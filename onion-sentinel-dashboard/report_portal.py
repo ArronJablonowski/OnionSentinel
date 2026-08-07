@@ -123,6 +123,11 @@ from portal_soc_ai_status import (
     compose_soc_ai_status,
     severity_meets_threshold as _modular_severity_meets_threshold,
 )
+from portal_soc_pcap_status import (
+    SocPcapStatusDependencies,
+    compose_pcap_status,
+    load_pcap_request_statuses,
+)
 from portal_incident_actions import (
     IncidentStatusPayloadError,
     normalize_incident_status_payload,
@@ -4955,103 +4960,17 @@ def soc_alert_pcap_analysis_index() -> dict[str, object]:
 
 
 def soc_alert_pcap_request_statuses(conn: sqlite3.Connection, rows: list[sqlite3.Row | dict]) -> dict[str, dict]:
-    """Return newest broker status keyed by group id and alert id for page rows."""
-    if not sqlite_table_exists(conn, "pcap_requests"):
-        return {}
-    def row_value(row: sqlite3.Row | dict, key: str, default: str = "") -> str:
-        if isinstance(row, dict):
-            return str(row.get(key, default) or "")
-        return str(row[key] or "") if key in row.keys() else str(default or "")
-
-    group_ids = {
-        (row_value(row, "group_id") or soc_alert_group_id(row_value(row, "group_key"))).strip()
-        for row in rows
-        if row_value(row, "group_id") or row_value(row, "group_key")
-    }
-    alert_ids = {
-        row_value(row, "alert_id").strip()
-        for row in rows
-        if row_value(row, "alert_id").strip()
-    }
-    terms = sorted(group_ids | alert_ids)
-    if not terms:
-        return {}
-    placeholders = ",".join("?" for _ in terms)
-    try:
-        found = conn.execute(
-            f"""
-            SELECT request_id, alert_id, group_id, status, error, request_json, updated_at, completed_at
-            FROM pcap_requests
-            WHERE group_id IN ({placeholders}) OR alert_id IN ({placeholders}) OR request_id IN ({placeholders})
-            ORDER BY COALESCE(completed_at, updated_at, created_at) DESC
-            """,
-            [*terms, *terms, *terms],
-        ).fetchall()
-    except sqlite3.Error:
-        return {}
-    statuses: dict[str, dict] = {}
-    for item in found:
-        record = {
-            "request_id": str(item["request_id"] or "").strip(),
-            "status": str(item["status"] or "").strip().lower(),
-            "error": str(item["error"] or "").strip(),
-            "updated_at": str(item["completed_at"] or item["updated_at"] or "").strip(),
-            "used_capture_file": False,
-        }
-        try:
-            request_json = json.loads(str(item["request_json"] or "{}"))
-            record["used_capture_file"] = bool(str(request_json.get("capture_file") or "").strip())
-        except (TypeError, ValueError):
-            record["used_capture_file"] = False
-        for key in ("group_id", "alert_id", "request_id"):
-            value = str(item[key] or "").strip()
-            if value and value not in statuses:
-                statuses[value] = record
-    return statuses
+    """Return page-bounded PCAP request state through the modular repository."""
+    dependencies = SocPcapStatusDependencies(
+        table_exists=sqlite_table_exists,
+        dashboard_group_id=soc_alert_group_id,
+    )
+    return load_pcap_request_statuses(conn, rows, dependencies)
 
 
 def soc_alert_pcap_status(group_id: str, alert_id: str, analysis_index: dict[str, object], request_statuses: dict[str, dict]) -> dict:
-    """Return the compact PCAP table status for one grouped alert."""
-    group_id = str(group_id or "").strip()
-    alert_id = str(alert_id or "").strip()
-    if group_id in analysis_index.get("group_ids", set()) or alert_id in analysis_index.get("alert_ids", set()):
-        return {
-            "pcap_status_key": "analyzed",
-            "pcap_status_label": "Analyzed",
-            "pcap_status_detail": "Parsed Zeek/TShark PCAP analysis is available for this detection group",
-        }
-    request_record = request_statuses.get(group_id) or request_statuses.get(alert_id) or {}
-    request_status = str(request_record.get("status") or "").strip().lower() if isinstance(request_record, dict) else str(request_record or "").strip().lower()
-    if request_status in {"pending", "claimed", "fulfilled"}:
-        return {
-            "pcap_status_key": "queued",
-            "pcap_status_label": "Queued" if request_status in {"pending", "claimed"} else "Parsing",
-            "pcap_status_detail": f"PCAP request is {request_status}; parsed analysis is not available yet",
-        }
-    if request_status == "failed":
-        error = str(request_record.get("error") or "").strip() if isinstance(request_record, dict) else ""
-        if "no matching packets" in error.lower():
-            if isinstance(request_record, dict) and not request_record.get("used_capture_file"):
-                return {
-                    "pcap_status_key": "error",
-                    "pcap_status_label": "Retry",
-                    "pcap_status_detail": "Older PCAP request did not include the Security Onion capture file hint; retry the request before treating this as no packets",
-                }
-            return {
-                "pcap_status_key": "no-packets",
-                "pcap_status_label": "No Packets",
-                "pcap_status_detail": "Security Onion found no matching packets for the requested flow/window",
-            }
-        return {
-            "pcap_status_key": "error",
-            "pcap_status_label": "Failed",
-            "pcap_status_detail": (error[:180] if error else "PCAP request failed before parsed analysis was produced"),
-        }
-    return {
-        "pcap_status_key": "none",
-        "pcap_status_label": "None",
-        "pcap_status_detail": "No parsed PCAP analysis is available for this detection group",
-    }
+    """Return the compact PCAP status through the modular policy."""
+    return compose_pcap_status(group_id, alert_id, analysis_index, request_statuses)
 
 
 def soc_alert_pcap_analysis_record(group_id: str) -> dict | None:

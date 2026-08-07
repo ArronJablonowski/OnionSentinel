@@ -398,6 +398,13 @@ threshold skip reasons. `report_portal.py` retains filesystem/database-backed
 artifact discovery and static report loading as injected ports; the policy
 module performs no direct I/O.
 
+`portal_soc_pcap_status.py` owns page-bounded PCAP request-state aggregation
+and analyst-facing status precedence. It indexes the newest durable request by
+group, alert, and request identity; recognizes capture-file-aware no-packet
+results; distinguishes retryable legacy requests, parser-pending work, hard
+failures, and parsed Zeek/TShark evidence. `report_portal.py` retains the public
+facades and injects table discovery and group identity policy.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and
