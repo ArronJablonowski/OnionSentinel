@@ -1774,6 +1774,21 @@ def _query_primitives():
     return primitives
 
 
+def _query_request():
+    _provider_routing()
+    from onion_sentinel.analysis.query import request
+    return request
+
+
+def _query_request_policy():
+    module = _query_request()
+    return module.Policy(
+        backends=frozenset(INVESTIGATION_QUERY_BACKENDS),
+        parameter_keys=INVESTIGATION_PARAMETER_KEYS,
+        query_id_pattern=INVESTIGATION_QUERY_ID_RE,
+    )
+
+
 def _query_event_tuple():
     _provider_routing()
     from onion_sentinel.analysis.query import event_tuple
@@ -4381,9 +4396,6 @@ INVESTIGATION_PARAMETER_KEYS = {
     "pcap_zeek": frozenset({"operation", "filters", "indicator", "limit"}),
     "enrichment": frozenset({"indicator_type", "indicator"}),
 }
-INVESTIGATION_PARAMETER_UNION = frozenset().union(
-    *INVESTIGATION_PARAMETER_KEYS.values()
-)
 
 
 def _query_utc(value: Any, label: str) -> dt.datetime:
@@ -4444,68 +4456,18 @@ def project_investigation_parameters(
     backend: str,
     parameters: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str]]:
-    """Project a union-shaped model object into one exact backend schema.
-
-    Known keys belonging to another advertised backend are harmlessly ignored.
-    Truly unknown keys—including raw Query DSL, paths, commands, scripts, and
-    parser arguments—still fail closed.
-    """
-    allowed = INVESTIGATION_PARAMETER_KEYS[backend]
-    unknown = set(parameters).difference(INVESTIGATION_PARAMETER_UNION)
-    if unknown:
-        raise InvestigationQueryError(
-            f"unsupported {backend} parameters: " + ", ".join(sorted(unknown))
-        )
-    dropped = sorted(set(parameters).difference(allowed))
-    return (
-        {
-            key: parameters[key]
-            for key in allowed
-            if key in parameters
-        },
-        dropped,
+    return _query_request().project_parameters(
+        backend, parameters, policy=_query_request_policy(),
+        error_type=InvestigationQueryError,
     )
 
 
-def normalize_investigation_query_request(
-    raw: Any,
-    *,
-    round_number: int,
-    position: int,
-    time_envelope: Any = None,
-    authorization_context: Any = None,
-) -> dict[str, Any]:
-    """Normalize one request without accepting executable provider syntax."""
-    if not isinstance(raw, dict):
-        raise InvestigationQueryError("each investigation query must be an object")
-    unknown = set(raw).difference({"query_id", "backend", "purpose", "parameters"})
-    if unknown:
-        raise InvestigationQueryError(
-            "unsupported investigation query fields: " + ", ".join(sorted(unknown))
-        )
-    backend = _query_text(raw.get("backend"), 32).lower()
-    if backend not in INVESTIGATION_QUERY_BACKENDS:
-        raise InvestigationQueryError(
-            f"unsupported investigation query backend: {backend or 'missing'}"
-        )
-    purpose = _query_text(raw.get("purpose"), 500)
-    if not purpose:
-        raise InvestigationQueryError("investigation query purpose is required")
-    query_id = _query_text(raw.get("query_id"), 64)
-    if not INVESTIGATION_QUERY_ID_RE.fullmatch(query_id):
-        query_id = f"round-{round_number}-query-{position}"
-    parameters = raw.get("parameters")
-    if not isinstance(parameters, dict):
-        raise InvestigationQueryError("investigation query parameters must be an object")
-    parameters, dropped_parameters = project_investigation_parameters(
-        backend,
-        parameters,
-    )
-
-    normalized_parameters: dict[str, Any]
-    normalization: dict[str, Any] = {}
+def _normalize_investigation_backend_parameters(
+    backend: str, parameters: dict[str, Any], purpose: str,
+    time_envelope: Any, authorization_context: Any,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     if backend in {"elastic", "oql"}:
-        normalized_parameters, normalization = _query_security_onion().normalize(
+        return _query_security_onion().normalize(
             parameters,
             purpose=purpose,
             backend=backend,
@@ -4515,38 +4477,48 @@ def normalize_investigation_query_request(
             dependencies=_query_security_onion_dependencies(),
             error_type=InvestigationQueryError,
         )
-    elif backend == "osquery":
+    if backend == "osquery":
         module = _query_endpoint()
-        normalized_parameters = module.normalize(
+        normalized = module.normalize(
             parameters, dependencies=module.Dependencies(
                 normalize_query=normalize_live_osquery_query,
                 query_error=LiveOsqueryContractError),
             error_type=InvestigationQueryError,
         )
-    elif backend == "enrichment":
-        normalized_parameters = _query_enrichment().normalize(
+        return normalized, {}
+    if backend == "enrichment":
+        normalized = _query_enrichment().normalize(
             parameters,
             authorization_context=authorization_context,
             error_type=InvestigationQueryError,
         )
-    else:
-        normalized_parameters = _query_derived().normalize(
-            parameters,
-            policy=_query_derived_policy(),
-            dependencies=_query_derived_dependencies(),
-            error_type=InvestigationQueryError,
-        )
-    if dropped_parameters:
-        normalization["dropped_cross_backend_parameters"] = dropped_parameters
-    normalized = {
-        "query_id": query_id,
-        "backend": backend,
-        "purpose": purpose,
-        "parameters": normalized_parameters,
-    }
-    if normalization:
-        normalized["normalization"] = normalization
-    return normalized
+        return normalized, {}
+    normalized = _query_derived().normalize(
+        parameters,
+        policy=_query_derived_policy(),
+        dependencies=_query_derived_dependencies(),
+        error_type=InvestigationQueryError,
+    )
+    return normalized, {}
+
+
+def normalize_investigation_query_request(
+    raw: Any, *, round_number: int, position: int,
+    time_envelope: Any = None, authorization_context: Any = None,
+) -> dict[str, Any]:
+    module = _query_request()
+    return module.normalize(
+        raw,
+        round_number=round_number,
+        position=position,
+        time_envelope=time_envelope,
+        authorization_context=authorization_context,
+        policy=_query_request_policy(),
+        dependencies=module.Dependencies(
+            normalize_parameters=_normalize_investigation_backend_parameters
+        ),
+        error_type=InvestigationQueryError,
+    )
 
 
 def pop_investigation_query_requests(response: dict[str, Any]) -> list[Any]:

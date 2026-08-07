@@ -35,6 +35,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.query.enrichment",
     "onion_sentinel.analysis.query.event_tuple",
     "onion_sentinel.analysis.query.primitives",
+    "onion_sentinel.analysis.query.request",
     "onion_sentinel.analysis.query.security_onion",
     "onion_sentinel.analysis.query.window",
     "onion_sentinel.analysis.conclusions.confidence",

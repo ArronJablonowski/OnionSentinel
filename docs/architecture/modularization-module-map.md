@@ -144,6 +144,9 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
   `analysis.query.derived`.
 - Bounded target selection and read-only SELECT validation for live endpoint
   OSQuery requests now live in `analysis.query.endpoint`.
+- Exact request envelopes, backend identity, deterministic query-ID fallback,
+  backend parameter projection, and cross-backend drop audit now live in
+  `analysis.query.request`.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports
