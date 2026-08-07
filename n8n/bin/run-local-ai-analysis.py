@@ -1801,6 +1801,12 @@ def _query_enrichment():
     return enrichment
 
 
+def _query_execution_enrichment():
+    _provider_routing()
+    from onion_sentinel.analysis.query.execution import enrichment
+    return enrichment
+
+
 def _query_derived():
     _provider_routing()
     from onion_sentinel.analysis.query import derived
@@ -5916,51 +5922,20 @@ def execute_investigation_query_batch(
     enrichment_requests = [
         request for request in requests if request["backend"] == "enrichment"
     ]
-    for request in enrichment_requests:
-        try:
-            if not enrichment_config or enrichment_config.get("enabled") is not True:
-                raise InvestigationQueryError("investigation enrichment is not enabled")
-            evidence = enrichment_executor(request, enrichment_config)
-            if (
-                not isinstance(evidence, dict)
-                or evidence.get("schema") != "onion-sentinel-investigation-enrichment-evidence-v1"
-                or evidence.get("status") != "ok"
-            ):
-                raise InvestigationQueryError("enrichment orchestrator returned invalid evidence")
-            results.append({
-                "query_id": request["query_id"],
-                "backend": "enrichment",
-                "status": "ok",
-                "read_only": True,
-                "evidence": evidence,
-                "trusted_query_audit": [{
-                    "query_id": request["query_id"],
-                    "backend": "enrichment",
-                    "status": "ok",
-                    "indicator_type": evidence.get("indicator_type"),
-                    "indicator": evidence.get("indicator"),
-                    "cache_checked_first": evidence.get("cache_checked_first"),
-                    "n8n_invoked": evidence.get("n8n_invoked"),
-                    "query_digest": evidence.get("query_digest"),
-                    "result_digest": evidence.get("result_digest"),
-                    "evidence_ref": evidence.get("evidence_ref"),
-                }],
-            })
-            audits.append({
-                "backend": "enrichment",
-                "cache_checked_first": evidence.get("cache_checked_first"),
-                "n8n_invoked": evidence.get("n8n_invoked"),
-                "query_digest": evidence.get("query_digest"),
-                "result_digest": evidence.get("result_digest"),
-            })
-        except (InvestigationQueryError, OSError, urllib.error.URLError) as exc:
-            results.append({
-                "query_id": request["query_id"],
-                "backend": "enrichment",
-                "status": "error",
-                "read_only": True,
-                "error": f"{type(exc).__name__}: {exc}"[:1000],
-            })
+    enrichment_module = _query_execution_enrichment()
+    enrichment_outcome = enrichment_module.execute(
+        enrichment_requests,
+        enrichment_config,
+        dependencies=enrichment_module.Dependencies(
+            executor=enrichment_executor,
+            error_type=InvestigationQueryError,
+            handled_errors=(
+                InvestigationQueryError, OSError, urllib.error.URLError,
+            ),
+        ),
+    )
+    results.extend(enrichment_outcome.results)
+    audits.extend(enrichment_outcome.audits)
     return {
         "schema": INVESTIGATION_QUERY_RESULT_SCHEMA,
         "round": round_number,
