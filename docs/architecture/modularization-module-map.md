@@ -445,11 +445,15 @@ legacy same-parent requirement for prompt discovery.
 AI/PCAP/evidence orchestration, per-row presenter invocation, and stable public
 response envelope. It also normalizes request aliases once and builds the
 parameterized summary-table and legacy window-function query plans, preserving
-their intentional filter differences. Its explicit dependency ports ensure each
-metadata source is loaded once per page and shared across all rows.
+their intentional filter differences. The module owns analyst/backend status
+matching, stable cursor filtering, exclusions, full-query active/severity and
+endpoint metrics, page clamping, enrichment invocation, and next-cursor
+construction. Its explicit dependency ports ensure each metadata source is
+loaded once per page and shared across all rows.
 `report_portal.py` retains allowlisted sort/severity parsing, concrete caches,
-settings, read-only SQLite execution and the compatibility facade; the service
-performs no direct database, filesystem, process, or network access.
+settings, status/enrichment readers, metric adapters, read-only SQLite execution
+and the compatibility facade; the service performs no direct database,
+filesystem, process, or network access.
 
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes

@@ -254,9 +254,14 @@
         "SocGroupQueryDependencies",
         "SocGroupQueryRequest",
         "SocGroupQueryRequestPolicy",
+        "SocGroupSnapshotDependencies",
         "compose_group_query_payload",
+        "compose_group_query_snapshot",
         "fallback_query_plan",
+        "filter_group_rows",
+        "group_next_cursor",
         "parse_group_query_request",
+        "row_matches_analyst_status",
         "summary_query_plan"
       ]
     },

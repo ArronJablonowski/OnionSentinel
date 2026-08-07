@@ -14,9 +14,12 @@ from portal_soc_group_query import (  # noqa: E402
     SocGroupQueryDependencies,
     SocGroupQueryRequest,
     SocGroupQueryRequestPolicy,
+    SocGroupSnapshotDependencies,
     compose_group_query_payload,
+    compose_group_query_snapshot,
     fallback_query_plan,
     parse_group_query_request,
+    row_matches_analyst_status,
     summary_query_plan,
 )
 
@@ -131,6 +134,114 @@ class SocGroupQueryTests(unittest.TestCase):
             "2026-08-01  00:00:00Z", "critical", "high",
         ])
         self.assertEqual(plan.args[3:], [f"%{search}%"] * 4)
+
+    def snapshot_dependencies(
+        self,
+        statuses: dict,
+        calls: list[object],
+    ) -> SocGroupSnapshotDependencies:
+        def status_counts(rows: list[object], loaded: dict) -> dict[str, int]:
+            calls.append(("counts", [row["group_id"] for row in rows], loaded))
+            return {"total": len(rows)}
+
+        def severity_summary(rows: list[object]) -> dict:
+            levels = [row["triage_level"] for row in rows]
+            calls.append(("severity", levels))
+            rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+            highest = max(levels, key=lambda value: rank[value]) if levels else "none"
+            return {"counts": {level: levels.count(level) for level in rank}, "highest": highest}
+
+        def enrich(rows: list[object]) -> list[object]:
+            calls.append(("enrich", [row["group_id"] for row in rows]))
+            return [{**row, "enriched": True} for row in rows]
+
+        return SocGroupSnapshotDependencies(
+            load_statuses=lambda: calls.append("statuses") or statuses,
+            status_counts=status_counts,
+            severity_summary=severity_summary,
+            top_endpoints=lambda rows: {
+                "source_ip": rows[0]["source_ip"] if rows else "n/a",
+            },
+            enrich_page_rows=enrich,
+            group_id=lambda row: row["group_id"],
+        )
+
+    def test_snapshot_separates_active_metrics_from_selected_suppressed_page(self) -> None:
+        rows = [
+            {"group_id": "g1", "group_last_seen": "30", "last_seen": "30",
+             "filter_status": "accepted", "triage_level": "critical", "source_ip": "1"},
+            {"group_id": "g2", "group_last_seen": "20", "last_seen": "20",
+             "filter_status": "accepted", "triage_level": "high", "source_ip": "2"},
+            {"group_id": "g3", "group_last_seen": "10", "last_seen": "10",
+             "filter_status": "suppressed", "triage_level": "medium", "source_ip": "3"},
+            {"group_id": "g4", "group_last_seen": "05", "last_seen": "05",
+             "filter_status": "accepted", "triage_level": "low", "source_ip": "4"},
+        ]
+        calls: list[object] = []
+        snapshot = compose_group_query_snapshot(
+            rows,
+            analyst_status="suppressed",
+            cursor_seen="",
+            cursor_id="",
+            limit=1,
+            requested_page=1,
+            excluded_group_ids={"g4"},
+            dependencies=self.snapshot_dependencies(
+                {"g2": {"status": "suppressed"}}, calls,
+            ),
+        )
+
+        self.assertEqual(snapshot.status_counts, {"total": 3})
+        self.assertEqual(snapshot.active_total, 1)
+        self.assertEqual(snapshot.active_highest_severity, "critical")
+        self.assertEqual(snapshot.total_matching, 2)
+        self.assertEqual(snapshot.highest_severity, "high")
+        self.assertEqual([row["group_id"] for row in snapshot.filtered_rows], ["g2", "g3"])
+        self.assertEqual(snapshot.page_rows, [{**rows[1], "enriched": True}])
+        self.assertEqual(snapshot.top_endpoints, {"source_ip": "2"})
+        self.assertEqual(snapshot.next_cursor, "20|g2")
+        self.assertIn(("counts", ["g1", "g2", "g3"], {"g2": {"status": "suppressed"}}), calls)
+
+    def test_snapshot_cursor_and_page_clamping_are_stable(self) -> None:
+        rows = [
+            {"group_id": "g1", "group_last_seen": "30", "last_seen": "30",
+             "filter_status": "accepted", "triage_level": "critical", "source_ip": "1"},
+            {"group_id": "g2", "group_last_seen": "20", "last_seen": "20",
+             "filter_status": "accepted", "triage_level": "high", "source_ip": "2"},
+        ]
+        snapshot = compose_group_query_snapshot(
+            rows,
+            analyst_status="",
+            cursor_seen="30",
+            cursor_id="g1",
+            limit=10,
+            requested_page=99,
+            excluded_group_ids=None,
+            dependencies=self.snapshot_dependencies({}, []),
+        )
+
+        self.assertEqual([row["group_id"] for row in snapshot.filtered_rows], ["g2"])
+        self.assertEqual(snapshot.current_page, 1)
+        self.assertEqual(snapshot.total_pages, 1)
+        self.assertEqual(snapshot.offset, 0)
+        self.assertIsNone(snapshot.next_cursor)
+
+    def test_analyst_state_policy_handles_backend_and_malformed_local_state(self) -> None:
+        backend_suppressed = {"filter_status": "suppressed"}
+        accepted = {"filter_status": "accepted"}
+
+        self.assertFalse(row_matches_analyst_status(
+            backend_suppressed, "g1", {}, "open",
+        ))
+        self.assertTrue(row_matches_analyst_status(
+            backend_suppressed, "g1", {}, "suppressed",
+        ))
+        self.assertTrue(row_matches_analyst_status(
+            accepted, "g1", {"g1": {"status": "acknowledged"}}, "acknowledged",
+        ))
+        self.assertTrue(row_matches_analyst_status(
+            accepted, "g1", {"g1": "malformed"}, "open",
+        ))
 
     def test_loads_page_metadata_once_and_shares_it_across_rows(self) -> None:
         rows = [{"alert_id": "alert-a"}, {"alert_id": "alert-b"}]

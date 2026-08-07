@@ -72,6 +72,16 @@ class SocGroupQueryPlan:
     args: list[object]
 
 
+@dataclass(frozen=True)
+class SocGroupSnapshotDependencies:
+    load_statuses: Callable[[], dict]
+    status_counts: Callable[[list[Row], dict], dict[str, int]]
+    severity_summary: Callable[[list[Row]], dict]
+    top_endpoints: Callable[[list[Row]], dict[str, str]]
+    enrich_page_rows: Callable[[list[Row]], list[Row]]
+    group_id: Callable[[Row], str]
+
+
 SUMMARY_QUERY_SQL = """
     SELECT group_id, group_key, representative_alert_id AS alert_id,
            first_seen AS group_first_seen, first_seen,
@@ -205,6 +215,110 @@ def fallback_query_plan(request: SocGroupQueryRequest, group_expr: str) -> SocGr
             order_sql=request.fallback_order_sql,
         ),
         args,
+    )
+
+
+def _row_value(row: Row, key: str, default: object = "") -> object:
+    try:
+        return row[key]
+    except (KeyError, TypeError, IndexError):
+        return default
+
+
+def row_matches_analyst_status(row: Row, group_id: str, statuses: object,
+                               analyst_status: str) -> bool:
+    """Apply analyst state and backend suppression as one visible-state policy."""
+    status_map = statuses if isinstance(statuses, dict) else {}
+    state = status_map.get(group_id)
+    state = state if isinstance(state, dict) else {}
+    current_status = state.get("status", "open")
+    filter_status = str(_row_value(row, "filter_status", "accepted") or "accepted").strip().lower()
+    if analyst_status in {"open", "new"}:
+        return current_status == "open" and filter_status != "suppressed"
+    if analyst_status == "suppressed":
+        return current_status == "suppressed" or filter_status == "suppressed"
+    if analyst_status == "acknowledged":
+        return current_status == "acknowledged"
+    return True
+
+
+def filter_group_rows(rows: list[Row], statuses: dict, analyst_status: str,
+                      cursor_seen: str, cursor_id: str,
+                      group_id: Callable[[Row], str]) -> list[Row]:
+    """Apply analyst bucket and stable descending cursor boundaries."""
+    filtered: list[Row] = []
+    for row in rows:
+        resolved_group_id = group_id(row)
+        if not row_matches_analyst_status(row, resolved_group_id, statuses, analyst_status):
+            continue
+        if cursor_seen and cursor_id:
+            last_seen = str(
+                _row_value(row, "group_last_seen") or _row_value(row, "last_seen") or ""
+            )
+            if not (
+                last_seen < cursor_seen
+                or (last_seen == cursor_seen and resolved_group_id < cursor_id)
+            ):
+                continue
+        filtered.append(row)
+    return filtered
+
+
+def group_next_cursor(filtered_rows: list[Row], page_rows: list[Row], offset: int,
+                      limit: int, group_id: Callable[[Row], str]) -> str | None:
+    """Return the next stable descending cursor only when another row exists."""
+    if len(filtered_rows) <= offset + limit or not page_rows:
+        return None
+    tail = page_rows[-1]
+    last_seen = _row_value(tail, "group_last_seen") or _row_value(tail, "last_seen") or ""
+    return f"{last_seen}|{group_id(tail)}"
+
+
+def compose_group_query_snapshot(
+    rows: list[Row],
+    *,
+    analyst_status: str,
+    cursor_seen: str,
+    cursor_id: str,
+    limit: int,
+    requested_page: int,
+    excluded_group_ids: set[str] | None,
+    dependencies: SocGroupSnapshotDependencies,
+) -> SocAlertQuerySnapshot:
+    """Compose one grouped page and full-query metrics before page slicing."""
+    if excluded_group_ids:
+        rows = [row for row in rows if dependencies.group_id(row) not in excluded_group_ids]
+    statuses = dependencies.load_statuses()
+    status_counts = dependencies.status_counts(rows, statuses)
+    active_rows = filter_group_rows(rows, statuses, "open", "", "", dependencies.group_id)
+    active_severity = dependencies.severity_summary(active_rows)
+    filtered_rows = filter_group_rows(
+        rows, statuses, analyst_status, cursor_seen, cursor_id, dependencies.group_id,
+    )
+    severity = dependencies.severity_summary(filtered_rows)
+    total_matching = len(filtered_rows)
+    total_pages = max(1, (total_matching + limit - 1) // limit)
+    current_page = min(requested_page, total_pages)
+    offset = (current_page - 1) * limit
+    page_rows = dependencies.enrich_page_rows(filtered_rows[offset:offset + limit])
+    return SocAlertQuerySnapshot(
+        statuses=statuses,
+        status_counts=status_counts,
+        active_total=len(active_rows),
+        active_severity_counts=active_severity["counts"],
+        active_highest_severity=active_severity["highest"],
+        severity_counts=severity["counts"],
+        highest_severity=severity["highest"],
+        top_endpoints=dependencies.top_endpoints(filtered_rows),
+        filtered_rows=filtered_rows,
+        page_rows=page_rows,
+        total_matching=total_matching,
+        total_pages=total_pages,
+        current_page=current_page,
+        offset=offset,
+        next_cursor=group_next_cursor(
+            filtered_rows, page_rows, offset, limit, dependencies.group_id,
+        ),
     )
 
 

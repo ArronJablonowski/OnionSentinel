@@ -153,7 +153,9 @@ from portal_soc_group_query import (
     SocGroupQueryDependencies,
     SocGroupQueryRequest,
     SocGroupQueryRequestPolicy,
+    SocGroupSnapshotDependencies,
     compose_group_query_payload,
+    compose_group_query_snapshot,
     fallback_query_plan,
     parse_group_query_request,
     summary_query_plan,
@@ -8699,22 +8701,6 @@ def soc_incident_detail_response(case_id: str) -> tuple[int, dict]:
     )
 
 
-def soc_alert_row_filter_status(row: sqlite3.Row) -> str:
-    return str(row["filter_status"] or "accepted").strip().lower()
-
-
-def soc_alert_row_matches_analyst_status(row: sqlite3.Row, group_id: str, statuses: dict, analyst_status: str) -> bool:
-    current_status = (statuses.get(group_id, {}) or {}).get("status", "open") if isinstance(statuses, dict) else "open"
-    filter_status = soc_alert_row_filter_status(row)
-    if analyst_status in {"open", "new"}:
-        return current_status == "open" and filter_status != "suppressed"
-    if analyst_status == "suppressed":
-        return current_status == "suppressed" or filter_status == "suppressed"
-    if analyst_status == "acknowledged":
-        return current_status == "acknowledged"
-    return True
-
-
 def soc_alert_status_bucket_counts(rows: list[sqlite3.Row], statuses: dict) -> dict[str, int]:
     def group_id_for_row(row: sqlite3.Row) -> str:
         group_key = row["group_key"] if "group_key" in row.keys() else ""
@@ -8732,26 +8718,6 @@ def soc_alert_group_id_for_query_row(row: sqlite3.Row | dict) -> str:
     if "group_id" in keys and row["group_id"]:
         return str(row["group_id"])
     return soc_alert_group_id(row["group_key"])
-
-
-def soc_alert_filter_group_rows(
-    rows: list[sqlite3.Row],
-    statuses: dict,
-    analyst_status: str,
-    cursor_seen: str,
-    cursor_id: str,
-) -> list[sqlite3.Row]:
-    filtered_rows: list[sqlite3.Row] = []
-    for row in rows:
-        group_id = soc_alert_group_id_for_query_row(row)
-        if not soc_alert_row_matches_analyst_status(row, group_id, statuses, analyst_status):
-            continue
-        if cursor_seen and cursor_id:
-            group_last_seen = row["group_last_seen"] or row["last_seen"] or ""
-            if not (group_last_seen < cursor_seen or (group_last_seen == cursor_seen and group_id < cursor_id)):
-                continue
-        filtered_rows.append(row)
-    return filtered_rows
 
 
 def soc_alert_enriched_page_rows(page_rows: list[sqlite3.Row]) -> list[sqlite3.Row | dict]:
@@ -8777,14 +8743,6 @@ def soc_alert_enriched_page_rows(page_rows: list[sqlite3.Row]) -> list[sqlite3.R
         return [dict(row) for row in page_rows]
 
 
-def soc_alert_group_next_cursor(filtered_rows: list[sqlite3.Row], page_rows: list[sqlite3.Row | dict], offset: int, limit: int) -> str | None:
-    if len(filtered_rows) <= offset + limit or not page_rows:
-        return None
-    tail = page_rows[-1]
-    group_id = soc_alert_group_id_for_query_row(tail)
-    return f"{tail['group_last_seen'] or tail['last_seen']}|{group_id}"
-
-
 def soc_alert_group_query_snapshot(
     rows: list[sqlite3.Row],
     *,
@@ -8795,41 +8753,23 @@ def soc_alert_group_query_snapshot(
     requested_page: int,
     excluded_group_ids: set[str] | None = None,
 ) -> SocAlertQuerySnapshot:
-    if excluded_group_ids:
-        rows = [
-            row for row in rows
-            if soc_alert_group_id_for_query_row(row) not in excluded_group_ids
-        ]
-    statuses = load_soc_alert_statuses()
-    status_counts = soc_alert_status_bucket_counts(rows, statuses)
-    # Active-card metrics describe work still requiring analyst action. Compute
-    # them from the complete filtered query before applying the selected analyst
-    # bucket, cursor, or page slice so UI pagination can never change the totals.
-    active_rows = soc_alert_filter_group_rows(rows, statuses, "open", "", "")
-    active_severity_summary = soc_alert_visible_severity_summary(active_rows)
-    filtered_rows = soc_alert_filter_group_rows(rows, statuses, analyst_status, cursor_seen, cursor_id)
-    severity_summary = soc_alert_visible_severity_summary(filtered_rows)
-    total_matching = len(filtered_rows)
-    total_pages = max(1, (total_matching + limit - 1) // limit)
-    current_page = min(requested_page, total_pages)
-    offset = (current_page - 1) * limit
-    page_rows = soc_alert_enriched_page_rows(filtered_rows[offset:offset + limit])
-    return SocAlertQuerySnapshot(
-        statuses=statuses,
-        status_counts=status_counts,
-        active_total=len(active_rows),
-        active_severity_counts=active_severity_summary["counts"],
-        active_highest_severity=active_severity_summary["highest"],
-        severity_counts=severity_summary["counts"],
-        highest_severity=severity_summary["highest"],
-        top_endpoints=soc_alert_top_endpoint_metrics(filtered_rows),
-        filtered_rows=filtered_rows,
-        page_rows=page_rows,
-        total_matching=total_matching,
-        total_pages=total_pages,
-        current_page=current_page,
-        offset=offset,
-        next_cursor=soc_alert_group_next_cursor(filtered_rows, page_rows, offset, limit),
+    dependencies = SocGroupSnapshotDependencies(
+        load_statuses=load_soc_alert_statuses,
+        status_counts=soc_alert_status_bucket_counts,
+        severity_summary=soc_alert_visible_severity_summary,
+        top_endpoints=soc_alert_top_endpoint_metrics,
+        enrich_page_rows=soc_alert_enriched_page_rows,
+        group_id=soc_alert_group_id_for_query_row,
+    )
+    return compose_group_query_snapshot(
+        rows,
+        analyst_status=analyst_status,
+        cursor_seen=cursor_seen,
+        cursor_id=cursor_id,
+        limit=limit,
+        requested_page=requested_page,
+        excluded_group_ids=excluded_group_ids,
+        dependencies=dependencies,
     )
 
 
