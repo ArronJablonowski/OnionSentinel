@@ -124,6 +124,17 @@ from dashboard_alert_detail_enrichment import (  # noqa: E402
     public_enrichment_markdown,
     public_enrichment_status,
 )
+from dashboard_alert_detail_sections import (  # noqa: E402
+    CRITICALITY_LABELS,
+    alert_identity_markdown,
+    alert_summary_markdown,
+    analyst_notes_markdown,
+    complete_alert_json_markdown,
+    raw_alert_markdown,
+    raw_logs_markdown,
+    severity_label_from_row,
+    triage_reasons_markdown,
+)
 from dashboard_flow_page import (  # noqa: E402
     FLOW_PAGE_CSS,
     FLOW_PAGE_JS,
@@ -1691,16 +1702,6 @@ CRITICALITY_ORDER = {
     'informational': 1,
     'info': 1,
 }
-CRITICALITY_LABELS = {
-    'critical': 'Critical',
-    'high': 'High',
-    'medium': 'Medium',
-    'low': 'Low',
-    'informational': 'Informational',
-    'info': 'Informational',
-}
-
-
 def detect_criticality(text: str, title: str, path: Path) -> tuple[str, int]:
     """Extract alert criticality from title/content/path with a stable severity order."""
     candidates = [title, path.name]
@@ -1944,22 +1945,6 @@ def running_ai_prompt_alert_ids(ai_prompts_by_alert_id: dict[str, dict]) -> set[
     return running
 
 
-def severity_label_from_row(row: sqlite3.Row | dict) -> str:
-    # Prefer deterministic triage level because it is what alert-store routed
-    # on. Fall back to raw Security Onion severity if triage is absent.
-    raw = str(row_value(row, 'triage_level') or row_value(row, 'severity_label') or '').strip().lower()
-    if raw in CRITICALITY_LABELS:
-        return CRITICALITY_LABELS[raw]
-    severity = row_value(row, 'severity')
-    if severity == 1:
-        return 'Critical'
-    if severity == 2:
-        return 'Medium'
-    if severity == 3:
-        return 'Low'
-    return 'Informational'
-
-
 def raw_alert_object(row: sqlite3.Row) -> dict:
     try:
         value = json.loads(row['alert_json'] or '{}')
@@ -2017,32 +2002,6 @@ def active_alert_highest_severity_class(reports: list[AlertReport]) -> str:
     if not active:
         return 'none'
     return criticality_class(max(active, key=lambda report: report.criticality_rank).criticality)
-
-
-def complete_alert_json_markdown(raw: dict) -> str:
-    alert_json = json.dumps(raw or {}, indent=2, sort_keys=True)
-    return '\n'.join([
-        '### Complete Alert JSON',
-        '',
-        'This block contains every alert field currently available to the dashboard from SQLite. Full-fidelity mode does not redact packet, payload, PCAP, or HTTP body fields.',
-        '',
-        '```json',
-        alert_json,
-        '```',
-    ])
-
-
-def raw_alert_markdown(raw: dict, fallback_json: str | None = None) -> str:
-    alert_json = json.dumps(raw, indent=2, sort_keys=True) if raw else (fallback_json or '{}')
-    return '\n'.join([
-        '### Raw Alert',
-        '',
-        '```json',
-        alert_json,
-        '```',
-    ])
-
-
 
 
 def remove_markdown_sections(text: str, section_titles: set[str]) -> str:
@@ -2169,55 +2128,6 @@ def insert_timeline_after_alert_identity(rendered_html: str, timeline_html: str)
     return timeline_html + rendered_html
 
 
-def raw_logs_markdown(
-    raw: dict,
-    fallback_json: str | None = None,
-    analysis: dict | None = None,
-    legacy_sections: list[tuple[str, str]] | None = None,
-) -> str:
-    sections = [
-        complete_alert_json_markdown(raw),
-        raw_alert_markdown(raw, fallback_json),
-    ]
-    if legacy_sections:
-        legacy_lines = [
-            '### Legacy Source Content',
-            '',
-            'These sections came from an older report schema and were moved here so they cannot change the standard analyst layout.',
-        ]
-        for title, body in legacy_sections:
-            legacy_lines.extend(['', f'#### {title}', '', body.strip() or 'No content was recorded.'])
-        sections.insert(0, '\n'.join(legacy_lines))
-    ai_response_json = complete_ai_response_json_markdown(analysis)
-    if ai_response_json:
-        sections.append(ai_response_json)
-    return '\n\n'.join(['## Raw Logs', *sections]).strip()
-
-
-def alert_summary_markdown(row: sqlite3.Row | dict) -> str:
-    """Build the standard alert summary from SQLite group data for every report."""
-    return '\n'.join([
-        '## Alert Summary',
-        '',
-        '| Field | Value |',
-        '| --- | --- |',
-        f'| Rule name | {markdown_cell(row_value(row, "rule_name") or "n/a", 240)} |',
-        f'| Event dataset | {markdown_cell(row_value(row, "event_dataset") or "n/a", 160)} |',
-        f'| Severity | {markdown_cell(row_value(row, "severity") if row_value(row, "severity") is not None else "n/a")} |',
-        f'| Severity label | {markdown_cell(row_value(row, "severity_label") or "n/a")} |',
-        f'| Triage level | {markdown_cell(row_value(row, "triage_level") or "n/a")} |',
-        f'| First seen | {markdown_cell(normalize_iso_display_text(row_value(row, "first_seen") or "n/a"))} |',
-        f'| Last seen | {markdown_cell(normalize_iso_display_text(row_value(row, "last_seen") or "n/a"))} |',
-        f'| Seen count | {markdown_cell(row_value(row, "seen_count") if row_value(row, "seen_count") is not None else "n/a")} |',
-        f'| Grouped alert rows | {markdown_cell(row_value(row, "raw_alert_count", "n/a"))} |',
-        f'| Source IP | {markdown_cell(row_value(row, "source_ip") or "n/a")} |',
-        f'| Destination IP | {markdown_cell(row_value(row, "destination_ip") or "n/a")} |',
-        f'| Destination port | {markdown_cell(row_value(row, "destination_port") or "n/a")} |',
-        f'| Route | {markdown_cell(row_value(row, "routing") or "n/a")} |',
-        f'| Filter status | {markdown_cell(row_value(row, "filter_status") or "accepted")} |',
-    ])
-
-
 def candidate_alert_ids_for_row(row: sqlite3.Row | dict) -> list[str]:
     candidate_ids = [row['alert_id']]
     if isinstance(row, dict):
@@ -2339,65 +2249,6 @@ def passthrough_markdown_report_text(text: str) -> str:
     # Kept for compatibility with the existing render path. Full-fidelity mode
     # intentionally renders report text without redacting alert fields.
     return text
-
-
-def alert_identity_markdown(row: sqlite3.Row | dict, source_text: str = '') -> str:
-    """Generate the fixed identity card from authoritative SQLite state."""
-    generated_match = re.search(
-        r'^(?:generated_at:\s*|[-*]\s+\*\*Generated:\*\*\s*)([^\n]+)',
-        source_text or '',
-        flags=re.IGNORECASE | re.MULTILINE,
-    )
-    generated = generated_match.group(1).strip().strip('"\'') if generated_match else (
-        row_value(row, 'timestamp') or row_value(row, 'last_seen') or 'n/a'
-    )
-    source_ip = row_value(row, 'source_ip') or 'n/a'
-    source_port = row_value(row, 'source_port')
-    destination_ip = row_value(row, 'destination_ip') or 'n/a'
-    destination_port = row_value(row, 'destination_port')
-    source_endpoint = f'{source_ip}:{source_port}' if source_port not in (None, '', 'n/a') else str(source_ip)
-    destination_endpoint = (
-        f'{destination_ip}:{destination_port}' if destination_port not in (None, '', 'n/a') else str(destination_ip)
-    )
-    status = row_value(row, 'filter_status') or 'accepted'
-    return '\n'.join([
-        f'# [{severity_label_from_row(row).upper()}] {row_value(row, "rule_name") or "Security Onion Alert"}',
-        '',
-        f'- **Generated:** {normalize_iso_display_text(generated)}',
-        f'- **Alert ID:** {row_value(row, "alert_id") or "n/a"}',
-        f'- **Workflow status:** {status}',
-        f'- **Filter status:** {status}',
-        f'- **Route:** {row_value(row, "routing") or "n/a"}',
-        f'- **Score:** {row_value(row, "triage_score", "n/a")}',
-        f'- **Direction:** {row_value(row, "traffic_direction") or "unknown"}',
-        f'- **Traffic:** {source_endpoint} -> {destination_endpoint}',
-    ])
-
-
-def triage_reasons_markdown(raw: dict, source_sections: dict[str, str]) -> str:
-    existing = source_sections.get('triage reasons')
-    if existing:
-        return existing
-    triage = nested_object(raw, 'triage')
-    reasons = triage.get('reasons') if isinstance(triage, dict) and isinstance(triage.get('reasons'), list) else []
-    if not reasons and isinstance(raw.get('triage_reasons'), list):
-        reasons = raw.get('triage_reasons')
-    cleaned = list(dict.fromkeys(str(reason).strip() for reason in reasons if str(reason).strip()))
-    if not cleaned:
-        cleaned = ['No scoring reasons were recorded for this alert.']
-    return '\n'.join(['## Triage Reasons', '', *(f'- [ ] {reason}' for reason in cleaned)])
-
-
-def analyst_notes_markdown(source_sections: dict[str, str]) -> str:
-    existing = source_sections.get('analyst notes')
-    if existing:
-        return existing
-    return '\n'.join([
-        '## Analyst Notes',
-        '',
-        '- [ ] Confirm whether the source and destination are expected for this asset or VLAN.',
-        '- [ ] Record the investigation outcome, tuning decision, or escalation rationale.',
-    ])
 
 
 def canonical_detail_report_markdown(

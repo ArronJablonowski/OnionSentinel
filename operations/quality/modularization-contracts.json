@@ -220,6 +220,19 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_alert_detail_sections.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_alert_detail_sections.py",
+      "required_symbols": [
+        "alert_identity_markdown",
+        "alert_summary_markdown",
+        "analyst_notes_markdown",
+        "raw_logs_markdown",
+        "severity_label_from_row",
+        "triage_reasons_markdown"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_flow_page.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_flow_page.py",
