@@ -460,6 +460,13 @@ the versioned Detailed Alert Report. It selects current-versus-legacy AI
 evidence, composes every required section exactly once, validates generated H2
 order, and returns immutable layout issues without reading runtime state.
 
+`dashboard_alert_repository.py` is the read-only SQLite boundary for the SOC
+Alerts dashboard. It adapts legacy alert-store schemas, selects rows once,
+builds the PCAP request index from the same snapshot, and normalizes grouped
+detections with stable keys, timelines, repeat counts, time bounds, and
+enrichment carry-forward. The dashboard builder now consumes this repository
+result instead of owning SQL and grouping policy.
+
 `dashboard_flow_page.py` owns the pure data-flow renderer, enrichment-service
 tiles, responsive pipeline styles, and privacy-toggle client. The builder
 assembles `FlowPageViewModel` from live alert/report/model/notification metrics

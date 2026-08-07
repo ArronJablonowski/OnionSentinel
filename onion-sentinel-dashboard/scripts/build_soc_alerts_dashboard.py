@@ -63,7 +63,6 @@ from dashboard_time_format import (  # noqa: E402
 )
 from dashboard_pcap_components import build_pcap_analysis_index, render_pcap_evidence_markdown  # noqa: E402
 from dashboard_pcap_request_index import (  # noqa: E402
-    build_pcap_request_index,
     load_pcap_request_index,
     request_for_alert,
 )
@@ -136,6 +135,12 @@ from dashboard_alert_detail_sections import (  # noqa: E402
     triage_reasons_markdown,
 )
 from dashboard_alert_detail_composer import canonical_detail_report_markdown  # noqa: E402
+from dashboard_alert_repository import (  # noqa: E402
+    GROUP_FALLBACK_VALUES,
+    alert_group_key,
+    load_alert_repository,
+    raw_alert_object,
+)
 from dashboard_flow_page import (  # noqa: E402
     FLOW_PAGE_CSS,
     FLOW_PAGE_JS,
@@ -307,15 +312,6 @@ ENRICHMENT_FLOW_SERVICES = [
     {'name': 'EPSS', 'asset': 'assets/brand/enrichment/first.ico', 'scope': 'exploit probability', 'note': 'no key'},
     {'name': 'NVD', 'asset': 'assets/brand/enrichment/nvd.ico', 'scope': 'CVE metadata', 'note': 'optional key'},
 ]
-GROUP_FALLBACK_VALUES = {
-    'triage_level': 'unscored',
-    'rule_name': 'unknown-rule',
-    'source_ip': 'unknown-source',
-    'destination_ip': 'unknown-destination',
-    'filter_status': 'accepted',
-}
-
-
 def load_analyst_group_statuses() -> dict[str, dict[str, object]]:
     """Return analyst-controlled group states from SQLite without creating tables."""
     if not DB_PATH.exists():
@@ -1946,27 +1942,6 @@ def running_ai_prompt_alert_ids(ai_prompts_by_alert_id: dict[str, dict]) -> set[
     return running
 
 
-def raw_alert_object(row: sqlite3.Row) -> dict:
-    try:
-        value = json.loads(row['alert_json'] or '{}')
-        return value if isinstance(value, dict) else {}
-    except json.JSONDecodeError:
-        return {}
-
-
-def alert_group_key(row: sqlite3.Row) -> str:
-    # Keep source port out of grouping because it can rotate per connection.
-    if row['suppression_key']:
-        return row['suppression_key']
-    return (
-        f"{row['triage_level'] or GROUP_FALLBACK_VALUES['triage_level']}|"
-        f"{row['rule_name'] or GROUP_FALLBACK_VALUES['rule_name']}|"
-        f"{row['source_ip'] or GROUP_FALLBACK_VALUES['source_ip']}|"
-        f"{row['destination_ip'] or GROUP_FALLBACK_VALUES['destination_ip']}|"
-        f"{row['filter_status'] or GROUP_FALLBACK_VALUES['filter_status']}"
-    )
-
-
 def safe_int(value: object) -> int:
     try:
         return int(value)
@@ -2676,87 +2651,12 @@ def load_reports() -> list[AlertReport]:
         return load_markdown_only_reports()
 
     markdown_by_alert_id = load_markdown_reports_by_alert_id()
-    pcap_request_index: dict[str, object] = {}
-    with closing(sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True, timeout=30)) as conn:
-        conn.row_factory = sqlite3.Row
-        columns = {row[1] for row in conn.execute('PRAGMA table_info(alerts)').fetchall()}
-        total_seen_expr = 'total_seen_count' if 'total_seen_count' in columns else '0'
-        source_port_expr = 'source_port' if 'source_port' in columns else 'NULL'
-        destination_port_expr = 'destination_port' if 'destination_port' in columns else 'NULL'
-        network_protocol_expr = 'network_protocol' if 'network_protocol' in columns else 'NULL'
-        transport_protocol_expr = 'transport_protocol' if 'transport_protocol' in columns else 'NULL'
-        rows = conn.execute(
-            f'''
-            SELECT alert_id, first_seen, last_seen, seen_count, {total_seen_expr} AS total_seen_count,
-                   timestamp, rule_name, event_dataset, severity, severity_label, source_ip, destination_ip,
-                   {source_port_expr} AS source_port, {destination_port_expr} AS destination_port,
-                   {network_protocol_expr} AS network_protocol, {transport_protocol_expr} AS transport_protocol,
-                   alert_json, traffic_direction, triage_score, triage_level, routing,
-                   filter_status, filter_reason, suppression_key, enrichment_json
-            FROM alerts
-            ORDER BY replace(replace(COALESCE(last_seen, timestamp, first_seen), 'T', ' '), 'Z', '') DESC, alert_id DESC
-            '''
-        ).fetchall()
-        pcap_request_index = build_pcap_request_index(conn)
-    grouped_by_key: dict[str, list[sqlite3.Row]] = {}
-    for row in rows:
-        grouped_by_key.setdefault(alert_group_key(row), []).append(row)
-    aggregated_rows: list[dict[str, object]] = []
-    for key, members in grouped_by_key.items():
-        # `members[0]` is the newest alert in this group because the source
-        # query is ordered by last_seen descending. Keep it as the representative
-        # so the table row reflects the newest event while Count covers the
-        # whole grouped detection.
-        representative = members[0]
-        raw_alert_count = len(members)
-        total_seen = 0
-        member_timeline: list[dict[str, object]] = []
-        earliest_first_seen = representative['first_seen']
-        latest_last_seen = representative['last_seen']
-        earliest_first_ts = parse_iso_timestamp(earliest_first_seen)
-        latest_last_ts = parse_iso_timestamp(latest_last_seen)
-        for member in members:
-            member_seen_count = max(1, safe_int(member['seen_count']), safe_int(member['total_seen_count']))
-            total_seen += member_seen_count
-            member_first_seen = member['first_seen']
-            member_last_seen = member['last_seen']
-            member_raw = raw_alert_object(member)
-            member_timeline.append({
-                'alert_id': member['alert_id'],
-                'timestamp': member['timestamp'] or member_last_seen or member_first_seen,
-                'first_seen': member_first_seen,
-                'last_seen': member_last_seen,
-                'seen_count': member_seen_count,
-                'source_ip': member['source_ip'] or nested_value(member_raw, 'source', 'ip') or 'n/a',
-                'destination_ip': member['destination_ip'] or nested_value(member_raw, 'destination', 'ip') or 'n/a',
-                'destination_port': clean_endpoint_part(member['destination_port'] or nested_value(member_raw, 'destination', 'port')),
-            })
-            member_first_ts = parse_iso_timestamp(member_first_seen)
-            member_last_ts = parse_iso_timestamp(member_last_seen)
-            if earliest_first_ts is None or (member_first_ts is not None and member_first_ts < earliest_first_ts):
-                earliest_first_seen = member_first_seen
-                earliest_first_ts = member_first_ts
-            if latest_last_ts is None or (member_last_ts is not None and member_last_ts > latest_last_ts):
-                latest_last_seen = member_last_seen
-                latest_last_ts = member_last_ts
-        row_dict = dict(representative)
-        enriched_member = next((member for member in members if public_enrichment_has_content(member['enrichment_json'])), None)
-        if enriched_member is not None and not public_enrichment_has_content(row_dict.get('enrichment_json')):
-            row_dict['enrichment_json'] = enriched_member['enrichment_json']
-        row_dict['raw_alert_count'] = raw_alert_count
-        row_dict['total_seen_count'] = total_seen
-        row_dict['repeat_count'] = max(raw_alert_count, total_seen)
-        row_dict['member_alert_ids'] = [member['alert_id'] for member in members]
-        row_dict['member_timeline'] = member_timeline
-        row_dict['first_seen'] = earliest_first_seen or representative['first_seen'] or 'n/a'
-        row_dict['last_seen'] = latest_last_seen or representative['last_seen'] or 'n/a'
-        row_dict['alert_group_key'] = key
-        aggregated_rows.append(row_dict)
+    repository = load_alert_repository(DB_PATH)
     ai_analysis_by_alert_id = load_ai_analysis_by_alert_id()
     ai_prompts_by_alert_id = load_ai_prompts_by_alert_id()
     running_ai_alert_ids = running_ai_prompt_alert_ids(ai_prompts_by_alert_id)
     pcap_index = pcap_analysis_index()
-    pcap_index.update(pcap_request_index)
+    pcap_index.update(repository.pcap_request_index)
     ai_analysis_min_severity = str(
         load_soc_ai_settings().get('soc_analyst_analysis_min_severity')
         or 'informational'
@@ -2771,7 +2671,7 @@ def load_reports() -> list[AlertReport]:
             pcap_index,
             ai_analysis_min_severity,
         )
-        for row in aggregated_rows
+        for row in repository.rows
     ]
     return sorted(reports, key=lambda r: (r.criticality_rank, r.mtime, r.title.lower()), reverse=True)
 
