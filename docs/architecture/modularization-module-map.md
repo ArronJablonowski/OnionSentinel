@@ -109,6 +109,9 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
 - Canonical, digest-bound operator authorization validation now lives in
   `analysis.conclusions.authorization_evidence`; the runner retains private
   compatibility delegates used by characterization tests.
+- Bounded evidence-reference normalization, source-class grouping, and
+  immutable query/result digest binding now live in
+  `analysis.evidence.references` as the first ARR-78 query-engine boundary.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports

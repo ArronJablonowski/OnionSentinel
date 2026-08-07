@@ -1660,6 +1660,18 @@ def _conclusion_authorization():
     return authorization
 
 
+def _evidence_references():
+    _provider_routing()
+    from onion_sentinel.analysis.evidence import references
+    return references
+
+
+def _evidence_reference_policy():
+    return _evidence_references().Policy(
+        maximum_text_length=EVIDENCE_REFERENCE_TEXT_MAX,
+    )
+
+
 def _conclusion_authorization_evidence():
     _provider_routing()
     from onion_sentinel.analysis.conclusions import authorization_evidence
@@ -3818,24 +3830,14 @@ REVIEW_RULE_LABEL_FIELD_PATHS = frozenset(
 
 
 def _bounded_reference(value: Any) -> str:
-    return re.sub(r"\s+", " ", str(value or "")).strip()[:EVIDENCE_REFERENCE_TEXT_MAX]
+    return _evidence_references().bounded(
+        value, _evidence_reference_policy()
+    )
 
 
 def evidence_source_class(source: Any) -> str:
     """Group multiple citations from one underlying source into one signal."""
-    root = str(source or "").strip().lower().split(".", 1)[0]
-    return {
-        "alert": "security_onion_detection",
-        "grouped_alert_context": "security_onion_detection",
-        "detection_validation": "security_onion_detection",
-        "public_enrichment": "public_enrichment",
-        "asset_context": "asset_inventory_context",
-        "analyst_state": "analyst_state",
-        "pcap_evidence": "packet_evidence",
-        "incident_response_evidence": "security_onion_incident_export",
-        "investigation_query_results": "security_onion_investigation_query",
-        "live_osquery_evidence": "live_endpoint_osquery",
-    }.get(root, root or "unknown")
+    return _evidence_references().source_class(source)
 
 
 def result_bound_query_reference(
@@ -3852,32 +3854,10 @@ def result_bound_query_reference(
     execution of the same query cannot collide with or silently reuse evidence
     from a different result set.
     """
-    query_text = _bounded_reference(query_digest)[:64].lower()
-    if not re.fullmatch(r"[a-f0-9]{64}", query_text):
-        return "", ""
-    result_text = _bounded_reference(result_digest)[:64].lower()
-    if not re.fullmatch(r"[a-f0-9]{64}", result_text):
-        result_text = ""
-    namespace = str(namespace or "").strip().lower()
-    if namespace not in {"query", "pack", "query-id"}:
-        return "", ""
-    suffix = f":{query_text}"
-    if result_text:
-        suffix += f":{result_text}"
-    if namespace == "query":
-        reference = f"query{suffix}"
-    else:
-        maximum_label = (
-            EVIDENCE_REFERENCE_TEXT_MAX
-            - len(namespace)
-            - 1
-            - len(suffix)
-        )
-        bounded_label = _bounded_reference(label)[:maximum_label]
-        if not bounded_label:
-            return "", ""
-        reference = f"{namespace}:{bounded_label}{suffix}"
-    return reference, result_text or query_text
+    return _evidence_references().result_bound(
+        query_digest, result_digest, namespace=namespace, label=label,
+        policy=_evidence_reference_policy(),
+    )
 
 
 def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any]:

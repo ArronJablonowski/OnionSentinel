@@ -24,6 +24,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.persistence.analysis_index",
     "onion_sentinel.analysis.persistence.memory_journal",
     "onion_sentinel.analysis.conclusions.verdict",
+    "onion_sentinel.analysis.evidence.references",
     "onion_sentinel.analysis.conclusions.confidence",
     "onion_sentinel.analysis.conclusions.authorization",
     "onion_sentinel.analysis.conclusions.authorization_evidence",
