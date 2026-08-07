@@ -103,6 +103,15 @@
       "required_symbols": []
     },
     {
+      "path": "onion-sentinel-dashboard/portal_pcap_health.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_pcap_health.py",
+      "required_symbols": [
+        "PcapHealthSources",
+        "compose_pcap_workflow_health"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_catalog_routes.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py",

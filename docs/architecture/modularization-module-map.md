@@ -333,6 +333,15 @@ browser-side service-start/reboot-confirmation behavior. `report_portal.py`
 retains a small facade that supplies existing host, process, filesystem, and
 shell callbacks; the renderer itself cannot invoke an undeclared system action.
 
+`portal_pcap_health.py` owns the PCAP workflow System Health read model. It
+aggregates request and outcome counts, artifact storage, active-transfer
+heartbeats, bounded serial-queue grace, relay capture-protection state, recent
+failures, stale-work warnings, and generated analysis metadata through an
+explicit source bundle. `report_portal.py` retains the public response facade
+and supplies its existing database, timestamp, JSON, filesystem, and transfer-
+duration callbacks, preserving API compatibility while isolating health policy
+from HTTP routing.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and

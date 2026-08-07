@@ -682,6 +682,7 @@ cp "$REPO_DIR/n8n/bin/security_jsonl_log.py" "$DASHBOARD_RUNTIME_DIR/security_js
 cp "$REPO_DIR/onion-sentinel-dashboard/report_portal.py" "$DASHBOARD_RUNTIME_DIR/report_portal.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_dashboard.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_dashboard.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_dashboard_assets.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_dashboard_assets.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_pcap_health.py" "$DASHBOARD_RUNTIME_DIR/portal_pcap_health.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_ai_model_policy.py" "$DASHBOARD_RUNTIME_DIR/portal_ai_model_policy.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_ai_settings_normalizer.py" "$DASHBOARD_RUNTIME_DIR/portal_ai_settings_normalizer.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_catalog_routes.py" "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py"
