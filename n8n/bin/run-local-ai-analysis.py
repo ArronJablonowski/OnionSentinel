@@ -1816,6 +1816,18 @@ def _query_audit_dependencies():
     )
 
 
+def _query_outcomes():
+    _provider_routing()
+    from onion_sentinel.analysis.query import outcomes
+    return outcomes
+
+
+def _query_outcomes_policy():
+    return _query_outcomes().Policy(
+        success_statuses=frozenset(INVESTIGATION_QUERY_SUCCESS_STATUSES),
+    )
+
+
 def _query_prompt_errors():
     _provider_routing()
     from onion_sentinel.analysis.query import prompt_errors
@@ -6053,207 +6065,18 @@ def investigation_query_outcome_summary(
     *,
     queries_admitted: int,
 ) -> dict[str, Any]:
-    """Count logical queries, including multi-query broker result envelopes."""
-    counts = {
-        "successful_queries": 0,
-        "partial_queries": 0,
-        "rejected_queries": 0,
-        "error_queries": 0,
-        "timeout_queries": 0,
-    }
-    query_status_history: dict[str, list[str]] = {}
-
-    def count_status(
-        status: Any,
-        logical_queries: int = 1,
-        *,
-        query_id: str = "",
-    ) -> None:
-        normalized = str(status or "").strip().lower()
-        if query_id:
-            query_status_history.setdefault(query_id, []).append(normalized)
-        if normalized in INVESTIGATION_QUERY_SUCCESS_STATUSES:
-            counts["successful_queries"] += logical_queries
-        elif normalized == "partial":
-            counts["partial_queries"] += logical_queries
-        elif normalized == "rejected":
-            counts["rejected_queries"] += logical_queries
-        elif normalized == "timeout":
-            counts["timeout_queries"] += logical_queries
-        else:
-            counts["error_queries"] += logical_queries
-
-    adjusted_windows = 0
-    for round_item in rounds:
-        if not isinstance(round_item, dict):
-            continue
-        for request in (
-            round_item.get("requests")
-            if isinstance(round_item.get("requests"), list)
-            else []
-        ):
-            normalization = (
-                request.get("normalization")
-                if isinstance(request, dict)
-                and isinstance(request.get("normalization"), dict)
-                else {}
-            )
-            if isinstance(normalization.get("window_adjustment"), dict):
-                adjusted_windows += 1
-        for result in (
-            round_item.get("results")
-            if isinstance(round_item.get("results"), list)
-            else []
-        ):
-            if not isinstance(result, dict):
-                counts["error_queries"] += 1
-                continue
-            query_ids = result.get("query_ids")
-            logical_query_ids = list(
-                dict.fromkeys(
-                    str(item).strip()
-                    for item in query_ids
-                    if str(item).strip()
-                )
-            ) if isinstance(query_ids, list) else []
-            evidence = (
-                result.get("evidence")
-                if isinstance(result.get("evidence"), dict)
-                else {}
-            )
-            nested_results = (
-                evidence.get("results")
-                if isinstance(evidence.get("results"), list)
-                else []
-            )
-            counted_ids: set[str] = set()
-            if logical_query_ids and nested_results:
-                controls_valid = evidence.get("controls_valid")
-                allowed_ids = set(logical_query_ids)
-                for nested in nested_results:
-                    if not isinstance(nested, dict):
-                        continue
-                    query_id = str(nested.get("query_id") or "").strip()
-                    if query_id not in allowed_ids or query_id in counted_ids:
-                        continue
-                    nested_status = nested.get("status")
-                    if (
-                        str(nested_status or "").strip().lower()
-                        in INVESTIGATION_QUERY_SUCCESS_STATUSES
-                        and (
-                            controls_valid is False
-                            or nested.get("semantic_valid") is False
-                        )
-                    ):
-                        nested_status = "partial"
-                    count_status(
-                        nested_status,
-                        query_id=query_id,
-                    )
-                    counted_ids.add(query_id)
-            remaining = (
-                len(logical_query_ids) - len(counted_ids)
-                if logical_query_ids
-                else 1
-            )
-            if remaining:
-                remaining_ids = [
-                    query_id
-                    for query_id in logical_query_ids
-                    if query_id not in counted_ids
-                ]
-                if remaining_ids:
-                    for query_id in remaining_ids:
-                        count_status(
-                            result.get("status"),
-                            query_id=query_id,
-                        )
-                else:
-                    count_status(
-                        result.get("status"),
-                        remaining,
-                        query_id=str(
-                            result.get("query_id") or ""
-                        ).strip(),
-                    )
-
-    accounted = sum(counts.values())
-    unreported = max(0, int(queries_admitted) - accounted)
-    counts["unreported_queries"] = unreported
-    counts["queries_admitted"] = int(queries_admitted)
-    counts["queries_accounted"] = accounted
-    counts["adjusted_windows"] = adjusted_windows
-    counts["zero_success"] = bool(queries_admitted and not counts["successful_queries"])
-    resolved_retry_query_ids = sorted(
-        query_id
-        for query_id, statuses in query_status_history.items()
-        if statuses
-        and statuses[-1] in INVESTIGATION_QUERY_SUCCESS_STATUSES
-        and any(
-            status not in INVESTIGATION_QUERY_SUCCESS_STATUSES
-            for status in statuses[:-1]
-        )
+    return _query_outcomes().summary(
+        rounds,
+        queries_admitted=queries_admitted,
+        policy=_query_outcomes_policy(),
     )
-    resolved_non_success_attempts = sum(
-        sum(
-            status not in INVESTIGATION_QUERY_SUCCESS_STATUSES
-            for status in query_status_history[query_id][:-1]
-        )
-        for query_id in resolved_retry_query_ids
-    )
-    non_success_attempts = (
-        counts["partial_queries"]
-        + counts["rejected_queries"]
-        + counts["error_queries"]
-        + counts["timeout_queries"]
-    )
-    unresolved_non_success_attempts = max(
-        0,
-        non_success_attempts - resolved_non_success_attempts,
-    )
-    counts["resolved_retry_query_ids"] = resolved_retry_query_ids
-    counts["resolved_non_success_attempts"] = (
-        resolved_non_success_attempts
-    )
-    counts["unresolved_non_success_attempts"] = (
-        unresolved_non_success_attempts
-    )
-    evidence_gaps: list[str] = []
-    if counts["zero_success"]:
-        evidence_gaps.append(
-            "All requested iterative investigation pivots failed, timed out, "
-            "or were rejected; no follow-up query evidence was collected."
-        )
-    elif unresolved_non_success_attempts or unreported:
-        evidence_gaps.append(
-            "One or more requested iterative investigation pivots did not "
-            "return complete successful evidence."
-        )
-    if adjusted_windows:
-        evidence_gaps.append(
-            "One or more model-requested query windows were narrowed to the "
-            "broker's 24-hour limit; omitted time remains an evidence gap."
-        )
-    counts["evidence_gaps"] = evidence_gaps
-    return counts
 
 
 def _append_investigation_evidence_gaps(
     response: dict[str, Any],
     gaps: list[str],
 ) -> None:
-    for container in (
-        response,
-        response.get("incident_response_report"),
-    ):
-        if not isinstance(container, dict):
-            continue
-        existing = container.get("evidence_gaps")
-        values = list(existing) if isinstance(existing, list) else []
-        for gap in gaps:
-            if gap not in values:
-                values.append(gap)
-        container["evidence_gaps"] = values[:100]
+    _query_outcomes().append_evidence_gaps(response, gaps)
 
 
 def investigation_backend_available(

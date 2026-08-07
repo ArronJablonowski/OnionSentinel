@@ -377,6 +377,10 @@ bounded rejected-proposal stubs, and repair-terminal read-only completion live
 under `onion_sentinel.analysis.query.audit`. The runner injects the canonical
 digest and broker result-binding functions so the package cannot invent query
 authority, query text, evidence, or execution outcomes.
+Logical-query outcome accounting and deterministic evidence-gap publication
+live under `onion_sentinel.analysis.query.outcomes`. Grouped broker envelopes,
+nested partial results, zero-success runs, repaired attempts, unreported calls,
+and narrowed time windows retain distinct audit semantics.
 The legacy runner functions remain compatibility delegates and inject runtime
 policy explicitly, preserving existing test seams while keeping review-package
 mutation and reviewer-output admission out of the composition root.
