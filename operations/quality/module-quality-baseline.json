@@ -670,9 +670,6 @@
     "n8n/bin/run-local-ai-analysis.py::normalize_correlation_assessment": {
       "max_complexity": 17
     },
-    "n8n/bin/run-local-ai-analysis.py::normalize_investigation_query_request": {
-      "max_complexity": 16
-    },
     "n8n/bin/run-local-ai-analysis.py::normalize_scope_dispositions": {
       "max_complexity": 22
     },
@@ -1357,5 +1354,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "3420d1f1d19efec90d37eb8ae8c3cd3c343e4033"
+  "source_release": "0b0be1b7c6806d040862b40f76e5aba868382d6d"
 }

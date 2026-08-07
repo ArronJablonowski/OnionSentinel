@@ -1792,6 +1792,10 @@ def _query_derived():
     return derived
 
 
+def _query_endpoint():
+    _provider_routing()
+    from onion_sentinel.analysis.query import endpoint
+    return endpoint
 def _query_derived_policy():
     module = _query_derived()
     return module.Policy(
@@ -4512,17 +4516,13 @@ def normalize_investigation_query_request(
             error_type=InvestigationQueryError,
         )
     elif backend == "osquery":
-        target_alias = _query_text(parameters.get("target_alias"), 64)
-        query = _query_text(parameters.get("query"), 4096)
-        if not target_alias or not query:
-            raise InvestigationQueryError(
-                "osquery request requires target_alias and a read-only SELECT"
-            )
-        try:
-            query = normalize_live_osquery_query(query)
-        except LiveOsqueryContractError as exc:
-            raise InvestigationQueryError(str(exc)) from exc
-        normalized_parameters = {"target_alias": target_alias, "query": query}
+        module = _query_endpoint()
+        normalized_parameters = module.normalize(
+            parameters, dependencies=module.Dependencies(
+                normalize_query=normalize_live_osquery_query,
+                query_error=LiveOsqueryContractError),
+            error_type=InvestigationQueryError,
+        )
     elif backend == "enrichment":
         normalized_parameters = _query_enrichment().normalize(
             parameters,
