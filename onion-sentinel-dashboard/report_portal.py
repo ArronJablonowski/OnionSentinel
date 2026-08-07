@@ -236,6 +236,7 @@ from portal_soc_write_dispatch import (
     SocWriteCallbacks,
     dispatch_authorized_soc_write,
 )
+from portal_soc_write_request import prepare_soc_write_request
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -9289,8 +9290,6 @@ class PortalHandler(BaseHTTPRequestHandler):
         )
         is_cti_program_write = route.cti_program_write
         is_asset_write = route.asset_write
-        is_incident_reanalysis = route.incident_reanalysis
-        is_review_write = route.review_write
         if not route.accepted:
             return self._send(HTTPStatus.NOT_FOUND, b"Not found", "text/plain; charset=utf-8")
         try:
@@ -9395,78 +9394,24 @@ class PortalHandler(BaseHTTPRequestHandler):
                 json.dumps(data, indent=2).encode(),
                 "application/json; charset=utf-8",
             )
-        if is_incident_reanalysis:
-            if not self._soc_review_write_authorized():
-                return self._send(
-                    HTTPStatus.FORBIDDEN,
-                    json.dumps({
-                        "ok": False,
-                        "error": "Incident reanalysis requests must come from the same-origin dashboard.",
-                    }).encode(),
-                    "application/json; charset=utf-8",
-                )
-            payload = parse_json_body(raw).value_or(None)
-            if not isinstance(payload, dict):
-                return self._send(
-                    HTTPStatus.BAD_REQUEST,
-                    json.dumps({
-                        "ok": False,
-                        "error": "Request body must be a JSON object.",
-                    }).encode(),
-                    "application/json; charset=utf-8",
-                )
-            status, data = dispatch_authorized_soc_write(
-                route, payload, PORTAL_SOC_WRITE_CALLBACKS
-            )
-            if status < 400:
+        soc_write = prepare_soc_write_request(
+            route,
+            raw,
+            same_origin_authorized=(
+                not (route.incident_reanalysis or route.review_write)
+                or self._soc_review_write_authorized()
+            ),
+            dispatcher=dispatch_authorized_soc_write,
+            callbacks=PORTAL_SOC_WRITE_CALLBACKS,
+        )
+        if soc_write is not None:
+            if soc_write.clear_cache:
                 SOC_ALERT_RESPONSE_CACHE.clear()
             return self._send(
-                status,
-                json.dumps(data, indent=2).encode(),
+                soc_write.status,
+                json.dumps(soc_write.payload, indent=2).encode(),
                 "application/json; charset=utf-8",
             )
-        if is_review_write:
-            if not self._soc_review_write_authorized():
-                return self._send(
-                    HTTPStatus.FORBIDDEN,
-                    json.dumps({
-                        "ok": False,
-                        "error": "Analyst review writes must come from the same-origin dashboard.",
-                    }).encode(),
-                    "application/json; charset=utf-8",
-                )
-            parsed_body = parse_json_body(raw)
-            if not parsed_body.valid:
-                return self._send(
-                    HTTPStatus.BAD_REQUEST,
-                    json.dumps({"ok": False, "error": "Request body must be valid JSON."}).encode(),
-                    "application/json; charset=utf-8",
-                )
-            payload = parsed_body.value
-            if not isinstance(payload, dict):
-                return self._send(
-                    HTTPStatus.BAD_REQUEST,
-                    json.dumps({"ok": False, "error": "Request body must be a JSON object."}).encode(),
-                    "application/json; charset=utf-8",
-                )
-            status, data = dispatch_authorized_soc_write(
-                route, payload, PORTAL_SOC_WRITE_CALLBACKS
-            )
-            if status < 400:
-                SOC_ALERT_RESPONSE_CACHE.clear()
-            return self._send(
-                status,
-                json.dumps(data, indent=2).encode(),
-                "application/json; charset=utf-8",
-            )
-        if route.alert_action:
-            payload = parse_json_body(raw, empty_object=True).value_or({})
-            status, data = dispatch_authorized_soc_write(
-                route, payload, PORTAL_SOC_WRITE_CALLBACKS
-            )
-            if status < 400:
-                SOC_ALERT_RESPONSE_CACHE.clear()
-            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path == "/api/soc-alerts/status":
             payload = parse_json_body(raw, empty_object=True).value_or({})
             ok, data = update_soc_alert_status(payload)

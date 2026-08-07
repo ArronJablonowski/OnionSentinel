@@ -487,6 +487,14 @@ translation through explicit callbacks. `PortalHandler` retains route
 classification, SSE streaming, JSON serialization, security headers, and
 socket writes.
 
+`portal_soc_write_request.py` owns same-origin authorization and JSON-shape
+policy for classified SOC Analyst and Incident Responder writes before calling
+the bounded operation dispatcher. It intentionally preserves strict review
+JSON errors, the reanalysis object requirement, lenient legacy alert-action
+fallback, and success-only cache invalidation signals. `PortalHandler` retains
+header/origin evaluation, request-size enforcement, response serialization,
+cache mutation, and socket writes.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and
