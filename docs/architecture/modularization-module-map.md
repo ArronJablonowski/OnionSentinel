@@ -512,6 +512,13 @@ catalog. `InvestigationSkillCatalogConfig` makes registry, validator, and home
 paths explicit; the builder retains path-aware wrappers so deployed and
 repository layouts use the same strict code-owned skill validation contract.
 
+`dashboard_model_presentation.py` owns exact provider-route labels, independent
+reviewer/adjudicator selector filtering, configured assignment projection, and
+observed execution-provenance labels shared by dashboard activity and Reports.
+It performs no settings, artifact, or process I/O; the builder reads only the
+newest stamped artifact when no valid assignment exists and passes that record
+into the pure projection policy.
+
 `dashboard_flow_page.py` owns the pure data-flow renderer, enrichment-service
 tiles, responsive pipeline styles, and privacy-toggle client. The builder
 assembles `FlowPageViewModel` from live alert/report/model/notification metrics

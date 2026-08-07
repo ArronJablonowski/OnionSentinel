@@ -331,6 +331,19 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_model_presentation.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_model_presentation.py",
+      "required_symbols": [
+        "agent_model_option_rows",
+        "agent_model_route_label",
+        "assigned_model_projection",
+        "llm_executed_model_label",
+        "observed_model_projection",
+        "unassigned_model_projection"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_flow_page.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_flow_page.py",

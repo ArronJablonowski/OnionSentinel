@@ -198,6 +198,21 @@ from dashboard_investigation_skills import (  # noqa: E402
     load_investigation_skill_registry,
     render_investigation_skill_catalog,
 )
+from dashboard_model_presentation import (  # noqa: E402
+    agent_adjudicator_model_route_label,
+    agent_model_option_rows,
+    agent_model_route_label,
+    agent_second_opinion_model_route_label,
+    assigned_model_projection,
+    codex_cli_route_parts as _codex_cli_route_parts,
+    llm_agent_label,
+    llm_executed_model_label,
+    llm_job_label,
+    llm_phase_label,
+    observed_model_projection,
+    provider_cli_route_parts as _provider_cli_route_parts,
+    unassigned_model_projection,
+)
 from dashboard_flow_page import (  # noqa: E402
     FLOW_PAGE_CSS,
     FLOW_PAGE_JS,
@@ -596,113 +611,6 @@ def severity_threshold_options(selected: str) -> str:
     )
 
 
-def _codex_cli_route_parts(route: str, settings: dict) -> tuple[str, str] | None:
-    """Resolve either an exact Codex route or the legacy provider-only route."""
-    if route.startswith('codex-cli:'):
-        try:
-            model, effort = route.removeprefix('codex-cli:').rsplit(':', 1)
-        except ValueError:
-            return None
-        if CODEX_CLI_MODEL_PATTERN.fullmatch(model) and effort in CODEX_CLI_REASONING_EFFORTS:
-            return model, effort
-        return None
-    if route in {'gpt-cli', 'codex-cli'}:
-        return (
-            str(settings.get('codex_cli_model') or settings.get('cloud_model') or 'gpt-5.5').strip(),
-            str(settings.get('codex_cli_reasoning_effort') or 'medium').strip(),
-        )
-    return None
-
-
-def _provider_cli_route_parts(
-    route: str,
-    provider: str,
-) -> tuple[str, str] | None:
-    """Parse one exact hosted-provider route without constraining its namespace."""
-    prefix = f'{provider}:'
-    if not route.startswith(prefix):
-        return None
-    try:
-        model, effort = route.removeprefix(prefix).rsplit(':', 1)
-    except ValueError:
-        return None
-    if (
-        CLI_HARNESS_MODEL_PATTERN.fullmatch(model)
-        and effort in CODEX_CLI_REASONING_EFFORTS
-    ):
-        return model, effort
-    return None
-
-
-def _agent_route_label(route: str, settings: dict) -> str | None:
-    if route.startswith('ollama:'):
-        return f"Ollama: {route.removeprefix('ollama:')}"
-    if codex_parts := _codex_cli_route_parts(route, settings):
-        model, effort = codex_parts
-        return f'Codex CLI: {model} ({effort})'
-    if hermes_parts := _provider_cli_route_parts(route, 'hermes-agent'):
-        model, effort = hermes_parts
-        return f'Hermes Agent: {model} ({effort})'
-    if openclaw_parts := _provider_cli_route_parts(route, 'openclaw'):
-        model, effort = openclaw_parts
-        return f'OpenClaw: {model} ({effort})'
-    return None
-
-
-def agent_model_route_label(settings: dict, role: str) -> str:
-    """Describe one agent's persisted exact model assignment."""
-    route = str((settings.get('agent_models') or {}).get(role) or '').strip()
-    return _agent_route_label(route, settings) or 'No analysis model assigned'
-
-
-def agent_second_opinion_model_route_label(settings: dict, role: str) -> str:
-    """Describe one agent's optional reviewer route without inventing a fallback."""
-    route = str((settings.get('agent_second_opinion_models') or {}).get(role) or '').strip()
-    return _agent_route_label(route, settings) or 'None selected'
-
-
-def agent_adjudicator_model_route_label(settings: dict, role: str) -> str:
-    """Describe one agent's optional bounded disagreement adjudicator."""
-    route = str((settings.get('agent_adjudicator_models') or {}).get(role) or '').strip()
-    return _agent_route_label(route, settings) or 'None selected'
-
-
-def agent_model_option_rows(
-    settings: dict,
-    role: str,
-    *,
-    second_opinion: bool = False,
-    adjudicator: bool = False,
-) -> str:
-    """Render enabled routes for a primary, reviewer, or adjudicator selector."""
-    assignment_key = (
-        'agent_adjudicator_models'
-        if adjudicator
-        else ('agent_second_opinion_models' if second_opinion else 'agent_models')
-    )
-    selected = str((settings.get(assignment_key) or {}).get(role) or '').strip()
-    primary = str((settings.get('agent_models') or {}).get(role) or '').strip()
-    reviewer = str((settings.get('agent_second_opinion_models') or {}).get(role) or '').strip()
-    options: list[str] = []
-    if second_opinion or adjudicator:
-        options.append('<option value="">Not assigned</option>')
-    for route in enabled_agent_model_routes(settings):
-        if (
-            (second_opinion or adjudicator)
-            and model_route_identity(route, settings) == model_route_identity(primary, settings)
-        ) or (
-            adjudicator
-            and model_route_identity(route, settings) == model_route_identity(reviewer, settings)
-        ):
-            continue
-        label = _agent_route_label(route, settings)
-        if not label:
-            continue
-        options.append(
-            f'<option value="{html.escape(route, quote=True)}"{" selected" if route == selected else ""}>'
-            f'{html.escape(label)}</option>'
-        )
-    return ''.join(options)
 
 
 def agent_model_control(settings: dict, role: str, label: str) -> str:
@@ -886,100 +794,35 @@ def reasoning_effort_options(selected: str) -> str:
     )
 
 
-def current_soc_analysis_model(settings: dict | None = None) -> dict[str, str]:
-    """Describe the SOC Analyst's assigned provider, model, and exact route."""
-    settings = settings or load_soc_ai_settings()
-    route = str((settings.get('agent_models') or {}).get('soc-analyst') or '').strip()
-    if route.startswith('ollama:'):
-        model = route.removeprefix('ollama:').strip()
-        if model:
-            return {
-                'provider': 'Ollama',
-                'provider_key': 'ollama',
-                'model': model,
-                'model_detail': model,
-                'label': f'Ollama · {model}',
-                'route': route,
-            }
-    if codex_parts := _codex_cli_route_parts(route, settings):
-        model, effort = codex_parts
-        return {
-            'provider': 'Codex CLI',
-            'provider_key': 'codex-cli',
-            'model': model,
-            'model_detail': f'{model} ({effort})',
-            'label': f'Codex CLI · {model} ({effort})',
-            'route': _codex_cli_route(model, effort),
-        }
-    if hermes_parts := _provider_cli_route_parts(route, 'hermes-agent'):
-        model, effort = hermes_parts
-        return {
-            'provider': 'Hermes Agent',
-            'provider_key': 'hermes-agent',
-            'model': model,
-            'model_detail': f'{model} ({effort})',
-            'label': f'Hermes Agent · {model} ({effort})',
-            'route': _hermes_agent_route(model, effort),
-        }
-    if openclaw_parts := _provider_cli_route_parts(route, 'openclaw'):
-        model, effort = openclaw_parts
-        return {
-            'provider': 'OpenClaw',
-            'provider_key': 'openclaw',
-            'model': model,
-            'model_detail': f'{model} ({effort})',
-            'label': f'OpenClaw · {model} ({effort})',
-            'route': _openclaw_route(model, effort),
-        }
-
-    # A malformed or missing assignment should not make the dashboard claim a
-    # configured provider. Fall back only to stamped analysis provenance.
+def _latest_observed_model_projection() -> dict[str, str] | None:
+    """Read the newest stamped analysis provenance without consulting settings."""
     try:
-        for path in sorted(AI_ANALYSIS_DIR.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
-            try:
-                data = json.loads(path.read_text(encoding='utf-8'))
-            except Exception:
-                continue
-            response = data.get('response') if isinstance(data.get('response'), dict) else {}
-            model = next((str(value).strip() for value in (
-                data.get('analysis_model'),
-                data.get('_analysis_model'),
-                data.get('model'),
-                response.get('_analysis_model'),
-            ) if value), '')
-            model_path = str(
-                data.get('analysis_model_path')
-                or data.get('_analysis_model_path')
-                or response.get('_analysis_model_path')
-                or ''
-            ).strip()
-            if not model:
-                continue
-            provider, provider_key = {
-                'frontier-codex-cli': ('Codex CLI', 'codex-cli'),
-                'hermes-agent': ('Hermes Agent', 'hermes-agent'),
-                'openclaw': ('OpenClaw', 'openclaw'),
-                'ollama': ('Ollama', 'ollama'),
-            }.get(model_path.lower(), ('Unknown provider', 'unknown'))
-            return {
-                'provider': provider,
-                'provider_key': provider_key,
-                'model': model,
-                'model_detail': model,
-                'label': f'{provider} · {model}',
-                'route': '',
-            }
+        paths = sorted(
+            AI_ANALYSIS_DIR.glob('*.json'),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
     except Exception:
-        pass
+        return None
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except Exception:
+            continue
+        if projection := observed_model_projection(data):
+            return projection
+    return None
+
+
+def current_soc_analysis_model(settings: dict | None = None) -> dict[str, str]:
+    """Describe the configured SOC assignment or newest observed provenance."""
+    configured = settings or load_soc_ai_settings()
+    if projection := assigned_model_projection(configured, 'soc-analyst'):
+        return projection
+    if projection := _latest_observed_model_projection():
+        return projection
     fallback = os.environ.get('SOC_AI_MODEL', '').strip() or 'unassigned'
-    return {
-        'provider': 'Unassigned',
-        'provider_key': 'unassigned',
-        'model': fallback,
-        'model_detail': fallback,
-        'label': f'Unassigned · {fallback}',
-        'route': '',
-    }
+    return unassigned_model_projection(fallback)
 
 
 def current_local_ai_model() -> str:
@@ -1953,102 +1796,6 @@ def llm_log_status_badge(log: dict[str, object]) -> str:
     return render_reports_status_badge(status, label)
 
 
-def llm_agent_label(log: dict[str, object]) -> str:
-    """Return the agent that actually owned this run, never a configured role."""
-    role = str(log.get('agent_role') or '').strip().lower().replace('_', '-')
-    return {
-        'soc-analyst': 'SOC Analyst',
-        'incident-responder': 'Incident Responder',
-        'siem-engineer': 'SIEM Engineer',
-        'cyber-threat-intel': 'Cyber Threat Intel',
-        'threat-hunter': 'Threat Hunter',
-    }.get(role, 'Unknown agent')
-
-
-def llm_job_label(log: dict[str, object]) -> str:
-    """Return the bounded job implied by the run's persisted agent role."""
-    role = str(log.get('agent_role') or '').strip().lower().replace('_', '-')
-    return {
-        'soc-analyst': 'SOC alert triage',
-        'incident-responder': 'Incident response investigation',
-        'siem-engineer': 'Detection engineering analysis',
-        'cyber-threat-intel': 'Threat-intelligence analysis',
-        'threat-hunter': 'Threat-hunting analysis',
-    }.get(role, 'Unknown analysis job')
-
-
-def llm_phase_label(log: dict[str, object]) -> str:
-    phase = str(log.get('active_phase') or '').strip().lower()
-    return {
-        'preparing': 'Preparing analysis',
-        'primary_analysis': 'Primary analysis',
-        'second_opinion': 'Second-opinion review',
-        'disagreement_adjudication': 'Disagreement adjudication',
-        'live_follow_up': 'Live-evidence follow-up',
-        'post_processing': 'Finalizing report',
-        'concurrent': 'Concurrent analyses',
-    }.get(phase, 'Completed run' if str(log.get('status') or '').lower() != 'running' else 'Analysis')
-
-
-def llm_executed_model_label(log: dict[str, object], *, live: bool = False) -> str:
-    """Describe observed execution provenance without falling back to settings."""
-    if live and str(log.get('status') or '').lower() != 'running':
-        return 'No model running'
-    if live and 'active_phase' in log:
-        route = str(log.get('active_model_route') or '').strip()
-        model = str(log.get('active_model') or '').strip()
-        model_path = str(log.get('active_model_path') or '').strip().lower()
-        provider_key = str(log.get('active_provider') or '').strip().lower()
-        if str(log.get('active_phase') or '').strip().lower() == 'post_processing' and not route and not model:
-            return 'No model running'
-    else:
-        route = str(log.get('model_route') or '').strip()
-        model = str(log.get('model') or '').strip()
-        model_path = str(log.get('model_path') or '').strip().lower()
-        provider_key = str(log.get('mode') or '').strip().lower()
-    provider = ''
-    effort = ''
-    if route.startswith('codex-cli:'):
-        try:
-            routed_model, effort = route.removeprefix('codex-cli:').rsplit(':', 1)
-        except ValueError:
-            routed_model = ''
-        if routed_model:
-            model = routed_model
-        provider = 'Codex CLI'
-    elif route.startswith('hermes-agent:'):
-        try:
-            routed_model, effort = route.removeprefix('hermes-agent:').rsplit(':', 1)
-        except ValueError:
-            routed_model = ''
-        if routed_model:
-            model = routed_model
-        provider = 'Hermes Agent'
-    elif route.startswith('openclaw:'):
-        try:
-            routed_model, effort = route.removeprefix('openclaw:').rsplit(':', 1)
-        except ValueError:
-            routed_model = ''
-        if routed_model:
-            model = routed_model
-        provider = 'OpenClaw'
-    elif route.startswith('ollama:'):
-        model = route.removeprefix('ollama:').strip() or model
-        provider = 'Ollama'
-    elif provider_key in {'codex-cli', 'gpt-cli'} or model_path == 'frontier-codex-cli':
-        provider = 'Codex CLI'
-    elif provider_key in {'hermes-agent', 'openai-codex'} or model_path == 'hermes-agent':
-        provider = 'Hermes Agent'
-    elif provider_key == 'openclaw' or model_path == 'openclaw':
-        provider = 'OpenClaw'
-    elif provider_key == 'ollama' or model_path == 'ollama':
-        provider = 'Ollama'
-    if not model:
-        return 'No model running' if live else 'No model started'
-    label = ' · '.join(part for part in (provider, model) if part) or model
-    if provider in {'Codex CLI', 'Hermes Agent', 'OpenClaw'} and effort:
-        label += f' ({effort})'
-    return label
 
 
 def _reports_alert_route(alert: dict[str, object], empty: str) -> str:
