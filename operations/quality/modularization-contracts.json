@@ -123,6 +123,16 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_flow_page.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_flow_page.py",
+      "required_symbols": [
+        "FlowPageViewModel",
+        "inject_flow_assets",
+        "render_flow_page"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_settings_assets.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_assets.py",
