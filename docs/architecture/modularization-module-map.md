@@ -309,7 +309,7 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (5,254
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (5,127
 lines).
 
 | Boundary | Responsibilities |
@@ -417,6 +417,12 @@ matter removal, nested collapsible-section state, and deterministic HTML
 rendering. Small state methods replace the former 153-line parser function;
 the builder directly re-exports its established helper names so report and
 detail contracts remain stable.
+
+`dashboard_alert_detail_layout.py` owns the versioned canonical section order,
+display labels, legacy aliases, immutable layout result, heading
+normalization, and fenced-code-aware relocation of unknown or duplicate legacy
+sections. This keeps historical Markdown from controlling the current report
+structure while preserving every displaced section under Raw Logs.
 
 `dashboard_flow_page.py` owns the pure data-flow renderer, enrichment-service
 tiles, responsive pipeline styles, and privacy-toggle client. The builder
