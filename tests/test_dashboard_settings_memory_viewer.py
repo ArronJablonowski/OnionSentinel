@@ -4,12 +4,24 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_BUILDER = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "build_soc_alerts_dashboard.py"
+SETTINGS_MODULES = (
+    REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_settings_assets.py",
+    REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_settings_client_shell.py",
+    REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_settings_client_model.py",
+    REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_settings_client_actions.py",
+)
 PORTAL = REPO_ROOT / "onion-sentinel-dashboard" / "report_portal.py"
+
+
+def settings_source() -> str:
+    """Return the complete Settings implementation across its owned modules."""
+    paths = (DASHBOARD_BUILDER, *SETTINGS_MODULES)
+    return "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
 
 class DashboardSettingsMemoryViewerTest(unittest.TestCase):
     def test_each_primary_and_reviewer_prompt_path_opens_its_collapsed_editor(self) -> None:
-        source = DASHBOARD_BUILDER.read_text(encoding="utf-8")
+        source = settings_source()
 
         for prompt_target in (
             "soc-analyst-prompt",
@@ -45,7 +57,7 @@ class DashboardSettingsMemoryViewerTest(unittest.TestCase):
         self.assertIn("promptEditor.focus({preventScroll: true});", source)
 
     def test_each_agent_exposes_read_only_memory_and_shared_memory_buttons(self) -> None:
-        source = DASHBOARD_BUILDER.read_text(encoding="utf-8")
+        source = settings_source()
 
         for memory_key in (
             "soc-analyst",
@@ -60,7 +72,7 @@ class DashboardSettingsMemoryViewerTest(unittest.TestCase):
         self.assertNotIn('contenteditable="true"', source)
 
     def test_viewer_uses_text_content_and_has_no_memory_write_route(self) -> None:
-        dashboard_source = DASHBOARD_BUILDER.read_text(encoding="utf-8")
+        dashboard_source = settings_source()
         portal_source = PORTAL.read_text(encoding="utf-8")
 
         self.assertIn("memoryContent.textContent = data.content || '';", dashboard_source)
@@ -71,7 +83,7 @@ class DashboardSettingsMemoryViewerTest(unittest.TestCase):
         self.assertNotIn('if parsed.path == "/api/soc-settings/agent-memory":', portal_source)
 
     def test_maxmind_databases_are_a_standalone_three_database_section(self) -> None:
-        source = DASHBOARD_BUILDER.read_text(encoding="utf-8")
+        source = settings_source()
 
         agent_end = source.index('</section>\n      <section class="settings-maxmind-section"')
         maxmind_start = source.index('<section class="settings-maxmind-section"')

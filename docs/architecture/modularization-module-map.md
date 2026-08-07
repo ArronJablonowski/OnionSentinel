@@ -309,7 +309,7 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (9,684
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (8,482
 lines).
 
 | Boundary | Responsibilities |
@@ -361,6 +361,16 @@ Hunter behavioral-triage page markup, analyst guardrails, responsive finding
 tables, normalized-field rendering, and read-only snapshot refresh client. The
 builder re-exports `ac_hunter_page_section`; collection, relay transport,
 normalization, caching, and verdict scoring remain in the AC Hunter backend.
+
+The Settings client is assembled by
+`dashboard_settings_assets.py` from `dashboard_settings_client_shell.py`,
+`dashboard_settings_client_model.py`, and
+`dashboard_settings_client_actions.py`. These bounded fragments respectively
+own prompt/memory/provider setup, model-route normalization, and persistence
+plus event wiring while preserving one injected client script. The builder
+continues to re-export `SETTINGS_PAGE_CSS`, `SETTINGS_PAGE_JS`, and
+`inject_settings_assets` until the Settings renderer receives its view-model
+boundary.
 
 ## Alert Store
 

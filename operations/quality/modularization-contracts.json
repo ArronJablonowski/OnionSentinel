@@ -113,6 +113,38 @@
       "required_symbols": [
         "ac_hunter_page_section"
       ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_settings_assets.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_assets.py",
+      "required_symbols": [
+        "inject_settings_assets"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_settings_client_shell.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_client_shell.py",
+      "required_symbols": [
+        "settings_client_shell_fragment"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_settings_client_model.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_client_model.py",
+      "required_symbols": [
+        "settings_client_model_fragment"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_settings_client_actions.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_client_actions.py",
+      "required_symbols": [
+        "settings_client_actions_fragment"
+      ]
     }
   ],
   "python_package_trees": [
