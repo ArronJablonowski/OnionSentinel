@@ -434,6 +434,23 @@ source bundle keeps clocks, database reads/writes, alert-store transport, and
 current status rendering outside the policy. The portal retains those runtime
 resources and a compatibility facade.
 
+`portal_soc_alert_status_store.py` owns analyst-status normalization, legacy
+and current SQLite schema creation, additive adjudication-column migration,
+merge-safe group-state upsert/delete operations, and stale-acknowledgement
+reopening while durable suppressions remain active. Its source bundle exposes
+table discovery, grouped alert counts, and the clock; database location,
+connection and retry policy, production alert-store delegation, and JSON mirror
+persistence remain outside this repository boundary.
+
+`portal_soc_alert_status_service.py` owns database-authoritative status reads,
+absence-only JSON disaster-recovery fallback, offline batch transaction
+orchestration, bounded transient-SQLite retries, and post-commit atomic JSON
+mirroring inside the status write lock. Its source bundle exposes paths,
+connection contexts, repository operations, the clock, UUID generation, lock,
+sleep, and retry settings. The portal retains runtime construction and its
+stable compatibility facade; production mutation authorization remains in
+`portal_soc_alert_status_write.py`.
+
 `portal_soc_adjudication_policy.py` owns canonical analyst outcome and factored
 verdict enumerations, legacy verdict projection and derivation, impossible
 factor-combination detection, bounded human-review fields, duplicate-reference

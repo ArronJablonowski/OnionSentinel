@@ -273,6 +273,34 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_soc_alert_status_store.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_alert_status_store.py",
+      "required_symbols": [
+        "SocAlertStatusStoreSources",
+        "ensure_soc_alert_status_schema",
+        "load_soc_group_statuses",
+        "normalize_soc_alert_status_meta",
+        "write_soc_group_status",
+        "write_soc_group_statuses"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_soc_alert_status_service.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_alert_status_service.py",
+      "required_symbols": [
+        "SocAlertStatusPersistenceSources",
+        "load_soc_alert_statuses",
+        "load_soc_alert_statuses_from_db",
+        "retryable_soc_alert_status_error",
+        "save_soc_alert_statuses",
+        "save_soc_alert_statuses_to_db",
+        "write_soc_alert_status",
+        "write_soc_alert_status_json_snapshot"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_soc_adjudication_policy.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_adjudication_policy.py",

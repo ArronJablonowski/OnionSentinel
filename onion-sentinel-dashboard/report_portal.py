@@ -394,6 +394,23 @@ from portal_soc_alert_status_write import (
     SocAlertStatusWriteSources,
     update_soc_alert_status as apply_soc_alert_status_update,
 )
+from portal_soc_alert_status_store import (
+    SocAlertStatusStoreSources,
+    ensure_soc_alert_status_schema,
+    load_soc_group_statuses,
+    normalize_soc_alert_status_meta as normalize_status_meta,
+    write_soc_group_status,
+    write_soc_group_statuses,
+)
+from portal_soc_alert_status_service import (
+    SocAlertStatusPersistenceSources,
+    load_soc_alert_statuses as load_persisted_soc_alert_statuses,
+    load_soc_alert_statuses_from_db as load_persisted_soc_alert_statuses_from_db,
+    save_soc_alert_statuses as save_persisted_soc_alert_statuses,
+    save_soc_alert_statuses_to_db as save_persisted_soc_alert_statuses_to_db,
+    write_soc_alert_status as persist_soc_alert_status,
+    write_soc_alert_status_json_snapshot as write_persisted_soc_alert_status_snapshot,
+)
 from portal_soc_adjudication_policy import (
     SOC_ANALYST_ACTIVITY_DISPOSITIONS,
     SOC_ANALYST_ADJUDICATION_OUTCOMES,
@@ -3260,107 +3277,12 @@ def render_home(reports: list[Report], host: str, port: int) -> bytes:
 
 def normalize_soc_alert_status_meta(value: object, *, now: str | None = None) -> dict | None:
     """Normalize analyst-controlled alert workflow state before persistence."""
-    if not isinstance(value, dict):
-        return None
-    raw_status = str(value.get("status") or "open").strip().lower()
-    if raw_status not in {"open", "acknowledged", "suppressed"}:
-        return None
-    try:
-        repeat_count = max(0, int(value.get("repeat_count") or value.get("acknowledged_count") or 0))
-    except (TypeError, ValueError):
-        repeat_count = 0
-    reason = str(value.get("reason") or "").strip()[:140]
-    return {
-        "status": raw_status,
-        "repeat_count": repeat_count,
-        "reason": reason,
-        "updated_at": str(value.get("updated_at") or now or now_iso_utc()),
-    }
+    return normalize_status_meta(value, now_iso=now_iso_utc, now=now)
 
 
 def ensure_soc_alert_status_table(conn: sqlite3.Connection) -> None:
-    """Create analyst state tables inside the alert store database.
-
-    `analyst_alert_status` is the original per-rendered-row table. It is kept
-    for backward compatibility. `analyst_alert_group_state` is the durable
-    group-level state table used by the API and multi-analyst UI path.
-    """
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS analyst_alert_status (
-          alert_id TEXT PRIMARY KEY,
-          status TEXT NOT NULL CHECK(status IN ('acknowledged', 'suppressed')),
-          repeat_count INTEGER NOT NULL DEFAULT 0,
-          reason TEXT,
-          updated_at TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_analyst_alert_status_status ON analyst_alert_status(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_analyst_alert_status_updated_at ON analyst_alert_status(updated_at)")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS analyst_alert_group_state (
-          group_id TEXT PRIMARY KEY,
-          group_key TEXT,
-          status TEXT NOT NULL CHECK(status IN ('acknowledged', 'suppressed')),
-          repeat_count INTEGER NOT NULL DEFAULT 0,
-          reason TEXT,
-          updated_at TEXT NOT NULL,
-          updated_by TEXT
-        )
-        """
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_group_state_status ON analyst_alert_group_state(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_group_state_updated_at ON analyst_alert_group_state(updated_at)")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS analyst_adjudications (
-          adjudication_id TEXT PRIMARY KEY,
-          dashboard_group_id TEXT NOT NULL,
-          stable_group_id TEXT NOT NULL,
-          case_id TEXT,
-          analysis_id TEXT NOT NULL,
-          outcome_override TEXT NOT NULL,
-          confidence TEXT NOT NULL,
-          rationale TEXT NOT NULL,
-          evidence_gap TEXT,
-          next_action TEXT,
-          reviewer TEXT NOT NULL,
-          event_status TEXT,
-          detection_validity TEXT,
-          activity_disposition TEXT,
-          handling TEXT,
-          duplicate_of TEXT,
-          case_resolution_reason TEXT,
-          created_at TEXT NOT NULL
-        )
-        """
-    )
-    adjudication_columns = {
-        str(row[1]) for row in conn.execute(
-            "PRAGMA table_info(analyst_adjudications)"
-        ).fetchall()
-    }
-    for column in (
-        "event_status",
-        "detection_validity",
-        "activity_disposition",
-        "handling",
-        "duplicate_of",
-    ):
-        if column not in adjudication_columns:
-            conn.execute(
-                f"ALTER TABLE analyst_adjudications ADD COLUMN {column} TEXT"
-            )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_analyst_adjudications_group_created "
-        "ON analyst_adjudications(dashboard_group_id, created_at DESC)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_analyst_adjudications_analysis_created "
-        "ON analyst_adjudications(analysis_id, created_at DESC)"
-    )
+    """Create and migrate analyst status/adjudication persistence tables."""
+    ensure_soc_alert_status_schema(conn)
 
 
 def soc_alert_group_key_from_values(
@@ -4039,6 +3961,14 @@ def soc_alert_active_group_ids(
     }
 
 
+def soc_alert_status_store_sources() -> SocAlertStatusStoreSources:
+    return SocAlertStatusStoreSources(
+        table_exists=sqlite_table_exists,
+        group_counts=soc_alert_group_counts,
+        now_iso=now_iso_utc,
+    )
+
+
 def normalize_soc_group_statuses(conn: sqlite3.Connection) -> dict:
     """Load current group state and hide stale acknowledgements.
 
@@ -4047,127 +3977,64 @@ def normalize_soc_group_statuses(conn: sqlite3.Connection) -> dict:
     exposed. Production deletion is owned by alert-store; portal reads must not
     become a second SQLite writer.
     """
-    if not sqlite_table_exists(conn, "analyst_alert_group_state"):
-        return {}
-    counts = soc_alert_group_counts(conn)
-    rows = conn.execute(
-        """
-        SELECT group_id, group_key, status, repeat_count, reason, updated_at, updated_by
-        FROM analyst_alert_group_state
-        WHERE status IN ('acknowledged', 'suppressed')
-        """
-    ).fetchall()
-    statuses: dict[str, dict] = {}
-    for row in rows:
-        group_id = row["group_id"]
-        status = row["status"]
-        repeat_count = int(row["repeat_count"] or 0)
-        current_count = counts.get(group_id, repeat_count)
-        if status == "acknowledged" and current_count > repeat_count:
-            continue
-        statuses[group_id] = {
-            "status": status,
-            "repeat_count": repeat_count,
-            "reason": row["reason"] or "",
-            "updated_at": row["updated_at"],
-            "updated_by": row["updated_by"] or "",
-            "group_key": row["group_key"] or "",
-        }
-    return statuses
+    return load_soc_group_statuses(soc_alert_status_store_sources(), conn)
+
+
+def soc_alert_status_persistence_sources() -> SocAlertStatusPersistenceSources:
+    store = soc_alert_status_store_sources()
+    return SocAlertStatusPersistenceSources(
+        db_path=SOC_ALERT_STORE_DB,
+        mirror_path=SOC_ALERT_STATUS_FILE,
+        connect_read=soc_alert_db_connect,
+        connect_write=soc_alert_db_write_connect,
+        ensure_schema=ensure_soc_alert_status_table,
+        load_db=normalize_soc_group_statuses,
+        write_one=lambda conn, alert_id, meta: write_soc_group_status(
+            store, conn, alert_id, meta
+        ),
+        write_many=lambda conn, statuses: write_soc_group_statuses(
+            store, conn, statuses
+        ),
+        normalize=normalize_soc_alert_status_meta,
+        now_iso=now_iso_utc,
+        uuid_hex=lambda: uuid.uuid4().hex,
+        lock=SOC_ALERT_DB_WRITE_LOCK,
+        sleep=time.sleep,
+        retry_attempts=SOC_ALERT_DB_WRITE_RETRY_ATTEMPTS,
+        retry_base_seconds=SOC_ALERT_DB_WRITE_RETRY_BASE_SECONDS,
+    )
 
 
 def load_soc_alert_statuses_from_db() -> dict:
-    if not SOC_ALERT_STORE_DB.exists():
-        return {}
-    try:
-        with soc_alert_db_connect() as conn:
-            return normalize_soc_group_statuses(conn)
-    except Exception:
-        return {}
+    return load_persisted_soc_alert_statuses_from_db(
+        soc_alert_status_persistence_sources()
+    )
 
 
 def write_soc_alert_status_json_snapshot(statuses: dict) -> None:
-    SOC_ALERT_STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "ok": True,
-        "updated_at": now_iso_utc(),
-        "statuses": statuses,
-    }
-    tmp = SOC_ALERT_STATUS_FILE.with_suffix(SOC_ALERT_STATUS_FILE.suffix + f".{uuid.uuid4().hex}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, SOC_ALERT_STATUS_FILE)
-    try:
-        SOC_ALERT_STATUS_FILE.chmod(0o600)
-    except Exception:
-        pass
+    write_persisted_soc_alert_status_snapshot(
+        soc_alert_status_persistence_sources(), statuses
+    )
 
 
 def save_soc_alert_statuses_to_db(statuses: dict) -> None:
     """Persist offline DR-test state; production writes through alert-store."""
-    if not SOC_ALERT_STORE_DB.parent.exists():
-        return
-    try:
-        with soc_alert_db_write_connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            ensure_soc_alert_status_table(conn)
-            for alert_id, raw_meta in statuses.items():
-                meta = normalize_soc_alert_status_meta(raw_meta)
-                group_id = str(alert_id)
-                if not meta or meta["status"] == "open":
-                    conn.execute("DELETE FROM analyst_alert_group_state WHERE group_id = ?", (group_id,))
-                    continue
-                group_key = str(raw_meta.get("group_key") or "") if isinstance(raw_meta, dict) else ""
-                conn.execute(
-                    """
-                    INSERT INTO analyst_alert_group_state (
-                      group_id, group_key, status, repeat_count, reason, updated_at, updated_by
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(group_id) DO UPDATE SET
-                      group_key = excluded.group_key,
-                      status = excluded.status,
-                      repeat_count = excluded.repeat_count,
-                      reason = excluded.reason,
-                      updated_at = excluded.updated_at,
-                      updated_by = excluded.updated_by
-                    """,
-                    (
-                        group_id,
-                        group_key,
-                        meta["status"],
-                        meta["repeat_count"],
-                        meta["reason"],
-                        meta["updated_at"],
-                        str(raw_meta.get("updated_by") or "")[:80] if isinstance(raw_meta, dict) else "",
-                    ),
-                )
-    except Exception:
-        # Do not let a failed transaction be followed by a successful-looking
-        # JSON mirror update.
-        raise
+    save_persisted_soc_alert_statuses_to_db(
+        soc_alert_status_persistence_sources(), statuses
+    )
 
 
 def load_soc_alert_statuses() -> dict:
     """Load shared SOC alert status state, using JSON only if SQLite is absent."""
-    if SOC_ALERT_STORE_DB.exists():
-        return load_soc_alert_statuses_from_db()
-    json_statuses: dict = {}
-    try:
-        data = json.loads(SOC_ALERT_STATUS_FILE.read_text(encoding="utf-8"))
-        statuses = data.get("statuses", {}) if isinstance(data, dict) else {}
-        json_statuses = statuses if isinstance(statuses, dict) else {}
-    except Exception:
-        json_statuses = {}
-    return json_statuses
+    return load_persisted_soc_alert_statuses(
+        soc_alert_status_persistence_sources()
+    )
 
 
 def save_soc_alert_statuses(statuses: dict) -> None:
-    normalized_statuses: dict[str, dict] = {}
-    for alert_id, raw_meta in statuses.items():
-        meta = normalize_soc_alert_status_meta(raw_meta)
-        if meta and meta["status"] != "open":
-            normalized_statuses[str(alert_id)] = meta
-    save_soc_alert_statuses_to_db(normalized_statuses)
-    write_soc_alert_status_json_snapshot(normalized_statuses)
+    save_persisted_soc_alert_statuses(
+        soc_alert_status_persistence_sources(), statuses
+    )
 
 
 def current_soc_alert_group_repeat_count(alert_id: str) -> int:
@@ -4182,77 +4049,9 @@ def current_soc_alert_group_repeat_count(alert_id: str) -> int:
 
 def write_soc_alert_status(alert_id: str, meta: dict) -> None:
     """Atomically persist one analyst state change, then refresh the JSON mirror."""
-    if not SOC_ALERT_STORE_DB.parent.exists():
-        return
-    normalized = normalize_soc_alert_status_meta(meta)
-    # Keep the post-commit read and atomic JSON mirror replacement in the same
-    # in-process critical section as the SQLite transaction. Otherwise another
-    # writer can begin journal/DDL setup while this request is opening its
-    # read-only snapshot connection.
-    with SOC_ALERT_DB_WRITE_LOCK:
-        for attempt in range(1, SOC_ALERT_DB_WRITE_RETRY_ATTEMPTS + 1):
-            try:
-                with soc_alert_db_write_connect() as conn:
-                    conn.execute("BEGIN IMMEDIATE")
-                    ensure_soc_alert_status_table(conn)
-                    if not normalized or normalized["status"] == "open":
-                        conn.execute(
-                            "DELETE FROM analyst_alert_group_state WHERE group_id = ?",
-                            (alert_id,),
-                        )
-                    else:
-                        group_key = (
-                            str(meta.get("group_key") or "")
-                            if isinstance(meta, dict)
-                            else ""
-                        )
-                        updated_by = (
-                            str(meta.get("updated_by") or "")[:80]
-                            if isinstance(meta, dict)
-                            else ""
-                        )
-                        conn.execute(
-                            """
-                            INSERT INTO analyst_alert_group_state (
-                              group_id, group_key, status, repeat_count, reason, updated_at, updated_by
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                            ON CONFLICT(group_id) DO UPDATE SET
-                              group_key = excluded.group_key,
-                              status = excluded.status,
-                              repeat_count = excluded.repeat_count,
-                              reason = excluded.reason,
-                              updated_at = excluded.updated_at,
-                              updated_by = excluded.updated_by
-                            """,
-                            (
-                                alert_id,
-                                group_key,
-                                normalized["status"],
-                                normalized["repeat_count"],
-                                normalized["reason"],
-                                normalized["updated_at"],
-                                updated_by,
-                            ),
-                        )
-                break
-            except sqlite3.OperationalError as exc:
-                retryable = any(
-                    marker in str(exc).lower()
-                    for marker in (
-                        "database is busy",
-                        "database is locked",
-                        "disk i/o error",
-                    )
-                )
-                if (
-                    not retryable
-                    or attempt >= SOC_ALERT_DB_WRITE_RETRY_ATTEMPTS
-                ):
-                    raise
-                time.sleep(
-                    SOC_ALERT_DB_WRITE_RETRY_BASE_SECONDS * attempt
-                )
-        write_soc_alert_status_json_snapshot(load_soc_alert_statuses_from_db())
+    persist_soc_alert_status(
+        soc_alert_status_persistence_sources(), alert_id, meta
+    )
 
 
 def soc_alert_status_response() -> dict:
