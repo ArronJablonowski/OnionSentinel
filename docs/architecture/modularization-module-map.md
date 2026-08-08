@@ -588,6 +588,21 @@ post-action redirects. Password hashing and storage, session persistence,
 concrete cookie construction, action execution, HTML rendering, client-address
 lookup, and socket writes remain in `report_portal.py`.
 
+`portal_admin_read_service.py` owns Administration login/dashboard/session and
+service-status read decisions, including redirect intent, query-message
+projection, authentication policy, public session-status shape, and lazy
+service probing. `report_portal.py` retains concrete session lookup, service
+probes, HTML rendering, JSON encoding, and socket writes; its inherited
+`_require_admin_auth` compatibility method remains available to dedicated
+server subclasses even though the GET route uses the extracted service.
+
+`portal_health_read_service.py` owns the legacy health JSON schema and isolated
+scan-root inspection. Top-level HTML counting is iterator-based rather than
+materializing file lists, and per-root filesystem failures remain visible
+without failing the health response. Report discovery, runtime roots, local
+address selection, timestamps, JSON encoding, and socket writes remain in
+`report_portal.py`.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and

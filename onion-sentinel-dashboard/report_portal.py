@@ -281,6 +281,8 @@ from portal_admin_service_write import AdminServiceWriteCallbacks, prepare_admin
 from portal_resource_library_write import ResourceLibraryWriteCallbacks, prepare_resource_library_write
 from portal_soc_status_write import prepare_soc_status_write
 from portal_admin_form_service import AdminFormCallbacks, prepare_admin_form
+from portal_admin_read_service import prepare_admin_read
+from portal_health_read_service import compose_portal_health
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -8582,43 +8584,25 @@ class PortalHandler(BaseHTTPRequestHandler):
             reports = scan_reports()
             body = render_home(reports, self.server.server_address[0], self.server.server_address[1])
             return self._send(HTTPStatus.OK, body)
-        if operation == "admin_login":
-            if self._admin_authenticated():
-                return self._redirect("/admin")
-            return self._send(HTTPStatus.OK, render_admin_login())
-        if operation == "admin":
-            if not self._require_admin_auth():
-                return None
-            admin_message = (query.get("admin_msg") or [""])[0]
-            admin_error = (query.get("admin_error") or [""])[0]
-            return self._send(HTTPStatus.OK, render_admin_dashboard(admin_message or admin_error, bool(admin_error)))
+        admin_read = prepare_admin_read(
+            operation, query,
+            admin_authenticated=lambda: self._admin_authenticated(),
+            asset_write_auth_required=ASSET_INVENTORY_ADMIN_WRITE_REQUIRED,
+            service_status=lambda: defang_admin_service_json(admin_service_statuses()),
+        )
+        if admin_read is not None:
+            if admin_read.redirect:
+                return self._redirect(admin_read.redirect, status=admin_read.status)
+            if admin_read.view:
+                renderer = render_admin_dashboard if admin_read.view == "dashboard" else render_admin_login
+                return self._send(admin_read.status, renderer(admin_read.message, admin_read.error))
+            return self._send(admin_read.status, json.dumps(admin_read.payload, indent=2).encode(), "application/json; charset=utf-8")
         if operation == "health":
-            reports = scan_reports()
-            roots = []
-            for root in SCAN_ROOTS:
-                info = {"path": str(root), "exists": root.exists(), "is_dir": root.is_dir(), "html_here": 0, "error": None}
-                try:
-                    info["html_here"] = len(list(root.glob("*.html"))) if root.exists() else 0
-                except Exception as e:
-                    info["error"] = repr(e)
-                roots.append(info)
-            data = {"ok": True, "reports": len(reports), "ip": local_ip(), "time": now_iso_local(), "roots": roots}
-            return self._send(HTTPStatus.OK, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "admin_session_status":
-            data = {
-                "ok": True,
-                "authenticated": self._admin_authenticated(),
-                "required": ASSET_INVENTORY_ADMIN_WRITE_REQUIRED,
-            }
-            return self._send(
-                HTTPStatus.OK,
-                json.dumps(data, indent=2).encode(),
-                "application/json; charset=utf-8",
+            data = compose_portal_health(
+                scan_reports(), SCAN_ROOTS,
+                local_address=local_ip(), generated_at=now_iso_local(),
             )
-        if operation == "admin_service_status":
-            if not self._admin_authenticated():
-                return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in before reading Administration service status."}).encode(), "application/json; charset=utf-8")
-            return self._send(HTTPStatus.OK, json.dumps(defang_admin_service_json(admin_service_statuses()), indent=2).encode(), "application/json; charset=utf-8")
+            return self._send(HTTPStatus.OK, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if operation == "resource_favorites":
             data = {"ok": True, "favorites": resource_favorites()}
             return self._send(HTTPStatus.OK, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
