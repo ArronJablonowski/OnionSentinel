@@ -38,20 +38,30 @@ def asset_public_record(asset: dict, state: str) -> dict:
     identifiers = asset.get("identifiers")
     identifiers = identifiers if isinstance(identifiers, dict) else {}
     return {
-        "asset_id": str(asset.get("asset_id") or ""),
+        "asset_id": _text(asset, "asset_id"),
         "state": state,
-        "ip_addresses": list(identifiers.get("ip") or []),
-        "hostnames": list(identifiers.get("hostname") or []),
-        "mac_addresses": list(identifiers.get("mac") or []),
-        "role": str(asset.get("role") or ""),
-        "platform": str(asset.get("platform") or ""),
-        "criticality": str(asset.get("criticality") or "unknown"),
-        "confidence": str(asset.get("confidence") or "unknown"),
-        "valid_from": str(asset.get("valid_from") or ""),
-        "valid_until": str(asset.get("valid_until") or ""),
-        "source_type": str(asset.get("source_type") or ""),
-        "source_ref": str(asset.get("source_ref") or ""),
+        "ip_addresses": _identifier_values(identifiers, "ip"),
+        "hostnames": _identifier_values(identifiers, "hostname"),
+        "mac_addresses": _identifier_values(identifiers, "mac"),
+        "role": _text(asset, "role"),
+        "platform": _text(asset, "platform"),
+        "criticality": _text(asset, "criticality", "unknown"),
+        "confidence": _text(asset, "confidence", "unknown"),
+        "valid_from": _text(asset, "valid_from"),
+        "valid_until": _text(asset, "valid_until"),
+        "source_type": _text(asset, "source_type"),
+        "source_ref": _text(asset, "source_ref"),
     }
+
+
+def _text(source: dict, key: str, default: str = "") -> str:
+    value = source.get(key)
+    return str(value) if value else default
+
+
+def _identifier_values(identifiers: dict, key: str) -> list:
+    values = identifiers.get(key)
+    return list(values) if values else []
 
 
 def database_query_parameters(query: Query | None) -> dict[str, str]:

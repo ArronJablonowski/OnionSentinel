@@ -363,6 +363,25 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_asset_mutation_service.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_asset_mutation_service.py",
+      "required_symbols": [
+        "execute_asset_mutation",
+        "normalize_asset_mutation_payload",
+        "normalize_asset_review_payload"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_asset_write_request.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_asset_write_request.py",
+      "required_symbols": [
+        "AssetWriteRequestResult",
+        "prepare_asset_write_request"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_catalog_routes.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py",

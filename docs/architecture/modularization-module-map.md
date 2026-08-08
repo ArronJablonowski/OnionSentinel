@@ -515,6 +515,16 @@ conflicting claims remain review-only. `report_portal.py` retains bounded
 file/database loading, runtime clocks, timestamp compatibility, and the public
 facade functions used by existing integrations.
 
+`portal_asset_mutation_service.py` owns bounded DHCP review, authoritative edit,
+and demotion payloads; IP/MAC/hostname normalization; exact edit/demotion
+confirmations; downstream status preservation; and success-only cache
+invalidation. `portal_asset_write_request.py` owns same-origin enforcement,
+optional Administration authentication, JSON parsing, and transport-neutral
+Asset write dispatch. Same-origin rejection deliberately precedes the lazy
+Administration check. `report_portal.py` retains owner-controlled credential
+loading, loopback HTTP transport, concrete cache state, and compatibility
+response facades.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and

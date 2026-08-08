@@ -258,6 +258,12 @@ from portal_asset_dhcp_overlay import (
     dhcp_asset_inventory_overlay,
     mac_address_scope,
 )
+from portal_asset_mutation_service import (
+    execute_asset_mutation,
+    normalize_asset_mutation_payload,
+    normalize_asset_review_payload,
+)
+from portal_asset_write_request import prepare_asset_write_request
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -4992,147 +4998,41 @@ def _normalized_asset_review_payload(
     *,
     action: str,
 ) -> dict:
-    """Bound the operator review payload before it reaches the asset store."""
-    if not isinstance(payload, dict):
-        raise ValueError("Request body must be a JSON object.")
-    allowed = {
-        "discovery_id",
-        "expected_ip",
-        "expected_mac",
-        "expected_hostname",
-        "asset_id",
-        "operator_ref",
-        "reason",
-        "confirm",
-    }
-    if action == "promote":
-        allowed |= {
-            "hostname",
-            "role",
-            "platform",
-            "criticality",
-            "owner_ref",
-            "accept_locally_administered_mac",
-        }
-    unknown = set(payload) - allowed
-    if unknown:
-        raise ValueError("Request contains unsupported asset review fields.")
+    return normalize_asset_review_payload(payload, action=action)
 
-    limits = {
-        "discovery_id": 20,
-        "expected_ip": 64,
-        "expected_mac": 17,
-        "expected_hostname": 253,
-        "asset_id": 160,
-        "operator_ref": 160,
-        "reason": 1000,
-        "confirm": 256,
-        "hostname": 253,
-        "role": 160,
-        "platform": 160,
-        "criticality": 16,
-        "owner_ref": 300,
-    }
-    result = {
-        key: str(payload.get(key) or "").strip()[: maximum + 1]
-        for key, maximum in limits.items()
-        if key in allowed
-    }
-    for key, maximum in limits.items():
-        if key in result and len(result[key]) > maximum:
-            raise ValueError(f"{key} exceeds its maximum length.")
-    required = {
-        "discovery_id",
-        "expected_ip",
-        "asset_id",
-        "operator_ref",
-        "reason",
-        "confirm",
-    }
-    if action == "promote":
-        required |= {"expected_mac", "role"}
-    missing = sorted(key for key in required if not result.get(key))
-    if missing:
-        raise ValueError(
-            f"Required asset review field is missing: {missing[0]}."
+
+def _clear_asset_inventory_cache() -> None:
+    with ASSET_INVENTORY_CACHE_LOCK:
+        ASSET_INVENTORY_CACHE.clear()
+        ASSET_INVENTORY_CACHE.update(
+            {"signature": None, "inventory": None, "expires_at": 0.0}
         )
-    if not re.fullmatch(r"[0-9a-f]{20}", result["discovery_id"]):
-        raise ValueError("discovery_id is invalid.")
-    try:
-        result["expected_ip"] = str(
-            ipaddress.ip_address(result["expected_ip"])
-        )
-    except ValueError as exc:
-        raise ValueError("expected_ip is invalid.") from exc
-    mac = result.get("expected_mac", "").lower().replace("-", ":")
-    if mac and not re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", mac):
-        raise ValueError("expected_mac is invalid.")
-    result["expected_mac"] = mac
-    result["expected_hostname"] = (
-        result.get("expected_hostname", "").rstrip(".").lower()
-    )
-    if action == "promote":
-        criticality = result.get("criticality") or "unknown"
-        if criticality not in {
-            "low",
-            "medium",
-            "high",
-            "critical",
-            "unknown",
-        }:
-            raise ValueError("criticality is invalid.")
-        result["criticality"] = criticality
-        result["accept_locally_administered_mac"] = (
-            payload.get("accept_locally_administered_mac") is True
-        )
-    return result
 
 
 def asset_dhcp_promotion_response(payload: object) -> tuple[int, dict]:
-    try:
-        normalized = _normalized_asset_review_payload(
-            payload,
-            action="promote",
-        )
-        result = asset_store_post_json("/assets/promote-dhcp", normalized)
-    except ValueError as exc:
-        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
-    except (RuntimeError, AlertStoreRequestError) as exc:
-        return int(getattr(exc, "status_code", 503)), {
-            "ok": False,
-            "error": str(exc),
-        }
-    with ASSET_INVENTORY_CACHE_LOCK:
-        ASSET_INVENTORY_CACHE.clear()
-        ASSET_INVENTORY_CACHE.update(
-            {"signature": None, "inventory": None, "expires_at": 0.0}
-        )
-    return HTTPStatus.CREATED, result
+    return execute_asset_mutation(
+        payload,
+        normalizer=lambda value: _normalized_asset_review_payload(
+            value, action="promote",
+        ),
+        path="/assets/promote-dhcp",
+        success_status=HTTPStatus.CREATED,
+        write=asset_store_post_json,
+        clear_cache=_clear_asset_inventory_cache,
+    )
 
 
 def asset_dhcp_ip_change_response(payload: object) -> tuple[int, dict]:
-    try:
-        normalized = _normalized_asset_review_payload(
-            payload,
-            action="ip_change",
-        )
-        result = asset_store_post_json(
-            "/assets/approve-dhcp-ip-change",
-            normalized,
-        )
-    except ValueError as exc:
-        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
-    except (RuntimeError, AlertStoreRequestError) as exc:
-        return int(getattr(exc, "status_code", 503)), {
-            "ok": False,
-            "error": str(exc),
-        }
-    with ASSET_INVENTORY_CACHE_LOCK:
-        ASSET_INVENTORY_CACHE.clear()
-        ASSET_INVENTORY_CACHE.update(
-            {"signature": None, "inventory": None, "expires_at": 0.0}
-        )
-    return HTTPStatus.CREATED, result
+    return execute_asset_mutation(
+        payload,
+        normalizer=lambda value: _normalized_asset_review_payload(
+            value, action="ip_change",
+        ),
+        path="/assets/approve-dhcp-ip-change",
+        success_status=HTTPStatus.CREATED,
+        write=asset_store_post_json,
+        clear_cache=_clear_asset_inventory_cache,
+    )
 
 
 def _normalized_asset_mutation_payload(
@@ -5140,190 +5040,48 @@ def _normalized_asset_mutation_payload(
     *,
     action: str,
 ) -> dict:
-    """Bound an operator edit or demotion before the database transaction."""
-    if not isinstance(payload, dict):
-        raise ValueError("Request body must be a JSON object.")
-    common = {
-        "asset_id",
-        "expected_valid_from",
-        "operator_ref",
-        "reason",
-        "confirm",
-    }
-    allowed = set(common)
-    if action == "edit":
-        allowed |= {
-            "ip_addresses",
-            "mac_addresses",
-            "hostnames",
-            "role",
-            "platform",
-            "criticality",
-            "confidence",
-        }
-    if set(payload) - allowed:
-        raise ValueError("Request contains unsupported asset mutation fields.")
-    limits = {
-        "asset_id": 160,
-        "expected_valid_from": 64,
-        "operator_ref": 160,
-        "reason": 1000,
-        "confirm": 256,
-        "role": 160,
-        "platform": 160,
-        "criticality": 16,
-        "confidence": 16,
-    }
-    result = {
-        key: str(payload.get(key) or "").strip()[: maximum + 1]
-        for key, maximum in limits.items()
-        if key in allowed
-    }
-    for key, maximum in limits.items():
-        if key in result and len(result[key]) > maximum:
-            raise ValueError(f"{key} exceeds its maximum length.")
-    missing = sorted(key for key in common if not result.get(key))
-    if missing:
-        raise ValueError(
-            f"Required asset mutation field is missing: {missing[0]}."
-        )
-    try:
-        parsed = parse_iso_timestamp(result["expected_valid_from"])
-    except (TypeError, ValueError) as exc:
-        raise ValueError("expected_valid_from is invalid.") from exc
-    if parsed.tzinfo is None:
-        raise ValueError("expected_valid_from is invalid.")
-    result["expected_valid_from"] = parsed.astimezone(
-        dt.timezone.utc
-    ).isoformat().replace("+00:00", "Z")
-    expected_confirmation = (
-        f"EDIT:{result['asset_id']}"
-        if action == "edit"
-        else f"DEMOTE:{result['asset_id']}"
+    return normalize_asset_mutation_payload(
+        payload, action=action, parse_timestamp=parse_iso_timestamp,
     )
-    if result["confirm"] != expected_confirmation:
-        raise ValueError(
-            f"Confirmation must exactly match {expected_confirmation}."
-        )
-    if action != "edit":
-        return result
-
-    def bounded_list(
-        key: str,
-        maximum: int,
-        *,
-        normalizer=None,
-    ) -> list[str]:
-        raw = payload.get(key)
-        if not isinstance(raw, list) or len(raw) > 64:
-            raise ValueError(f"{key} must be a bounded list.")
-        values = []
-        for item in raw:
-            value = str(item or "").strip()
-            if not value or len(value) > maximum:
-                raise ValueError(f"{key} contains an invalid value.")
-            if normalizer is not None:
-                value = normalizer(value)
-            if value not in values:
-                values.append(value)
-        return values
-
-    def normalize_ip(value: str) -> str:
-        try:
-            return str(ipaddress.ip_address(value))
-        except ValueError as exc:
-            raise ValueError("ip_addresses contains an invalid address.") from exc
-
-    def normalize_mac(value: str) -> str:
-        normalized = value.lower().replace("-", ":")
-        if not re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", normalized):
-            raise ValueError("mac_addresses contains an invalid address.")
-        if int(normalized.split(":", 1)[0], 16) & 1:
-            raise ValueError("multicast MAC addresses cannot identify assets.")
-        return normalized
-
-    def normalize_hostname(value: str) -> str:
-        normalized = value.rstrip(".").lower()
-        if not normalized:
-            raise ValueError("hostnames contains an invalid value.")
-        return normalized
-
-    result["ip_addresses"] = bounded_list(
-        "ip_addresses",
-        64,
-        normalizer=normalize_ip,
-    )
-    result["mac_addresses"] = bounded_list(
-        "mac_addresses",
-        17,
-        normalizer=normalize_mac,
-    )
-    result["hostnames"] = bounded_list(
-        "hostnames",
-        253,
-        normalizer=normalize_hostname,
-    )
-    if not (
-        result["ip_addresses"]
-        or result["mac_addresses"]
-        or result["hostnames"]
-    ):
-        raise ValueError("An asset must retain at least one identifier.")
-    if not result.get("role"):
-        raise ValueError("role is required.")
-    if result.get("criticality") not in {
-        "low", "medium", "high", "critical", "unknown"
-    }:
-        raise ValueError("criticality is invalid.")
-    if result.get("confidence") not in {
-        "low", "medium", "high", "unknown"
-    }:
-        raise ValueError("confidence is invalid.")
-    return result
 
 
 def asset_update_response(payload: object) -> tuple[int, dict]:
-    try:
-        normalized = _normalized_asset_mutation_payload(
-            payload,
-            action="edit",
-        )
-        result = asset_store_post_json("/assets/update", normalized)
-    except ValueError as exc:
-        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
-    except (RuntimeError, AlertStoreRequestError) as exc:
-        return int(getattr(exc, "status_code", 503)), {
-            "ok": False,
-            "error": str(exc),
-        }
-    with ASSET_INVENTORY_CACHE_LOCK:
-        ASSET_INVENTORY_CACHE.clear()
-        ASSET_INVENTORY_CACHE.update(
-            {"signature": None, "inventory": None, "expires_at": 0.0}
-        )
-    return HTTPStatus.OK, result
+    return execute_asset_mutation(
+        payload,
+        normalizer=lambda value: _normalized_asset_mutation_payload(
+            value, action="edit",
+        ),
+        path="/assets/update",
+        success_status=HTTPStatus.OK,
+        write=asset_store_post_json,
+        clear_cache=_clear_asset_inventory_cache,
+    )
 
 
 def asset_demote_response(payload: object) -> tuple[int, dict]:
-    try:
-        normalized = _normalized_asset_mutation_payload(
-            payload,
-            action="demote",
-        )
-        result = asset_store_post_json("/assets/demote", normalized)
-    except ValueError as exc:
-        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
-    except (RuntimeError, AlertStoreRequestError) as exc:
-        return int(getattr(exc, "status_code", 503)), {
-            "ok": False,
-            "error": str(exc),
-        }
-    with ASSET_INVENTORY_CACHE_LOCK:
-        ASSET_INVENTORY_CACHE.clear()
-        ASSET_INVENTORY_CACHE.update(
-            {"signature": None, "inventory": None, "expires_at": 0.0}
-        )
-    return HTTPStatus.OK, result
+    return execute_asset_mutation(
+        payload,
+        normalizer=lambda value: _normalized_asset_mutation_payload(
+            value, action="demote",
+        ),
+        path="/assets/demote",
+        success_status=HTTPStatus.OK,
+        write=asset_store_post_json,
+        clear_cache=_clear_asset_inventory_cache,
+    )
+
+
+def dispatch_asset_write(path: str, payload: object) -> tuple[int, dict]:
+    callbacks = {
+        "/api/assets/promote-dhcp": asset_dhcp_promotion_response,
+        "/api/assets/approve-dhcp-ip-change": asset_dhcp_ip_change_response,
+        "/api/assets/update": asset_update_response,
+        "/api/assets/demote": asset_demote_response,
+    }
+    callback = callbacks.get(path)
+    if callback is None:
+        return HTTPStatus.NOT_FOUND, {"ok": False, "error": "Not found"}
+    return callback(payload)
 
 
 def alert_store_get_json(path: str, timeout: float = 5.0) -> dict:
@@ -8973,46 +8731,18 @@ class PortalHandler(BaseHTTPRequestHandler):
                 "application/json; charset=utf-8",
             )
         if is_asset_write:
-            if not self._soc_review_write_authorized():
-                return self._send(
-                    HTTPStatus.FORBIDDEN,
-                    json.dumps({
-                        "ok": False,
-                        "error": (
-                            "Asset inventory changes must come from the "
-                            "same-origin Onion Sentinel dashboard."
-                        ),
-                    }).encode(),
-                    "application/json; charset=utf-8",
-                )
-            if (
-                ASSET_INVENTORY_ADMIN_WRITE_REQUIRED
-                and not self._admin_authenticated()
-            ):
-                return self._send(
-                    HTTPStatus.FORBIDDEN,
-                    json.dumps({
-                        "ok": False,
-                        "authentication_required": True,
-                        "error": (
-                            "Sign in to Onion Sentinel Administration before "
-                            "approving asset inventory changes."
-                        ),
-                    }).encode(),
-                    "application/json; charset=utf-8",
-                )
-            payload = parse_json_body(raw).value_or(None)
-            if parsed.path == "/api/assets/promote-dhcp":
-                status, data = asset_dhcp_promotion_response(payload)
-            elif parsed.path == "/api/assets/approve-dhcp-ip-change":
-                status, data = asset_dhcp_ip_change_response(payload)
-            elif parsed.path == "/api/assets/update":
-                status, data = asset_update_response(payload)
-            else:
-                status, data = asset_demote_response(payload)
+            asset_write = prepare_asset_write_request(
+                route,
+                raw,
+                same_origin_authorized=self._soc_review_write_authorized(),
+                admin_required=ASSET_INVENTORY_ADMIN_WRITE_REQUIRED,
+                admin_authenticated=self._admin_authenticated,
+                dispatcher=dispatch_asset_write,
+            )
+            assert asset_write is not None
             return self._send(
-                status,
-                json.dumps(data, indent=2).encode(),
+                asset_write.status,
+                json.dumps(asset_write.payload, indent=2).encode(),
                 "application/json; charset=utf-8",
             )
         soc_write = prepare_soc_write_request(

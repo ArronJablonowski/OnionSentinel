@@ -16,6 +16,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_DIR = ROOT / "onion-sentinel-dashboard"
 PORTAL_PATH = DASHBOARD_DIR / "report_portal.py"
+ASSET_WRITE_POLICY_PATH = DASHBOARD_DIR / "portal_asset_write_request.py"
 BUILDER_PATH = DASHBOARD_DIR / "scripts" / "build_soc_alerts_dashboard.py"
 ASSET_PAGE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_asset_inventory_page.py"
 INSTALLER_PATH = ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
@@ -468,14 +469,19 @@ class AssetInventoryPageTests(unittest.TestCase):
         self.assertIn(".dhcp-review-check[hidden]{display:none!important}", page)
         self.assertIn("asset-inventory.html", page)
         portal_source = PORTAL_PATH.read_text(encoding="utf-8")
+        asset_write_policy = ASSET_WRITE_POLICY_PATH.read_text(encoding="utf-8")
         self.assertIn(
             "ASSET_INVENTORY_ADMIN_WRITE_REQUIRED",
             portal_source,
         )
         self.assertIn('"authentication_required": True', portal_source)
         self.assertIn(
-            '"Asset inventory changes must come from the "',
+            "prepare_asset_write_request(",
             portal_source,
+        )
+        self.assertIn(
+            "Asset inventory changes must come from the same-origin Onion Sentinel dashboard.",
+            asset_write_policy,
         )
         self.assertIn("const assetIdentityHtml=asset=>", incident_page)
         self.assertIn("item.source_asset", incident_page)
