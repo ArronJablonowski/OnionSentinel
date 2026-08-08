@@ -284,6 +284,14 @@ fairness applies within a severity; subsecond due times and prior SOC results
 remain authoritative. The launchd wrapper resolves settings and binds these
 inputs at call time, preserving its public selection function.
 
+`scheduler_legacy_selection.py` preserves the pre-indexed fallback as a
+separate compatibility boundary. It combines artifact freshness, pending
+durable rerun intent, duplicate-group reduction, manual prompt overrides,
+strict severity order, per-drain exclusions, and exact-group targeting through
+an explicit request and injected artifact/query sources. Indexed deployments
+do not depend on this filesystem-backed path, allowing it to be retired safely
+after the supported upgrade window.
+
 `scheduler_terminal_recovery.py` owns the read-only proof that a stranded
 processing lease already produced an exact, committed terminal result. It
 requires matching provider lane, group, alert, role, attempt window, harness

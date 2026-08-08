@@ -65,6 +65,11 @@ from scheduler_indexed_selection import (
     provider_lane_predicate,
     select_next_indexed_alert,
 )
+from scheduler_legacy_selection import (
+    LegacySelectionRequest,
+    LegacySelectionSources,
+    select_next_legacy_alert,
+)
 from scheduler_terminal_recovery import (
     TerminalRecoverySources,
     reconcile_terminal_success,
@@ -2379,114 +2384,32 @@ def select_next_alert(
     already_analyzed: set[str],
     already_selected_groups: set[str] | None = None,
 ) -> sqlite3.Row | None:
-    levels = [level.strip().lower() for level in args.levels.split(",") if level.strip()]
-    if not levels:
-        raise SystemExit("--levels must contain at least one level")
-    since = (dt.datetime.now().astimezone() - dt.timedelta(hours=args.hours)).replace(microsecond=0).isoformat().replace("T", "  ")
-    newest_alert_time = alert_time_sql()
-    group_key_expr = alert_group_key_sql()
-    filter_sql = ""
-    filter_params: list[object] = []
-    if not args.include_tests:
-        filter_sql, filter_params = test_filter_sql()
-        filter_sql = f"AND {filter_sql}"
-    placeholders = ", ".join("?" for _ in levels)
-    prompt_mtimes = latest_prompt_mtimes(args.prompt_dir) if getattr(args, "prompt_dir", None) else {}
-    ai_mtimes = latest_analysis_mtimes(args.analysis_dir) if getattr(args, "analysis_dir", None) else {}
-    prompt_override_ids = sorted(
-        alert_id
-        for alert_id, prompt_mtime in prompt_mtimes.items()
-        if prompt_mtime > ai_mtimes.get(alert_id, 0)
+    request = LegacySelectionRequest(
+        levels=args.levels,
+        hours=args.hours,
+        include_tests=args.include_tests,
+        only_group_id=str(getattr(args, "only_group_id", "") or ""),
+        analysis_dir=getattr(args, "analysis_dir", None),
+        pcap_analysis_dir=getattr(args, "pcap_analysis_dir", None),
+        prompt_dir=getattr(args, "prompt_dir", None),
+        already_analyzed=frozenset(already_analyzed),
+        already_selected_groups=frozenset(already_selected_groups or set()),
     )
-    prompt_override_sql = ""
-    prompt_override_params: list[object] = []
-    if prompt_override_ids:
-        prompt_override_sql = f" OR alert_id IN ({', '.join('?' for _ in prompt_override_ids)})"
-        prompt_override_params.extend(prompt_override_ids)
-    analyzed_groups = analyzed_alert_groups(
-        conn,
-        already_analyzed,
-        getattr(args, "analysis_dir", None),
-        getattr(args, "pcap_analysis_dir", None),
-        getattr(args, "prompt_dir", None),
+    sources = LegacySelectionSources(
+        now=lambda: dt.datetime.now().astimezone(),
+        alert_time_sql=lambda: alert_time_sql(),
+        alert_group_key_sql=alert_group_key_sql,
+        severity_priority_sql=lambda: severity_priority_sql(),
+        test_filter_sql=lambda: test_filter_sql(),
+        latest_prompt_mtimes=latest_prompt_mtimes,
+        latest_analysis_mtimes=latest_analysis_mtimes,
+        analyzed_alert_groups=analyzed_alert_groups,
+        pending_ai_job_ids=pending_ai_job_ids,
+        alert_group_key=alert_group_key,
+        alert_group_id=alert_group_id,
+        eligible_filter_statuses=ELIGIBLE_FILTER_STATUSES,
     )
-    pending_group_ids = pending_ai_job_ids(conn)
-    skipped_groups = set(already_selected_groups or set())
-    only_group_id = str(getattr(args, "only_group_id", "") or "").strip().lower()
-    if only_group_id and not re.fullmatch(r"[a-f0-9]{20}", only_group_id):
-        raise SystemExit("--only-group-id must be one exact 20-hex stable group id")
-    alert_columns = {str(item[1]) for item in conn.execute("PRAGMA table_info(alerts)").fetchall()}
-    stable_group_select = "stable_group_id" if "stable_group_id" in alert_columns else "NULL AS stable_group_id"
-    candidates = rows(
-        conn,
-        f"""
-        WITH eligible AS (
-          SELECT alert_id, first_seen, last_seen, timestamp, rule_name,
-                 source_ip, destination_ip, triage_level, triage_score,
-                 COALESCE(NULLIF(filter_status, ''), 'accepted') AS filter_status,
-                 {stable_group_select},
-                 routing, suppression_key,
-                 {newest_alert_time} AS queue_time,
-                 replace(replace({newest_alert_time}, 'T', ' '), 'Z', '') AS queue_time_sort,
-                 {group_key_expr} AS queue_group_key,
-                 {severity_priority_sql()} AS severity_rank
-          FROM alerts
-          WHERE (
-              (
-                replace(replace({newest_alert_time}, 'T', ' '), 'Z', '') >= replace(replace(?, 'T', ' '), 'Z', '')
-                AND triage_level IN ({placeholders})
-                AND COALESCE(NULLIF(filter_status, ''), 'accepted') IN ({", ".join("?" for _ in ELIGIBLE_FILTER_STATUSES)})
-                {filter_sql}
-              )
-              {prompt_override_sql}
-            )
-        ),
-        ranked_groups AS (
-          SELECT *,
-                 ROW_NUMBER() OVER (
-                   PARTITION BY queue_group_key
-                   ORDER BY queue_time_sort DESC, COALESCE(triage_score, 0) DESC, alert_id DESC
-                 ) AS group_row_rank
-          FROM eligible
-        )
-        SELECT alert_id, first_seen, last_seen, timestamp, rule_name,
-               source_ip, destination_ip, triage_level, triage_score,
-               filter_status, stable_group_id, routing, suppression_key, queue_time,
-               queue_group_key
-        FROM ranked_groups
-        WHERE group_row_rank = 1
-        ORDER BY severity_rank ASC, queue_time_sort DESC,
-                 COALESCE(triage_score, 0) DESC, alert_id DESC
-        """,
-        [since, *levels, *ELIGIBLE_FILTER_STATUSES, *filter_params, *prompt_override_params],
-    )
-    if prompt_override_ids:
-        prompt_override_set = set(prompt_override_ids)
-        # A manual Analyze click is an analyst-directed override. Keep the SQL
-        # severity ordering inside manual/automatic buckets, but drain manual
-        # prompts before unattended backlog so the UI action has immediate effect.
-        candidates = sorted(
-            candidates,
-            key=lambda candidate: 0 if str(candidate["alert_id"] or "") in prompt_override_set else 1,
-        )
-
-    for candidate in candidates:
-        # SQLite has already reduced the raw alert stream to the newest row per
-        # duplicate group and sorted those groups by strict severity drain
-        # order. Python only filters groups already analyzed or selected during
-        # this same continuous-drain run.
-        group_key = candidate["queue_group_key"] or alert_group_key(candidate)
-        stable_id = str(candidate["stable_group_id"] or "").strip()
-        queue_group_id = stable_id or alert_group_id(str(group_key))
-        if only_group_id and queue_group_id != only_group_id:
-            continue
-        if group_key in skipped_groups:
-            continue
-        if queue_group_id in pending_group_ids:
-            return candidate
-        if candidate["alert_id"] not in already_analyzed and group_key not in analyzed_groups:
-            return candidate
-    return None
+    return select_next_legacy_alert(conn, request, sources)
 
 
 def latest_prompt_for_alert(prompt_dir: Path, alert_id: str) -> Path | None:

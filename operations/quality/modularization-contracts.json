@@ -80,6 +80,16 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_legacy_selection.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_legacy_selection.py",
+      "required_symbols": [
+        "LegacySelectionRequest",
+        "LegacySelectionSources",
+        "select_next_legacy_alert"
+      ]
+    },
+    {
       "path": "n8n/bin/onion_sentinel_harness.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/onion_sentinel_harness.py",
