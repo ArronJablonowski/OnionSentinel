@@ -304,6 +304,17 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_soc_pcap_request_store.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_pcap_request_store.py",
+      "required_symbols": [
+        "PcapRequestStoreSources",
+        "insert_pcap_request",
+        "pcap_capture_file_from_json",
+        "read_pcap_request_candidate"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_versions.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_versions.py",

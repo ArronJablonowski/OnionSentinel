@@ -455,6 +455,12 @@ metadata. Its only injected dependency is canonical timestamp normalization;
 database candidate lookup, queue persistence, and alert-store dispatch remain
 separate runtime concerns.
 
+`portal_soc_pcap_request_store.py` owns schema-adaptive grouped-alert candidate
+lookup, optional representative-alert enrichment, bounded capture-file recovery
+from raw event JSON, and idempotent pending-queue insertion/requeue behavior.
+Its source bundle exposes schema inspection and the clock; connection ownership,
+request policy, and production alert-store dispatch remain outside the store.
+
 `portal_cron_failures.py` owns bounded Hermes cron-failure collection and
 escaped Administration rendering. It treats run-level Markdown output as
 authoritative evidence, uses `jobs.json` only as a latest-error fallback,

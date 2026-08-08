@@ -415,6 +415,12 @@ from portal_soc_pcap_request_policy import (
     normalize_pcap_request as normalize_pcap_request_policy,
     pcap_request_id as projected_pcap_request_id,
 )
+from portal_soc_pcap_request_store import (
+    PcapRequestStoreSources,
+    insert_pcap_request as store_pcap_request,
+    pcap_capture_file_from_json as extract_pcap_capture_file,
+    read_pcap_request_candidate,
+)
 from portal_beacon_history import project_beacon_history
 from portal_n8n_container_status import (
     N8nContainerStatusSources,
@@ -3653,92 +3659,21 @@ def normalize_pcap_timestamp(value: object) -> str:
 
 
 def pcap_capture_file_from_json(*values: object) -> str | None:
-    for value in values:
-        if not value:
-            continue
-        try:
-            parsed = json.loads(str(value))
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(parsed, dict):
-            continue
-        for path in (
-            ("suricata", "capture_file"),
-            ("capture_file",),
-        ):
-            current = parsed
-            for key in path:
-                current = current.get(key) if isinstance(current, dict) else None
-            if current:
-                return str(current)[:512]
-    return None
+    return extract_pcap_capture_file(*values)
+
+
+def pcap_request_store_sources() -> PcapRequestStoreSources:
+    return PcapRequestStoreSources(
+        table_exists=sqlite_table_exists,
+        table_columns=sqlite_table_columns,
+        now_iso=now_iso_utc,
+    )
 
 
 def pcap_request_candidate_from_group(conn: sqlite3.Connection, group_id: str) -> dict:
-    if not sqlite_table_exists(conn, "alert_group_summary"):
-        return {}
-    columns = sqlite_table_columns(conn, "alert_group_summary")
-    network_protocol_sql = "network_protocol" if "network_protocol" in columns else "NULL AS network_protocol"
-    row = conn.execute(
-        f"""
-        SELECT group_id, group_key, representative_alert_id, first_seen, last_seen,
-               timestamp, source_ip, source_port, destination_ip, destination_port,
-               {network_protocol_sql}, transport_protocol
-        FROM alert_group_summary
-        WHERE group_id = ?
-        """,
-        (group_id,),
-    ).fetchone()
-    if not row:
-        return {}
-    candidate = {
-        "alert_id": row["representative_alert_id"],
-        "group_id": row["group_id"],
-        "group_key": row["group_key"],
-        "first_seen": row["first_seen"] or row["timestamp"],
-        "last_seen": row["last_seen"] or row["timestamp"],
-        "source_ip": row["source_ip"],
-        "source_port": row["source_port"],
-        "destination_ip": row["destination_ip"],
-        "destination_port": row["destination_port"],
-        "network_protocol": row["network_protocol"],
-        "transport_protocol": row["transport_protocol"],
-        "community_id": None,
-    }
-    if sqlite_table_exists(conn, "alerts") and row["representative_alert_id"]:
-        alert_columns = sqlite_table_columns(conn, "alerts")
-        select_parts = [
-            "alert_id",
-            "first_seen" if "first_seen" in alert_columns else "NULL AS first_seen",
-            "last_seen" if "last_seen" in alert_columns else "NULL AS last_seen",
-            "timestamp" if "timestamp" in alert_columns else "NULL AS timestamp",
-            "source_ip" if "source_ip" in alert_columns else "NULL AS source_ip",
-            "source_port" if "source_port" in alert_columns else "NULL AS source_port",
-            "destination_ip" if "destination_ip" in alert_columns else "NULL AS destination_ip",
-            "destination_port" if "destination_port" in alert_columns else "NULL AS destination_port",
-            "network_protocol" if "network_protocol" in alert_columns else "NULL AS network_protocol",
-            "transport_protocol" if "transport_protocol" in alert_columns else "NULL AS transport_protocol",
-            "alert_json" if "alert_json" in alert_columns else "NULL AS alert_json",
-            "raw_event_json" if "raw_event_json" in alert_columns else "NULL AS raw_event_json",
-        ]
-        alert_row = conn.execute(
-            f"SELECT {', '.join(select_parts)} FROM alerts WHERE alert_id = ?",
-            (row["representative_alert_id"],),
-        ).fetchone()
-        if alert_row:
-            candidate.update({
-                "alert_id": alert_row["alert_id"] or candidate["alert_id"],
-                "first_seen": alert_row["first_seen"] or alert_row["timestamp"] or candidate["first_seen"],
-                "last_seen": alert_row["last_seen"] or alert_row["timestamp"] or candidate["last_seen"],
-                "source_ip": alert_row["source_ip"] or candidate["source_ip"],
-                "source_port": alert_row["source_port"] if alert_row["source_port"] is not None else candidate["source_port"],
-                "destination_ip": alert_row["destination_ip"] or candidate["destination_ip"],
-                "destination_port": alert_row["destination_port"] if alert_row["destination_port"] is not None else candidate["destination_port"],
-                "network_protocol": alert_row["network_protocol"] or candidate["network_protocol"],
-                "transport_protocol": alert_row["transport_protocol"] or candidate["transport_protocol"],
-                "capture_file": pcap_capture_file_from_json(alert_row["raw_event_json"], alert_row["alert_json"]),
-            })
-    return candidate
+    return read_pcap_request_candidate(
+        pcap_request_store_sources(), conn, group_id
+    )
 
 
 def pcap_request_policy_sources() -> PcapRequestPolicySources:
@@ -3752,58 +3687,7 @@ def normalize_pcap_request(payload: dict, candidate: dict) -> tuple[dict | None,
 
 
 def insert_pcap_request(conn: sqlite3.Connection, request: dict) -> sqlite3.Row:
-    columns = sqlite_table_columns(conn, "pcap_requests")
-    if not columns:
-        raise sqlite3.Error("pcap_requests table is unavailable")
-    now = now_iso_utc()
-    values = {
-        "request_id": request["request_id"],
-        "status": "pending",
-        "alert_id": request["alert_id"],
-        "group_id": request["group_id"],
-        "group_key": request["group_key"],
-        "first_seen": request["first_seen"],
-        "last_seen": request["last_seen"],
-        "source_ip": request["source_ip"],
-        "source_port": request["source_port"],
-        "destination_ip": request["destination_ip"],
-        "destination_port": request["destination_port"],
-        "network_protocol": request["network_protocol"],
-        "transport_protocol": request["transport_protocol"],
-        "community_id": request["community_id"],
-        "requested_by": request["requested_by"],
-        "reason": request["reason"],
-        "max_window_seconds": request["max_window_seconds"],
-        "request_json": json.dumps(request, separators=(",", ":"), sort_keys=True),
-        "created_at": now,
-        "updated_at": now,
-        "claimed_at": None,
-        "completed_at": None,
-        "error": None,
-        "artifact_path": None,
-        "artifact_sha256": None,
-        "artifact_size_bytes": None,
-    }
-    insert_columns = [column for column in values if column in columns]
-    placeholders = ", ".join("?" for _ in insert_columns)
-    update_columns = [
-        column for column in (
-            "status", "reason", "requested_by", "max_window_seconds", "request_json",
-            "updated_at", "claimed_at", "completed_at", "error", "artifact_path",
-            "artifact_sha256", "artifact_size_bytes",
-        )
-        if column in columns
-    ]
-    updates = ", ".join(f"{column} = excluded.{column}" for column in update_columns)
-    conn.execute(
-        f"""
-        INSERT INTO pcap_requests ({", ".join(insert_columns)})
-        VALUES ({placeholders})
-        ON CONFLICT(request_id) DO UPDATE SET {updates}
-        """,
-        [values[column] for column in insert_columns],
-    )
-    return conn.execute("SELECT * FROM pcap_requests WHERE request_id = ?", (request["request_id"],)).fetchone()
+    return store_pcap_request(pcap_request_store_sources(), conn, request)
 
 
 def asset_store_write_token() -> str:
