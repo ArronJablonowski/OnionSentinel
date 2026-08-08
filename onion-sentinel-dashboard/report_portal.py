@@ -252,6 +252,7 @@ from portal_asset_inventory_service import (
     current_asset_projection,
     database_query_parameters as asset_database_query_parameters,
     database_unavailable_payload as asset_database_unavailable_payload,
+    resolve_asset_ip as resolve_asset_ip_record,
 )
 from portal_asset_dhcp_overlay import (
     annotate_exact_ip_dhcp_macs,
@@ -264,6 +265,7 @@ from portal_asset_mutation_service import (
     normalize_asset_review_payload,
 )
 from portal_asset_write_request import prepare_asset_write_request
+from portal_asset_repository import AssetInventoryRepository, DhcpStateRepository
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -554,74 +556,19 @@ def _asset_inventory_module():
 
 def load_asset_inventory_data() -> tuple[dict, str]:
     """Return the PostgreSQL export used by investigation identity resolution."""
-    if ASSET_DATABASE_READ_ENABLED:
-        with ASSET_INVENTORY_CACHE_LOCK:
-            if (
-                float(ASSET_INVENTORY_CACHE.get("expires_at") or 0) > time.time()
-                and isinstance(ASSET_INVENTORY_CACHE.get("inventory"), dict)
-            ):
-                return dict(ASSET_INVENTORY_CACHE["inventory"]), ""
-        try:
-            result = alert_store_get_json("/assets/snapshot", timeout=5.0)
-            raw_inventory = result.get("inventory")
-            inventory = _asset_inventory_module().validate_asset_inventory(
-                raw_inventory
-            )
-            inventory["inventory_status"] = "database"
-        except (
-            OSError,
-            RuntimeError,
-            TypeError,
-            ValueError,
-            json.JSONDecodeError,
-        ) as exc:
-            return {
-                "assets": [],
-                "inventory_status": "unavailable",
-            }, f"PostgreSQL asset inventory unavailable: {exc}"
-        with ASSET_INVENTORY_CACHE_LOCK:
-            ASSET_INVENTORY_CACHE["signature"] = "postgresql"
-            ASSET_INVENTORY_CACHE["inventory"] = inventory
-            ASSET_INVENTORY_CACHE["expires_at"] = time.time() + 5.0
-        return dict(inventory), ""
-
-    # Offline disaster recovery and unit tests retain a strictly validated
-    # file reader. Production never silently falls back from PostgreSQL to this
-    # snapshot because that would create two competing sources of truth.
-    path = Path(ASSET_INVENTORY_FILE)
-    try:
-        metadata = path.stat()
-        if not path.is_file() or metadata.st_size > ASSET_INVENTORY_MAX_BYTES:
-            raise ValueError("asset inventory is not a bounded regular file")
-        signature: object = (
-            str(path.resolve()),
-            metadata.st_mtime_ns,
-            metadata.st_size,
-        )
-    except FileNotFoundError:
-        return {
-            "schema": "onion-sentinel-asset-inventory-v1",
-            "version": 0,
-            "generated_at": "",
-            "assets": [],
-            "inventory_status": "missing",
-        }, ""
-    except (OSError, ValueError) as exc:
-        return {"assets": [], "inventory_status": "invalid"}, str(exc)
-
-    with ASSET_INVENTORY_CACHE_LOCK:
-        if (
-            ASSET_INVENTORY_CACHE.get("signature") == signature
-            and isinstance(ASSET_INVENTORY_CACHE.get("inventory"), dict)
-        ):
-            return dict(ASSET_INVENTORY_CACHE["inventory"]), ""
-        try:
-            inventory = _asset_inventory_module().load_asset_inventory(path)
-        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
-            return {"assets": [], "inventory_status": "invalid"}, str(exc)
-        ASSET_INVENTORY_CACHE["signature"] = signature
-        ASSET_INVENTORY_CACHE["inventory"] = inventory
-        return dict(inventory), ""
+    validator = _asset_inventory_module()
+    repository = AssetInventoryRepository(
+        database_enabled=ASSET_DATABASE_READ_ENABLED,
+        cache=ASSET_INVENTORY_CACHE,
+        cache_lock=ASSET_INVENTORY_CACHE_LOCK,
+        epoch_seconds=time.time,
+        fetch_json=alert_store_get_json,
+        validate_inventory=validator.validate_asset_inventory,
+        load_inventory_file=validator.load_asset_inventory,
+        inventory_path=Path(ASSET_INVENTORY_FILE),
+        maximum_bytes=ASSET_INVENTORY_MAX_BYTES,
+    )
+    return repository.load()
 
 
 def _asset_record_state(
@@ -637,63 +584,12 @@ def _asset_public_record(asset: dict, state: str) -> dict:
 
 def load_dhcp_asset_discovery_state_data() -> tuple[dict, str]:
     """Load the bounded collector state without treating absence as an error."""
-    if ASSET_DATABASE_READ_ENABLED:
-        try:
-            result = alert_store_get_json("/assets/dhcp-state", timeout=5.0)
-            state = result.get("state")
-            if (
-                not isinstance(state, dict)
-                or state.get("schema")
-                != "onion-sentinel-dhcp-asset-observations-v1"
-                or not isinstance(state.get("collection"), dict)
-                or not isinstance(state.get("observations"), list)
-                or len(state["observations"]) > 100_000
-            ):
-                raise ValueError("database DHCP state failed validation")
-            return state, ""
-        except (RuntimeError, TypeError, ValueError) as exc:
-            return {
-                "collection": {"status": "unavailable"},
-                "observations": [],
-            }, f"PostgreSQL DHCP state unavailable: {exc}"
-
-    state_path = Path(DHCP_ASSET_DISCOVERY_STATE_FILE)
-    try:
-        metadata = state_path.stat()
-        if (
-            not state_path.is_file()
-            or metadata.st_size > DHCP_ASSET_DISCOVERY_MAX_BYTES
-        ):
-            raise ValueError(
-                "DHCP observation state is not a bounded regular file"
-            )
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-        if (
-            not isinstance(state, dict)
-            or state.get("schema")
-            != "onion-sentinel-dhcp-asset-observations-v1"
-            or not isinstance(state.get("collection"), dict)
-            or not isinstance(state.get("observations"), list)
-            or len(state["observations"]) > 5000
-        ):
-            raise ValueError("DHCP observation state failed schema validation")
-        return state, ""
-    except FileNotFoundError:
-        return {
-            "updated_at": "",
-            "collection": {
-                "status": "never_run",
-                "last_attempt_at": "",
-                "last_success_at": "",
-                "last_error": "",
-            },
-            "observations": [],
-        }, ""
-    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
-        return {
-            "collection": {"status": "invalid"},
-            "observations": [],
-        }, str(exc)
+    return DhcpStateRepository(
+        database_enabled=ASSET_DATABASE_READ_ENABLED,
+        fetch_json=alert_store_get_json,
+        state_path=Path(DHCP_ASSET_DISCOVERY_STATE_FILE),
+        maximum_bytes=DHCP_ASSET_DISCOVERY_MAX_BYTES,
+    ).load()
 
 
 def _mac_address_scope(value: object) -> str:
@@ -833,61 +729,13 @@ def resolve_asset_ip(
     observed_at: object,
     inventory: dict | None = None,
 ) -> dict:
-    """Resolve an IP only when one active inventory record claims it."""
-    try:
-        address = str(ipaddress.ip_address(str(value or "").strip()))
-    except ValueError:
-        return {"status": "not_applicable", "ip": str(value or "")}
-    try:
-        when = parse_iso_timestamp(observed_at)
-        if when.tzinfo is None:
-            raise ValueError("timestamp lacks offset")
-        when = when.astimezone(dt.timezone.utc)
-    except (TypeError, ValueError):
-        return {"status": "time_invalid", "ip": address}
-    if inventory is None:
-        inventory, error = load_asset_inventory_data()
-        if error:
-            return {"status": "inventory_unavailable", "ip": address}
-
-    matches = []
-    for raw in inventory.get("assets", []):
-        if not isinstance(raw, dict) or _asset_record_state(raw, when) != "current":
-            continue
-        identifiers = (
-            raw.get("identifiers")
-            if isinstance(raw.get("identifiers"), dict)
-            else {}
-        )
-        if address in (identifiers.get("ip") or []):
-            matches.append(raw)
-    if not matches:
-        return {"status": "unmapped", "ip": address}
-    if len(matches) > 1:
-        return {
-            "status": "ambiguous",
-            "ip": address,
-            "asset_ids": sorted(
-                str(item.get("asset_id") or "") for item in matches
-            ),
-        }
-    asset = matches[0]
-    identifiers = asset.get("identifiers") or {}
-    hostnames = list(identifiers.get("hostname") or [])
-    return {
-        "status": "resolved" if hostnames else "known_without_hostname",
-        "ip": address,
-        "asset_id": str(asset.get("asset_id") or ""),
-        "hostname": hostnames[0] if hostnames else "",
-        "hostnames": hostnames,
-        "role": str(asset.get("role") or ""),
-        "platform": str(asset.get("platform") or ""),
-        "criticality": str(asset.get("criticality") or "unknown"),
-        "confidence": str(asset.get("confidence") or "unknown"),
-        "valid_from": str(asset.get("valid_from") or ""),
-        "valid_until": str(asset.get("valid_until") or ""),
-        "source_type": str(asset.get("source_type") or ""),
-    }
+    return resolve_asset_ip_record(
+        value,
+        observed_at,
+        inventory,
+        parse_timestamp=parse_iso_timestamp,
+        load_inventory=load_asset_inventory_data,
+    )
 
 
 def dhcp_asset_discovery_response(

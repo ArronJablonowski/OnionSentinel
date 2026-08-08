@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 from pathlib import Path
 import sys
+import tempfile
+import threading
 import unittest
 
 
@@ -18,6 +21,11 @@ from portal_asset_dhcp_overlay import (  # noqa: E402
 from portal_asset_inventory_service import (  # noqa: E402
     asset_public_record,
     database_query_parameters,
+    resolve_asset_ip,
+)
+from portal_asset_repository import (  # noqa: E402
+    AssetInventoryRepository,
+    DhcpStateRepository,
 )
 
 
@@ -189,6 +197,126 @@ class PortalAssetInventoryServiceTests(unittest.TestCase):
         )
         self.assertEqual(overlays, {})
         self.assertEqual(discovered, [])
+
+    def test_resolution_does_not_load_inventory_for_invalid_inputs(self) -> None:
+        loads: list[bool] = []
+        loader = lambda: loads.append(True) or ({"assets": []}, "")
+        invalid_ip = resolve_asset_ip(
+            "not-an-ip", "2026-07-29T18:00:00Z", None,
+            parse_timestamp=parse_timestamp, load_inventory=loader,
+        )
+        invalid_time = resolve_asset_ip(
+            "192.0.2.10", "not-a-time", None,
+            parse_timestamp=parse_timestamp, load_inventory=loader,
+        )
+        self.assertEqual(invalid_ip["status"], "not_applicable")
+        self.assertEqual(invalid_time["status"], "time_invalid")
+        self.assertEqual(loads, [])
+
+    def test_resolution_is_event_time_scoped_and_fail_closed(self) -> None:
+        old = authoritative_asset("old", address="192.0.2.10")
+        old["valid_until"] = "2026-07-01T00:00:00Z"
+        current = authoritative_asset("current", address="192.0.2.10")
+        current["valid_from"] = "2026-07-01T00:00:00Z"
+        inventory = {"assets": [old, current]}
+        resolved = resolve_asset_ip(
+            "192.0.2.10", "2026-07-29T18:00:00Z", inventory,
+            parse_timestamp=parse_timestamp,
+            load_inventory=lambda: self.fail("explicit inventory must be used"),
+        )
+        unavailable = resolve_asset_ip(
+            "192.0.2.10", "2026-07-29T18:00:00Z", None,
+            parse_timestamp=parse_timestamp,
+            load_inventory=lambda: ({"assets": []}, "database unavailable"),
+        )
+        self.assertEqual(resolved["asset_id"], "current")
+        self.assertEqual(unavailable["status"], "inventory_unavailable")
+
+
+class PortalAssetRepositoryTests(unittest.TestCase):
+    def repository(self, root: Path, **overrides) -> AssetInventoryRepository:
+        options = {
+            "database_enabled": False,
+            "cache": {},
+            "cache_lock": threading.RLock(),
+            "epoch_seconds": lambda: 100.0,
+            "fetch_json": lambda _path, timeout=5.0: {},
+            "validate_inventory": lambda value: dict(value),
+            "load_inventory_file": lambda path: json.loads(path.read_text()),
+            "inventory_path": root / "inventory.json",
+            "maximum_bytes": 1024 * 1024,
+        }
+        options.update(overrides)
+        return AssetInventoryRepository(**options)
+
+    def test_database_inventory_is_validated_cached_and_never_falls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fetches: list[str] = []
+            repository = self.repository(
+                root,
+                database_enabled=True,
+                fetch_json=lambda path, timeout=5.0: (
+                    fetches.append(path) or {"inventory": {"assets": []}}
+                ),
+            )
+            first, first_error = repository.load()
+            second, second_error = repository.load()
+            self.assertEqual(first["inventory_status"], "database")
+            self.assertEqual((first_error, second_error), ("", ""))
+            self.assertEqual(second, first)
+            self.assertEqual(fetches, ["/assets/snapshot"])
+
+            repository.fetch_json = lambda _path, timeout=5.0: (
+                _ for _ in ()
+            ).throw(RuntimeError("offline"))
+            repository.cache.clear()
+            unavailable, error = repository.load()
+            self.assertEqual(unavailable["inventory_status"], "unavailable")
+            self.assertIn("PostgreSQL asset inventory unavailable", error)
+
+    def test_missing_and_valid_file_inventory_keep_distinct_states(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = self.repository(root)
+            missing, error = repository.load()
+            self.assertEqual(missing["inventory_status"], "missing")
+            self.assertEqual(error, "")
+            repository.inventory_path.write_text(
+                json.dumps({"assets": [], "inventory_status": "loaded"}),
+                encoding="utf-8",
+            )
+            loaded, error = repository.load()
+            self.assertEqual(loaded["inventory_status"], "loaded")
+            self.assertEqual(error, "")
+
+    def test_dhcp_repository_bounds_database_and_file_state(self) -> None:
+        valid = {
+            "schema": "onion-sentinel-dhcp-asset-observations-v1",
+            **state(),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "dhcp.json"
+            missing, error = DhcpStateRepository(
+                False, lambda *_args, **_kwargs: {}, path, 1024,
+            ).load()
+            self.assertEqual(missing["collection"]["status"], "never_run")
+            self.assertEqual(error, "")
+            path.write_text(json.dumps(valid), encoding="utf-8")
+            loaded, error = DhcpStateRepository(
+                False, lambda *_args, **_kwargs: {}, path, 1024,
+            ).load()
+            self.assertEqual(loaded["collection"]["status"], "ok")
+            self.assertEqual(error, "")
+
+            unavailable, error = DhcpStateRepository(
+                True,
+                lambda *_args, **_kwargs: {"state": {"observations": []}},
+                path,
+                1024,
+            ).load()
+            self.assertEqual(unavailable["collection"]["status"], "unavailable")
+            self.assertIn("PostgreSQL DHCP state unavailable", error)
 
 
 if __name__ == "__main__":

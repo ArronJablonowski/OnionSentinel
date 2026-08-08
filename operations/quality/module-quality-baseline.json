@@ -49,7 +49,7 @@
       "max_lines": 979
     },
     "onion-sentinel-dashboard/report_portal.py": {
-      "max_lines": 9028
+      "max_lines": 8876
     },
     "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py": {
       "max_lines": 2670
@@ -754,9 +754,6 @@
     "onion-sentinel-dashboard/report_portal.py::llm_runtime_model_state": {
       "max_complexity": 41
     },
-    "onion-sentinel-dashboard/report_portal.py::load_dhcp_asset_discovery_state_data": {
-      "max_complexity": 17
-    },
     "onion-sentinel-dashboard/report_portal.py::merge_live_llm_activity": {
       "max_complexity": 21
     },
@@ -792,9 +789,6 @@
     },
     "onion-sentinel-dashboard/report_portal.py::reconcile_llm_primary_logs": {
       "max_complexity": 23
-    },
-    "onion-sentinel-dashboard/report_portal.py::resolve_asset_ip": {
-      "max_complexity": 30
     },
     "onion-sentinel-dashboard/report_portal.py::save_soc_agent_model": {
       "max_complexity": 25
@@ -1081,5 +1075,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "b62cfd9f8bf4674ff219025fc8053a392e5f8b22"
+  "source_release": "f448896350a309343982e485f2cad61301909eed"
 }

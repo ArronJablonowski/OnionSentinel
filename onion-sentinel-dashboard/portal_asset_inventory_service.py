@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 from http import HTTPStatus
+import ipaddress
 from typing import Callable
 
 
@@ -62,6 +63,96 @@ def _text(source: dict, key: str, default: str = "") -> str:
 def _identifier_values(identifiers: dict, key: str) -> list:
     values = identifiers.get(key)
     return list(values) if values else []
+
+
+def _asset_ip_matches(
+    inventory: dict,
+    address: str,
+    observed_at: dt.datetime,
+    parse_timestamp: TimestampParser,
+) -> list[dict]:
+    matches: list[dict] = []
+    for raw in inventory.get("assets", []):
+        if not isinstance(raw, dict):
+            continue
+        if asset_record_state(raw, observed_at, parse_timestamp) != "current":
+            continue
+        identifiers = raw.get("identifiers")
+        identifiers = identifiers if isinstance(identifiers, dict) else {}
+        if address in (identifiers.get("ip") or []):
+            matches.append(raw)
+    return matches
+
+
+def _resolved_ip_record(address: str, asset: dict) -> dict:
+    identifiers = asset.get("identifiers")
+    identifiers = identifiers if isinstance(identifiers, dict) else {}
+    hostnames = list(identifiers.get("hostname") or [])
+    return {
+        "status": "resolved" if hostnames else "known_without_hostname",
+        "ip": address,
+        "asset_id": _text(asset, "asset_id"),
+        "hostname": hostnames[0] if hostnames else "",
+        "hostnames": hostnames,
+        "role": _text(asset, "role"),
+        "platform": _text(asset, "platform"),
+        "criticality": _text(asset, "criticality", "unknown"),
+        "confidence": _text(asset, "confidence", "unknown"),
+        "valid_from": _text(asset, "valid_from"),
+        "valid_until": _text(asset, "valid_until"),
+        "source_type": _text(asset, "source_type"),
+    }
+
+
+def _lookup_address(value: object) -> str | None:
+    try:
+        return str(ipaddress.ip_address(str(value or "").strip()))
+    except ValueError:
+        return None
+
+
+def _lookup_time(
+    value: object,
+    parse_timestamp: TimestampParser,
+) -> dt.datetime | None:
+    try:
+        parsed = parse_timestamp(value)
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone(dt.timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def resolve_asset_ip(
+    value: object,
+    observed_at: object,
+    inventory: dict | None,
+    *,
+    parse_timestamp: TimestampParser,
+    load_inventory: Callable[[], tuple[dict, str]],
+) -> dict:
+    """Resolve one IP only when one event-time inventory record claims it."""
+    address = _lookup_address(value)
+    if address is None:
+        return {"status": "not_applicable", "ip": str(value or "")}
+    when = _lookup_time(observed_at, parse_timestamp)
+    if when is None:
+        return {"status": "time_invalid", "ip": address}
+    if inventory is None:
+        inventory, error = load_inventory()
+        if error:
+            return {"status": "inventory_unavailable", "ip": address}
+    matches = _asset_ip_matches(inventory, address, when, parse_timestamp)
+    if not matches:
+        return {"status": "unmapped", "ip": address}
+    if len(matches) == 1:
+        return _resolved_ip_record(address, matches[0])
+    return {
+        "status": "ambiguous",
+        "ip": address,
+        "asset_ids": sorted(_text(item, "asset_id") for item in matches),
+    }
 
 
 def database_query_parameters(query: Query | None) -> dict[str, str]:

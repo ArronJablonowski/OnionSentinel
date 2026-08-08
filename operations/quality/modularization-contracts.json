@@ -363,6 +363,20 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_asset_repository.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_asset_repository.py",
+      "required_symbols": [
+        "AssetInventoryRepository",
+        "DhcpStateRepository",
+        "invalid_asset_inventory",
+        "invalid_dhcp_state",
+        "missing_asset_inventory",
+        "missing_dhcp_state",
+        "validate_dhcp_state"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_asset_mutation_service.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_asset_mutation_service.py",

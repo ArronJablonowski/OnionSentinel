@@ -515,6 +515,16 @@ conflicting claims remain review-only. `report_portal.py` retains bounded
 file/database loading, runtime clocks, timestamp compatibility, and the public
 facade functions used by existing integrations.
 
+`portal_asset_repository.py` owns PostgreSQL snapshot caching and validation,
+bounded disaster-recovery file reads, explicit missing/invalid/unavailable
+states, and bounded DHCP state validation. Production database failures remain
+fail-closed and never fall back to a competing file source. Event-time IP
+resolution lives in `portal_asset_inventory_service.py` and performs input
+validation before invoking its injected repository port, so malformed or
+non-IP observables cannot trigger storage work. `report_portal.py` retains
+dynamic validator discovery and concrete runtime paths, locks, clocks, and
+alert-store transport.
+
 `portal_asset_mutation_service.py` owns bounded DHCP review, authoritative edit,
 and demotion payloads; IP/MAC/hostname normalization; exact edit/demotion
 confirmations; downstream status preservation; and success-only cache
