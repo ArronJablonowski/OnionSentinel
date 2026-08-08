@@ -78,6 +78,11 @@ from portal_ai_model_policy import (
     _valid_provider_model,
     default_soc_ai_settings,
 )
+from portal_cli_provider_readiness import (
+    enabled_cli_harnesses_ready,
+    hermes_auth_readiness_error,
+    resolve_cli_harness,
+)
 from portal_admin_dashboard import (
     AdminDashboardSources,
     compose_admin_dashboard,
@@ -1874,143 +1879,26 @@ def _resolve_cli_harness_for_settings(
     basename: str,
 ) -> Path | None:
     """Resolve one harness without executing it, in the runner's fixed order."""
-    executable = str(configured or basename).strip()
-    path = Path(executable)
-    if path.is_absolute():
-        candidates = [path]
-    else:
-        candidates: list[Path] = []
-        discovered = shutil.which(basename)
-        if discovered:
-            candidates.append(Path(discovered))
-        candidates.extend([
-            HOME / ".local" / "bin" / basename,
-            Path("/opt/homebrew/bin") / basename,
-            Path("/usr/local/bin") / basename,
-        ])
-    seen: set[str] = set()
-    for candidate in candidates:
-        candidate_text = str(candidate)
-        if candidate_text in seen:
-            continue
-        seen.add(candidate_text)
-        if (
-            candidate.name == basename
-            and candidate.is_file()
-            and os.access(candidate, os.X_OK)
-        ):
-            return candidate
-    return None
+    return resolve_cli_harness(
+        configured, basename, home=HOME, discover=shutil.which
+    )
 
 
 def _hermes_auth_readiness_error() -> str:
     """Return a safe operator-facing error for the dedicated Hermes credential."""
-    try:
-        metadata = DEFAULT_HERMES_AUTH_FILE.lstat()
-    except FileNotFoundError:
-        return (
-            "Hermes Agent authentication is unavailable at "
-            "~/n8n-local/private/hermes-agent/auth.json."
-        )
-    except OSError:
-        return "Hermes Agent authentication file could not be inspected."
-    mode = stat.S_IMODE(metadata.st_mode)
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        return "Hermes Agent authentication must be a regular, non-symlink file."
-    if mode != 0o600:
-        return (
-            "Hermes Agent authentication permissions are unsafe; "
-            "set the file mode to 0600."
-        )
-    if metadata.st_size <= 0 or metadata.st_size > HERMES_AUTH_MAX_BYTES:
-        return "Hermes Agent authentication file is empty or exceeds 2 MiB."
-    descriptor = -1
-    try:
-        descriptor = os.open(
-            DEFAULT_HERMES_AUTH_FILE,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-        )
-        opened_metadata = os.fstat(descriptor)
-        opened_mode = stat.S_IMODE(opened_metadata.st_mode)
-        if (
-            not stat.S_ISREG(opened_metadata.st_mode)
-            or opened_mode != 0o600
-        ):
-            return (
-                "Hermes Agent authentication must remain a regular "
-                "owner-only file."
-            )
-        chunks: list[bytes] = []
-        remaining = HERMES_AUTH_MAX_BYTES + 1
-        while remaining > 0:
-            chunk = os.read(descriptor, min(64 * 1024, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        raw = b"".join(chunks)
-    except OSError:
-        return "Hermes Agent authentication file is not safely readable."
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-    if not raw or len(raw) > HERMES_AUTH_MAX_BYTES:
-        return "Hermes Agent authentication file is empty or exceeds 2 MiB."
-    try:
-        auth_store = json.loads(raw.decode("utf-8", errors="strict"))
-    except (UnicodeError, json.JSONDecodeError):
-        return "Hermes Agent authentication file is not valid bounded JSON."
-    if not isinstance(auth_store, dict):
-        return "Hermes Agent authentication JSON root must be an object."
-    providers = auth_store.get("providers")
-    provider_state = (
-        providers.get("openai-codex")
-        if isinstance(providers, dict)
-        else None
+    return hermes_auth_readiness_error(
+        DEFAULT_HERMES_AUTH_FILE, HERMES_AUTH_MAX_BYTES
     )
-    credential_pool = auth_store.get("credential_pool")
-    pool_entries = (
-        credential_pool.get("openai-codex")
-        if isinstance(credential_pool, dict)
-        else None
-    )
-    pool_is_valid = isinstance(pool_entries, list) and not any(
-        not isinstance(entry, dict)
-        or (
-            entry.get("provider") is not None
-            and str(entry.get("provider")).strip() != "openai-codex"
-        )
-        for entry in pool_entries
-    )
-    if isinstance(pool_entries, list) and not pool_is_valid:
-        return "Hermes Agent openai-codex credential pool is invalid."
-    has_provider = isinstance(provider_state, dict) and bool(provider_state)
-    has_pool = pool_is_valid and bool(pool_entries)
-    if not (has_provider or has_pool):
-        return (
-            "Hermes Agent authentication does not contain dedicated "
-            "openai-codex credentials."
-        )
-    return ""
 
 
 def _enabled_cli_harnesses_ready(settings: dict) -> tuple[bool, str]:
     """Fail a settings save when an enabled harness cannot start."""
-    for enabled_key, path_key, basename, label in (
-        ("hermes_agent_enabled", "hermes_agent_path", "hermes", "Hermes Agent"),
-        ("openclaw_enabled", "openclaw_path", "openclaw", "OpenClaw"),
-    ):
-        if not _boolean_setting(settings.get(enabled_key)):
-            continue
-        if _resolve_cli_harness_for_settings(settings.get(path_key), basename) is None:
-            return False, (
-                f"{label} is enabled but its executable is unavailable. "
-                f"Install {basename} or configure an executable absolute path."
-            )
-        if basename == "hermes":
-            if auth_error := _hermes_auth_readiness_error():
-                return False, auth_error
-    return True, ""
+    return enabled_cli_harnesses_ready(
+        settings,
+        boolean_setting=_boolean_setting,
+        resolve=_resolve_cli_harness_for_settings,
+        hermes_auth_error=_hermes_auth_readiness_error,
+    )
 
 
 def save_soc_ai_settings(payload: object) -> tuple[bool, dict]:

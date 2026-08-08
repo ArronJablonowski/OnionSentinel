@@ -324,6 +324,14 @@ settings lock and public normalization facade. This policy module reads only
 the two documented default environment variables and performs no persistence,
 HTTP, filesystem reads or writes, process execution, or network access.
 
+`portal_cli_provider_readiness.py` owns fixed-order Hermes/OpenClaw executable
+resolution and the safe Hermes credential-readiness boundary: exact owner-only
+mode, regular non-symlink identity, bounded no-follow reads, strict JSON, and
+dedicated `openai-codex` provider/pool validation. It returns only safe
+operator-facing readiness errors and never exposes credential contents. The
+portal retains runtime paths, executable discovery, provider-enable policy
+callbacks, and compatibility facades.
+
 `portal_admin_dashboard.py` owns the Administration dashboard view model and
 escaped rendering. Its explicit source boundary collects service health,
 running/latest actions, update and reboot state, version/availability details,

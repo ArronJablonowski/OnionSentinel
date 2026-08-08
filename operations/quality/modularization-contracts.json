@@ -86,6 +86,16 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_cli_provider_readiness.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_cli_provider_readiness.py",
+      "required_symbols": [
+        "enabled_cli_harnesses_ready",
+        "hermes_auth_readiness_error",
+        "resolve_cli_harness"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_dashboard.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_dashboard.py",
