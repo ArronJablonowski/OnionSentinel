@@ -275,6 +275,15 @@ Fresh jobs, stale analysis rows, and explicit rerun requests remain eligible
 for scheduler execution. The launchd wrapper keeps stable compatibility
 delegates while later priority-selection extraction consumes this repository.
 
+`scheduler_indexed_selection.py` owns the indexed durable-job selection query
+and the pure provider-lane predicate. Its request and source bundles make the
+clock, age window, test policy, severity policy, exact-group target, eligible
+statuses, fairness threshold, and lane parameters explicit. Manual reruns
+preempt unattended work; severity remains strict across roles; bounded age
+fairness applies within a severity; subsecond due times and prior SOC results
+remain authoritative. The launchd wrapper resolves settings and binds these
+inputs at call time, preserving its public selection function.
+
 `scheduler_terminal_recovery.py` owns the read-only proof that a stranded
 processing lease already produced an exact, committed terminal result. It
 requires matching provider lane, group, alert, role, attempt window, harness

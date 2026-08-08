@@ -59,6 +59,17 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_indexed_selection.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_indexed_selection.py",
+      "required_symbols": [
+        "IndexedSelectionRequest",
+        "IndexedSelectionSources",
+        "provider_lane_predicate",
+        "select_next_indexed_alert"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_terminal_recovery.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_terminal_recovery.py",

@@ -59,6 +59,12 @@ from scheduler_indexed_state import (
     indexed_reconcilable_ai_job_ids as load_indexed_reconcilable_ai_job_ids,
     indexed_scheduler_available as indexed_scheduler_state_available,
 )
+from scheduler_indexed_selection import (
+    IndexedSelectionRequest,
+    IndexedSelectionSources,
+    provider_lane_predicate,
+    select_next_indexed_alert,
+)
 from scheduler_terminal_recovery import (
     TerminalRecoverySources,
     reconcile_terminal_success,
@@ -1810,27 +1816,8 @@ def configured_analysis_levels(settings_path: Path, configured_levels: str) -> l
 def provider_lane_sql(args: argparse.Namespace) -> tuple[str, list[object]]:
     """Build an allowlisted SQL predicate for the selected provider lane."""
     provider_lane = str(getattr(args, "provider_lane", "any") or "any")
-    if provider_lane == "any":
-        return "", []
     cli_roles = sorted(cli_agent_roles(Path(getattr(args, "ai_settings_file", DEFAULT_AI_SETTINGS))))
-    role_expr = """
-      CASE
-        WHEN p.id IS NULL THEN 'soc-analyst'
-        WHEN json_valid(COALESCE(p.payload_json, '')) THEN
-          COALESCE(
-            NULLIF(TRIM(CAST(json_extract(p.payload_json, '$.agent_role') AS TEXT)), ''),
-            CASE WHEN p.job_type = 'incident_response_analysis'
-                 THEN 'incident-responder' ELSE 'soc-analyst' END
-          )
-        WHEN p.job_type = 'incident_response_analysis' THEN 'incident-responder'
-        ELSE 'soc-analyst'
-      END
-    """
-    if not cli_roles:
-        return ("AND 0 = 1", []) if provider_lane == "cli" else ("", [])
-    placeholders = ", ".join("?" for _ in cli_roles)
-    operator = "IN" if provider_lane == "cli" else "NOT IN"
-    return f"AND ({role_expr}) {operator} ({placeholders})", list(cli_roles)
+    return provider_lane_predicate(provider_lane, cli_roles)
 
 
 def rows(conn: sqlite3.Connection, sql: str, params: Iterable[object] = ()) -> list[sqlite3.Row]:
@@ -2361,163 +2348,29 @@ def select_next_alert_indexed(
     args: argparse.Namespace,
     already_selected_groups: set[str] | None = None,
 ) -> sqlite3.Row | None:
-    """Select one group using only indexed SQLite state.
-
-    Durable intent overrides age, suppression, test, and prior-analysis filters.
-    Manual requests get their own priority bucket. Automatic work is ordered by
-    strict severity and then receives bounded age fairness across agent roles.
-    Re-running this query before every model call preserves critical/high
-    preemption while preventing a continuous Incident Responder stream from
-    starving SOC Analyst work assigned to the same provider lane.
-    """
-    levels = [level.strip().lower() for level in args.levels.split(",") if level.strip()]
-    if not levels:
-        raise SystemExit("--levels must contain at least one level")
-    since = (dt.datetime.now().astimezone() - dt.timedelta(hours=args.hours)).replace(
-        microsecond=0,
-    ).isoformat().replace("T", "  ")
-    newest_alert_time = alert_time_sql("a")
-    eligible_alert_time = alert_time_sql("eligible")
-    level_placeholders = ", ".join("?" for _ in levels)
-    test_sql = ""
-    test_params: list[object] = []
-    if not args.include_tests:
-        clause, test_params = test_filter_sql("eligible.alert_id")
-        test_sql = f"AND {clause}"
-    run_columns = {
-        str(row[1]) for row in conn.execute("PRAGMA table_info(ai_analysis_runs)")
-    }
-    run_role_sql = (
-        "AND COALESCE(ar.agent_role, 'soc-analyst') = 'soc-analyst'"
-        if "agent_role" in run_columns
-        else ""
-    )
     lane_sql, lane_params = provider_lane_sql(args)
-    only_group_id = str(getattr(args, "only_group_id", "") or "").strip().lower()
-    if only_group_id and not re.fullmatch(r"[a-f0-9]{20}", only_group_id):
-        raise SystemExit("--only-group-id must be one exact 20-hex stable group id")
-    group_filter_sql = "AND r.stable_group_id = ?" if only_group_id else ""
-    group_filter_params: list[object] = [only_group_id] if only_group_id else []
     # Indexed groups are guarded by durable job state. Do not apply the legacy
     # per-process exclusion set: a request coalesced while inference is active
     # becomes a fresh pending job and should be eligible immediately.
     del already_selected_groups
-    candidate = conn.execute(
-        f"""
-        WITH due_jobs_ranked AS (
-          SELECT id, job_type, dedupe_key, payload_json, priority,
-                 requested_at,
-                 ROW_NUMBER() OVER (
-                   PARTITION BY dedupe_key
-                   ORDER BY CASE job_type WHEN 'incident_response_analysis' THEN 0 ELSE 1 END,
-                            priority DESC, requested_at ASC, id ASC
-                 ) AS job_rank
-          FROM durable_jobs
-          WHERE job_type IN ('incident_response_analysis', 'ai_analysis')
-            AND status = 'pending'
-            AND attempt_count < max_attempts
-            AND julianday(replace(next_attempt_at, '  ', 'T')) <=
-                julianday(replace(?, '  ', 'T'))
-        ),
-        due_jobs AS (
-          SELECT id, job_type, dedupe_key, payload_json, priority,
-                 requested_at
-          FROM due_jobs_ranked WHERE job_rank = 1
-        ),
-        ranked AS (
-          SELECT a.*,
-                 {newest_alert_time} AS queue_time,
-                 julianday(replace({newest_alert_time}, '  ', 'T')) AS queue_time_sort,
-                 {severity_priority_sql('a.triage_level')} AS severity_rank,
-                 ROW_NUMBER() OVER (
-                   PARTITION BY a.stable_group_id
-                   ORDER BY julianday(replace({newest_alert_time}, '  ', 'T')) DESC,
-                            COALESCE(a.triage_score, 0) DESC, a.alert_id DESC
-                 ) AS group_row_rank
-          FROM alerts AS a
-          WHERE a.stable_group_id IS NOT NULL AND a.stable_group_id != ''
-        )
-        SELECT r.alert_id, r.first_seen, r.last_seen, r.timestamp, r.rule_name,
-               r.source_ip, r.destination_ip, r.triage_level, r.triage_score,
-               COALESCE(NULLIF(r.filter_status, ''), 'accepted') AS filter_status,
-               r.stable_group_id, r.routing, r.suppression_key, r.queue_time,
-               COALESCE(NULLIF(r.stable_group_key, ''), r.stable_group_id) AS queue_group_key,
-               p.id AS durable_job_id,
-               p.payload_json AS durable_payload_json,
-               p.job_type AS durable_job_type,
-               p.requested_at AS durable_requested_at,
-               CASE WHEN p.id IS NOT NULL THEN 1 ELSE 0 END AS has_durable_intent,
-               CASE
-                 WHEN p.id IS NOT NULL
-                   AND instr(replace(p.payload_json, ' ', ''), '"manual_reanalysis":true') > 0 THEN 0
-                 WHEN p.id IS NOT NULL THEN 1
-                 ELSE 2
-               END AS request_bucket,
-               CASE
-                 WHEN p.id IS NOT NULL
-                   AND julianday(replace(p.requested_at, '  ', 'T')) <=
-                       julianday(replace(?, '  ', 'T'))
-                       - (? / 86400.0)
-                 THEN 0
-                 ELSE 1
-               END AS fairness_bucket,
-               r.severity_rank, r.queue_time_sort
-        FROM ranked AS r
-        LEFT JOIN due_jobs AS p ON p.dedupe_key = r.stable_group_id
-        WHERE r.group_row_rank = 1
-          AND (
-            p.id IS NOT NULL
-            OR (
-              NOT EXISTS (
-                SELECT 1 FROM durable_jobs AS existing
-                WHERE existing.job_type = 'ai_analysis'
-                  AND existing.dedupe_key = r.stable_group_id
-                  AND existing.status != 'completed'
-              )
-              AND NOT EXISTS (
-                SELECT 1 FROM ai_analysis_runs AS ar
-                WHERE ar.group_id = r.stable_group_id
-                  {run_role_sql}
-              )
-              AND EXISTS (
-                SELECT 1 FROM alerts AS eligible
-                WHERE eligible.stable_group_id = r.stable_group_id
-                  AND julianday(replace({eligible_alert_time}, '  ', 'T')) >=
-                      julianday(replace(?, '  ', 'T'))
-                  AND eligible.triage_level IN ({level_placeholders})
-                  AND COALESCE(NULLIF(eligible.filter_status, ''), 'accepted')
-                      IN ({", ".join("?" for _ in ELIGIBLE_FILTER_STATUSES)})
-                  {test_sql}
-              )
-            )
-          )
-          {group_filter_sql}
-          {lane_sql}
-        ORDER BY request_bucket ASC, severity_rank ASC,
-                 fairness_bucket ASC,
-                 CASE WHEN fairness_bucket = 0
-                      THEN julianday(replace(p.requested_at, '  ', 'T'))
-                      ELSE NULL END ASC,
-                 COALESCE(p.priority, 0) DESC,
-                 julianday(replace(p.requested_at, '  ', 'T')) ASC,
-                 CASE p.job_type WHEN 'incident_response_analysis' THEN 0 ELSE 1 END,
-                 queue_time_sort DESC,
-                 COALESCE(r.triage_score, 0) DESC, r.alert_id DESC
-        LIMIT 1
-        """,
-        [
-            project_now_precise(),
-            project_now_precise(),
-            AI_JOB_FAIRNESS_AGE_SECONDS,
-            since,
-            *levels,
-            *ELIGIBLE_FILTER_STATUSES,
-            *test_params,
-            *group_filter_params,
-            *lane_params,
-        ],
-    ).fetchone()
-    return candidate
+    request = IndexedSelectionRequest(
+        levels=args.levels,
+        hours=args.hours,
+        include_tests=args.include_tests,
+        only_group_id=str(getattr(args, "only_group_id", "") or ""),
+        lane_sql=lane_sql,
+        lane_params=tuple(lane_params),
+    )
+    sources = IndexedSelectionSources(
+        now=lambda: dt.datetime.now().astimezone(),
+        precise_now=project_now_precise,
+        alert_time_sql=alert_time_sql,
+        severity_priority_sql=severity_priority_sql,
+        test_filter_sql=test_filter_sql,
+        eligible_filter_statuses=ELIGIBLE_FILTER_STATUSES,
+        fairness_age_seconds=AI_JOB_FAIRNESS_AGE_SECONDS,
+    )
+    return select_next_indexed_alert(conn, request, sources)
 
 
 def select_next_alert(
