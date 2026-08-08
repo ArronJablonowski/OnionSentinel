@@ -116,6 +116,20 @@ from portal_admin_action_runner import (
     AdminActionRunnerSources,
     start_admin_action as run_admin_action,
 )
+from portal_admin_service_probes import (
+    AdminServiceProbeSources,
+    ServiceCommandOutcome,
+    codex_app_status as probe_codex_app_status,
+    codex_cli_status as probe_codex_cli_status,
+    docker_status as probe_docker_status,
+    macs_fan_control_status as probe_macs_fan_control_status,
+    matching_process_lines,
+)
+from portal_admin_services import (
+    AdminServiceStartSources,
+    compose_admin_service_statuses,
+    start_admin_service as start_allowed_admin_service,
+)
 from portal_pcap_health import PcapHealthSources, compose_pcap_workflow_health
 from portal_home_dashboard import (
     HomeDashboardSources,
@@ -2390,9 +2404,7 @@ def artifact_library_disk_usage() -> int:
     return total
 
 
-def process_matches(matchers: list[str], exclude: list[str] | None = None) -> list[str]:
-    """Return ps output lines whose command text matches any supplied substring."""
-    exclude = exclude or []
+def _admin_process_lines() -> list[str]:
     proc = subprocess.run(
         ["/bin/ps", "axww", "-o", "pid=,args="],
         text=True,
@@ -2401,121 +2413,61 @@ def process_matches(matchers: list[str], exclude: list[str] | None = None) -> li
         timeout=3,
         check=True,
     )
-    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-    return [
-        line for line in lines
-        if any(matcher in line for matcher in matchers)
-        and not any(blocked in line for blocked in exclude)
-    ]
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
-def macs_fan_control_status() -> tuple[bool, str]:
-    """Return whether Macs Fan Control is currently running plus detail text."""
-    try:
-        matches = process_matches([
-            "Macs Fan Control.app/Contents/MacOS/Macs Fan Control",
-            "com.crystalidea.macsfancontrol",
-            "MacsFanControl",
-        ], exclude=["grep"])
-        if matches:
-            preview = " | ".join(matches[:2])
-            return True, f"Macs Fan Control is running: {preview}"
-        return False, "WARNING: Macs Fan Control is not currently running on this system."
-    except Exception as exc:
-        return False, f"WARNING: Unable to verify Macs Fan Control process state: {exc}"
-
-
-def codex_app_status() -> tuple[bool, str]:
-    """Return whether the Codex desktop app is currently running plus detail text."""
-    try:
-        matches = process_matches([
-            "/Applications/Codex.app/Contents/MacOS/Codex",
-            "/Applications/Codex.app/Contents/Resources/codex app-server",
-        ], exclude=["grep"])
-        if matches:
-            preview = " | ".join(matches[:2])
-            return True, f"Codex app is running: {preview}"
-        return False, "WARNING: Codex app is not currently running on this system."
-    except Exception as exc:
-        return False, f"WARNING: Unable to verify Codex app process state: {exc}"
-
-
-def codex_cli_status() -> tuple[bool, str]:
-    """Return whether the Codex command-line interface is currently running."""
-    try:
+def _admin_service_probe_sources() -> AdminServiceProbeSources:
+    def docker_info() -> ServiceCommandOutcome:
+        docker_bin = shutil.which("docker") or "/usr/local/bin/docker"
         proc = subprocess.run(
-            ["/bin/ps", "axww", "-o", "pid=,args="],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=3,
-            check=True,
-        )
-        matches: list[str] = []
-        exclude_bits = [
-            "/Applications/Codex.app/",
-            "Codex Computer Use.app/",
-            "Codex for Chrome",
-            "com.openai.codex",
-            "Sparkle/Launcher",
-            "browser_crashpad_handler",
-            "grep",
-        ]
-        cli_patterns = [
-            re.compile(r"(^|/)codex(\s|$)", re.IGNORECASE),
-            re.compile(r"(^|\s)codex\s+(exec|run|login|resume|mcp|sandbox|apply|--)", re.IGNORECASE),
-            re.compile(r"openai[-_]codex", re.IGNORECASE),
-        ]
-        for raw_line in proc.stdout.splitlines():
-            line = raw_line.strip()
-            if not line or any(bit in line for bit in exclude_bits):
-                continue
-            if any(pattern.search(line) for pattern in cli_patterns):
-                matches.append(line)
-        if matches:
-            preview = " | ".join(matches[:3])
-            suffix = "" if len(matches) <= 3 else f" | +{len(matches) - 3} more"
-            return True, f"Codex CLI is running: {preview}{suffix}"
-        return False, "Codex CLI is not currently running."
-    except Exception as exc:
-        return False, f"WARNING: Unable to verify Codex CLI process state: {exc}"
-
-
-def docker_status() -> tuple[bool, str]:
-    """Return whether Docker is currently running plus detail text."""
-    docker_bin = shutil.which("docker") or "/usr/local/bin/docker"
-    try:
-        info_proc = subprocess.run(
             [docker_bin, "info", "--format", "{{.ServerVersion}}"],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=4,
             check=False,
-            env={**os.environ, "PATH": ADMIN_COMMAND_ENV.get("PATH", os.environ.get("PATH", ""))},
+            env={
+                **os.environ,
+                "PATH": ADMIN_COMMAND_ENV.get(
+                    "PATH", os.environ.get("PATH", "")
+                ),
+            },
         )
-        if info_proc.returncode == 0 and info_proc.stdout.strip():
-            version = info_proc.stdout.strip().splitlines()[0]
-            return True, f"Docker daemon is running. Server version: {version}."
-        desktop_matches = process_matches([
-            "/Applications/Docker.app/Contents/MacOS/Docker",
-            "com.docker.backend",
-            "com.docker.hyperkit",
-            "com.docker.virtualization",
-            "docker desktop",
-        ], exclude=["grep"])
-        if desktop_matches:
-            preview = " | ".join(desktop_matches[:2])
-            return True, f"Docker Desktop process is running, but docker info did not return daemon details: {preview}"
-        helper_matches = process_matches(["com.docker.vmnetd"], exclude=["grep"])
-        helper_note = ""
-        if helper_matches:
-            helper_note = f" Docker helper is present but the daemon is unavailable: {' | '.join(helper_matches[:1])}."
-        stderr = (info_proc.stderr or "").strip().splitlines()
-        reason = stderr[-1] if stderr else "docker info did not report a running daemon"
-        return False, f"WARNING: Docker is not currently running or the daemon is unavailable: {reason}.{helper_note}"
-    except Exception as exc:
-        return False, f"WARNING: Unable to verify Docker state: {exc}"
+        return ServiceCommandOutcome(
+            returncode=proc.returncode,
+            stdout=proc.stdout or "",
+            stderr=proc.stderr or "",
+        )
+
+    return AdminServiceProbeSources(
+        process_lines=_admin_process_lines,
+        docker_info=docker_info,
+    )
+
+
+def process_matches(matchers: list[str], exclude: list[str] | None = None) -> list[str]:
+    """Return ps output lines whose command text matches supplied substrings."""
+    return matching_process_lines(_admin_process_lines(), matchers, exclude)
+
+
+def macs_fan_control_status() -> tuple[bool, str]:
+    """Return whether Macs Fan Control is currently running plus detail text."""
+    return probe_macs_fan_control_status(_admin_service_probe_sources())
+
+
+def codex_app_status() -> tuple[bool, str]:
+    """Return whether the Codex desktop app is currently running plus detail text."""
+    return probe_codex_app_status(_admin_service_probe_sources())
+
+
+def codex_cli_status() -> tuple[bool, str]:
+    """Return whether the Codex command-line interface is currently running."""
+    return probe_codex_cli_status(_admin_service_probe_sources())
+
+
+def docker_status() -> tuple[bool, str]:
+    """Return whether Docker is currently running plus detail text."""
+    return probe_docker_status(_admin_service_probe_sources())
 
 
 def n8n_container_status() -> dict[str, object]:
@@ -2548,20 +2500,9 @@ def admin_service_statuses() -> dict[str, dict[str, object]]:
         "codex-cli": codex_cli_status,
         "docker": docker_status,
     }
-    statuses: dict[str, dict[str, object]] = {}
-    for service_id, checker in checks.items():
-        running, detail = checker()
-        statuses[service_id] = {
-            "id": service_id,
-            "label": ADMIN_SERVICE_LABELS[service_id],
-            "running": running,
-            "level": "ok" if running else "warn",
-            "startable": True,
-            "value": "Running" if running else "Not running",
-            "detail": detail,
-        }
-    statuses["n8n"] = n8n_container_status()
-    return statuses
+    return compose_admin_service_statuses(
+        ADMIN_SERVICE_LABELS, checks, n8n_container_status
+    )
 
 
 def start_admin_service(service_id: str) -> tuple[bool, str, dict[str, object] | None]:
@@ -2572,23 +2513,23 @@ def start_admin_service(service_id: str) -> tuple[bool, str, dict[str, object] |
         "codex-cli": ["/usr/bin/osascript", "-e", f'tell application "Terminal" to do script "{CODEX_CLI_BIN}"', "-e", 'tell application "Terminal" to activate'],
         "docker": ["/usr/bin/open", "-a", "Docker"],
     }
-    if service_id not in start_commands:
-        return False, "Unknown service.", None
-    status = admin_service_statuses().get(service_id)
-    if status and status.get("running"):
-        return True, f"{ADMIN_SERVICE_LABELS[service_id]} is already running.", status
-    try:
+    def spawn(command: list[str]) -> None:
         subprocess.Popen(
-            start_commands[service_id],
+            command,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        status = admin_service_statuses().get(service_id)
-        return True, f"Started {ADMIN_SERVICE_LABELS[service_id]}. The card will update when it reports running.", status
-    except Exception as exc:
-        status = admin_service_statuses().get(service_id)
-        return False, f"Unable to start {ADMIN_SERVICE_LABELS[service_id]}: {exc}", status
+
+    return start_allowed_admin_service(
+        service_id,
+        AdminServiceStartSources(
+            labels=ADMIN_SERVICE_LABELS,
+            start_commands=start_commands,
+            statuses=admin_service_statuses,
+            spawn=spawn,
+        ),
+    )
 
 
 def defang_admin_service_json(statuses: dict[str, dict[str, object]]) -> dict[str, object]:

@@ -360,6 +360,14 @@ rollback. All state operations and process launch are explicit callbacks. The
 portal retains the trusted action catalog, environment, working directory,
 subprocess constants, and actual `Popen` adapter.
 
+`portal_admin_service_probes.py` owns process matching and health
+classification for Macs Fan Control, the Codex app/CLI, and Docker. Its source
+bundle exposes only a bounded process snapshot and Docker-info outcome;
+subprocess execution and executable resolution stay in the portal.
+`portal_admin_services.py` owns service-card projection and allowlisted startup
+orchestration, including idempotent already-running behavior and post-launch
+re-probing. The portal retains the start-command catalog and `Popen` adapter.
+
 `portal_cron_failures.py` owns bounded Hermes cron-failure collection and
 escaped Administration rendering. It treats run-level Markdown output as
 authoritative evidence, uses `jobs.json` only as a latest-error fallback,

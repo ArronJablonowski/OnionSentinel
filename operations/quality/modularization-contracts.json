@@ -136,6 +136,29 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_admin_service_probes.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_service_probes.py",
+      "required_symbols": [
+        "AdminServiceProbeSources",
+        "ServiceCommandOutcome",
+        "codex_app_status",
+        "codex_cli_status",
+        "docker_status",
+        "macs_fan_control_status"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_admin_services.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_services.py",
+      "required_symbols": [
+        "AdminServiceStartSources",
+        "compose_admin_service_statuses",
+        "start_admin_service"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_versions.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_versions.py",
