@@ -143,6 +143,17 @@ from portal_hermes_backup_health import (
     compose_backup_inventory,
     compose_latest_hermes_backup_metric,
 )
+from portal_update_health import (
+    UpdateCommandOutcome,
+    UpdateHealthSources,
+    compose_brew_update_source_metric,
+    compose_hermes_update_source_metric,
+    compose_latest_running_update_action,
+    compose_latest_update_action_failure,
+    compose_macos_update_metric,
+    compose_prioritized_updates_metric,
+    read_macos_update_status as load_macos_update_status,
+)
 from portal_pcap_health import PcapHealthSources, compose_pcap_workflow_health
 from portal_home_dashboard import (
     HomeDashboardSources,
@@ -2685,161 +2696,67 @@ def latest_hermes_backup_metric() -> tuple[str, str, bool]:
 
 
 def macos_update_metric() -> tuple[str, str, int]:
-    """Return display value, tooltip/detail text, and update count for cached macOS update status."""
-    try:
-        data = json.loads(MACOS_UPDATE_STATUS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return "Not checked", "macOS update status has not been checked yet.", -1
-    status = str(data.get("status") or "Unknown")
-    checked_at = str(data.get("checked_at") or "unknown time")
-    updates = data.get("updates") or []
-    try:
-        count = int(data.get("count", -1))
-    except Exception:
-        count = -1
-    detail_bits = [f"Checked {checked_at}"]
-    if isinstance(updates, list) and updates:
-        detail_bits.append("Updates: " + "; ".join(str(x) for x in updates[:5]))
-    if data.get("error"):
-        detail_bits.append("Error: " + str(data.get("error")))
-    return status, " · ".join(detail_bits), count
+    return compose_macos_update_metric(MACOS_UPDATE_STATUS_FILE)
+
+
+def _brew_update_check() -> UpdateCommandOutcome:
+    proc = subprocess.run(
+        ["/opt/homebrew/bin/brew", "outdated", "--quiet"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=12,
+        env=ADMIN_COMMAND_ENV,
+    )
+    return UpdateCommandOutcome(proc.returncode, proc.stdout, proc.stderr)
+
+
+def _hermes_update_check() -> UpdateCommandOutcome:
+    proc = subprocess.run(
+        [HERMES_BIN, "update", "--check"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=20,
+        env=ADMIN_COMMAND_ENV,
+    )
+    return UpdateCommandOutcome(proc.returncode, proc.stdout or "")
+
+
+def update_health_sources() -> UpdateHealthSources:
+    return UpdateHealthSources(
+        macos_status_file=MACOS_UPDATE_STATUS_FILE,
+        run_brew_check=_brew_update_check,
+        run_hermes_check=_hermes_update_check,
+        read_action_status=read_admin_action_status,
+        process_running=process_is_running,
+        action_labels={
+            action_id: str(action.get("label") or action_id)
+            for action_id, action in ADMIN_ACTIONS.items()
+        },
+        parse_timestamp=parse_iso_timestamp,
+        format_timestamp=format_iso_timestamp,
+    )
 
 
 def brew_update_source_metric() -> tuple[int, str, list[str]]:
-    """Return Homebrew outdated count, detail, and package names."""
-    try:
-        proc = subprocess.run(
-            ["/opt/homebrew/bin/brew", "outdated", "--quiet"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=12,
-            env=ADMIN_COMMAND_ENV,
-        )
-        outdated = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-        if outdated:
-            preview = ", ".join(outdated[:8])
-            suffix = "" if len(outdated) <= 8 else f" and {len(outdated) - 8} more"
-            return len(outdated), f"{len(outdated)} Homebrew package(s) outdated: {preview}{suffix}.", outdated
-        if proc.returncode == 0:
-            return 0, "No Homebrew updates available.", []
-        return -1, f"Could not determine Homebrew updates: {proc.stderr.strip() or 'brew outdated failed'}.", []
-    except Exception as exc:
-        return -1, f"Could not determine Homebrew updates: {exc}", []
+    return compose_brew_update_source_metric(_brew_update_check)
 
 
 def hermes_update_source_metric() -> tuple[bool, str]:
-    """Return whether Hermes Agent has an available update plus detail text."""
-    try:
-        proc = subprocess.run(
-            [HERMES_BIN, "update", "--check"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=20,
-            env=ADMIN_COMMAND_ENV,
-        )
-        output = proc.stdout.strip()
-        lower = output.lower()
-        if "update available" in lower or "commits behind" in lower or "run 'hermes update'" in lower:
-            first_line = output.splitlines()[0] if output.splitlines() else "Hermes Agent update is available."
-            return True, f"Hermes Agent update available: {first_line}"
-        if "up to date" in lower or "already up" in lower or "no update" in lower or proc.returncode == 0:
-            return False, "No Hermes Agent update available."
-        return False, f"Could not determine Hermes Agent update availability: {output[-240:] or 'hermes update --check failed'}."
-    except Exception as exc:
-        return False, f"Could not determine Hermes Agent update availability: {exc}"
+    return compose_hermes_update_source_metric(_hermes_update_check)
 
 
 def latest_running_update_action() -> tuple[str, str] | None:
-    """Return currently running update action for the homepage Updates metric."""
-    for action_id in ("macos-update", "brew-update", "hermes-update"):
-        status = read_admin_action_status(action_id)
-        if status.get("state") != "running":
-            continue
-        pid = status.get("pid")
-        if not process_is_running(pid):
-            continue
-        action = ADMIN_ACTIONS.get(action_id, {})
-        label = str(status.get("label") or action.get("label") or action_id)
-        timestamp = status.get("started_at") or status.get("updated_at")
-        try:
-            parsed = parse_iso_timestamp(timestamp).astimezone() if timestamp else None
-        except Exception:
-            parsed = None
-        exact = format_iso_timestamp(parsed) if parsed else "unknown time"
-        short = "Update running"
-        if "Homebrew" in label:
-            short = "brew running"
-        elif "macOS" in label:
-            short = "macOS running"
-        elif "Hermes" in label:
-            short = "Hermes running"
-        return short, f"{label} is currently running as PID {pid or 'unknown'}; started at {exact}. The Updates metric will refresh availability after the action completes."
-    return None
+    return compose_latest_running_update_action(update_health_sources())
 
 
 def latest_update_action_failure() -> tuple[str, str] | None:
-    """Return latest failed/unknown update action for the homepage warning metric."""
-    failures: list[tuple[dt.datetime, str, str]] = []
-    for action_id in ("macos-update", "brew-update", "hermes-update"):
-        status = read_admin_action_status(action_id)
-        state = str(status.get("state") or "idle")
-        if state not in {"failed", "error", "unknown"}:
-            continue
-        timestamp = status.get("finished_at") or status.get("updated_at") or status.get("started_at")
-        try:
-            parsed = parse_iso_timestamp(timestamp).astimezone() if timestamp else dt.datetime.fromtimestamp(0).astimezone()
-        except Exception:
-            parsed = dt.datetime.fromtimestamp(0).astimezone()
-        action = ADMIN_ACTIONS.get(action_id, {})
-        label = str(action.get("label") or action_id)
-        exact = format_iso_timestamp(parsed) if timestamp else "unknown time"
-        message = str(status.get("message") or "No failure message recorded.")
-        failures.append((parsed, label, f"WARNING: {label} last failed at {exact}. {message}"))
-    if not failures:
-        return None
-    _parsed, label, detail = max(failures, key=lambda item: item[0])
-    short = "Failed"
-    if "Homebrew" in label:
-        short = "brew failed"
-    elif "macOS" in label:
-        short = "macOS failed"
-    elif "Hermes" in label:
-        short = "Hermes failed"
-    return short, detail
+    return compose_latest_update_action_failure(update_health_sources())
 
 
 def prioritized_updates_metric() -> tuple[str, str, int, str]:
-    """Return homepage Updates metric using priority: running update > failure > macOS > Homebrew > Hermes."""
-    running = latest_running_update_action()
-    if running:
-        label, detail = running
-        return f"⏳ {label}", detail, 2, "running"
-
-    failure = latest_update_action_failure()
-    if failure:
-        label, detail = failure
-        return f"⚠ {label}", detail, -2, "failed"
-
-    _mac_value, mac_detail, mac_count = macos_update_metric()
-    detail_parts = ["Priority order: macOS > Homebrew > Hermes Agent.", f"macOS: {mac_detail}"]
-    if mac_count > 0:
-        return f"{mac_count} macOS", " · ".join(detail_parts), mac_count, "macos"
-
-    brew_count, brew_detail, _brew_items = brew_update_source_metric()
-    detail_parts.append(f"Homebrew: {brew_detail}")
-    if brew_count > 0:
-        return f"{brew_count} brew", " · ".join(detail_parts), brew_count, "brew"
-
-    hermes_available, hermes_detail = hermes_update_source_metric()
-    detail_parts.append(f"Hermes: {hermes_detail}")
-    if hermes_available:
-        return "Hermes", " · ".join(detail_parts), 1, "hermes"
-
-    if mac_count < 0 or brew_count < 0:
-        return "Unknown", " · ".join(detail_parts), -1, "unknown"
-    return "Current", " · ".join(detail_parts), 0, "none"
+    return compose_prioritized_updates_metric(update_health_sources())
 
 
 def human_time(ts: float) -> str:
@@ -3017,11 +2934,7 @@ def redact_sensitive_text(text: str) -> str:
 
 
 def read_macos_update_status() -> dict:
-    try:
-        data = json.loads(MACOS_UPDATE_STATUS_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception as exc:
-        return {"status": "Not checked", "count": -1, "updates": [], "error": str(exc)}
+    return load_macos_update_status(MACOS_UPDATE_STATUS_FILE)
 
 
 def backup_inventory() -> tuple[list[dict], dict]:

@@ -182,6 +182,22 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_update_health.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_update_health.py",
+      "required_symbols": [
+        "UpdateCommandOutcome",
+        "UpdateHealthSources",
+        "compose_brew_update_source_metric",
+        "compose_hermes_update_source_metric",
+        "compose_latest_running_update_action",
+        "compose_latest_update_action_failure",
+        "compose_macos_update_metric",
+        "compose_prioritized_updates_metric",
+        "read_macos_update_status"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_versions.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_versions.py",

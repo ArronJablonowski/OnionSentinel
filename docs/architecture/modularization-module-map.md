@@ -382,6 +382,14 @@ projection. Its source bundle exposes backup locations plus timestamp, size,
 relative-age, and redaction callbacks. The portal retains environment-derived
 paths and presentation rendering through compatibility facades.
 
+`portal_update_health.py` owns cached macOS-update projection, bounded Homebrew
+and Hermes check classification, live/stale update-action classification,
+newest-failure selection, and homepage update-source precedence. Its source
+bundle exposes command outcomes, action-state readers, process liveness,
+labels, and timestamp codecs. The portal retains executable paths, subprocess
+limits/environment, admin-state storage, and detail-page presentation through
+compatibility facades.
+
 `portal_cron_failures.py` owns bounded Hermes cron-failure collection and
 escaped Administration rendering. It treats run-level Markdown output as
 authoritative evidence, uses `jobs.json` only as a latest-error fallback,
