@@ -721,6 +721,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/portal_health_read_service.py" "$DASHBOAR
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_general_read_service.py" "$DASHBOARD_RUNTIME_DIR/portal_general_read_service.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_post_intake.py" "$DASHBOARD_RUNTIME_DIR/portal_post_intake.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_json_write_service.py" "$DASHBOARD_RUNTIME_DIR/portal_json_write_service.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_llm_runtime_state.py" "$DASHBOARD_RUNTIME_DIR/portal_llm_runtime_state.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_resource_action_read.py" "$DASHBOARD_RUNTIME_DIR/portal_resource_action_read.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_catalog_read_service.py" "$DASHBOARD_RUNTIME_DIR/portal_catalog_read_service.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_catalog_delivery.py" "$DASHBOARD_RUNTIME_DIR/portal_catalog_delivery.py"

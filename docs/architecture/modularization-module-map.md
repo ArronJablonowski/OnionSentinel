@@ -966,6 +966,13 @@ It performs no settings, artifact, or process I/O; the builder reads only the
 newest stamped artifact when no valid assignment exists and passes that record
 into the pure projection policy.
 
+`portal_llm_runtime_state.py` owns the live portal's corresponding execution
+state projection: active-phase versus rolling-deploy fields, exact Codex CLI,
+Hermes Agent, OpenClaw, and Ollama routes, provider inference, reasoning effort,
+and model-free preparing/finalizing phases. It is pure and never falls back to
+an assigned model when execution provenance is absent; `report_portal.py`
+retains current-record collection and the compatibility import facade.
+
 `dashboard_static_composition.py` owns the side-effect-free transformation from
 the shared dashboard shell to each static route. A `StaticPagePlan` supplies
 escaped route metadata, server-rendered navigation and content, while the

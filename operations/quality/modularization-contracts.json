@@ -514,6 +514,14 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_llm_runtime_state.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_llm_runtime_state.py",
+      "required_symbols": [
+        "llm_runtime_model_state"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_resource_action_read.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_resource_action_read.py",

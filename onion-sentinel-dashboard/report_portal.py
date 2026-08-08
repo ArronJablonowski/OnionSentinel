@@ -282,6 +282,7 @@ from portal_catalog_delivery import CatalogDeliveryCallbacks, deliver_catalog_ro
 from portal_general_read_service import GeneralReadCallbacks, dispatch_general_read
 from portal_post_intake import prepare_post_intake
 from portal_json_write_service import JsonWriteCallbacks, dispatch_json_write
+from portal_llm_runtime_state import llm_runtime_model_state
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -5537,100 +5538,6 @@ def read_llm_current_analysis() -> dict:
         data["status"] = "idle"
         data["stale_running_record"] = True
     return decorate_llm_analysis_record(data, live=True)
-
-
-def llm_runtime_model_state(current: object) -> dict:
-    """Describe the model executing now without rewriting primary audit data."""
-    if not isinstance(current, dict) or current.get("status") != "running":
-        return {"running": False}
-    has_phase_metadata = "active_phase" in current
-    phase = str(current.get("active_phase") or "primary_analysis").strip().lower()
-    if has_phase_metadata:
-        route = str(current.get("active_model_route") or "").strip()
-        model = str(current.get("active_model") or "").strip()
-        provider_key = str(current.get("active_provider") or "").strip().lower()
-        model_path = str(current.get("active_model_path") or "").strip().lower()
-    else:
-        # Rolling-deploy fallback for a runner that predates active-phase fields.
-        route = str(current.get("model_route") or "").strip()
-        model = str(current.get("model") or "").strip()
-        provider_key = str(current.get("mode") or "").strip().lower()
-        model_path = str(current.get("model_path") or "").strip().lower()
-
-    provider = ""
-    effort = ""
-    if route.startswith("codex-cli:"):
-        try:
-            routed_model, effort = route.removeprefix("codex-cli:").rsplit(":", 1)
-        except ValueError:
-            routed_model = ""
-        if routed_model:
-            model = routed_model
-        provider = "Codex CLI"
-    elif route.startswith("hermes-agent:"):
-        try:
-            routed_model, effort = route.removeprefix("hermes-agent:").rsplit(":", 1)
-        except ValueError:
-            routed_model = ""
-        if routed_model:
-            model = routed_model
-        provider = "Hermes Agent"
-    elif route.startswith("openclaw:"):
-        try:
-            routed_model, effort = route.removeprefix("openclaw:").rsplit(":", 1)
-        except ValueError:
-            routed_model = ""
-        if routed_model:
-            model = routed_model
-        provider = "OpenClaw"
-    elif route.startswith("ollama:"):
-        model = route.removeprefix("ollama:").strip() or model
-        provider = "Ollama"
-    elif provider_key in {"codex-cli", "gpt-cli"} or model_path == "frontier-codex-cli":
-        provider = "Codex CLI"
-    elif provider_key in {"hermes-agent", "openai-codex"} or model_path == "hermes-agent":
-        provider = "Hermes Agent"
-    elif provider_key == "openclaw" or model_path == "openclaw":
-        provider = "OpenClaw"
-    elif provider_key == "ollama" or model_path == "ollama":
-        provider = "Ollama"
-
-    if phase in {"preparing", "post_processing"} and not route and not model:
-        phase_label = (
-            "Preparing analysis"
-            if phase == "preparing"
-            else "Finalizing analysis"
-        )
-        return {
-            "running": True,
-            "phase": phase,
-            "phase_label": phase_label,
-            "route": "",
-            "model": "",
-            "provider": "",
-            "label": "No model running",
-            "detail": f"{phase_label} · No model running",
-        }
-    label = " · ".join(part for part in (provider, model) if part) or "Unknown model"
-    if provider in {"Codex CLI", "Hermes Agent", "OpenClaw"} and effort:
-        label += f" ({effort})"
-    phase_label = {
-        "preparing": "Preparing analysis",
-        "second_opinion": "Second-opinion review",
-        "disagreement_adjudication": "Disagreement adjudication",
-        "live_follow_up": "Live-evidence follow-up",
-        "primary_analysis": "Analyzing",
-    }.get(phase, "Analyzing")
-    return {
-        "running": True,
-        "phase": phase,
-        "phase_label": phase_label,
-        "route": route,
-        "model": model,
-        "provider": provider,
-        "label": label,
-        "detail": f"{phase_label} · Running: {label}",
-    }
 
 
 def merge_live_llm_activity(static_ai: object, current: object) -> dict:
