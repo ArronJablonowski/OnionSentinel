@@ -342,6 +342,12 @@ and supplies its existing database, timestamp, JSON, filesystem, and transfer-
 duration callbacks, preserving API compatibility while isolating health policy
 from HTTP routing.
 
+`portal_beacon_history.py` owns the System Health beacon window, timestamp and
+status normalization, relay-recovery failure projection, chronological order,
+success counts, and closed/open heartbeat-gap derivation. The portal facade
+retains bounded source selection and JSON reads, current time, Alert Store
+pipeline collection, PCAP health composition, and timestamp callback binding.
+
 `portal_home_dashboard.py` owns the Mac Studio LAN Portal home-page view model,
 explicit report-card discovery, metric severity presentation, escaping, and
 HTML rendering. `portal_home_dashboard_assets.py` owns its stable CSS and
