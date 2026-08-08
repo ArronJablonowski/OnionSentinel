@@ -126,6 +126,16 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_admin_action_runner.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_action_runner.py",
+      "required_symbols": [
+        "AdminActionRunnerSources",
+        "build_admin_wrapped_command",
+        "start_admin_action"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_versions.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_versions.py",

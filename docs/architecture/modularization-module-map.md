@@ -353,6 +353,13 @@ action catalog, process-liveness probe, clock, and timestamp codecs. The portal
 retains compatibility facades; shell construction and process launch remain
 outside this persistence module.
 
+`portal_admin_action_runner.py` owns approved-action validation, typed
+confirmation, availability gating, audit-log initialization, completion
+wrapper construction, detached-launch orchestration, and launch-failure
+rollback. All state operations and process launch are explicit callbacks. The
+portal retains the trusted action catalog, environment, working directory,
+subprocess constants, and actual `Popen` adapter.
+
 `portal_cron_failures.py` owns bounded Hermes cron-failure collection and
 escaped Administration rendering. It treats run-level Markdown output as
 authoritative evidence, uses `jobs.json` only as a latest-error fallback,

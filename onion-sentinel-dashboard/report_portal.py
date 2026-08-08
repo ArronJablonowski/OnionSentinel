@@ -112,6 +112,10 @@ from portal_admin_action_state import (
     update_action_lock_pid,
     write_action_status,
 )
+from portal_admin_action_runner import (
+    AdminActionRunnerSources,
+    start_admin_action as run_admin_action,
+)
 from portal_pcap_health import PcapHealthSources, compose_pcap_workflow_health
 from portal_home_dashboard import (
     HomeDashboardSources,
@@ -2056,97 +2060,44 @@ def release_admin_action_lock(action_id: str) -> None:
 
 
 def start_admin_action(action_id: str, confirmation: str = "") -> tuple[bool, str]:
-    action = ADMIN_ACTIONS.get(action_id)
-    if not action:
-        return False, "Unknown admin action."
-    required = action.get("requires_confirmation")
-    if required and confirmation != required:
-        return False, f"Confirmation failed. Type {required!r} to run this action."
-    running = running_admin_action()
-    if running:
-        return False, f"{running.get('label', 'Another admin action')} is still running as PID {running.get('pid', 'unknown')}. Wait for it to complete before starting another update or reboot."
-    current = read_admin_action_status(action_id)
-    if current.get("state") == "running" and process_is_running(current.get("pid")):
-        return False, f"{action['label']} is already running."
-    available, availability_message = check_admin_action_available(action_id)
-    if not available:
-        return False, availability_message
-    ADMIN_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = admin_log_path(action_id)
-    started_at = now_iso_local()
-    lock_ok, lock_message = claim_admin_action_lock(action_id, str(action["label"]), started_at)
-    if not lock_ok:
-        return False, lock_message
-    command = [str(part) for part in action["command"]]
-    with log_path.open("ab") as log:
-        log.write(f"\n===== {started_at} START {action['label']} =====\n".encode("utf-8"))
-        log.write(("Command: " + " ".join(command) + "\n").encode("utf-8"))
-        log.flush()
-    initial_status = {
-        "id": action_id,
-        "label": action["label"],
-        "summary": action.get("summary", ""),
-        "command": " ".join(command),
-        "started_at": started_at,
-        "pid": None,
-        "state": "running",
-        "returncode": None,
-        "message": f"Starting {action['label']}.",
-    }
-    write_admin_action_status(action_id, initial_status)
-    status_path = admin_status_path(action_id)
-    lock_path = ADMIN_LOCK_FILE
-    finish_py = (
-        "import datetime,json,pathlib,subprocess,sys; "
-        f"p=pathlib.Path({str(status_path)!r}); "
-        f"lp=pathlib.Path({str(lock_path)!r}); "
-        f"aid={action_id!r}; "
-        "d=json.loads(p.read_text()); "
-        "rc=int(sys.argv[1]); "
-        "label=d.get('label') or aid; "
-        "d.update({'state':'ok' if rc == 0 else 'failed', 'returncode':rc, "
-        "'message':(f'{label} completed successfully.' if rc == 0 else f'{label} failed with exit code {rc}.'), "
-        "'finished_at':datetime.datetime.now().astimezone().isoformat(timespec='seconds').replace('T','  '), "
-        "'updated_at':datetime.datetime.now().astimezone().isoformat(timespec='seconds').replace('T','  ')}); "
-        "p.write_text(json.dumps(d, indent=2)); "
-        f"checker=pathlib.Path({str(HOME / '.hermes' / 'scripts' / 'check_macos_updates.py')!r}); "
-        "\ntry:\n subprocess.run([str(checker)], timeout=300) if (rc == 0 and aid == 'macos-update' and checker.exists()) else None\n"
-        "except Exception: pass\n"
-        "try:\n l=json.loads(lp.read_text()) if lp.exists() else {};\n"
-        " lp.unlink() if (not l or l.get('id') == aid) else None\n"
-        "except Exception: pass"
+    def spawn(wrapped_command: str, log) -> int:
+        proc = subprocess.Popen(
+            ["/bin/bash", "-lc", wrapped_command],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            cwd=str(HOME),
+            env=ADMIN_COMMAND_ENV,
+            start_new_session=True,
+        )
+        return proc.pid
+
+    return run_admin_action(
+        action_id,
+        confirmation,
+        AdminActionRunnerSources(
+            actions=ADMIN_ACTIONS,
+            state_dir=ADMIN_STATE_DIR,
+            lock_file=ADMIN_LOCK_FILE,
+            macos_update_checker=HOME
+            / ".hermes"
+            / "scripts"
+            / "check_macos_updates.py",
+            now_iso=now_iso_local,
+            running_action=running_admin_action,
+            read_status=read_admin_action_status,
+            process_running=process_is_running,
+            check_available=check_admin_action_available,
+            claim_lock=claim_admin_action_lock,
+            release_lock=release_admin_action_lock,
+            update_lock_pid=update_admin_action_lock_pid,
+            write_status=write_admin_action_status,
+            status_path=admin_status_path,
+            log_path=admin_log_path,
+            quote=shlex.quote,
+            spawn=spawn,
+        ),
     )
-    shell_command = " ".join(shlex.quote(part) for part in command)
-    wrapped_command = (
-        f"{shell_command}; rc=$?; "
-        f"printf '\\n===== %s END {shlex.quote(action['label'])} rc=%s =====\\n' \"$(date -u '+%Y-%m-%d  %H:%M:%SZ')\" \"$rc\"; "
-        f"/usr/bin/python3 -c {shlex.quote(finish_py)} \"$rc\"; exit $rc"
-    )
-    with log_path.open("ab") as log:
-        try:
-            proc = subprocess.Popen(
-                ["/bin/bash", "-lc", wrapped_command],
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
-                cwd=str(HOME),
-                env=ADMIN_COMMAND_ENV,
-                start_new_session=True,
-            )
-        except Exception as exc:
-            release_admin_action_lock(action_id)
-            write_admin_action_status(action_id, {
-                **initial_status,
-                "state": "failed",
-                "returncode": None,
-                "message": f"Failed to start {action['label']}: {exc}",
-            })
-            return False, f"Failed to start {action['label']}: {exc}"
-    initial_status["pid"] = proc.pid
-    initial_status["message"] = f"Started {action['label']} as PID {proc.pid}."
-    update_admin_action_lock_pid(action_id, proc.pid)
-    write_admin_action_status(action_id, initial_status)
-    return True, f"Started {action['label']}."
 
 
 def tail_file(path: Path, max_chars: int = 7000) -> str:
