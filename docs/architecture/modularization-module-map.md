@@ -346,6 +346,13 @@ bounded Homebrew/Hermes command outcomes supplied by the portal. The module
 cannot construct a process environment or execute a command itself; the portal
 retains that host adapter and returns only a typed, bounded command outcome.
 
+`portal_admin_action_state.py` owns durable Administration action status,
+newest-outcome projection, stale-process reconciliation, and atomic singleton
+lock ownership. Its source bundle declares the state/lock roots, approved
+action catalog, process-liveness probe, clock, and timestamp codecs. The portal
+retains compatibility facades; shell construction and process launch remain
+outside this persistence module.
+
 `portal_cron_failures.py` owns bounded Hermes cron-failure collection and
 escaped Administration rendering. It treats run-level Markdown output as
 authoritative evidence, uses `jobs.json` only as a latest-error fallback,

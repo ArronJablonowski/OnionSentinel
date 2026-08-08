@@ -113,6 +113,19 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_admin_action_state.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_action_state.py",
+      "required_symbols": [
+        "AdminActionStateSources",
+        "claim_action_lock",
+        "latest_action_outcome",
+        "read_action_status",
+        "running_action",
+        "write_action_status"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_versions.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_versions.py",

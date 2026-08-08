@@ -99,6 +99,19 @@ from portal_cron_failures import (
     compose_cron_failure_records,
     render_cron_failure_log,
 )
+from portal_admin_action_state import (
+    AdminActionStateSources,
+    action_log_path,
+    action_status_path,
+    claim_action_lock,
+    latest_action_outcome,
+    read_action_lock,
+    read_action_status,
+    release_action_lock,
+    running_action,
+    update_action_lock_pid,
+    write_action_status,
+)
 from portal_pcap_health import PcapHealthSources, compose_pcap_workflow_health
 from portal_home_dashboard import (
     HomeDashboardSources,
@@ -1976,11 +1989,11 @@ def save_soc_agent_model(payload: object) -> tuple[bool, dict]:
 
 
 def admin_status_path(action_id: str) -> Path:
-    return ADMIN_STATE_DIR / f"{action_id}.json"
+    return action_status_path(action_id, _admin_action_state_sources())
 
 
 def admin_log_path(action_id: str) -> Path:
-    return ADMIN_STATE_DIR / f"{action_id}.log"
+    return action_log_path(action_id, _admin_action_state_sources())
 
 
 def process_is_running(pid: int | None) -> bool:
@@ -1993,152 +2006,53 @@ def process_is_running(pid: int | None) -> bool:
         return False
 
 
+def _admin_action_state_sources() -> AdminActionStateSources:
+    return AdminActionStateSources(
+        state_dir=ADMIN_STATE_DIR,
+        lock_file=ADMIN_LOCK_FILE,
+        actions=ADMIN_ACTIONS,
+        process_running=process_is_running,
+        now_iso=now_iso_local,
+        parse_timestamp=parse_iso_timestamp,
+        format_timestamp=format_iso_timestamp,
+    )
+
+
 def read_admin_action_status(action_id: str) -> dict:
-    action = ADMIN_ACTIONS.get(action_id, {})
-    current_command = " ".join(str(part) for part in action.get("command", []))
-    status = {
-        "id": action_id,
-        "label": action.get("label", action_id),
-        "summary": action.get("summary", ""),
-        "command": current_command,
-        "started_at": None,
-        "pid": None,
-        "state": "idle",
-        "returncode": None,
-        "message": "Not run yet.",
-        "updated_at": None,
-    }
-    path = admin_status_path(action_id)
-    loaded_has_command = False
-    try:
-        if path.exists():
-            loaded_status = json.loads(path.read_text(encoding="utf-8"))
-            loaded_has_command = "command" in loaded_status
-            status.update(loaded_status)
-    except Exception as exc:
-        status.update({"state": "error", "message": f"Could not read status: {exc}"})
-    if action_id == "reboot" and status.get("started_at") and ((not loaded_has_command) or status.get("command") != current_command):
-        status.update({
-            "command": current_command,
-            "message": "Last reboot run was recorded before the current reboot command path changed; the timestamp is retained for audit history.",
-        })
-    if status.get("state") == "running" and not process_is_running(status.get("pid")):
-        status["state"] = "unknown"
-        status["message"] = "Process is no longer visible; check the log for completion details."
-    return status
+    return read_action_status(action_id, _admin_action_state_sources())
 
 
 def write_admin_action_status(action_id: str, status: dict) -> None:
-    ADMIN_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    status["updated_at"] = now_iso_local()
-    admin_status_path(action_id).write_text(json.dumps(status, indent=2), encoding="utf-8")
-
-
-def _parse_admin_status_time(value: object) -> dt.datetime | None:
-    if not value:
-        return None
-    try:
-        return parse_iso_timestamp(value)
-    except Exception:
-        return None
+    write_action_status(action_id, status, _admin_action_state_sources())
 
 
 def latest_admin_action_outcome() -> dict | None:
     """Return the newest non-running admin action outcome for status banner rendering."""
-    newest: dict | None = None
-    newest_time: dt.datetime | None = None
-    for action_id, action in ADMIN_ACTIONS.items():
-        status = read_admin_action_status(action_id)
-        state = str(status.get("state") or "idle")
-        if state in {"idle", "running"}:
-            continue
-        when = (
-            _parse_admin_status_time(status.get("finished_at"))
-            or _parse_admin_status_time(status.get("updated_at"))
-            or _parse_admin_status_time(status.get("started_at"))
-        )
-        if not when:
-            continue
-        if newest_time is None or when > newest_time:
-            newest_time = when
-            newest = {
-                "id": action_id,
-                "label": status.get("label") or action.get("label", action_id),
-                "state": state,
-                "returncode": status.get("returncode"),
-                "message": status.get("message") or "No completion message recorded.",
-                "when": format_iso_timestamp(when),
-            }
-    return newest
+    return latest_action_outcome(_admin_action_state_sources())
 
 
 def read_admin_lock() -> dict | None:
-    try:
-        return json.loads(ADMIN_LOCK_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    return read_action_lock(_admin_action_state_sources())
 
 
 def running_admin_action() -> dict | None:
     """Return the currently running admin action, clearing stale locks when safe."""
-    lock = read_admin_lock()
-    if lock:
-        pid = lock.get("pid")
-        if process_is_running(pid):
-            return lock
-        try:
-            ADMIN_LOCK_FILE.unlink()
-        except FileNotFoundError:
-            pass
-        except Exception:
-            return lock
-    for action_id in ADMIN_ACTIONS:
-        status = read_admin_action_status(action_id)
-        if status.get("state") == "running" and process_is_running(status.get("pid")):
-            return {
-                "id": action_id,
-                "label": status.get("label") or ADMIN_ACTIONS[action_id]["label"],
-                "pid": status.get("pid"),
-                "started_at": status.get("started_at"),
-            }
-    return None
+    return running_action(_admin_action_state_sources())
 
 
 def claim_admin_action_lock(action_id: str, label: str, started_at: str) -> tuple[bool, str]:
     """Atomically claim the singleton admin-action lock."""
-    ADMIN_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    running = running_admin_action()
-    if running:
-        return False, f"{running.get('label', 'Another admin action')} is still running as PID {running.get('pid', 'unknown')}. Wait for it to complete before starting another update or reboot."
-    payload = {"id": action_id, "label": label, "pid": None, "started_at": started_at}
-    try:
-        fd = os.open(str(ADMIN_LOCK_FILE), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
-        return True, "Lock acquired."
-    except FileExistsError:
-        running = running_admin_action()
-        if running:
-            return False, f"{running.get('label', 'Another admin action')} is still running as PID {running.get('pid', 'unknown')}. Wait for it to complete before starting another update or reboot."
-        return claim_admin_action_lock(action_id, label, started_at)
-    except Exception as exc:
-        return False, f"Could not acquire admin action lock: {exc}"
+    return claim_action_lock(
+        action_id, label, started_at, _admin_action_state_sources()
+    )
 
 
 def update_admin_action_lock_pid(action_id: str, pid: int) -> None:
-    lock = read_admin_lock() or {}
-    if lock.get("id") == action_id:
-        lock["pid"] = pid
-        ADMIN_LOCK_FILE.write_text(json.dumps(lock, indent=2), encoding="utf-8")
+    update_action_lock_pid(action_id, pid, _admin_action_state_sources())
 
 
 def release_admin_action_lock(action_id: str) -> None:
-    lock = read_admin_lock() or {}
-    if not lock or lock.get("id") == action_id:
-        try:
-            ADMIN_LOCK_FILE.unlink()
-        except FileNotFoundError:
-            pass
+    release_action_lock(action_id, _admin_action_state_sources())
 
 
 def start_admin_action(action_id: str, confirmation: str = "") -> tuple[bool, str]:
