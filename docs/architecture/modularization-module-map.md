@@ -448,6 +448,13 @@ Its source bundle exposes the connection/schema adapters and existing review
 models, leaving database location, connection policy, and public route wiring in
 the portal.
 
+`portal_soc_pcap_request_policy.py` owns deterministic PCAP request identities,
+candidate-plus-analyst override semantics, required endpoint/time validation,
+bounded ports and capture windows, protocol normalization, and bounded request
+metadata. Its only injected dependency is canonical timestamp normalization;
+database candidate lookup, queue persistence, and alert-store dispatch remain
+separate runtime concerns.
+
 `portal_cron_failures.py` owns bounded Hermes cron-failure collection and
 escaped Administration rendering. It treats run-level Markdown output as
 authoritative evidence, uses `jobs.json` only as a latest-error fallback,

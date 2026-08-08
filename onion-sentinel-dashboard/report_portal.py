@@ -409,6 +409,12 @@ from portal_soc_adjudication_history import (
     SocAdjudicationHistorySources,
     read_soc_adjudication_history,
 )
+from portal_soc_pcap_request_policy import (
+    PcapRequestPolicySources,
+    bounded_int as bounded_pcap_int,
+    normalize_pcap_request as normalize_pcap_request_policy,
+    pcap_request_id as projected_pcap_request_id,
+)
 from portal_beacon_history import project_beacon_history
 from portal_n8n_container_status import (
     N8nContainerStatusSources,
@@ -3630,16 +3636,11 @@ def sqlite_table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
 
 
 def bounded_int(value: object, default: int, low: int, high: int) -> int:
-    try:
-        number = int(round(float(value)))
-    except (TypeError, ValueError):
-        number = default
-    return max(low, min(high, number))
+    return bounded_pcap_int(value, default, low, high)
 
 
 def pcap_request_id(seed: dict) -> str:
-    raw = json.dumps(seed, ensure_ascii=False, separators=(",", ":"))
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    return projected_pcap_request_id(seed)
 
 
 def normalize_pcap_timestamp(value: object) -> str:
@@ -3740,51 +3741,14 @@ def pcap_request_candidate_from_group(conn: sqlite3.Connection, group_id: str) -
     return candidate
 
 
-def normalize_pcap_request(payload: dict, candidate: dict) -> tuple[dict | None, str]:
-    merged = {**candidate, **(payload or {})}
-    reason = str(merged.get("reason") or "SOC analyst requested PCAP evidence").strip()[:240]
-    source_ip = str(merged.get("source_ip") or "").strip()[:64]
-    destination_ip = str(merged.get("destination_ip") or "").strip()[:64]
-    first_seen = normalize_pcap_timestamp(merged.get("first_seen") or merged.get("timestamp") or merged.get("last_seen"))
-    last_seen = normalize_pcap_timestamp(merged.get("last_seen") or merged.get("timestamp") or merged.get("first_seen"))
-    if not source_ip or not destination_ip:
-        return None, "PCAP request requires source and destination IPs"
-    if not first_seen or not last_seen:
-        return None, "PCAP request requires first_seen and last_seen timestamps"
+def pcap_request_policy_sources() -> PcapRequestPolicySources:
+    return PcapRequestPolicySources(normalize_timestamp=normalize_pcap_timestamp)
 
-    request = {
-        "alert_id": str(merged.get("alert_id") or "").strip()[:512] or None,
-        "group_id": str(merged.get("group_id") or "").strip()[:64] or None,
-        "group_key": str(merged.get("group_key") or "").strip()[:512] or None,
-        "first_seen": first_seen,
-        "last_seen": last_seen,
-        "source_ip": source_ip,
-        "source_port": bounded_int(merged.get("source_port"), 0, 0, 65535) or None,
-        "destination_ip": destination_ip,
-        "destination_port": bounded_int(merged.get("destination_port"), 0, 0, 65535) or None,
-        "network_protocol": str(merged.get("network_protocol") or "").strip()[:32] or None,
-        "transport_protocol": str(merged.get("transport_protocol") or "").strip().lower()[:32] or None,
-        "community_id": str(merged.get("community_id") or "").strip()[:128] or None,
-        "capture_file": str(merged.get("capture_file") or "").strip()[:512] or None,
-        "requested_by": str(merged.get("requested_by") or "dashboard").strip()[:80] or "dashboard",
-        "reason": reason,
-        "max_window_seconds": bounded_int(merged.get("max_window_seconds"), 120, 30, 300),
-        "require_source_port": bool(merged.get("require_source_port")),
-    }
-    request["request_id"] = pcap_request_id({
-        "alert_id": request["alert_id"],
-        "group_id": request["group_id"],
-        "first_seen": request["first_seen"],
-        "last_seen": request["last_seen"],
-        "source_ip": request["source_ip"],
-        "source_port": request["source_port"],
-        "destination_ip": request["destination_ip"],
-        "destination_port": request["destination_port"],
-        "community_id": request["community_id"],
-        "capture_file": request["capture_file"],
-        "reason": request["reason"],
-    })
-    return request, ""
+
+def normalize_pcap_request(payload: dict, candidate: dict) -> tuple[dict | None, str]:
+    return normalize_pcap_request_policy(
+        pcap_request_policy_sources(), payload, candidate
+    )
 
 
 def insert_pcap_request(conn: sqlite3.Connection, request: dict) -> sqlite3.Row:
