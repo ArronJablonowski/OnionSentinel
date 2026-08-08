@@ -284,6 +284,10 @@ from portal_post_intake import prepare_post_intake
 from portal_json_write_service import JsonWriteCallbacks, dispatch_json_write
 from portal_llm_runtime_state import llm_runtime_model_state
 from portal_beacon_history import project_beacon_history
+from portal_n8n_container_status import (
+    N8nContainerStatusSources,
+    compose_n8n_container_status,
+)
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -2888,116 +2892,15 @@ def docker_status() -> tuple[bool, str]:
 
 def n8n_container_status() -> dict[str, object]:
     """Return compact n8n container/app health without exposing container config."""
-    now = dt.datetime.now().astimezone()
-    checked_at = format_iso_timestamp(now)
-    checked_label = format_iso_timestamp(now)
     docker_bin = shutil.which("docker") or "/usr/local/bin/docker"
     env = {**os.environ, "PATH": ADMIN_COMMAND_ENV.get("PATH", os.environ.get("PATH", ""))}
-    base: dict[str, object] = {
-        "id": "n8n",
-        "label": "n8n container",
-        "startable": False,
-        "checked_at": checked_at,
-    }
-    try:
-        inspect_proc = subprocess.run(
-            [docker_bin, "inspect", N8N_CONTAINER_NAME],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=5,
-            check=False,
-            env=env,
-        )
-    except Exception as exc:
-        return {
-            **base,
-            "running": False,
-            "level": "alert",
-            "value": "Docker unavailable",
-            "detail": f"WARNING: unable to inspect {N8N_CONTAINER_NAME}: {exc} · checked {checked_label}",
-        }
-    if inspect_proc.returncode != 0:
-        stderr = (inspect_proc.stderr or inspect_proc.stdout or "docker inspect failed").strip().splitlines()
-        reason = stderr[-1] if stderr else "docker inspect failed"
-        lower_reason = reason.lower()
-        value = "Missing" if "no such object" in lower_reason or "no such container" in lower_reason else "Docker unavailable"
-        return {
-            **base,
-            "running": False,
-            "level": "alert",
-            "value": value,
-            "detail": f"WARNING: {N8N_CONTAINER_NAME} status unavailable: {reason} · healthz not checked · checked {checked_label}",
-        }
-    try:
-        inspect_data = json.loads(inspect_proc.stdout)
-        container = inspect_data[0] if isinstance(inspect_data, list) and inspect_data else {}
-    except Exception as exc:
-        return {
-            **base,
-            "running": False,
-            "level": "alert",
-            "value": "Unknown",
-            "detail": f"WARNING: unable to parse docker inspect output for {N8N_CONTAINER_NAME}: {exc} · checked {checked_label}",
-        }
-    state_obj = (container.get("State") or {}) if isinstance(container, dict) else {}
-    host_config = (container.get("HostConfig") or {}) if isinstance(container, dict) else {}
-    restart_obj = host_config.get("RestartPolicy") or {}
-    state = str(state_obj.get("Status") or "unknown")
-    started_at = str(state_obj.get("StartedAt") or "unknown")
-    restart_policy = str(restart_obj.get("Name") or "none")
-    health_ok = False
-    health_detail = "not checked"
-    if state == "running":
-        try:
-            health_proc = subprocess.run(
-                ["/usr/bin/curl", "-fsS", "--max-time", "5", N8N_HEALTH_URL],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=7,
-                check=False,
-            )
-            body = health_proc.stdout.strip()
-            if health_proc.returncode == 0:
-                try:
-                    payload = json.loads(body)
-                    health_ok = payload.get("status") == "ok"
-                except Exception:
-                    health_ok = body == '{"status":"ok"}'
-                health_detail = "ok" if health_ok else f"unexpected response: {body[:120] or 'empty body'}"
-            else:
-                err = (health_proc.stderr or body or "curl failed").strip().splitlines()
-                health_detail = err[-1] if err else "curl failed"
-        except Exception as exc:
-            health_detail = f"health check error: {exc}"
-    if state != "running":
-        level = "alert"
-        value = state if state != "unknown" else "Unknown"
-    elif not health_ok:
-        level = "warn"
-        value = "Health warning"
-    elif restart_policy != "unless-stopped":
-        level = "warn"
-        value = "Policy warning"
-    else:
-        level = "ok"
-        value = "Healthy"
-    detail = (
-        f"state={state} · healthz={health_detail} · restart={restart_policy} "
-        f"· started={started_at} · checked {checked_label}"
-    )
-    return {
-        **base,
-        "running": level == "ok",
-        "level": level,
-        "value": value,
-        "detail": detail,
-        "container_state": state,
-        "healthz": health_detail,
-        "restart_policy": restart_policy,
-        "started_at": started_at,
-    }
+    return compose_n8n_container_status(N8nContainerStatusSources(
+        docker_bin=docker_bin, container_name=N8N_CONTAINER_NAME,
+        health_url=N8N_HEALTH_URL, environment=env,
+        pipe=subprocess.PIPE, run=subprocess.run,
+        now=lambda: dt.datetime.now().astimezone(),
+        format_timestamp=format_iso_timestamp,
+    ))
 
 
 ADMIN_SERVICE_LABELS = {

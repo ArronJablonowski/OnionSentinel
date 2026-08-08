@@ -333,6 +333,13 @@ browser-side service-start/reboot-confirmation behavior. `report_portal.py`
 retains a small facade that supplies existing host, process, filesystem, and
 shell callbacks; the renderer itself cannot invoke an undeclared system action.
 
+`portal_n8n_container_status.py` owns the bounded n8n Administration health
+record. An explicit source bundle exposes Docker and curl execution, time,
+formatting, environment, container identity, and health URL. The service
+projects only state, healthz, restart policy, start time, and bounded errors;
+Docker configuration and environment values are never returned. The portal
+retains executable/path selection and the public compatibility function.
+
 `portal_pcap_health.py` owns the PCAP workflow System Health read model. It
 aggregates request and outcome counts, artifact storage, active-transfer
 heartbeats, bounded serial-queue grace, relay capture-protection state, recent

@@ -103,6 +103,15 @@
       "required_symbols": []
     },
     {
+      "path": "onion-sentinel-dashboard/portal_n8n_container_status.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_n8n_container_status.py",
+      "required_symbols": [
+        "N8nContainerStatusSources",
+        "compose_n8n_container_status"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_pcap_health.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_pcap_health.py",
