@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import datetime as dt
 import hashlib
 import hmac
@@ -89,6 +88,15 @@ from portal_cli_provider_readiness import (
     enabled_cli_harnesses_ready,
     hermes_auth_readiness_error,
     resolve_cli_harness,
+)
+from portal_ollama_catalog import (
+    OllamaCatalogSources,
+    OllamaMetadataSources,
+    classify_ollama_model_compatibility as classify_ollama_compatibility,
+    compose_ollama_models_response,
+    list_ollama_models as discover_ollama_models,
+    load_ollama_model_compatibility,
+    ollama_context_length,
 )
 from portal_admin_dashboard import (
     AdminDashboardSources,
@@ -1700,167 +1708,55 @@ def read_soc_ai_settings() -> dict:
 
 def list_ollama_models() -> list[str]:
     """Return locally installed Ollama model names from `ollama ls`."""
-    commands = [
-        ["/opt/homebrew/bin/ollama", "ls"],
-        ["/usr/local/bin/ollama", "ls"],
-        ["ollama", "ls"],
-    ]
-    output = ""
-    for command in commands:
-        try:
-            proc = subprocess.run(
-                command,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=10,
-                env=ADMIN_COMMAND_ENV,
-            )
-        except Exception:
-            continue
-        if proc.returncode == 0 and proc.stdout.strip():
-            output = proc.stdout
-            break
-    models: list[str] = []
-    for line in output.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.lower().startswith("name"):
-            continue
-        name = stripped.split()[0].strip()
-        if name and name not in models:
-            models.append(name)
-    return models
+    return discover_ollama_models(
+        run=subprocess.run, env=ADMIN_COMMAND_ENV
+    )
 
 
 def _ollama_context_length(model_info: object) -> int:
     """Return the largest declared context window from Ollama model metadata."""
-    if not isinstance(model_info, dict):
-        return 0
-    lengths: list[int] = []
-    for key, value in model_info.items():
-        if not str(key).endswith(".context_length"):
-            continue
-        try:
-            lengths.append(max(0, int(value)))
-        except (TypeError, ValueError):
-            continue
-    return max(lengths, default=0)
+    return ollama_context_length(model_info)
 
 
 def classify_ollama_model_compatibility(model: str, metadata: object) -> dict:
     """Assess only capabilities the current bounded SOC analysis exchange requires."""
-    if not isinstance(metadata, dict):
-        return {
-            "compatible": False,
-            "status": "unverified",
-            "reasons": ["Ollama did not return capability metadata for this model."],
-            "capabilities": [],
-            "context_length": 0,
-        }
-
-    capabilities = sorted({
-        str(item).strip().lower()
-        for item in metadata.get("capabilities", [])
-        if str(item).strip()
-    }) if isinstance(metadata.get("capabilities"), list) else []
-    context_length = _ollama_context_length(metadata.get("model_info"))
-    reasons: list[str] = []
-
-    if "completion" not in capabilities:
-        if "image" in capabilities:
-            reasons.append(
-                "Image-generation only: this model cannot return the text and JSON analysis required by Onion Sentinel."
-            )
-        elif "embedding" in capabilities:
-            reasons.append(
-                "Embedding-only: this model cannot generate the text and JSON analysis required by Onion Sentinel."
-            )
-        else:
-            reasons.append(
-                "No text-completion capability was reported, so the model cannot produce an Onion Sentinel analysis."
-            )
-    if not str(metadata.get("template") or "").strip():
-        reasons.append(
-            "No chat template was reported, so the model cannot accept the system and analyst messages used by Onion Sentinel."
-        )
-    if context_length and context_length < OLLAMA_MODEL_MIN_CONTEXT_TOKENS:
-        reasons.append(
-            f"The {context_length:,}-token context window is below Onion Sentinel's "
-            f"{OLLAMA_MODEL_MIN_CONTEXT_TOKENS:,}-token operational minimum."
-        )
-
-    return {
-        "compatible": not reasons,
-        "status": "compatible" if not reasons else "incompatible",
-        "reasons": reasons,
-        "capabilities": capabilities,
-        "context_length": context_length,
-    }
+    return classify_ollama_compatibility(
+        model,
+        metadata,
+        min_context_tokens=OLLAMA_MODEL_MIN_CONTEXT_TOKENS,
+    )
 
 
 def ollama_model_compatibility(model: str, ollama_url: str) -> dict:
     """Read bounded local Ollama metadata and cache the compatibility decision."""
-    cache_key = (ollama_url.rstrip("/"), model)
+    return load_ollama_model_compatibility(
+        OllamaMetadataSources(
+            cache_get_or_compute=OLLAMA_MODEL_COMPATIBILITY_CACHE.get_or_compute,
+            open_url=urllib_request.urlopen,
+            read_json=read_bounded_json,
+            max_bytes=OLLAMA_MODEL_SHOW_MAX_BYTES,
+            min_context_tokens=OLLAMA_MODEL_MIN_CONTEXT_TOKENS,
+        ),
+        model,
+        ollama_url,
+    )
 
-    def compute() -> dict:
-        endpoint = cache_key[0] + "/api/show"
-        request = urllib_request.Request(
-            endpoint,
-            data=json.dumps({"model": model}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib_request.urlopen(request, timeout=4) as response:
-                metadata = read_bounded_json(response, max_bytes=OLLAMA_MODEL_SHOW_MAX_BYTES)
-        except Exception:
-            return classify_ollama_model_compatibility(model, None)
-        return classify_ollama_model_compatibility(model, metadata)
 
-    return OLLAMA_MODEL_COMPATIBILITY_CACHE.get_or_compute(cache_key, compute)
+def ollama_catalog_sources() -> OllamaCatalogSources:
+    return OllamaCatalogSources(
+        read_settings=read_soc_ai_settings,
+        default_settings=default_soc_ai_settings,
+        list_models=list_ollama_models,
+        normalize_models=_normalized_model_list,
+        compatibility=ollama_model_compatibility,
+        clear_cache=OLLAMA_MODEL_COMPATIBILITY_CACHE.clear,
+    )
 
 
 def ollama_models_response(force_refresh: bool = False) -> dict:
-    settings = read_soc_ai_settings().get("settings") or default_soc_ai_settings()
-    installed_models = list_ollama_models()
-    enabled_models = _normalized_model_list(settings.get("enabled_ollama_models"))
-    models = list(installed_models)
-    for configured_model in enabled_models:
-        if configured_model not in models:
-            models.append(configured_model)
-    if force_refresh:
-        OLLAMA_MODEL_COMPATIBILITY_CACHE.clear()
-    ollama_url = str(settings.get("ollama_url") or "http://127.0.0.1:11434").rstrip("/")
-    installed_set = set(installed_models)
-
-    def assess(model: str) -> tuple[str, dict]:
-        if model not in installed_set:
-            return model, {
-                "compatible": False,
-                "status": "unavailable",
-                "reasons": ["This model is configured but is not installed locally, so Onion Sentinel cannot run it."],
-                "capabilities": [],
-                "context_length": 0,
-            }
-        return model, ollama_model_compatibility(model, ollama_url)
-
-    compatibility: dict[str, dict] = {}
-    if models:
-        # Metadata reads are independent local requests. A small fixed pool keeps
-        # one unhealthy model endpoint from serially delaying the Settings page.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(models))) as executor:
-            for model, assessment in executor.map(assess, models):
-                compatibility[model] = assessment
-    current = enabled_models[0] if enabled_models else str(settings.get("ollama_model") or "").strip()
-    return {
-        "ok": True,
-        "models": models,
-        "installed_models": installed_models,
-        "enabled_models": enabled_models,
-        "compatibility": compatibility,
-        "selected": current,
-        "command": "ollama ls",
-    }
+    return compose_ollama_models_response(
+        ollama_catalog_sources(), force_refresh=force_refresh
+    )
 
 
 def _write_soc_ai_settings(normalized: dict) -> tuple[bool, dict]:

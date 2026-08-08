@@ -340,6 +340,14 @@ operator-facing readiness errors and never exposes credential contents. The
 portal retains runtime paths, executable discovery, provider-enable policy
 callbacks, and compatibility facades.
 
+`portal_ollama_catalog.py` owns fixed-order local model discovery, deduplicated
+CLI output parsing, bounded cached `/api/show` metadata retrieval, capability/
+chat-template/context-window compatibility classification, configured-but-
+uninstalled model projection, cache refresh, and bounded concurrent assessment.
+Its source bundles expose process execution, environment, settings/defaults,
+normalization, URL transport, bounded JSON reading, cache operations, and worker
+limits. The portal retains runtime constants and stable compatibility facades.
+
 `portal_admin_dashboard.py` owns the Administration dashboard view model and
 escaped rendering. Its explicit source boundary collects service health,
 running/latest actions, update and reboot state, version/availability details,

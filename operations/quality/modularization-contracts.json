@@ -96,6 +96,20 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_ollama_catalog.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_ollama_catalog.py",
+      "required_symbols": [
+        "OllamaCatalogSources",
+        "OllamaMetadataSources",
+        "classify_ollama_model_compatibility",
+        "compose_ollama_models_response",
+        "list_ollama_models",
+        "load_ollama_model_compatibility",
+        "ollama_context_length"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_ai_settings_store.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_ai_settings_store.py",
