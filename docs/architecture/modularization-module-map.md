@@ -609,6 +609,12 @@ discovery, software inventory, and CTI reads. Exact-route selection invokes
 only its corresponding injected callback. `report_portal.py` retains runtime
 dependency composition, JSON serialization, HTML rendering, and socket writes.
 
+`portal_post_intake.py` owns POST path acceptance, safe `Content-Length`
+parsing, per-route request-size limits, and exact JSON, not-found, login, or
+Administration-dashboard rejection intent. Administration authentication is
+lazy and consulted only for an invalid Administration action. The HTTP handler
+retains bounded body reads, form rendering, and socket writes.
+
 `portal_resource_action_read.py` owns asynchronous Resource Library action ID
 validation, pending-state projection, and byte-preserving status reads. The
 portal retains the concrete action-status directory, JSON encoding for

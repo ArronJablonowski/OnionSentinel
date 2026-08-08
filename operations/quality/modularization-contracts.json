@@ -495,6 +495,15 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_post_intake.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_post_intake.py",
+      "required_symbols": [
+        "PostIntakeResult",
+        "prepare_post_intake"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_resource_action_read.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_resource_action_read.py",

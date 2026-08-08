@@ -287,6 +287,7 @@ from portal_resource_action_read import read_resource_action_status
 from portal_catalog_read_service import CatalogReadCallbacks, dispatch_catalog_read
 from portal_catalog_delivery import CatalogDeliveryCallbacks, deliver_catalog_route
 from portal_general_read_service import GeneralReadCallbacks, dispatch_general_read
+from portal_post_intake import prepare_post_intake
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -8463,20 +8464,17 @@ class PortalHandler(BaseHTTPRequestHandler):
             prompt_paths=SOC_SETTINGS_PROMPT_API_PATHS,
         )
         is_asset_write = route.asset_write
-        if not route.accepted:
-            return self._send(HTTPStatus.NOT_FOUND, b"Not found", "text/plain; charset=utf-8")
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            length = 0
-        request_limit = route.request_limit(cti_program.MAX_FILE_BYTES)
-        if length <= 0 or length > request_limit:
-            if route.json_request:
-                return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
-            if parsed.path == "/admin/action" and self._admin_authenticated():
-                return self._send(HTTPStatus.BAD_REQUEST, render_admin_dashboard("Invalid admin action request size.", True))
-            return self._send(HTTPStatus.BAD_REQUEST, render_admin_login("Invalid request size.", True))
-        raw = self.rfile.read(length).decode("utf-8", errors="replace")
+        intake = prepare_post_intake(
+            route, self.headers.get("Content-Length"),
+            cti_file_bytes=cti_program.MAX_FILE_BYTES,
+            admin_authenticated=lambda: self._admin_authenticated(),
+        )
+        if not intake.ready:
+            if intake.view:
+                renderer = render_admin_dashboard if intake.view == "dashboard" else render_admin_login
+                return self._send(intake.status, renderer(intake.message, True))
+            return self._send(intake.status, intake.body, intake.content_type)
+        raw = self.rfile.read(intake.length).decode("utf-8", errors="replace")
         if route.cti_program_write:
             cti_write = prepare_cti_program_write(
                 route,
