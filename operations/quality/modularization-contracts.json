@@ -39,6 +39,17 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_job_reporting.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_job_reporting.py",
+      "required_symbols": [
+        "ClaimedAiLease",
+        "ControlledClaimRejected",
+        "SchedulerReportingSources",
+        "transition_ai_job_status"
+      ]
+    },
+    {
       "path": "n8n/bin/onion_sentinel_harness.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/onion_sentinel_harness.py",

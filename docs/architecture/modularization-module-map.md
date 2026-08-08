@@ -260,6 +260,14 @@ compatibility facade that resolves its existing mutable defaults and injects
 the alert-ID, dispatch-ID, and stable-group-key policies at parse time, so
 tests and operators keep the exact CLI and environment behavior.
 
+`scheduler_job_reporting.py` owns the bounded `/jobs/status` mutation contract,
+terminal status projection, exact controlled-claim validation, indeterminate-
+request retry policy, rolling-deployment 404 behavior, conflict rejection, and
+server-authoritative lease snapshot. Its source bundle exposes HTTP creation,
+transport, bounded JSON decoding, mutation headers, sleep, and controlled-route
+policy. The launchd wrapper retains a stable `report_ai_job_status` facade and
+binds its existing transport globals at call time for compatibility.
+
 ### `onion_sentinel_harness.py`
 
 | Current responsibility | Target boundary | Notes |

@@ -49,6 +49,12 @@ from scheduler_cli import (
     SchedulerCliPolicy,
     parse_scheduler_args,
 )
+from scheduler_job_reporting import (
+    ClaimedAiLease,
+    ControlledClaimRejected,
+    SchedulerReportingSources,
+    transition_ai_job_status,
+)
 
 
 HOME = Path.home()
@@ -1822,42 +1828,19 @@ def rows(conn: sqlite3.Connection, sql: str, params: Iterable[object] = ()) -> l
     return conn.execute(sql, tuple(params)).fetchall()
 
 
-class ControlledClaimRejected(RuntimeError):
-    """An exact controlled job was not claimed; no queue mutation is owned."""
-
-
-class ClaimedAiLease(str):
-    """Lease token carrying the server-authoritative job snapshot it claimed."""
-
-    job_payload: dict[str, object]
-    job_type: str
-    resolved_key: str
-    job_id: int
-    reanalysis_attempt_id: str
-
-    def __new__(
-        cls,
-        token: str,
-        *,
-        job_payload: dict[str, object] | None = None,
-        job_type: str = "",
-        resolved_key: str = "",
-        job_id: int = 0,
-        reanalysis_attempt_id: str = "",
-    ):
-        value = super().__new__(cls, token)
-        try:
-            normalized_job_id = int(job_id or 0)
-        except (TypeError, ValueError):
-            normalized_job_id = 0
-        value.job_payload = (
-            job_payload if isinstance(job_payload, dict) else {}
-        )
-        value.job_type = str(job_type or "")
-        value.resolved_key = str(resolved_key or "")
-        value.job_id = normalized_job_id
-        value.reanalysis_attempt_id = str(reanalysis_attempt_id or "")
-        return value
+def scheduler_reporting_sources() -> SchedulerReportingSources:
+    """Bind the scheduler's bounded HTTP and controlled-claim policy ports."""
+    return SchedulerReportingSources(
+        request_factory=urllib.request.Request,
+        open_url=urllib.request.urlopen,
+        read_json=read_bounded_json,
+        mutation_headers=alert_store_mutation_headers,
+        sleep=time.sleep,
+        valid_stable_group_key=valid_controlled_stable_group_key,
+        model_route_pattern=CONTROLLED_MODEL_ROUTE_RE,
+        max_response_bytes=DEFAULT_MAX_CONTROL_RESPONSE_BYTES,
+        exact_claim_attempts=CONTROLLED_EXACT_CLAIM_ATTEMPTS,
+    )
 
 
 def report_ai_job_status(
@@ -1883,163 +1866,23 @@ def report_ai_job_status(
     worker never performs expensive inference without a durable processing
     lease in the current indexed architecture.
     """
-    request_payload = {
-        "job_type": job_type,
-        "dedupe_key": group_id,
-        "status": status,
-        "error": error[:1000],
-        "lease_token": lease_token,
-        "retryable": bool(retryable),
-    }
-    exact_claim_values = (
-        int(expected_job_id or 0),
-        str(expected_representative_alert_id or ""),
-        str(expected_dispatch_id or ""),
-        str(expected_stable_group_key or ""),
-        str(expected_assigned_route or ""),
-        str(expected_reviewer_route or ""),
-        reviewer_required is True,
+    return transition_ai_job_status(
+        scheduler_reporting_sources(),
+        base_url,
+        group_id,
+        status,
+        error,
+        lease_token,
+        job_type,
+        retryable,
+        expected_job_id,
+        expected_representative_alert_id,
+        expected_dispatch_id,
+        expected_stable_group_key,
+        expected_assigned_route,
+        expected_reviewer_route,
+        reviewer_required,
     )
-    if any(exact_claim_values):
-        if (
-            status != "processing"
-            or lease_token
-            or not all(exact_claim_values)
-        ):
-            raise ControlledClaimRejected(
-                "controlled durable AI claim identity is incomplete"
-            )
-        if not valid_controlled_stable_group_key(exact_claim_values[3]):
-            raise ControlledClaimRejected(
-                "controlled durable AI claim stable group key is invalid"
-            )
-        if (
-            not CONTROLLED_MODEL_ROUTE_RE.fullmatch(exact_claim_values[4])
-            or not CONTROLLED_MODEL_ROUTE_RE.fullmatch(exact_claim_values[5])
-            or exact_claim_values[4].rsplit(":", 1)[0]
-            == exact_claim_values[5].rsplit(":", 1)[0]
-            or exact_claim_values[6] is not True
-        ):
-            raise ControlledClaimRejected(
-                "controlled durable AI claim route identity is invalid"
-            )
-        request_payload.update(
-            {
-                "expected_job_id": exact_claim_values[0],
-                "expected_representative_alert_id": exact_claim_values[1],
-                "expected_dispatch_id": exact_claim_values[2],
-                "expected_stable_group_key": exact_claim_values[3],
-                "expected_assigned_route": exact_claim_values[4],
-                "expected_reviewer_route": exact_claim_values[5],
-                "reviewer_required": True,
-            }
-        )
-    payload = json.dumps(request_payload).encode("utf-8")
-    exact_claim = bool(all(exact_claim_values))
-    attempts = CONTROLLED_EXACT_CLAIM_ATTEMPTS if exact_claim else 1
-    last_error: Exception | None = None
-    for attempt_index in range(attempts):
-        if attempt_index:
-            time.sleep(0.05 * attempt_index)
-        request = urllib.request.Request(
-            f"{base_url.rstrip('/')}/jobs/status",
-            data=payload,
-            headers=alert_store_mutation_headers(),
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                if response.status not in range(200, 300):
-                    raise RuntimeError(
-                        f"AI job status returned HTTP {response.status}"
-                    )
-                result = read_bounded_json(
-                    response,
-                    max_bytes=DEFAULT_MAX_CONTROL_RESPONSE_BYTES,
-                )
-            if not result.get("ok", True):
-                raise RuntimeError(
-                    str(
-                        result.get("reason")
-                        or "AI job status was rejected"
-                    )
-                )
-            if status != "processing":
-                return True
-            claimed_token = str(result.get("lease_token") or "")
-            claim = result.get("claim")
-            claim = claim if isinstance(claim, dict) else {}
-            claimed_payload = claim.get("payload")
-            if (
-                not claimed_token
-                or (
-                    exact_claim
-                    and not isinstance(claimed_payload, dict)
-                )
-            ):
-                error = RuntimeError(
-                    "AI job processing transition did not return an exact "
-                    "lease receipt"
-                )
-                if exact_claim and attempt_index + 1 < attempts:
-                    last_error = error
-                    continue
-                raise error
-            try:
-                claimed_job_id = int(claim.get("job_id") or 0)
-            except (TypeError, ValueError):
-                claimed_job_id = 0
-            return ClaimedAiLease(
-                claimed_token,
-                job_payload=(
-                    claimed_payload
-                    if isinstance(claimed_payload, dict)
-                    else {}
-                ),
-                job_type=str(claim.get("job_type") or ""),
-                resolved_key=str(
-                    claim.get("dedupe_key")
-                    or result.get("dedupe_key")
-                    or group_id
-                ),
-                job_id=claimed_job_id,
-                reanalysis_attempt_id=str(
-                    claim.get("reanalysis_attempt_id") or ""
-                ),
-            )
-        except urllib.error.HTTPError as exc:
-            status_code = int(exc.code)
-            exc.close()
-            if status_code == 409:
-                raise ControlledClaimRejected(
-                    "controlled durable AI job changed before it could be "
-                    "claimed"
-                ) from exc
-            if status_code == 404:
-                return False
-            error = RuntimeError(
-                f"AI job status returned HTTP {status_code}"
-            )
-            if (
-                exact_claim
-                and (
-                    status_code >= 500
-                    or status_code in {408, 425, 429}
-                )
-                and attempt_index + 1 < attempts
-            ):
-                last_error = error
-                continue
-            raise error from exc
-        except (urllib.error.URLError, TimeoutError, OSError, BoundedHttpError) as exc:
-            error = RuntimeError(f"AI job status request failed: {exc}")
-            if exact_claim and attempt_index + 1 < attempts:
-                last_error = error
-                continue
-            raise error from exc
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("AI job status retry invariant failed")
 
 
 def incident_reanalysis_attempt_id(lease_token: str) -> str:
