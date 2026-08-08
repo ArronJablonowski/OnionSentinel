@@ -405,6 +405,13 @@ directory, byte/record limits, and a bounded process-command snapshot callback.
 The portal retains the static dashboard read, actual `ps` subprocess, runtime
 paths, and compatibility facades.
 
+`portal_llm_history.py` owns committed primary-run projection, exact and
+five-second legacy identity reconciliation, second-opinion and disagreement
+adjudication shaping, exact-parent collector telemetry hydration, reviewer
+start-time derivation, chronological ordering, per-role totals, and history
+truncation metadata. The portal retains schema-adaptive read-only SQLite and
+JSONL queries, cache lifetime, pagination, and compatibility facades.
+
 `portal_cron_failures.py` owns bounded Hermes cron-failure collection and
 escaped Administration rendering. It treats run-level Markdown output as
 authoritative evidence, uses `jobs.json` only as a latest-error fallback,

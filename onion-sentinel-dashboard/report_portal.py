@@ -365,6 +365,19 @@ from portal_llm_active_store import (
     read_active_llm_analyses as load_active_llm_analyses,
     read_bounded_llm_record,
 )
+from portal_llm_history import (
+    PARENT_RUN_FIELDS as LLM_PARENT_RUN_FIELDS,
+    compose_llm_activity_snapshot,
+    hydrate_llm_reviewer_from_parent as hydrate_projected_llm_reviewer,
+    llm_analysis_run_timestamp as projected_llm_run_timestamp,
+    llm_log_sort_timestamp as projected_llm_log_sort_timestamp,
+    llm_primary_run_identity as projected_llm_primary_identity,
+    llm_reviewer_started_at as projected_llm_reviewer_started_at,
+    project_adjudication_rows,
+    project_database_primary_rows,
+    project_second_opinion_rows,
+    reconcile_llm_primary_logs as reconcile_projected_llm_primary_logs,
+)
 from portal_beacon_history import project_beacon_history
 from portal_n8n_container_status import (
     N8nContainerStatusSources,
@@ -4502,35 +4515,11 @@ LLM_AGENT_ACTIVITY_CACHE = ResponseCache(
 
 
 def _llm_analysis_run_timestamp(value: object) -> float:
-    text = str(value or "").strip()
-    if not text:
-        return 0.0
-    try:
-        parsed = dt.datetime.fromisoformat(text.replace("  ", "T", 1))
-    except ValueError:
-        return 0.0
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.timezone.utc)
-    return parsed.timestamp()
+    return projected_llm_run_timestamp(value)
 
 
 def _llm_primary_run_identity(record: object) -> tuple[str, str, float]:
-    """Return a conservative fallback identity for pre-contract run records."""
-    current = record if isinstance(record, dict) else {}
-    alert = current.get("alert") if isinstance(current.get("alert"), dict) else {}
-    alert_id = str(
-        alert.get("primary_alert_id")
-        or current.get("alert_id")
-        or ""
-    ).strip()
-    role = str(current.get("agent_role") or "soc-analyst").strip().lower()
-    role = role.replace("_", "-")
-    timestamp = _llm_analysis_run_timestamp(
-        current.get("finished_at")
-        or current.get("generated_at")
-        or current.get("started_at")
-    )
-    return alert_id, role, timestamp
+    return projected_llm_primary_identity(record)
 
 
 def read_llm_database_primary_logs(
@@ -4613,149 +4602,25 @@ def read_llm_database_primary_logs(
     except (FileNotFoundError, sqlite3.Error, TypeError, ValueError):
         return []
 
-    logs: list[dict] = []
-    for raw in rows:
-        row = dict(raw)
-        analysis_id = str(row.get("analysis_id") or "").strip()
-        alert_id = str(row.get("alert_id") or "").strip()
-        generated_at = str(row.get("generated_at") or "").strip()
-        try:
-            alert_count = max(1, int(row.get("seen_count") or 1))
-        except (TypeError, ValueError):
-            alert_count = 1
-        logs.append({
-            "log_id": analysis_id,
-            "analysis_id": analysis_id,
-            "run_kind": "primary_analysis",
-            "agent_role": row.get("agent_role") or "soc-analyst",
-            "status": "success",
-            "model": row.get("model"),
-            "model_path": row.get("model_path"),
-            "model_route": "",
-            # SQLite records the committed completion time, not the start.
-            # Display that observed timestamp without claiming a runtime.
-            "started_at": generated_at,
-            "finished_at": generated_at,
-            "runtime_seconds": None,
-            "telemetry_source": "analysis_run_database",
-            "error": "Committed analysis record; host telemetry unavailable",
-            "alert": {
-                "primary_alert_id": alert_id,
-                "rule_name": row.get("rule_name") or "Security Onion alert",
-                "alert_count": alert_count,
-                "source_ip": row.get("source_ip"),
-                "destination_ip": row.get("destination_ip"),
-                "destination_port": row.get("destination_port"),
-            },
-        })
-    return logs
+    return project_database_primary_rows(rows)
 
 
 def reconcile_llm_primary_logs(
     telemetry_logs: list[dict],
     database_logs: list[dict],
 ) -> tuple[list[dict], int]:
-    """Merge primary activity without double-counting legacy run identities."""
-    merged = [dict(item) for item in telemetry_logs if isinstance(item, dict)]
-    exact_ids: dict[str, int] = {}
-    fallback: dict[tuple[str, str], list[tuple[float, int]]] = {}
-    for index, item in enumerate(merged):
-        run_id = str(
-            item.get("analysis_id") or item.get("log_id") or ""
-        ).strip()
-        if run_id:
-            exact_ids[run_id] = index
-        alert_id, role, timestamp = _llm_primary_run_identity(item)
-        if alert_id and timestamp:
-            fallback.setdefault((alert_id, role), []).append((timestamp, index))
-
-    def confirm_database_identity(index: int, database: dict) -> None:
-        """Hydrate only provenance that SQLite authoritatively observed."""
-        current = merged[index]
-        if not str(current.get("agent_role") or "").strip():
-            current["agent_role"] = (
-                database.get("agent_role") or "soc-analyst"
-            )
-        if not str(current.get("analysis_id") or "").strip():
-            current["analysis_id"] = database.get("analysis_id")
-        current["database_confirmed"] = True
-
-    recovered = 0
-    for item in database_logs:
-        if not isinstance(item, dict):
-            continue
-        run_id = str(
-            item.get("analysis_id") or item.get("log_id") or ""
-        ).strip()
-        if run_id and run_id in exact_ids:
-            confirm_database_identity(exact_ids[run_id], item)
-            continue
-        alert_id, role, timestamp = _llm_primary_run_identity(item)
-        # Before the shared analysis-id contract, JSONL and SQLite used
-        # different IDs. Alert, role, and a five-second completion window are
-        # sufficiently strict to identify the same execution without merging
-        # distinct reruns hours or days apart.
-        matched_index = next(
-            (
-                index
-                for observed, index in fallback.get((alert_id, role), ())
-                if abs(timestamp - observed) <= 5.0
-            ),
-            None,
-        ) if alert_id and timestamp else None
-        if matched_index is not None:
-            confirm_database_identity(matched_index, item)
-            continue
-        merged.append(dict(item))
-        recovered += 1
-        merged_index = len(merged) - 1
-        if run_id:
-            exact_ids[run_id] = merged_index
-        if alert_id and timestamp:
-            fallback.setdefault((alert_id, role), []).append(
-                (timestamp, merged_index)
-            )
-    return merged, recovered
+    return reconcile_projected_llm_primary_logs(telemetry_logs, database_logs)
 
 
 def _llm_reviewer_started_at(generated_at: object, runtime: object) -> str:
-    """Derive the review start without inventing precision absent from SQLite."""
-    text = str(generated_at or "").strip()
-    try:
-        seconds = max(0.0, float(runtime or 0))
-        parsed = dt.datetime.fromisoformat(text.replace("  ", "T", 1))
-    except (TypeError, ValueError, OverflowError):
-        return text
-    return (parsed - dt.timedelta(seconds=seconds)).isoformat(
-        timespec="seconds",
-    ).replace("T", "  ", 1)
-
-
-LLM_PARENT_RUN_FIELDS = (
-    "alert",
-    "gpu_temperature_celsius_max",
-    "gpu_utilization_percent_max",
-    "gpu_percent_max",
-    "cpu_temperature_celsius_max",
-    "soc_temperature_celsius_max",
-    "memory_used_percent_max",
-    "power_watts_max",
-    "cpu_used_percent_max",
-    "pcap_total_size_bytes",
-    "alert_context_size_bytes",
-)
+    return projected_llm_reviewer_started_at(generated_at, runtime)
 
 
 def hydrate_llm_reviewer_from_parent(
     reviewer: dict,
     parent: dict | None,
 ) -> None:
-    """Attach collector-owned context from the reviewer's exact parent run."""
-    if not isinstance(parent, dict):
-        return
-    for key in LLM_PARENT_RUN_FIELDS:
-        if key in parent:
-            reviewer[key] = parent.get(key)
+    hydrate_projected_llm_reviewer(reviewer, parent)
 
 
 def read_llm_second_opinion_logs(
@@ -4771,11 +4636,6 @@ def read_llm_second_opinion_logs(
     Reviewer model, runtime, status, outcome, and error always come from the
     independent reviewer row.
     """
-    primary_by_id = {
-        str(item.get("analysis_id") or item.get("log_id") or ""): item
-        for item in primary_logs
-        if isinstance(item, dict)
-    }
     try:
         with soc_alert_db_connect() as conn:
             if not sqlite_table_exists(conn, "ai_second_opinion_runs"):
@@ -4802,60 +4662,7 @@ def read_llm_second_opinion_logs(
     except (FileNotFoundError, sqlite3.Error, TypeError, ValueError):
         return []
 
-    reviewer_logs: list[dict] = []
-    for raw in rows:
-        row = dict(raw)
-        analysis_id = str(row.get("analysis_id") or "")
-        parent = dict(primary_by_id.get(analysis_id) or {})
-        status = str(row.get("status") or "unknown").strip().lower()
-        error = str(row.get("reviewer_error") or "").strip()
-        agreement = str(row.get("agreement") or "").strip()
-        outcome = str(row.get("reviewer_outcome") or "").strip()
-        detail_parts = [
-            error,
-            f"Agreement: {agreement.replace('_', ' ')}" if agreement else "",
-            f"Outcome: {outcome.replace('_', ' ')}" if outcome else "",
-        ]
-        reviewer = {
-            "log_id": f"{analysis_id}:second-opinion",
-            "analysis_id": analysis_id,
-            "parent_log_id": analysis_id,
-            "run_kind": "second_opinion",
-            "active_phase": "second_opinion",
-            "phase_label": "Second-opinion review",
-            "agent_role": row.get("agent_role"),
-            "job_label": "Second-opinion review",
-            "status": "success" if status == "completed" else status,
-            "review_status": status,
-            "error": " · ".join(part for part in detail_parts if part),
-            "trigger": row.get("trigger"),
-            "model": row.get("reviewer_model"),
-            "model_path": row.get("reviewer_model_path"),
-            "model_route": "",
-            "mode": (
-                "codex-cli"
-                if row.get("reviewer_model_path") == "frontier-codex-cli"
-                else row.get("reviewer_model_path")
-            ),
-            "runtime_seconds": row.get("reviewer_runtime_seconds"),
-            "started_at": _llm_reviewer_started_at(
-                row.get("generated_at"),
-                row.get("reviewer_runtime_seconds"),
-            ),
-            "finished_at": row.get("generated_at"),
-            "alert": parent.get("alert") or {
-                "primary_alert_id": row.get("alert_id"),
-                "rule_name": "Security Onion alert",
-                "alert_count": 1,
-            },
-            "reviewer_outcome": outcome,
-            "reviewer_confidence": row.get("reviewer_confidence"),
-            "agreement": agreement,
-            "material_disagreement": bool(row.get("material_disagreement")),
-        }
-        hydrate_llm_reviewer_from_parent(reviewer, parent)
-        reviewer_logs.append(reviewer)
-    return reviewer_logs
+    return project_second_opinion_rows(rows, primary_logs)
 
 
 def read_llm_disagreement_adjudication_logs(
@@ -4864,11 +4671,6 @@ def read_llm_disagreement_adjudication_logs(
     limit: int = LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
 ) -> list[dict]:
     """Return durable shadow adjudicator executions as distinct audit runs."""
-    primary_by_id = {
-        str(item.get("analysis_id") or item.get("log_id") or ""): item
-        for item in primary_logs
-        if isinstance(item, dict)
-    }
     try:
         with soc_alert_db_connect() as conn:
             if not sqlite_table_exists(
@@ -4891,79 +4693,11 @@ def read_llm_disagreement_adjudication_logs(
     except (FileNotFoundError, sqlite3.Error, TypeError, ValueError):
         return []
 
-    logs: list[dict] = []
-    for raw in rows:
-        row = dict(raw)
-        analysis_id = str(row.get("analysis_id") or "")
-        parent = dict(primary_by_id.get(analysis_id) or {})
-        status = str(row.get("status") or "unknown").strip().lower()
-        decision = str(row.get("decision") or "").strip()
-        error = str(row.get("adjudicator_error") or "").strip()
-        route = str(row.get("model_route") or "").strip()
-        detail_parts = [
-            error,
-            f"Decision: {decision.replace('_', ' ')}" if decision else "",
-            (
-                "Human adjudication required"
-                if row.get("human_adjudication_required")
-                else ""
-            ),
-        ]
-        mode = str(row.get("mode") or "shadow")
-        if route.startswith("codex-cli:"):
-            mode = "codex-cli"
-        elif route.startswith("ollama:"):
-            mode = "ollama"
-        adjudicator = {
-            "log_id": f"{analysis_id}:disagreement-adjudication",
-            "analysis_id": analysis_id,
-            "parent_log_id": analysis_id,
-            "run_kind": "disagreement_adjudication",
-            "active_phase": "disagreement_adjudication",
-            "phase_label": "Disagreement adjudication",
-            "agent_role": row.get("agent_role"),
-            "job_label": "Disagreement adjudication",
-            "status": "success" if status == "completed" else status,
-            "review_status": status,
-            "error": " · ".join(part for part in detail_parts if part),
-            "model": route,
-            "model_path": mode,
-            "model_route": route,
-            "mode": mode,
-            "runtime_seconds": row.get("adjudicator_runtime_seconds"),
-            "started_at": _llm_reviewer_started_at(
-                row.get("generated_at"),
-                row.get("adjudicator_runtime_seconds"),
-            ),
-            "finished_at": row.get("generated_at"),
-            "alert": parent.get("alert") or {
-                "primary_alert_id": row.get("alert_id"),
-                "rule_name": "Security Onion alert",
-                "alert_count": 1,
-            },
-            "adjudication_decision": decision,
-            "adjudication_confidence": row.get("confidence"),
-            "adjudication_confidence_score": row.get("confidence_score"),
-            "human_adjudication_required": bool(
-                row.get("human_adjudication_required")
-            ),
-        }
-        hydrate_llm_reviewer_from_parent(adjudicator, parent)
-        logs.append(adjudicator)
-    return logs
+    return project_adjudication_rows(rows, primary_logs)
 
 
 def _llm_log_sort_timestamp(record: dict) -> float:
-    for key in ("started_at", "finished_at"):
-        text = str(record.get(key) or "").strip()
-        if not text:
-            continue
-        try:
-            parsed = dt.datetime.fromisoformat(text.replace("  ", "T", 1))
-            return parsed.timestamp()
-        except ValueError:
-            continue
-    return 0.0
+    return projected_llm_log_sort_timestamp(record)
 
 
 def read_llm_agent_activity_snapshot() -> dict:
@@ -4984,38 +4718,16 @@ def read_llm_agent_activity_snapshot() -> dict:
         adjudication_logs = read_llm_disagreement_adjudication_logs(
             primary_logs,
         )
-        combined = [*primary_logs, *reviewer_logs, *adjudication_logs]
-        combined.sort(
-            key=lambda record: (
-                _llm_log_sort_timestamp(record),
-                str(record.get("log_id") or ""),
-            ),
-            reverse=True,
+        return compose_llm_activity_snapshot(
+            telemetry_total,
+            len(telemetry_logs),
+            primary_logs,
+            len(database_logs),
+            database_recovered_total,
+            reviewer_logs,
+            adjudication_logs,
+            LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
         )
-        agent_totals: dict[str, int] = {}
-        for record in combined:
-            role = str(
-                record.get("agent_role") or "unknown"
-            ).strip().lower()
-            role = role.replace("_", "-") or "unknown"
-            agent_totals[role] = agent_totals.get(role, 0) + 1
-        return {
-            "primary_logs": primary_logs,
-            "reviewer_logs": reviewer_logs,
-            "adjudication_logs": adjudication_logs,
-            "combined": combined,
-            "telemetry_total": telemetry_total,
-            "database_recovered_total": database_recovered_total,
-            "agent_totals": agent_totals,
-            "history_truncated": (
-                telemetry_total > len(telemetry_logs)
-                or len(database_logs) >= LLM_ANALYSIS_COMBINED_HISTORY_LIMIT
-                or len(reviewer_logs)
-                >= LLM_ANALYSIS_COMBINED_HISTORY_LIMIT
-                or len(adjudication_logs)
-                >= LLM_ANALYSIS_COMBINED_HISTORY_LIMIT
-            ),
-        }
 
     return LLM_AGENT_ACTIVITY_CACHE.get_or_compute(
         "role-complete-history",
