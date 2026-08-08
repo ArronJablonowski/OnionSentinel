@@ -374,6 +374,14 @@ inventory cache. Its source bundle exposes the home root, clock, cache, and two
 scan callbacks. The portal retains exact macOS commands, shell quoting,
 subprocess constants, and the 30-second process adapters.
 
+`portal_hermes_backup_health.py` owns Hermes disaster-recovery archive
+discovery, companion-file validation, scheduled-log correlation, newest
+successful-set selection, incomplete-artifact and unfinished-attempt warnings,
+newest-first inventory projection, success ratings, and redacted log-tail
+projection. Its source bundle exposes backup locations plus timestamp, size,
+relative-age, and redaction callbacks. The portal retains environment-derived
+paths and presentation rendering through compatibility facades.
+
 `portal_cron_failures.py` owns bounded Hermes cron-failure collection and
 escaped Administration rendering. It treats run-level Markdown output as
 authoritative evidence, uses `jobs.json` only as a latest-error fallback,

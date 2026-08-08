@@ -136,6 +136,13 @@ from portal_disk_inventory import (
     compose_local_disk_inventory,
     compose_local_disk_usage,
 )
+from portal_hermes_backup_health import (
+    HermesBackupSources,
+    backup_base_path,
+    backup_timestamp_from_name,
+    compose_backup_inventory,
+    compose_latest_hermes_backup_metric,
+)
 from portal_pcap_health import PcapHealthSources, compose_pcap_workflow_health
 from portal_home_dashboard import (
     HomeDashboardSources,
@@ -2661,113 +2668,20 @@ def disk_file_inventory_rows(rows: list[dict]) -> str:
     )
 
 
+def hermes_backup_sources() -> HermesBackupSources:
+    return HermesBackupSources(
+        backup_dir=HERMES_DR_BACKUP_DIR,
+        remote_dest=HERMES_DR_REMOTE_DEST,
+        remote_directory=HERMES_DR_REMOTE_DIR,
+        format_timestamp=format_iso_timestamp,
+        human_size=human_size,
+        relative_time_label=relative_time_label,
+        redact_text=redact_sensitive_text,
+    )
+
+
 def latest_hermes_backup_metric() -> tuple[str, str, bool]:
-    """Return display value, detail text, and warning state for successful Hermes DR backups.
-
-    A successful backup requires a complete backup set plus confirmation from the
-    scheduled backup log. Incomplete/newer artifacts are ignored for the displayed
-    timestamp and surfaced as warnings instead.
-    """
-    log_file = HERMES_DR_BACKUP_DIR / "backup-cron.log"
-
-    def backup_base(path: Path) -> Path:
-        raw = str(path)
-        if raw.endswith(".tar.zst.enc"):
-            return Path(raw.removesuffix(".tar.zst.enc"))
-        return Path(raw.removesuffix(".tar.zst"))
-
-    def backup_dt(path: Path) -> dt.datetime:
-        stem = path.name
-        if stem.endswith(".tar.zst.enc"):
-            marker = stem.removeprefix("macstudio-hermes-dr_").removesuffix(".tar.zst.enc")
-        else:
-            marker = stem.removeprefix("macstudio-hermes-dr_").removesuffix(".tar.zst")
-        try:
-            return dt.datetime.strptime(marker, "%Y%m%d_%H%M%SZ").replace(tzinfo=dt.timezone.utc)
-        except Exception:
-            return dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)
-
-    try:
-        artifacts = sorted(
-            [*HERMES_DR_BACKUP_DIR.glob("macstudio-hermes-dr_*.tar.zst"), *HERMES_DR_BACKUP_DIR.glob("macstudio-hermes-dr_*.tar.zst.enc")],
-            key=backup_dt,
-        )
-    except Exception:
-        artifacts = []
-
-    completed_archives: set[str] = set()
-    non_dry_starts: list[dt.datetime] = []
-    scheduled_completions: list[dt.datetime] = []
-    log_warning = ""
-    try:
-        log_text = log_file.read_text(encoding="utf-8", errors="replace")
-        completed_archives = set(re.findall(r"^Archive: (.*macstudio-hermes-dr_\d{8}_\d{6}Z\.tar\.zst(?:\.enc)?)$", log_text, re.MULTILINE))
-        for stamp, dry_run in re.findall(r"^\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\] Scheduled backup start: dry_run=(\d)", log_text, re.MULTILINE):
-            if dry_run == "0":
-                non_dry_starts.append(dt.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc))
-        for stamp in re.findall(r"^\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\] Scheduled backup complete\.", log_text, re.MULTILINE):
-            scheduled_completions.append(dt.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc))
-    except Exception as exc:
-        log_warning = f"Could not read backup log {log_file}: {exc}"
-
-    complete_sets: list[Path] = []
-    incomplete_sets: list[str] = []
-    for archive in artifacts:
-        base = backup_base(archive)
-        missing = []
-        if not archive.with_suffix(archive.suffix + ".sha256").exists():
-            missing.append("checksum")
-        if not Path(str(base) + ".RESTORE.txt").exists():
-            missing.append("restore notes")
-        try:
-            if archive.stat().st_size <= 0:
-                missing.append("non-empty archive")
-        except Exception:
-            missing.append("readable archive")
-        if completed_archives and str(archive) not in completed_archives:
-            missing.append("success log entry")
-        if missing:
-            incomplete_sets.append(f"{archive.name} missing {', '.join(missing)}")
-        else:
-            complete_sets.append(archive)
-
-    if not complete_sets:
-        warning = True
-        detail_bits = [f"WARNING: No successful full Hermes backup sets found in {HERMES_DR_BACKUP_DIR}"]
-        if incomplete_sets:
-            detail_bits.append("Incomplete artifacts: " + "; ".join(incomplete_sets[-3:]))
-        if log_warning:
-            detail_bits.append(log_warning)
-        return "⚠ None", " · ".join(detail_bits), warning
-
-    newest_success = max(complete_sets, key=backup_dt)
-    timestamp = backup_dt(newest_success).astimezone()
-    last_success_utc = backup_dt(newest_success)
-    warnings: list[str] = []
-
-    if incomplete_sets:
-        newest_artifact = max(artifacts, key=backup_dt) if artifacts else None
-        if newest_artifact and backup_dt(newest_artifact) > last_success_utc:
-            warnings.append("Newer backup artifact is incomplete/not confirmed successful: " + incomplete_sets[-1])
-    if non_dry_starts:
-        latest_start = max(non_dry_starts)
-        latest_complete = max(scheduled_completions) if scheduled_completions else None
-        if latest_start > last_success_utc and (latest_complete is None or latest_complete < latest_start):
-            warnings.append(f"Latest scheduled backup attempt started {format_iso_timestamp(latest_start.astimezone())} but did not log a successful completion")
-    if log_warning:
-        warnings.append(log_warning)
-
-    warning = bool(warnings)
-    value = ("⚠ " if warning else "") + relative_time_label(timestamp.timestamp())
-    detail_bits = [
-        f"Latest successful full Hermes backup: {newest_success.name}",
-        format_iso_timestamp(timestamp.astimezone()),
-        human_size(newest_success.stat().st_size),
-        "success confirmed by backup-cron.log",
-    ]
-    if warnings:
-        detail_bits.insert(0, "WARNING: " + " | ".join(warnings))
-    return value, " · ".join(detail_bits), warning
+    return compose_latest_hermes_backup_metric(hermes_backup_sources())
 
 
 def macos_update_metric() -> tuple[str, str, int]:
@@ -3110,83 +3024,8 @@ def read_macos_update_status() -> dict:
         return {"status": "Not checked", "count": -1, "updates": [], "error": str(exc)}
 
 
-def backup_base_path(path: Path) -> Path:
-    raw = str(path)
-    if raw.endswith(".tar.zst.enc"):
-        return Path(raw.removesuffix(".tar.zst.enc"))
-    return Path(raw.removesuffix(".tar.zst"))
-
-
-def backup_timestamp_from_name(path: Path) -> dt.datetime:
-    stem = path.name
-    if stem.endswith(".tar.zst.enc"):
-        marker = stem.removeprefix("macstudio-hermes-dr_").removesuffix(".tar.zst.enc")
-    else:
-        marker = stem.removeprefix("macstudio-hermes-dr_").removesuffix(".tar.zst")
-    try:
-        return dt.datetime.strptime(marker, "%Y%m%d_%H%M%SZ").replace(tzinfo=dt.timezone.utc)
-    except Exception:
-        return dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)
-
-
 def backup_inventory() -> tuple[list[dict], dict]:
-    log_file = HERMES_DR_BACKUP_DIR / "backup-cron.log"
-    completed_archives: set[str] = set()
-    log_text = ""
-    try:
-        log_text = log_file.read_text(encoding="utf-8", errors="replace")
-        completed_archives = set(re.findall(r"^Archive: (.*macstudio-hermes-dr_\d{8}_\d{6}Z\.tar\.zst(?:\.enc)?)$", log_text, re.MULTILINE))
-    except Exception:
-        pass
-    try:
-        archives = sorted([*HERMES_DR_BACKUP_DIR.glob("macstudio-hermes-dr_*.tar.zst"), *HERMES_DR_BACKUP_DIR.glob("macstudio-hermes-dr_*.tar.zst.enc")], key=backup_timestamp_from_name, reverse=True)
-    except Exception:
-        archives = []
-    rows = []
-    for archive in archives:
-        base = backup_base_path(archive)
-        checksum = archive.with_suffix(archive.suffix + ".sha256")
-        restore = Path(str(base) + ".RESTORE.txt")
-        missing = []
-        if not checksum.exists():
-            missing.append("checksum")
-        if not restore.exists():
-            missing.append("restore notes")
-        try:
-            size = archive.stat().st_size
-            if size <= 0:
-                missing.append("non-empty archive")
-        except Exception:
-            size = 0
-            missing.append("readable archive")
-        if completed_archives and str(archive) not in completed_archives:
-            missing.append("success log entry")
-        created = backup_timestamp_from_name(archive).astimezone()
-        ok = not missing
-        rows.append({
-            "archive": archive,
-            "checksum": checksum,
-            "restore": restore,
-            "created": created,
-            "size": size,
-            "ok": ok,
-            "rating": "Successful" if ok else "Needs attention",
-            "missing": missing,
-        })
-    successful = sum(1 for row in rows if row["ok"])
-    total = len(rows)
-    meta = {
-        "directory": HERMES_DR_BACKUP_DIR,
-        "remote_dest": HERMES_DR_REMOTE_DEST,
-        "remote_directory": HERMES_DR_REMOTE_DIR,
-        "remote_location": f"{HERMES_DR_REMOTE_DEST}:{HERMES_DR_REMOTE_DIR}",
-        "log_file": log_file,
-        "total": total,
-        "successful": successful,
-        "rating_percent": round((successful / total * 100), 1) if total else 0.0,
-        "log_tail": redact_sensitive_text("\n".join(log_text.splitlines()[-40:])) if log_text else "",
-    }
-    return rows, meta
+    return compose_backup_inventory(hermes_backup_sources())
 
 
 def metric_detail_shell(title: str, kicker: str, body_html: str, hero_extra_html: str = "") -> bytes:

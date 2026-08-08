@@ -170,6 +170,18 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_hermes_backup_health.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_hermes_backup_health.py",
+      "required_symbols": [
+        "HermesBackupSources",
+        "backup_base_path",
+        "backup_timestamp_from_name",
+        "compose_backup_inventory",
+        "compose_latest_hermes_backup_metric"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_versions.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_versions.py",
