@@ -390,6 +390,13 @@ labels, and timestamp codecs. The portal retains executable paths, subprocess
 limits/environment, admin-state storage, and detail-page presentation through
 compatibility facades.
 
+`portal_llm_activity.py` owns agent/job identity, immutable observed-model
+provenance decoration, idle and stale-current projection, concurrent-run
+aggregation, and live dashboard overlays. It composes the narrower
+`portal_llm_runtime_state.py` route/phase policy and accepts the process-liveness
+decision as a callback. The portal retains bounded status-file discovery,
+process snapshots, queue reads, and compatibility facades.
+
 `portal_cron_failures.py` owns bounded Hermes cron-failure collection and
 escaped Administration rendering. It treats run-level Markdown output as
 authoritative evidence, uses `jobs.json` only as a latest-error fallback,

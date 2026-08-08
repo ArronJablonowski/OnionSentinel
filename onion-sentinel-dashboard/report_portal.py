@@ -352,6 +352,12 @@ from portal_general_read_service import GeneralReadCallbacks, dispatch_general_r
 from portal_post_intake import prepare_post_intake
 from portal_json_write_service import JsonWriteCallbacks, dispatch_json_write
 from portal_llm_runtime_state import llm_runtime_model_state
+from portal_llm_activity import (
+    compose_current_llm_analysis,
+    decorate_llm_analysis_record as project_llm_analysis_record,
+    llm_agent_execution_state as project_llm_agent_execution_state,
+    merge_live_llm_activity as project_live_llm_activity,
+)
 from portal_beacon_history import project_beacon_history
 from portal_n8n_container_status import (
     N8nContainerStatusSources,
@@ -4471,208 +4477,31 @@ def read_active_llm_analyses() -> list[dict]:
 
 
 def llm_agent_execution_state(record: object) -> dict:
-    """Describe the persisted agent/job owner for one observed execution."""
-    current = record if isinstance(record, dict) else {}
-    role = str(current.get("agent_role") or "").strip().lower().replace("_", "-")
-    labels = {
-        "soc-analyst": ("SOC Analyst", "ai_analysis", "SOC alert triage"),
-        "incident-responder": (
-            "Incident Responder",
-            "incident_response_analysis",
-            "Incident response investigation",
-        ),
-        "siem-engineer": (
-            "SIEM Engineer",
-            "siem_engineering",
-            "Detection engineering analysis",
-        ),
-        "cyber-threat-intel": (
-            "Cyber Threat Intel",
-            "cyber_threat_intel",
-            "Threat-intelligence analysis",
-        ),
-        "threat-hunter": (
-            "Threat Hunter",
-            "threat_hunt",
-            "Threat-hunting analysis",
-        ),
-    }
-    agent_label, job_type, job_label = labels.get(
-        role,
-        ("Unknown agent", "unknown", "Unknown analysis job"),
-    )
-    return {
-        "agent_role": role or "unknown",
-        "agent_label": agent_label,
-        "job_type": job_type,
-        "job_label": job_label,
-    }
+    return project_llm_agent_execution_state(record)
 
 
 def decorate_llm_analysis_record(record: object, *, live: bool) -> dict:
-    """Add display provenance while retaining the immutable raw audit fields."""
-    decorated = dict(record) if isinstance(record, dict) else {}
-    for key, value in llm_agent_execution_state(decorated).items():
-        decorated.setdefault(key, value)
-    if live:
-        runtime = llm_runtime_model_state(decorated)
-        if runtime.get("running"):
-            decorated.update({
-                "runtime_model_label": runtime.get("label") or "Unknown model",
-                "phase_label": runtime.get("phase_label") or "Analysis",
-            })
-        else:
-            decorated.update({
-                "runtime_model_label": "No model running",
-                "phase_label": "Idle",
-            })
-        return decorated
-    # Completed rows retain the model/provider observed in the artifact. Treat
-    # them as a legacy running record only for neutral route-label formatting.
-    historical = dict(decorated)
-    historical["status"] = "running"
-    historical.pop("active_phase", None)
-    runtime = llm_runtime_model_state(historical)
-    model_observed = bool(
-        str(decorated.get("model") or "").strip()
-        or str(decorated.get("model_route") or "").strip()
-    )
-    decorated.update({
-        "runtime_model_label": (
-            runtime.get("label") or "Unknown model"
-            if model_observed
-            else "No model started"
-        ),
-        "phase_label": "Completed run",
-    })
-    return decorated
+    return project_llm_analysis_record(record, live=live)
 
 
 def read_llm_current_analysis() -> dict:
     queue_size = current_llm_queue_size()
     active_runs = read_active_llm_analyses()
-    if active_runs:
-        decorated_runs = [
-            decorate_llm_analysis_record(record, live=True)
-            for record in active_runs
-        ]
-        data = dict(decorated_runs[0])
-        data.update({
-            "ok": True,
-            "status": "running",
-            "queue_size": queue_size,
-            "active_count": len(decorated_runs),
-            "active_runs": decorated_runs,
-        })
-        if len(decorated_runs) > 1:
-            runtimes = [llm_runtime_model_state(record) for record in decorated_runs]
-            labels = [str(runtime.get("label") or "") for runtime in runtimes]
-            providers = list(dict.fromkeys(
-                str(runtime.get("provider") or "") for runtime in runtimes
-                if runtime.get("provider")
-            ))
-            routes = [
-                str(runtime.get("route") or "") for runtime in runtimes
-                if runtime.get("route")
-            ]
-            data.update({
-                "active_phase": "concurrent",
-                "active_model": " + ".join(labels),
-                "active_provider": " + ".join(providers),
-                "active_model_route": " | ".join(routes),
-                "runtime_model_label": " + ".join(labels),
-                "phase_label": "Concurrent analyses",
-                "agent_label": " + ".join(dict.fromkeys(
-                    str(record.get("agent_label") or "")
-                    for record in decorated_runs
-                    if record.get("agent_label")
-                )),
-                "job_label": " + ".join(dict.fromkeys(
-                    str(record.get("job_label") or "")
-                    for record in decorated_runs
-                    if record.get("job_label")
-                )),
-            })
-        return data
-
-    data = read_bounded_llm_analysis_record(SOC_ALERT_LLM_ANALYSIS_CURRENT_FILE)
-    if not data:
-        return decorate_llm_analysis_record({
-            "ok": True,
-            "status": "idle",
-            "alert": {},
-            "model": "n/a",
-            "queue_size": queue_size,
-        }, live=True)
-    data = dict(data)
-    data["ok"] = True
-    data["queue_size"] = queue_size
-    if data.get("status") == "running" and not llm_analysis_process_active(str(data.get("prompt_package") or "")):
-        data["status"] = "idle"
-        data["stale_running_record"] = True
-    return decorate_llm_analysis_record(data, live=True)
+    data = (
+        {}
+        if active_runs
+        else read_bounded_llm_analysis_record(SOC_ALERT_LLM_ANALYSIS_CURRENT_FILE)
+    )
+    return compose_current_llm_analysis(
+        queue_size,
+        active_runs,
+        data,
+        llm_analysis_process_active,
+    )
 
 
 def merge_live_llm_activity(static_ai: object, current: object) -> dict:
-    """Overlay current execution on the slower generated queue summary."""
-    merged = dict(static_ai) if isinstance(static_ai, dict) else {}
-    current_records = (
-        [
-            record for record in current.get("active_runs", [])
-            if isinstance(record, dict)
-        ]
-        if isinstance(current, dict) and isinstance(current.get("active_runs"), list)
-        else [current]
-    )
-    runtimes = [
-        runtime
-        for record in current_records
-        if (runtime := llm_runtime_model_state(record)).get("running")
-    ]
-    if not runtimes:
-        return merged
-    counts = dict(merged.get("counts") or {}) if isinstance(merged.get("counts"), dict) else {}
-    try:
-        analyzing_count = int(counts.get("analyzing") or 0)
-    except (TypeError, ValueError, OverflowError):
-        analyzing_count = 0
-    counts["analyzing"] = max(len(runtimes), analyzing_count)
-    if len(runtimes) == 1:
-        runtime = runtimes[0]
-        detail = runtime["detail"]
-        model = runtime["label"]
-        provider = runtime["provider"]
-        route = runtime["route"]
-        phase = runtime["phase"]
-    else:
-        detail = (
-            f"{len(runtimes)} analyses running · "
-            + " | ".join(
-                f"{runtime['phase_label']}: {runtime['label']}"
-                for runtime in runtimes
-            )
-        )
-        model = " + ".join(str(runtime["label"]) for runtime in runtimes)
-        provider = " + ".join(dict.fromkeys(
-            str(runtime["provider"]) for runtime in runtimes
-            if runtime["provider"]
-        ))
-        route = " | ".join(
-            str(runtime["route"]) for runtime in runtimes
-            if runtime["route"]
-        )
-        phase = "concurrent"
-    merged.update({
-        "active": True,
-        "label": str(merged.get("label") or "AI Alert Triage"),
-        "detail": detail,
-        "model": model,
-        "provider": provider,
-        "route": route,
-        "phase": phase,
-        "counts": counts,
-    })
-    return merged
+    return project_live_llm_activity(static_ai, current)
 
 
 def llm_analysis_process_commands() -> list[str]:

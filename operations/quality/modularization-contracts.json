@@ -198,6 +198,17 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_llm_activity.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_llm_activity.py",
+      "required_symbols": [
+        "compose_current_llm_analysis",
+        "decorate_llm_analysis_record",
+        "llm_agent_execution_state",
+        "merge_live_llm_activity"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_versions.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_versions.py",
