@@ -404,6 +404,17 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_soc_action_service.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_action_service.py",
+      "required_symbols": [
+        "SocActionServiceSources",
+        "escalate_soc_alert",
+        "forward_controlled_dispatch_contract",
+        "queue_soc_alert_analysis"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_versions.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_versions.py",

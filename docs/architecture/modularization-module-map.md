@@ -518,6 +518,15 @@ API-disabled fallback that composes candidate lookup, normalization, and durable
 queue insertion. Its callback bundle keeps connection ownership, transport,
 policy, and repository implementations independently replaceable.
 
+`portal_soc_action_service.py` owns manual SOC analysis queueing and Incident
+Response escalation orchestration. It validates dashboard group identities,
+bounds analyst-supplied limits and descriptions, preserves exact controlled-
+dispatch identity and route fields for authoritative alert-store validation,
+maps transport conflicts and availability failures, and projects queued public
+status metadata. Its source bundle keeps transport, API error rendering, the
+clock, and concrete alert-store exception types outside the service boundary;
+the portal retains stable compatibility facades for existing callers.
+
 `portal_cron_failures.py` owns bounded Hermes cron-failure collection and
 escaped Administration rendering. It treats run-level Markdown output as
 authoritative evidence, uses `jobs.json` only as a latest-error fallback,

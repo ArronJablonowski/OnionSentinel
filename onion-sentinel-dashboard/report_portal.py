@@ -474,6 +474,12 @@ from portal_soc_pcap_request_service import (
     PcapRequestServiceSources,
     request_soc_alert_pcap,
 )
+from portal_soc_action_service import (
+    SocActionServiceSources,
+    escalate_soc_alert,
+    forward_controlled_dispatch_contract,
+    queue_soc_alert_analysis,
+)
 from portal_beacon_history import project_beacon_history
 from portal_n8n_container_status import (
     N8nContainerStatusSources,
@@ -4343,115 +4349,29 @@ def _forward_controlled_dispatch_contract(
     request_payload: dict,
 ) -> None:
     """Forward frozen route fields only for a controlled cohort dispatch."""
+    forward_controlled_dispatch_contract(payload, request_payload)
 
-    if "cohort_id" not in payload and "dispatch_id" not in payload:
-        return
-    for field in (
-        "release_id",
-        "expected_assigned_route",
-        "expected_reviewer_route",
-        "reviewer_required",
-    ):
-        if field in payload:
-            # Preserve exact values. The alert-store is the authoritative
-            # validator and must see omissions, malformed routes, and false
-            # reviewer flags rather than dashboard-normalized substitutes.
-            request_payload[field] = payload[field]
+
+def soc_action_service_sources() -> SocActionServiceSources:
+    """Bind portal transport, error, and clock dependencies for SOC actions."""
+    return SocActionServiceSources(
+        post_json=alert_store_post_json,
+        api_error=soc_alert_api_error,
+        now_local=now_iso_local,
+        request_error_status=lambda exc: (
+            exc.status_code if isinstance(exc, AlertStoreRequestError) else None
+        ),
+    )
 
 
 def soc_alert_queue_analysis_response(group_id: str, payload: dict | None = None) -> tuple[int, dict]:
     """Record durable reanalysis intent; the worker builds fresh evidence later."""
-    group_id = str(group_id or "").strip().lower()
-    if not re.fullmatch(r"[a-f0-9]{12}", group_id):
-        return soc_alert_api_error("Invalid SOC alert group id")
-    payload = payload if isinstance(payload, dict) else {}
-    try:
-        request_payload = {
-            "group_id": group_id,
-            "reason": str(payload.get("reason") or "SOC analyst requested fresh AI analysis")[:500],
-            "requested_by": str(payload.get("requested_by") or "dashboard")[:100],
-            "related_limit": max(1, min(500, int(payload.get("related_limit", 250)))),
-            "pcap_analysis_limit": max(1, min(25, int(payload.get("pcap_analysis_limit", 8)))),
-        }
-        for identity_field in (
-            "representative_alert_id",
-            "stable_group_id",
-            "stable_group_key",
-            "cohort_id",
-            "dispatch_id",
-        ):
-            if identity_field in payload:
-                # Alert-store owns identity validation. Preserve the caller's
-                # exact value so malformed or stale pins cannot be normalized
-                # into a different, apparently valid dispatch.
-                request_payload[identity_field] = payload[identity_field]
-        _forward_controlled_dispatch_contract(payload, request_payload)
-        data = alert_store_post_json(
-            "/ai/request",
-            request_payload,
-            timeout=10.0,
-        )
-    except (TypeError, ValueError):
-        return soc_alert_api_error("AI analysis queue limits must be integers", 400)
-    except AlertStoreRequestError as exc:
-        return soc_alert_api_error(
-            f"Alert-store AI queue request failed: {exc}",
-            exc.status_code,
-        )
-    except RuntimeError as exc:
-        return soc_alert_api_error(f"Alert-store AI queue request failed: {exc}", 503)
-    return 202, {
-        **data,
-        "ai_status_key": "queued",
-        "ai_status_label": "Queued",
-        "ai_status_detail": f"Manual SOC Analyst reanalysis queued at {now_iso_local()}",
-    }
+    return queue_soc_alert_analysis(soc_action_service_sources(), group_id, payload)
 
 
 def soc_alert_escalate_response(group_id: str, payload: dict | None = None) -> tuple[int, dict]:
     """Create or refresh one durable Incident Response case for an alert group."""
-    group_id = str(group_id or "").strip().lower()
-    if not re.fullmatch(r"[a-f0-9]{12}", group_id):
-        return soc_alert_api_error("Invalid SOC alert group id")
-    payload = payload if isinstance(payload, dict) else {}
-    try:
-        request_payload = {
-            "group_id": group_id,
-            "reason": str(payload.get("reason") or "Escalated from SOC Alerts for incident response")[:1000],
-            "requested_by": str(payload.get("requested_by") or "dashboard")[:100],
-            "related_limit": max(1, min(500, int(payload.get("related_limit", 250)))),
-            "pcap_analysis_limit": max(1, min(25, int(payload.get("pcap_analysis_limit", 25)))),
-        }
-        for identity_field in (
-            "representative_alert_id",
-            "stable_group_id",
-            "stable_group_key",
-            "cohort_id",
-            "dispatch_id",
-        ):
-            if identity_field in payload:
-                request_payload[identity_field] = payload[identity_field]
-        _forward_controlled_dispatch_contract(payload, request_payload)
-        data = alert_store_post_json(
-            "/incidents/escalate",
-            request_payload,
-            timeout=10.0,
-        )
-    except (TypeError, ValueError):
-        return soc_alert_api_error("Incident response queue limits must be integers", 400)
-    except AlertStoreRequestError as exc:
-        return soc_alert_api_error(
-            f"Incident response escalation failed: {exc}",
-            exc.status_code,
-        )
-    except RuntimeError as exc:
-        return soc_alert_api_error(f"Incident response escalation failed: {exc}", 503)
-    return 202, {
-        **data,
-        "agent_status": "queued",
-        "agent_status_label": "Queued",
-        "detail": f"Incident Responder analysis queued at {now_iso_local()}",
-    }
+    return escalate_soc_alert(soc_action_service_sources(), group_id, payload)
 
 
 def _soc_legacy_verdict_factors(outcome: str) -> dict[str, str | None]:
