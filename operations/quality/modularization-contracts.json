@@ -284,6 +284,15 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_soc_adjudication_history.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_adjudication_history.py",
+      "required_symbols": [
+        "SocAdjudicationHistorySources",
+        "read_soc_adjudication_history"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_versions.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_versions.py",

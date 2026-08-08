@@ -698,6 +698,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/portal_llm_history_store.py" "$DASHBOARD_
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_llm_history_api.py" "$DASHBOARD_RUNTIME_DIR/portal_llm_history_api.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_alert_status_write.py" "$DASHBOARD_RUNTIME_DIR/portal_soc_alert_status_write.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_adjudication_policy.py" "$DASHBOARD_RUNTIME_DIR/portal_soc_adjudication_policy.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_adjudication_history.py" "$DASHBOARD_RUNTIME_DIR/portal_soc_adjudication_history.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_cron_failures.py" "$DASHBOARD_RUNTIME_DIR/portal_cron_failures.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_n8n_container_status.py" "$DASHBOARD_RUNTIME_DIR/portal_n8n_container_status.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_pcap_health.py" "$DASHBOARD_RUNTIME_DIR/portal_pcap_health.py"

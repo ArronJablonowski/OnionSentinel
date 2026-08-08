@@ -441,6 +441,13 @@ validation, and incident-resolution requirements. It is pure policy shared by
 the alert and incident write facades; HTTP routing, case lookup, database state,
 and append-only alert-store transport remain outside the module.
 
+`portal_soc_adjudication_history.py` owns bounded read-only adjudication history,
+dashboard-to-stable group resolution through alias and representative-alert
+metadata, newest-first ordering, and alert-versus-incident review composition.
+Its source bundle exposes the connection/schema adapters and existing review
+models, leaving database location, connection policy, and public route wiring in
+the portal.
+
 `portal_cron_failures.py` owns bounded Hermes cron-failure collection and
 escaped Administration rendering. It treats run-level Markdown output as
 authoritative evidence, uses `jobs.json` only as a latest-error fallback,

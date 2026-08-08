@@ -405,6 +405,10 @@ from portal_soc_adjudication_policy import (
     legacy_verdict_factors,
     normalize_soc_adjudication_payload as normalize_adjudication_payload,
 )
+from portal_soc_adjudication_history import (
+    SocAdjudicationHistorySources,
+    read_soc_adjudication_history,
+)
 from portal_beacon_history import project_beacon_history
 from portal_n8n_container_status import (
     N8nContainerStatusSources,
@@ -5487,87 +5491,31 @@ def soc_incident_current_analysis(
     return load_current_incident_analysis(conn, case)
 
 
+def soc_adjudication_history_sources() -> SocAdjudicationHistorySources:
+    return SocAdjudicationHistorySources(
+        connect=soc_alert_db_connect,
+        table_exists=sqlite_table_exists,
+        table_columns=sqlite_table_columns,
+        review_defaults=_soc_review_defaults,
+        alert_review_state=soc_alert_review_state_for_group,
+        current_incident_analysis=soc_incident_current_analysis,
+        parse_review_json=_soc_review_json,
+        incident_review_state=soc_incident_review_state,
+    )
+
+
 def soc_adjudication_history_response(
     group_id: str,
     *,
     case_id: str = "",
     limit: int = 25,
 ) -> tuple[int, dict]:
-    group_id = str(group_id or "").strip().lower()
-    case_id = str(case_id or "").strip().lower()
-    if not re.fullmatch(r"[a-f0-9]{12}", group_id):
-        return soc_alert_api_error("Invalid SOC alert group id")
-    if case_id and not re.fullmatch(r"ir-[a-z0-9_-]{1,64}", case_id):
-        return soc_alert_api_error("Invalid incident case id")
-    limit = max(1, min(100, int(limit or 25)))
-    try:
-        with soc_alert_db_connect() as conn:
-            if not sqlite_table_exists(conn, "analyst_adjudications"):
-                return 200, {"ok": True, "review": _soc_review_defaults(), "history": []}
-            sql = """
-                SELECT adjudication_id, dashboard_group_id, stable_group_id,
-                       case_id, analysis_id, outcome_override, confidence,
-                       rationale, evidence_gap, next_action, reviewer,
-                       event_status, detection_validity, activity_disposition,
-                       handling, duplicate_of,
-                       case_resolution_reason, created_at
-                FROM analyst_adjudications
-            """
-            if case_id:
-                sql += " WHERE case_id = ?"
-                arguments: list[object] = [case_id]
-            else:
-                stable_group_id = ""
-                if sqlite_table_exists(conn, "alert_group_alias"):
-                    row = conn.execute(
-                        "SELECT stable_group_id FROM alert_group_alias "
-                        "WHERE legacy_group_id = ?",
-                        (group_id,),
-                    ).fetchone()
-                    stable_group_id = str(row["stable_group_id"] or "") if row else ""
-                if (
-                    not stable_group_id
-                    and sqlite_table_exists(conn, "alert_group_summary")
-                    and "stable_group_id" in sqlite_table_columns(conn, "alerts")
-                ):
-                    row = conn.execute(
-                        """
-                        SELECT a.stable_group_id
-                        FROM alert_group_summary AS g
-                        JOIN alerts AS a ON a.alert_id = g.representative_alert_id
-                        WHERE g.group_id = ?
-                        """,
-                        (group_id,),
-                    ).fetchone()
-                    stable_group_id = str(row["stable_group_id"] or "") if row else ""
-                if stable_group_id:
-                    sql += " WHERE stable_group_id = ?"
-                    arguments = [stable_group_id]
-                else:
-                    sql += " WHERE dashboard_group_id = ?"
-                    arguments = [group_id]
-            sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
-            arguments.append(limit)
-            history = [dict(row) for row in conn.execute(sql, arguments).fetchall()]
-            review = soc_alert_review_state_for_group(conn, group_id)
-            if case_id and sqlite_table_exists(conn, "incident_response_cases"):
-                case_row = conn.execute(
-                    "SELECT * FROM incident_response_cases WHERE case_id = ?",
-                    (case_id,),
-                ).fetchone()
-                if case_row:
-                    case = dict(case_row)
-                    analysis = soc_incident_current_analysis(conn, case)
-                    response = _soc_review_json(analysis.get("response_json"))
-                    review = soc_incident_review_state(
-                        conn,
-                        case,
-                        analysis,
-                        response,
-                    )
-    except (FileNotFoundError, sqlite3.Error) as exc:
-        return soc_alert_api_error(f"Analyst review history unavailable: {exc}", 503)
-    return 200, {"ok": True, "review": review, "history": history}
+    return read_soc_adjudication_history(
+        soc_adjudication_history_sources(),
+        group_id,
+        case_id=case_id,
+        limit=limit,
+    )
 
 
 def soc_incident_agent_display_state(
