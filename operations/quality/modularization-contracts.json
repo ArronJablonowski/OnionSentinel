@@ -926,6 +926,16 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_incident_read_service.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_incident_read_service.py",
+      "required_symbols": [
+        "IncidentReadServiceSources",
+        "incident_detail_response",
+        "incident_list_response"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_incident_read_model.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_incident_read_model.py",

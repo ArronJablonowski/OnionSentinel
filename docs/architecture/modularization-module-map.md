@@ -876,6 +876,15 @@ review-state composition, adjudication, and asset presentation while keeping
 SQLite query construction, HTTP errors, and inventory-file loading outside the
 service.
 
+`portal_incident_read_service.py` owns list and detail read orchestration. It
+coordinates request parsing, schema-aware empty pages, repository snapshots,
+asset inventory, row composition, persisted-response decoding, review state,
+report rendering, prior SOC analysis, and the stable public payload while
+preserving distinct validation, missing-schema, missing-case, and database-
+unavailable responses. Its dependency bundle keeps the concrete database,
+inventory, policy, renderer, and portal error formatter replaceable; the portal
+retains only runtime wiring and compatibility facades.
+
 `portal_incident_actions.py` owns pure analyst-action validation and bounded
 payload construction. Its first contract covers incident status transitions,
 resolution-reason requirements, reviewer aliases, and field-length limits;

@@ -279,11 +279,15 @@ from portal_incident_actions import (
 )
 from portal_incident_read_model import (
     IncidentRowCallbacks,
-    IncidentQueryError,
     empty_incident_page,
     parse_incident_list_request,
 )
 from portal_incident_list_service import compose_incident_list_rows
+from portal_incident_read_service import (
+    IncidentReadServiceSources,
+    incident_detail_response,
+    incident_list_response,
+)
 from portal_incident_reanalysis import (
     IncidentReanalysisQueryError,
     compose_reanalysis_progress_payload,
@@ -308,8 +312,6 @@ from portal_incident_review_model import (
     parse_analysis_response,
 )
 from portal_incident_repository import (
-    IncidentCaseNotFound,
-    IncidentSchemaUnavailable,
     incident_schema_ready,
     load_current_incident_analysis,
     load_incident_detail_records,
@@ -4640,47 +4642,11 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
     loads the existing group-detail endpoint only after an analyst expands a
     row, keeping routine polling inexpensive even with a large case history.
     """
-    try:
-        request = parse_incident_list_request(
-            query,
-            max_per_page=SOC_ALERT_API_MAX_LIMIT,
-        )
-    except IncidentQueryError as exc:
-        return soc_alert_api_error(str(exc))
-    try:
-        with soc_alert_db_connect() as conn:
-            if not incident_schema_ready(conn):
-                return 200, empty_incident_page(request)
-            records = load_incident_list_records(conn, request)
-            incident_inventory, incident_inventory_error = load_asset_inventory_data()
-            incidents = compose_incident_list_rows(
-                conn,
-                records,
-                incident_inventory,
-                incident_inventory_error,
-                _soc_review_defaults(),
-                INCIDENT_ROW_CALLBACKS,
-            )
-    except (FileNotFoundError, sqlite3.Error) as exc:
-        return soc_alert_api_error(f"Incident Response data unavailable: {exc}", 503)
-    return 200, {
-        "ok": True,
-        "incidents": incidents,
-        "page": records.page,
-        "per_page": request.per_page,
-        "total": records.total,
-        "pages": records.pages,
-        "status_counts": records.status_counts,
-        "agent_status_counts": records.agent_status_counts,
-        "schema_ready": True,
-        "sort": request.sort,
-        "direction": request.direction,
-        "asset_inventory_status": (
-            "invalid"
-            if incident_inventory_error
-            else str(incident_inventory.get("inventory_status") or "loaded")
-        ),
-    }
+    return incident_list_response(
+        incident_read_service_sources(),
+        query,
+        max_per_page=SOC_ALERT_API_MAX_LIMIT,
+    )
 
 
 def soc_incident_review_state(
@@ -4844,51 +4810,31 @@ def render_prior_soc_analysis_html(response: dict[str, object], analysis: dict[s
     return '<div class="ir-prior-analysis">' + "".join(sections) + "</div>"
 
 
+def incident_read_service_sources() -> IncidentReadServiceSources:
+    """Bind portal runtime resources to Incident Response read orchestration."""
+    return IncidentReadServiceSources(
+        connect=soc_alert_db_connect,
+        api_error=soc_alert_api_error,
+        parse_list_request=parse_incident_list_request,
+        schema_ready=incident_schema_ready,
+        empty_page=empty_incident_page,
+        load_list_records=load_incident_list_records,
+        load_inventory=load_asset_inventory_data,
+        compose_list_rows=compose_incident_list_rows,
+        load_detail_records=load_incident_detail_records,
+        parse_analysis_response=parse_analysis_response,
+        compose_review_state=compose_incident_review_state,
+        review_defaults=_soc_review_defaults,
+        row_callbacks=INCIDENT_ROW_CALLBACKS,
+        render_incident_report=render_incident_response_report_html,
+        render_prior_analysis=render_prior_soc_analysis_html,
+        compose_detail_payload=compose_incident_detail_payload,
+    )
+
+
 def soc_incident_detail_response(case_id: str) -> tuple[int, dict]:
     """Return one bounded IR report, its exact query audit, and prior SOC analysis."""
-    case_id = str(case_id or "").strip().lower()
-    if not re.fullmatch(r"ir-[a-z0-9_-]{1,64}", case_id):
-        return soc_alert_api_error("Invalid incident case id")
-    try:
-        with soc_alert_db_connect() as conn:
-            records = load_incident_detail_records(conn, case_id)
-    except IncidentSchemaUnavailable:
-        return soc_alert_api_error("Incident Response schema is unavailable", 503)
-    except IncidentCaseNotFound:
-        return soc_alert_api_error("Incident case not found", 404)
-    except (FileNotFoundError, sqlite3.Error) as exc:
-        return soc_alert_api_error(f"Incident Response detail unavailable: {exc}", 503)
-
-    response = parse_analysis_response(records.analysis)
-    prior_response = parse_analysis_response(records.prior_analysis)
-    review = compose_incident_review_state(
-        records.case,
-        records.analysis,
-        response,
-        records.review.evidence_updated_at,
-        records.review.reviewer,
-        records.review.adjudication,
-        _soc_review_defaults(),
-        INCIDENT_ROW_CALLBACKS,
-    )
-    incident_html, query_count = render_incident_response_report_html(
-        records.case,
-        response,
-        records.analysis,
-        review,
-    )
-    prior_html = render_prior_soc_analysis_html(
-        prior_response, records.prior_analysis
-    )
-    return 200, compose_incident_detail_payload(
-        case_id,
-        records.case,
-        response,
-        review,
-        incident_html,
-        prior_html,
-        query_count,
-    )
+    return incident_detail_response(incident_read_service_sources(), case_id)
 
 
 def soc_alert_status_bucket_counts(rows: list[sqlite3.Row], statuses: dict) -> dict[str, int]:
