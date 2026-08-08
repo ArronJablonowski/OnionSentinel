@@ -13,6 +13,9 @@ sys.path.insert(0, str(DASHBOARD))
 from portal_soc_alert_status_store import (  # noqa: E402
     SocAlertStatusStoreSources,
     ensure_soc_alert_status_schema,
+    load_active_soc_group_ids,
+    load_manually_escalated_group_ids,
+    load_soc_alert_group_counts,
     load_soc_group_statuses,
     normalize_soc_alert_status_meta,
     write_soc_group_status,
@@ -30,7 +33,8 @@ class SocAlertStatusStoreTest(unittest.TestCase):
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
                 (table,),
             ).fetchone() is not None,
-            group_counts=lambda conn: dict(self.counts),
+            group_key_sql=lambda: "group_key",
+            group_id=lambda value: str(value),
             now_iso=lambda: "2026-08-07T12:00:00Z",
         )
 
@@ -92,11 +96,19 @@ class SocAlertStatusStoreTest(unittest.TestCase):
 
     def test_acknowledgement_reopens_on_new_repeat_but_suppression_persists(self) -> None:
         ensure_soc_alert_status_schema(self.conn)
+        self.conn.execute(
+            "CREATE TABLE alert_group_summary ("
+            "group_id TEXT, raw_alert_count INTEGER, total_seen_count INTEGER, "
+            "filter_status TEXT)"
+        )
+        self.conn.executemany(
+            "INSERT INTO alert_group_summary VALUES (?, ?, ?, 'accepted')",
+            (("ack", 4, 4), ("suppress", 4, 4)),
+        )
         write_soc_group_statuses(self.sources, self.conn, {
             "ack": {"status": "acknowledged", "repeat_count": 3},
             "suppress": {"status": "suppressed", "repeat_count": 3},
         })
-        self.counts = {"ack": 4, "suppress": 4}
         statuses = load_soc_group_statuses(self.sources, self.conn)
         self.assertNotIn("ack", statuses)
         self.assertEqual(statuses["suppress"]["status"], "suppressed")
@@ -133,6 +145,64 @@ class SocAlertStatusStoreTest(unittest.TestCase):
 
     def test_missing_group_table_reads_empty(self) -> None:
         self.assertEqual(load_soc_group_statuses(self.sources, self.conn), {})
+
+    def test_summary_counts_and_active_visibility_use_authoritative_projection(self) -> None:
+        self.conn.execute(
+            "CREATE TABLE alert_group_summary ("
+            "group_id TEXT, raw_alert_count INTEGER, total_seen_count INTEGER, "
+            "filter_status TEXT)"
+        )
+        self.conn.executemany(
+            "INSERT INTO alert_group_summary VALUES (?, ?, ?, ?)",
+            (
+                ("aaaaaaaaaaaa", 2, 5, "accepted"),
+                ("bbbbbbbbbbbb", 3, 1, "accepted"),
+                ("cccccccccccc", 9, 9, "suppressed"),
+            ),
+        )
+        self.assertEqual(load_soc_alert_group_counts(self.sources, self.conn), {
+            "aaaaaaaaaaaa": 5,
+            "bbbbbbbbbbbb": 3,
+            "cccccccccccc": 9,
+        })
+        active = load_active_soc_group_ids(
+            self.sources,
+            self.conn,
+            {"aaaaaaaaaaaa": {"status": "acknowledged"}},
+            {"bbbbbbbbbbbb"},
+        )
+        self.assertEqual(active, set())
+
+    def test_manual_escalation_recovers_case_event_and_alias_ids(self) -> None:
+        self.conn.executescript(
+            """
+            CREATE TABLE incident_response_cases (
+              case_id TEXT, dashboard_group_id TEXT, group_id TEXT
+            );
+            CREATE TABLE incident_response_events (
+              case_id TEXT, event_type TEXT, detail_json TEXT
+            );
+            CREATE TABLE alert_group_alias (
+              stable_group_id TEXT, legacy_group_id TEXT
+            );
+            """
+        )
+        self.conn.execute(
+            "INSERT INTO incident_response_cases VALUES (?, ?, ?)",
+            ("case-1", "aaaaaaaaaaaa", "stable-1"),
+        )
+        self.conn.execute(
+            "INSERT INTO incident_response_events VALUES (?, 'escalated', ?)",
+            ("case-1", '{"dashboard_group_id":"bbbbbbbbbbbb"}'),
+        )
+        self.conn.execute(
+            "INSERT INTO alert_group_alias VALUES (?, ?)",
+            ("stable-1", "cccccccccccc"),
+        )
+        self.assertEqual(
+            load_manually_escalated_group_ids(self.sources, self.conn),
+            {"aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"},
+        )
 
 
 if __name__ == "__main__":

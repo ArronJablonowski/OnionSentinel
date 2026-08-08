@@ -467,11 +467,14 @@ resources and a compatibility facade.
 
 `portal_soc_alert_status_store.py` owns analyst-status normalization, legacy
 and current SQLite schema creation, additive adjudication-column migration,
-merge-safe group-state upsert/delete operations, and stale-acknowledgement
-reopening while durable suppressions remain active. Its source bundle exposes
-table discovery, grouped alert counts, and the clock; database location,
-connection and retry policy, production alert-store delegation, and JSON mirror
-persistence remain outside this repository boundary.
+merge-safe group-state upsert/delete operations, grouped repeat-count reads,
+manual-escalation alias recovery, active-group visibility, and stale-
+acknowledgement reopening while durable suppressions remain active. Fast
+summary reads retain legacy-alert fallbacks, and stable-group alias expansion is
+bounded in 500-ID chunks. Its source bundle exposes table discovery, canonical
+group-key SQL/identity, and the clock; database location, connection and retry
+policy, production alert-store delegation, and JSON mirror persistence remain
+outside this repository boundary.
 
 `portal_soc_alert_status_service.py` owns database-authoritative status reads,
 absence-only JSON disaster-recovery fallback, offline batch transaction

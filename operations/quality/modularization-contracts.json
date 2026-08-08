@@ -328,6 +328,9 @@
       "required_symbols": [
         "SocAlertStatusStoreSources",
         "ensure_soc_alert_status_schema",
+        "load_active_soc_group_ids",
+        "load_manually_escalated_group_ids",
+        "load_soc_alert_group_counts",
         "load_soc_group_statuses",
         "normalize_soc_alert_status_meta",
         "write_soc_group_status",

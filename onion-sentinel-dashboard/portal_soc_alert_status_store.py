@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import sqlite3
+import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -9,8 +11,192 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class SocAlertStatusStoreSources:
     table_exists: Callable[[sqlite3.Connection, str], bool]
-    group_counts: Callable[[sqlite3.Connection], dict[str, int]]
+    group_key_sql: Callable[[], str]
+    group_id: Callable[[object], str]
     now_iso: Callable[[], str]
+
+
+def soc_alert_group_summary_available(
+    sources: SocAlertStatusStoreSources,
+    conn: sqlite3.Connection,
+) -> bool:
+    if not sources.table_exists(conn, "alert_group_summary"):
+        return False
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM alert_group_summary").fetchone()
+    except sqlite3.Error:
+        return False
+    return bool(row and int(row[0] or 0) > 0)
+
+
+def load_soc_alert_group_counts(
+    sources: SocAlertStatusStoreSources,
+    conn: sqlite3.Connection,
+) -> dict[str, int]:
+    """Return current grouped repeat counts keyed by dashboard group ID."""
+    if soc_alert_group_summary_available(sources, conn):
+        try:
+            rows = conn.execute(
+                """
+                SELECT group_id,
+                       MAX(raw_alert_count, COALESCE(total_seen_count, 0))
+                         AS repeat_count
+                FROM alert_group_summary
+                """
+            ).fetchall()
+            return {
+                row["group_id"]: int(row["repeat_count"] or 0)
+                for row in rows
+            }
+        except sqlite3.Error:
+            pass
+    group_expr = sources.group_key_sql()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT {group_expr} AS group_key,
+                   MAX(
+                     COUNT(*),
+                     COALESCE(SUM(MAX(1, COALESCE(seen_count, 1))), 0)
+                   ) AS repeat_count
+            FROM alerts
+            GROUP BY group_key
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {
+        sources.group_id(row["group_key"]): int(row["repeat_count"] or 0)
+        for row in rows
+    }
+
+
+def _valid_dashboard_group_id(value: object) -> str:
+    group_id = str(value or "").strip().lower()
+    return group_id if re.fullmatch(r"[a-f0-9]{12}", group_id) else ""
+
+
+def load_manually_escalated_group_ids(
+    sources: SocAlertStatusStoreSources,
+    conn: sqlite3.Connection,
+) -> set[str]:
+    """Return dashboard aliases moved manually to Incident Responder."""
+    if not all(sources.table_exists(conn, table) for table in (
+        "incident_response_cases", "incident_response_events"
+    )):
+        return set()
+    try:
+        rows = conn.execute(
+            """
+            SELECT c.dashboard_group_id, c.group_id AS stable_group_id,
+                   e.detail_json
+            FROM incident_response_cases AS c
+            JOIN incident_response_events AS e ON e.case_id = c.case_id
+            WHERE e.event_type = 'escalated'
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return set()
+    dashboard_ids, stable_ids = _escalated_row_ids(rows)
+    if stable_ids and sources.table_exists(conn, "alert_group_alias"):
+        dashboard_ids.update(_alias_group_ids(conn, stable_ids))
+    return dashboard_ids
+
+
+def _escalated_row_ids(rows: list) -> tuple[set[str], set[str]]:
+    dashboard_ids = set()
+    stable_ids = set()
+    for row in rows:
+        if group_id := _valid_dashboard_group_id(row["dashboard_group_id"]):
+            dashboard_ids.add(group_id)
+        if stable_id := str(row["stable_group_id"] or "").strip():
+            stable_ids.add(stable_id)
+        try:
+            detail = json.loads(row["detail_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            detail = {}
+        if isinstance(detail, dict):
+            if group_id := _valid_dashboard_group_id(
+                detail.get("dashboard_group_id")
+            ):
+                dashboard_ids.add(group_id)
+    return dashboard_ids, stable_ids
+
+
+def _alias_group_ids(
+    conn: sqlite3.Connection,
+    stable_ids: set[str],
+) -> set[str]:
+    aliases = set()
+    sorted_ids = sorted(stable_ids)
+    for start in range(0, len(sorted_ids), 500):
+        chunk = sorted_ids[start:start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        try:
+            rows = conn.execute(
+                "SELECT legacy_group_id FROM alert_group_alias "
+                f"WHERE stable_group_id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+        except sqlite3.Error:
+            continue
+        aliases.update(
+            group_id
+            for row in rows
+            if (group_id := _valid_dashboard_group_id(row["legacy_group_id"]))
+        )
+    return aliases
+
+
+def load_active_soc_group_ids(
+    sources: SocAlertStatusStoreSources,
+    conn: sqlite3.Connection,
+    statuses: object,
+    manually_escalated_group_ids: set[str] | None = None,
+) -> set[str]:
+    """Return grouped detections visible in the default active view."""
+    current = statuses if isinstance(statuses, dict) else {}
+    hidden = {
+        group_id
+        for group_id, meta in current.items()
+        if isinstance(meta, dict)
+        and meta.get("status") in {"acknowledged", "suppressed"}
+    }
+    hidden.update(
+        manually_escalated_group_ids
+        if manually_escalated_group_ids is not None
+        else load_manually_escalated_group_ids(sources, conn)
+    )
+    if soc_alert_group_summary_available(sources, conn):
+        try:
+            rows = conn.execute(
+                """
+                SELECT group_id
+                FROM alert_group_summary
+                WHERE lower(coalesce(filter_status, 'accepted')) != 'suppressed'
+                """
+            ).fetchall()
+            return {row["group_id"] for row in rows if row["group_id"] not in hidden}
+        except sqlite3.Error:
+            pass
+    group_expr = sources.group_key_sql()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT {group_expr} AS group_key,
+                   lower(coalesce(filter_status, 'accepted')) AS filter_status
+            FROM alerts
+            GROUP BY group_key, filter_status
+            HAVING filter_status != 'suppressed'
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return set()
+    return {
+        group_id
+        for row in rows
+        if (group_id := sources.group_id(row["group_key"])) not in hidden
+    }
 
 
 def normalize_soc_alert_status_meta(
@@ -157,7 +343,7 @@ def load_soc_group_statuses(
 ) -> dict:
     if not sources.table_exists(conn, "analyst_alert_group_state"):
         return {}
-    counts = sources.group_counts(conn)
+    counts = load_soc_alert_group_counts(sources, conn)
     rows = conn.execute(
         """
         SELECT group_id, group_key, status, repeat_count, reason,
