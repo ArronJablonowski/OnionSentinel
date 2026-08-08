@@ -130,6 +130,12 @@ from portal_admin_services import (
     compose_admin_service_statuses,
     start_admin_service as start_allowed_admin_service,
 )
+from portal_disk_inventory import (
+    DiskInventorySources,
+    DiskScanOutcome,
+    compose_local_disk_inventory,
+    compose_local_disk_usage,
+)
 from portal_pcap_health import PcapHealthSources, compose_pcap_workflow_health
 from portal_home_dashboard import (
     HomeDashboardSources,
@@ -2576,68 +2582,13 @@ def system_uptime_metric() -> tuple[str, str, bool]:
 
 def local_disk_usage_metric() -> tuple[int, int, float]:
     """Return free bytes, total bytes, and percent free for the user's home volume."""
-    try:
-        usage = shutil.disk_usage(HOME)
-        percent_free = (usage.free / usage.total * 100) if usage.total else 0.0
-        return int(usage.free), int(usage.total), percent_free
-    except Exception:
-        return 0, 0, 0.0
+    return compose_local_disk_usage(HOME, shutil.disk_usage)
 
 
 DISK_INVENTORY_CACHE: dict[str, object] = {"generated": 0.0, "dirs": [], "files": [], "warnings": []}
 
 
-def _parse_size_path_lines(output: str, multiplier: int = 1) -> list[dict]:
-    rows: list[dict] = []
-    for raw in output.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        parts = line.split(None, 1)
-        if len(parts) != 2:
-            continue
-        try:
-            size = int(parts[0]) * multiplier
-        except Exception:
-            continue
-        rows.append({"size": size, "path": parts[1]})
-    return rows
-
-
-def _parse_file_stat_lines(output: str) -> list[dict]:
-    rows: list[dict] = []
-    for raw in output.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        parts = line.split(None, 2)
-        if len(parts) != 3:
-            continue
-        try:
-            allocated = int(parts[0]) * 512
-            logical = int(parts[1])
-        except Exception:
-            continue
-        rows.append({"size": allocated, "logical_size": logical, "path": parts[2]})
-    return rows
-
-
-def local_disk_inventory(limit: int = 10, cache_seconds: int = 600) -> tuple[list[dict], list[dict], list[str], dt.datetime]:
-    """Return cached largest directories/files under HOME for the Local Disk detail page."""
-    now = dt.datetime.now().astimezone()
-    cached_at = float(DISK_INVENTORY_CACHE.get("generated") or 0.0)
-    if cached_at and (now.timestamp() - cached_at) < cache_seconds:
-        generated = dt.datetime.fromtimestamp(cached_at).astimezone()
-        return (
-            list(DISK_INVENTORY_CACHE.get("dirs") or []),
-            list(DISK_INVENTORY_CACHE.get("files") or []),
-            list(DISK_INVENTORY_CACHE.get("warnings") or []),
-            generated,
-        )
-
-    warnings: list[str] = []
-    top_dirs: list[dict] = []
-    top_files: list[dict] = []
+def _directory_disk_scan() -> DiskScanOutcome:
     try:
         proc = subprocess.run(
             ["/usr/bin/du", "-k", "-x", "-d", "4", str(HOME)],
@@ -2647,21 +2598,20 @@ def local_disk_inventory(limit: int = 10, cache_seconds: int = 600) -> tuple[lis
             timeout=30,
             check=False,
         )
-        dir_rows = [row for row in _parse_size_path_lines(proc.stdout, 1024) if row["path"] != str(HOME)]
-        top_dirs = sorted(dir_rows, key=lambda row: row["size"], reverse=True)[:limit]
-        if proc.stderr.strip():
-            warnings.append("Directory scan warnings: " + proc.stderr.strip().splitlines()[-1])
+        return DiskScanOutcome(stdout=proc.stdout, stderr=proc.stderr)
     except subprocess.TimeoutExpired:
-        warnings.append("Directory scan timed out after 30 seconds; showing cached/empty directory data.")
+        return DiskScanOutcome(timed_out=True)
     except Exception as exc:
-        warnings.append(f"Directory scan failed: {exc}")
+        return DiskScanOutcome(error=str(exc))
 
+
+def _file_disk_scan() -> DiskScanOutcome:
+    find_cmd = (
+        f"/usr/bin/find {shlex.quote(str(HOME))} -xdev -type f -size +1M "
+        "-exec /usr/bin/stat -f '%b\t%z\t%N' {} + 2>/dev/null "
+        "| /usr/bin/sort -nr | /usr/bin/head -10"
+    )
     try:
-        find_cmd = (
-            f"/usr/bin/find {shlex.quote(str(HOME))} -xdev -type f -size +1M "
-            "-exec /usr/bin/stat -f '%b\t%z\t%N' {} + 2>/dev/null "
-            "| /usr/bin/sort -nr | /usr/bin/head -10"
-        )
         proc = subprocess.run(
             ["/bin/bash", "-lc", find_cmd],
             text=True,
@@ -2670,21 +2620,27 @@ def local_disk_inventory(limit: int = 10, cache_seconds: int = 600) -> tuple[lis
             timeout=30,
             check=False,
         )
-        top_files = _parse_file_stat_lines(proc.stdout)[:limit]
-        if proc.stderr.strip():
-            warnings.append("File scan warnings: " + proc.stderr.strip().splitlines()[-1])
+        return DiskScanOutcome(stdout=proc.stdout, stderr=proc.stderr)
     except subprocess.TimeoutExpired:
-        warnings.append("File scan timed out after 30 seconds; showing cached/empty file data.")
+        return DiskScanOutcome(timed_out=True)
     except Exception as exc:
-        warnings.append(f"File scan failed: {exc}")
+        return DiskScanOutcome(error=str(exc))
 
-    DISK_INVENTORY_CACHE.update({
-        "generated": now.timestamp(),
-        "dirs": top_dirs,
-        "files": top_files,
-        "warnings": warnings,
-    })
-    return top_dirs, top_files, warnings, now
+
+def local_disk_inventory(limit: int = 10, cache_seconds: int = 600) -> tuple[list[dict], list[dict], list[str], dt.datetime]:
+    """Return cached largest directories/files under HOME for the Local Disk detail page."""
+
+    return compose_local_disk_inventory(
+        DiskInventorySources(
+            home=HOME,
+            cache=DISK_INVENTORY_CACHE,
+            now=lambda: dt.datetime.now().astimezone(),
+            directory_scan=_directory_disk_scan,
+            file_scan=_file_disk_scan,
+        ),
+        limit=limit,
+        cache_seconds=cache_seconds,
+    )
 
 
 def disk_inventory_rows(rows: list[dict]) -> str:

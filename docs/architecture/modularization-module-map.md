@@ -368,6 +368,12 @@ subprocess execution and executable resolution stay in the portal.
 orchestration, including idempotent already-running behavior and post-launch
 re-probing. The portal retains the start-command catalog and `Popen` adapter.
 
+`portal_disk_inventory.py` owns local-disk usage projection, `du`/`stat`
+parsing, largest-item ranking, independent scan warnings, and the bounded
+inventory cache. Its source bundle exposes the home root, clock, cache, and two
+scan callbacks. The portal retains exact macOS commands, shell quoting,
+subprocess constants, and the 30-second process adapters.
+
 `portal_cron_failures.py` owns bounded Hermes cron-failure collection and
 escaped Administration rendering. It treats run-level Markdown output as
 authoritative evidence, uses `jobs.json` only as a latest-error fallback,

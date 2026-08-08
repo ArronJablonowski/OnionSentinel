@@ -159,6 +159,17 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_disk_inventory.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_disk_inventory.py",
+      "required_symbols": [
+        "DiskInventorySources",
+        "DiskScanOutcome",
+        "compose_local_disk_inventory",
+        "compose_local_disk_usage"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_versions.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_versions.py",
