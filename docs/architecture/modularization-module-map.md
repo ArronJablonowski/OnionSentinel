@@ -612,14 +612,20 @@ synthetic responses, content headers, and socket writes.
 dispatch of operational metric renderers. Ordinary metrics never scan the
 report catalog; only the catalog index and portal-update metric invoke the
 injected scan port. Report discovery and concrete HTML renderers remain in
-`report_portal.py`, along with static assets, report file resolution, response
-encoding, and socket writes.
+`report_portal.py`, along with response encoding and socket writes.
+
+`portal_catalog_delivery.py` owns traversal-safe static and report asset
+resolution, file read and error policy, MIME selection, lazy report lookup,
+report-open redirects, and download response projection. `report_portal.py`
+retains the concrete asset roots, report discovery callback, and HTTP socket
+writes.
 
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and
 unknown requests cannot trigger an expensive recursive report-tree walk;
-filesystem resolution and traversal enforcement remain in `PortalHandler`.
+filesystem delivery and traversal enforcement live in
+`portal_catalog_delivery.py`.
 
 `portal_incident_read_model.py` owns the pure request and presentation policy
 for durable Incident Response lists: allowlisted filters and sort fields,

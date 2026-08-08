@@ -13,7 +13,6 @@ import importlib.util
 import ipaddress
 import json
 import math
-import mimetypes
 import os
 import re
 import shutil
@@ -34,7 +33,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib import error as urllib_error
 from urllib import request as urllib_request
-from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 PORTAL_SOURCE_DIR = Path(__file__).resolve().parent
 if str(PORTAL_SOURCE_DIR) not in sys.path:
@@ -285,6 +284,7 @@ from portal_admin_read_service import prepare_admin_read
 from portal_health_read_service import compose_portal_health
 from portal_resource_action_read import read_resource_action_status
 from portal_catalog_read_service import CatalogReadCallbacks, dispatch_catalog_read
+from portal_catalog_delivery import CatalogDeliveryCallbacks, deliver_catalog_route
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -8334,18 +8334,6 @@ class PortalHandler(BaseHTTPRequestHandler):
                 self.send_header(k, v)
         self.end_headers()
 
-    def _serve_file(self, target: Path) -> None:
-        if not target.is_file():
-            return self._send(HTTPStatus.NOT_FOUND, b"Asset not found", "text/plain; charset=utf-8")
-        try:
-            body = target.read_bytes()
-        except Exception as e:
-            return self._send(HTTPStatus.INTERNAL_SERVER_ERROR, str(e).encode(), "text/plain; charset=utf-8")
-        ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-        if target.suffix.lower() in (".html", ".htm"):
-            ctype = "text/html; charset=utf-8"
-        return self._send(HTTPStatus.OK, body, ctype)
-
     def _send_soc_alert_events(self) -> None:
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -8374,9 +8362,6 @@ class PortalHandler(BaseHTTPRequestHandler):
                 time.sleep(5)
             except (BrokenPipeError, ConnectionResetError, OSError):
                 return
-
-    def reports_by_id(self) -> dict[str, Report]:
-        return {r.rid: r for r in scan_reports()}
 
     def _admin_session_id(self) -> str:
         return parse_cookie_header(self.headers.get("Cookie")).get(ADMIN_SESSION_COOKIE, "")
@@ -8665,56 +8650,18 @@ class PortalHandler(BaseHTTPRequestHandler):
         if catalog_read is not None:
             body = catalog_read.payload if catalog_read.encoded else json.dumps(catalog_read.payload, indent=2).encode()
             return self._send(catalog_read.status, body, catalog_read.content_type)
-        # Backward-compatible static aliases for Forest Room 5. These make old
-        # /open/<id> pages, cached pages, and direct LAN asset URLs resolve their
-        # relative image/PDF links instead of showing alt-text-only blank cards.
-        if catalog_operation == "forest_asset":
-            base = (HOME / "report_portal" / "library" / "Prototype Web App" / "forest_room5_assets").resolve()
-            target = (base / (catalog_route.asset_path or "")).resolve()
-            try:
-                target.relative_to(base)
-            except ValueError:
-                return self._send(HTTPStatus.FORBIDDEN, b"Forbidden", "text/plain; charset=utf-8")
-            return self._serve_file(target)
-        if catalog_operation == "qr_landing_source":
-            return self._serve_file(HOME / "report_portal" / "library" / "Prototype Web App" / "qr_landing_source.pdf")
-        if catalog_operation == "view_report":
-            report = self.reports_by_id().get(catalog_route.report_id or "")
-            if not report:
-                return self._send(HTTPStatus.NOT_FOUND, b"Report not found", "text/plain; charset=utf-8")
-            asset_rel = catalog_route.asset_path or ""
-            if asset_rel in ("", "/"):
-                target = report.path
-            else:
-                base = report.path.parent.resolve()
-                target = (base / asset_rel).resolve()
-                try:
-                    target.relative_to(base)
-                except ValueError:
-                    return self._send(HTTPStatus.FORBIDDEN, b"Forbidden", "text/plain; charset=utf-8")
-            if not target.is_file():
-                return self._send(HTTPStatus.NOT_FOUND, b"Asset not found", "text/plain; charset=utf-8")
-            try:
-                body = target.read_bytes()
-            except Exception as e:
-                return self._send(HTTPStatus.INTERNAL_SERVER_ERROR, str(e).encode(), "text/plain; charset=utf-8")
-            ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-            if target.suffix.lower() in (".html", ".htm"):
-                ctype = "text/html; charset=utf-8"
-            return self._send(HTTPStatus.OK, body, ctype)
-        if catalog_operation in {"open_report", "download_report"}:
-            report = self.reports_by_id().get(catalog_route.report_id or "")
-            if not report:
-                return self._send(HTTPStatus.NOT_FOUND, b"Report not found", "text/plain; charset=utf-8")
-            if catalog_operation == "open_report":
-                return self._redirect(f"/view/{report.rid}/")
-            try:
-                body = report.path.read_bytes()
-            except Exception as e:
-                return self._send(HTTPStatus.INTERNAL_SERVER_ERROR, str(e).encode(), "text/plain; charset=utf-8")
-            ctype = mimetypes.guess_type(report.path.name)[0] or "text/html; charset=utf-8"
-            extra = {"Content-Disposition": f"attachment; filename={quote(report.path.name)}"}
-            return self._send(HTTPStatus.OK, body, ctype, extra)
+        delivery = deliver_catalog_route(
+            catalog_route,
+            forest_asset_root=HOME / "report_portal" / "library" / "Prototype Web App" / "forest_room5_assets",
+            qr_landing_source=HOME / "report_portal" / "library" / "Prototype Web App" / "qr_landing_source.pdf",
+            callbacks=CatalogDeliveryCallbacks(
+                lambda: {report.rid: report for report in scan_reports()},
+            ),
+        )
+        if delivery is not None:
+            if delivery.redirect:
+                return self._redirect(delivery.redirect, status=delivery.status)
+            return self._send(delivery.status, delivery.body, delivery.content_type, delivery.headers)
         return self._send(HTTPStatus.NOT_FOUND, b"Not found", "text/plain; charset=utf-8")
 
 
