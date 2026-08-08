@@ -333,6 +333,13 @@ browser-side service-start/reboot-confirmation behavior. `report_portal.py`
 retains a small facade that supplies existing host, process, filesystem, and
 shell callbacks; the renderer itself cannot invoke an undeclared system action.
 
+`portal_admin_versions.py` owns bounded current/latest version discovery for
+the macOS, Homebrew, and Hermes Administration cards. Its explicit source
+bundle exposes only command execution, cached macOS update status, and Hermes
+paths. Provider-specific parsing and presentation are split into small
+collectors, while `report_portal.py` retains process environment construction
+and the public compatibility facade.
+
 `portal_n8n_container_status.py` owns the bounded n8n Administration health
 record. An explicit source bundle exposes Docker and curl execution, time,
 formatting, environment, container identity, and health URL. The service

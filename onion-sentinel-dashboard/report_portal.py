@@ -85,6 +85,10 @@ from portal_admin_dashboard import (
     compose_admin_dashboard,
     render_admin_dashboard as render_admin_dashboard_view,
 )
+from portal_admin_versions import (
+    AdminVersionSources,
+    compose_admin_action_version_info,
+)
 from portal_pcap_health import PcapHealthSources, compose_pcap_workflow_health
 from portal_home_dashboard import (
     HomeDashboardSources,
@@ -2384,127 +2388,19 @@ def _run_admin_version_command(command: list[str], timeout: int = 12) -> tuple[i
         return None, f"Unable to run {' '.join(command)}: {exc}"
 
 
-def _json_outdated_entries(data: dict) -> list[dict]:
-    """Normalize Homebrew outdated --json=v2 formula/cask entries."""
-    entries: list[dict] = []
-    for section in ("formulae", "casks"):
-        raw_items = data.get(section) if isinstance(data, dict) else []
-        if not isinstance(raw_items, list):
-            continue
-        for item in raw_items:
-            if isinstance(item, dict):
-                copied = dict(item)
-                copied["kind"] = "cask" if section == "casks" else "formula"
-                entries.append(copied)
-    return entries
-
-
-def _brew_entry_versions(item: dict) -> tuple[str, str, str]:
-    """Return name/current/latest display strings from a Homebrew JSON entry."""
-    name = str(item.get("name") or item.get("token") or item.get("full_name") or "unknown")
-    installed_raw = item.get("installed_versions") or item.get("installed_version") or item.get("installed") or []
-    if isinstance(installed_raw, list):
-        installed = ", ".join(str(x) for x in installed_raw if x) or "installed"
-    else:
-        installed = str(installed_raw or "installed")
-    current_raw = item.get("current_version") or item.get("current_versions") or item.get("latest_version") or item.get("latest") or "available"
-    if isinstance(current_raw, list):
-        current = ", ".join(str(x) for x in current_raw if x) or "available"
-    else:
-        current = str(current_raw or "available")
-    return name, installed, current
-
-
-def _shorten(value: str, max_len: int = 96) -> str:
-    value = " ".join(str(value).split())
-    if len(value) <= max_len:
-        return value
-    return value[: max_len - 1].rstrip() + "…"
-
-
 def admin_action_version_info(action_id: str) -> dict[str, str]:
     """Return current/latest version metadata for an Administration update card."""
-    if action_id == "macos-update":
-        _rc, sw = _run_admin_version_command(["/usr/bin/sw_vers"], timeout=6)
-        fields: dict[str, str] = {}
-        for line in sw.splitlines():
-            if ":" in line:
-                key, value = line.split(":", 1)
-                fields[key.strip()] = value.strip()
-        version = fields.get("ProductVersion") or "Unknown"
-        build = fields.get("BuildVersion")
-        current = f"macOS {version}" + (f" ({build})" if build else "")
-        data = read_macos_update_status()
-        updates = data.get("updates") if isinstance(data.get("updates"), list) else []
-        if updates:
-            latest = _shorten(str(updates[0]), 120)
-            detail = f"{len(updates)} cached macOS update(s) available from softwareupdate check at {data.get('checked_at') or 'unknown time'}."
-        elif int(data.get("count", 0) or 0) == 0:
-            latest = "Current"
-            detail = f"No cached macOS updates available. Last checked {data.get('checked_at') or 'unknown time'}."
-        else:
-            latest = "Unknown"
-            detail = f"macOS update availability is unknown. Last check: {data.get('status') or 'not checked'}."
-        return {"current": current, "latest": latest, "detail": detail}
-
-    if action_id == "brew-update":
-        _rc, version_out = _run_admin_version_command(["/opt/homebrew/bin/brew", "--version"], timeout=8)
-        current = version_out.splitlines()[0].strip() if version_out.splitlines() else "Homebrew version unknown"
-        rc, outdated_out = _run_admin_version_command(["/opt/homebrew/bin/brew", "outdated", "--json=v2"], timeout=25)
-        entries: list[dict] = []
-        if rc == 0:
-            try:
-                json_start = outdated_out.find("{")
-                payload = outdated_out[json_start:] if json_start >= 0 else outdated_out
-                entries = _json_outdated_entries(json.loads(payload))
-            except Exception:
-                entries = []
-        if entries:
-            version_bits = []
-            detail_bits = []
-            for item in entries[:6]:
-                name, installed, latest_version = _brew_entry_versions(item)
-                version_bits.append(f"{name} {latest_version}")
-                detail_bits.append(f"{name}: {installed} → {latest_version}")
-            suffix = "" if len(entries) <= 6 else f" +{len(entries) - 6} more"
-            latest = _shorten(", ".join(version_bits) + suffix, 140)
-            detail = f"{len(entries)} Homebrew package(s) outdated: " + "; ".join(detail_bits) + ("." if len(entries) <= 6 else f"; plus {len(entries) - 6} more.")
-        elif rc == 0:
-            latest = "Current"
-            detail = "No Homebrew formulae or casks are outdated."
-        else:
-            latest = "Unknown"
-            detail = _shorten(outdated_out or "Could not determine Homebrew outdated versions.", 260)
-        return {"current": current, "latest": latest, "detail": detail}
-
-    if action_id == "hermes-update":
-        _rc, version_out = _run_admin_version_command([HERMES_BIN, "--version"], timeout=25)
-        current_line = version_out.splitlines()[0].strip() if version_out.splitlines() else "Hermes Agent version unknown"
-        project = HOME / ".hermes" / "hermes-agent"
-        _lrc, local_hash = _run_admin_version_command(["/usr/bin/git", "-C", str(project), "rev-parse", "--short", "HEAD"], timeout=8)
-        _orc, origin_hash = _run_admin_version_command(["/usr/bin/git", "-C", str(project), "rev-parse", "--short", "origin/main"], timeout=8)
-        _src, subject = _run_admin_version_command(["/usr/bin/git", "-C", str(project), "log", "origin/main", "-1", "--pretty=%s"], timeout=8)
-        _vrc, origin_init = _run_admin_version_command(["/usr/bin/git", "-C", str(project), "show", "origin/main:hermes_cli/__init__.py"], timeout=8)
-        version_match = re.search(r"Hermes Agent\s+(v\S+)", current_line)
-        version_label = version_match.group(1) if version_match else current_line
-        origin_version_match = re.search(r"__version__\s*=\s*['\"]([^'\"]+)['\"]", origin_init)
-        origin_release_match = re.search(r"__release_date__\s*=\s*['\"]([^'\"]+)['\"]", origin_init)
-        origin_version_label = f"v{origin_version_match.group(1)}" if origin_version_match else "latest"
-        origin_release_label = f" ({origin_release_match.group(1)})" if origin_release_match else ""
-        current = _shorten(f"Hermes Agent {version_label}" + (f" · {local_hash}" if local_hash else ""), 110)
-        update_available = local_hash and origin_hash and local_hash != origin_hash
-        if update_available:
-            latest = _shorten(f"Hermes Agent {origin_version_label}{origin_release_label} · {origin_hash}", 110)
-            detail = _shorten(f"Current Hermes version {version_label} at commit {local_hash}; latest available is Hermes Agent {origin_version_label}{origin_release_label} at {origin_hash}. {subject}", 260)
-        elif "Update available" in version_out:
-            latest = "Available"
-            detail = _shorten("Hermes reports an update is available: " + " ".join(version_out.splitlines()[-2:]), 220)
-        else:
-            latest = "Current"
-            detail = _shorten(f"Current commit {local_hash or 'unknown'} matches origin/main." if local_hash else "No Hermes update version detail available.", 220)
-        return {"current": current, "latest": latest, "detail": detail}
-
-    return {"current": "Not applicable", "latest": "Not applicable", "detail": "This action does not have update-version metadata."}
+    return compose_admin_action_version_info(
+        action_id,
+        AdminVersionSources(
+            run_command=lambda command, timeout: _run_admin_version_command(
+                command, timeout=timeout
+            ),
+            read_macos_update_status=read_macos_update_status,
+            hermes_bin=HERMES_BIN,
+            hermes_project=HOME / ".hermes" / "hermes-agent",
+        ),
+    )
 
 def check_admin_action_available(action_id: str, skip_expensive: bool = False) -> tuple[bool, str]:
     """Return whether an admin action can be started because relevant updates exist."""

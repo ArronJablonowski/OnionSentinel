@@ -103,6 +103,15 @@
       "required_symbols": []
     },
     {
+      "path": "onion-sentinel-dashboard/portal_admin_versions.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_versions.py",
+      "required_symbols": [
+        "AdminVersionSources",
+        "compose_admin_action_version_info"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_n8n_container_status.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_n8n_container_status.py",
