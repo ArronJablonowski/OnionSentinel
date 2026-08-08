@@ -525,6 +525,14 @@ non-IP observables cannot trigger storage work. `report_portal.py` retains
 dynamic validator discovery and concrete runtime paths, locks, clocks, and
 alert-store transport.
 
+`portal_asset_store_client.py` owns the allowlisted loopback mutation routes,
+owner/mode/symlink/size checks for the runtime environment file, selection of
+only the Asset Store write token, authenticated request construction, bounded
+response parsing, and downstream HTTP-status preservation. Route rejection
+occurs before credential loading or network access. `report_portal.py` retains
+the concrete base URL, response-size setting, environment path, and public
+compatibility functions.
+
 `portal_asset_mutation_service.py` owns bounded DHCP review, authoritative edit,
 and demotion payloads; IP/MAC/hostname normalization; exact edit/demotion
 confirmations; downstream status preservation; and success-only cache

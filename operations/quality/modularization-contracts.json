@@ -377,6 +377,16 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_asset_store_client.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_asset_store_client.py",
+      "required_symbols": [
+        "AlertStoreRequestError",
+        "AssetStoreClient",
+        "load_asset_store_write_token"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_asset_mutation_service.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_asset_mutation_service.py",

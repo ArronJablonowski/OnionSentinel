@@ -266,6 +266,11 @@ from portal_asset_mutation_service import (
 )
 from portal_asset_write_request import prepare_asset_write_request
 from portal_asset_repository import AssetInventoryRepository, DhcpStateRepository
+from portal_asset_store_client import (
+    AlertStoreRequestError,
+    AssetStoreClient,
+    load_asset_store_write_token,
+)
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -4695,113 +4700,22 @@ def insert_pcap_request(conn: sqlite3.Connection, request: dict) -> sqlite3.Row:
     return conn.execute("SELECT * FROM pcap_requests WHERE request_id = ?", (request["request_id"],)).fetchone()
 
 
-class AlertStoreRequestError(RuntimeError):
-    """Preserve an alert-store HTTP status without exposing response bodies."""
-
-    def __init__(self, detail: str, status_code: int = 503):
-        super().__init__(detail)
-        self.status_code = int(status_code)
-
-
 def asset_store_write_token() -> str:
     """Read the owner-controlled local asset-write credential without exporting it."""
-    configured = str(os.environ.get("ASSET_STORE_WRITE_TOKEN") or "").strip()
-    if configured:
-        if len(configured) < 32:
-            raise RuntimeError("asset-store write credential is invalid")
-        return configured
-    path = Path(ASSET_STORE_ENV_FILE)
-    try:
-        metadata = path.lstat()
-    except OSError as exc:
-        raise RuntimeError("asset-store write credential is unavailable") from exc
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_uid != os.geteuid()
-        or stat.S_IMODE(metadata.st_mode) != 0o600
-        or metadata.st_size > 1024 * 1024
-    ):
-        raise RuntimeError("asset-store environment file is not owner-controlled")
-    values: dict[str, str] = {}
-    try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            cleaned = value.strip()
-            if (
-                len(cleaned) >= 2
-                and cleaned[0] == cleaned[-1]
-                and cleaned[0] in {"'", '"'}
-            ):
-                cleaned = cleaned[1:-1]
-            values[key.strip()] = cleaned
-    except OSError as exc:
-        raise RuntimeError("asset-store write credential is unavailable") from exc
-    token = values.get("ASSET_STORE_WRITE_TOKEN") or values.get(
-        "N8N_POST_COMMIT_TOKEN",
-        "",
+    return load_asset_store_write_token(
+        os.environ.get("ASSET_STORE_WRITE_TOKEN"),
+        Path(ASSET_STORE_ENV_FILE),
     )
-    if len(token) < 32:
-        raise RuntimeError("asset-store write credential is invalid")
-    return token
 
 
 def asset_store_post_json(path: str, payload: dict, timeout: float = 10.0) -> dict:
     """Send one authenticated asset mutation to the loopback alert-store."""
-    if path not in {
-        "/assets/promote-dhcp",
-        "/assets/approve-dhcp-ip-change",
-        "/assets/update",
-        "/assets/demote",
-    }:
-        raise ValueError("asset-store mutation path is not allowlisted")
-    encoded = json.dumps(
-        payload,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    headers = {
-        "Content-Type": "application/json",
-        "Content-Length": str(len(encoded)),
-        "X-Onion-Sentinel-Asset-Token": asset_store_write_token(),
-    }
-    req = urllib_request.Request(
-        f"{SOC_ALERT_STORE_API_URL}{path}",
-        data=encoded,
-        method="POST",
-        headers=headers,
-    )
-    try:
-        with urllib_request.urlopen(req, timeout=timeout) as response:
-            result = read_bounded_json(
-                response,
-                max_bytes=SOC_ALERT_STORE_RESPONSE_MAX_BYTES,
-            )
-    except urllib_error.HTTPError as exc:
-        try:
-            error_payload = read_bounded_json(
-                exc,
-                max_bytes=SOC_ALERT_STORE_RESPONSE_MAX_BYTES,
-            )
-            detail = str(
-                error_payload.get("reason")
-                or error_payload.get("error")
-                or exc.reason
-            )
-        except (OSError, BoundedResponseError, json.JSONDecodeError):
-            detail = str(exc.reason)
-        raise AlertStoreRequestError(
-            detail[:500],
-            int(exc.code or 503),
-        ) from exc
-    except (OSError, urllib_error.URLError, json.JSONDecodeError) as exc:
-        raise AlertStoreRequestError(str(exc)[:500], 503) from exc
-    if not isinstance(result, dict) or result.get("ok") is not True:
-        raise AlertStoreRequestError("asset-store rejected request", 400)
-    return result
+    return AssetStoreClient(
+        base_url=SOC_ALERT_STORE_API_URL,
+        maximum_response_bytes=SOC_ALERT_STORE_RESPONSE_MAX_BYTES,
+        token=asset_store_write_token,
+        read_json=read_bounded_json,
+    ).post(path, payload, timeout)
 
 
 def alert_store_post_json(path: str, payload: dict, timeout: float = 5.0) -> dict:
