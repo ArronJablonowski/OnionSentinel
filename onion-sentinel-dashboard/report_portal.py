@@ -94,6 +94,11 @@ from portal_admin_availability import (
     AdminCommandOutcome,
     compose_admin_action_availability,
 )
+from portal_cron_failures import (
+    CronFailureSources,
+    compose_cron_failure_records,
+    render_cron_failure_log,
+)
 from portal_pcap_health import PcapHealthSources, compose_pcap_workflow_health
 from portal_home_dashboard import (
     HomeDashboardSources,
@@ -2240,140 +2245,26 @@ def tail_file(path: Path, max_chars: int = 7000) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def _parse_cron_time(value: object) -> dt.datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = parse_iso_timestamp(value)
-        if parsed.tzinfo is None:
-            parsed = parsed.astimezone()
-        return parsed.astimezone()
-    except Exception:
-        return None
-
-
-def _cron_failure_status(status: str) -> bool:
-    status = status.lower().strip()
-    if not status:
-        return False
-    return any(marker in status for marker in ("fail", "error", "timeout", "exception"))
-
-
-def _cron_job_index() -> dict[str, dict]:
-    try:
-        data = json.loads(CRON_JOBS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    jobs: dict[str, dict] = {}
-    for job in data.get("jobs", []):
-        jid = str(job.get("id") or job.get("job_id") or "").strip()
-        if jid:
-            jobs[jid] = job
-    return jobs
+def _cron_failure_sources() -> CronFailureSources:
+    return CronFailureSources(
+        jobs_file=CRON_JOBS_FILE,
+        output_dir=CRON_OUTPUT_DIR,
+        parse_timestamp=parse_iso_timestamp,
+        format_timestamp=format_iso_timestamp,
+        redact=redact_sensitive_text,
+    )
 
 
 def cron_failure_records(limit: int = 12) -> list[dict]:
-    """Collect recent failed Hermes cron runs from jobs.json and cron output files."""
-    records: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    jobs = _cron_job_index()
-
-    def add_record(job_id: str, name: str, status: str, when: dt.datetime | None, detail: str, source: Path | None) -> None:
-        detail = redact_sensitive_text(detail.strip()) if detail else "No failure detail recorded."
-        source_key = str(source) if source else str(when or "jobs.json")
-        key = (job_id, source_key)
-        if key in seen:
-            return
-        seen.add(key)
-        records.append({
-            "job_id": job_id or "unknown",
-            "name": name or jobs.get(job_id, {}).get("name") or "Unnamed cron",
-            "status": status or "error",
-            "when": when,
-            "detail": detail,
-            "source": source,
-        })
-
-    # Output files preserve complete run-level failure logs, including tracebacks.
-    try:
-        output_files = sorted(
-            [p for p in CRON_OUTPUT_DIR.rglob("*.md") if p.is_file()],
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )[:300]
-    except Exception:
-        output_files = []
-    for path in output_files:
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            continue
-        status_match = re.search(r"^\*\*Status:\*\*\s*(.+)$", text, re.MULTILINE)
-        status = status_match.group(1).strip() if status_match else ""
-        if not _cron_failure_status(status):
-            continue
-        name_match = re.search(r"^#\s+Cron Job:\s*(.+)$", text, re.MULTILINE)
-        id_match = re.search(r"^\*\*Job ID:\*\*\s*(.+)$", text, re.MULTILINE)
-        run_match = re.search(r"^\*\*Run Time:\*\*\s*(.+)$", text, re.MULTILINE)
-        job_id = id_match.group(1).strip() if id_match else path.parent.name
-        name = name_match.group(1).strip() if name_match else str(jobs.get(job_id, {}).get("name") or "Unnamed cron")
-        when = _parse_cron_time(run_match.group(1).strip()) if run_match else dt.datetime.fromtimestamp(path.stat().st_mtime).astimezone()
-        add_record(job_id, name, status, when, text, path)
-
-    # jobs.json carries the latest error even when an output artifact is missing.
-    for job_id, job in jobs.items():
-        last_status = str(job.get("last_status") or "")
-        last_error = str(job.get("last_error") or "")
-        if not last_error and not _cron_failure_status(last_status):
-            continue
-        when = _parse_cron_time(job.get("last_run_at") or job.get("updated_at") or job.get("created_at"))
-        if when and any(
-            row.get("job_id") == job_id
-            and isinstance(row.get("when"), dt.datetime)
-            and abs((row["when"] - when).total_seconds()) <= 5
-            for row in records
-        ):
-            continue
-        detail = last_error or f"Last status: {last_status}"
-        add_record(job_id, str(job.get("name") or "Unnamed cron"), last_status or "error", when, detail, None)
-
-    records.sort(key=lambda row: row.get("when") or dt.datetime.fromtimestamp(0).astimezone(), reverse=True)
-    return records[:limit]
+    """Collect recent failed Hermes cron runs from jobs.json and output files."""
+    return compose_cron_failure_records(_cron_failure_sources(), limit=limit)
 
 
 def render_cron_failure_log_section() -> str:
-    records = cron_failure_records()
-    if not records:
-        body = '<p>No failed Hermes cron runs found in <code>{}</code> or <code>{}</code>.</p>'.format(
-            html.escape(str(CRON_JOBS_FILE)),
-            html.escape(str(CRON_OUTPUT_DIR)),
-        )
-    else:
-        table_rows = []
-        detail_blocks = []
-        for idx, row in enumerate(records, 1):
-            when = row.get("when")
-            when_label = format_iso_timestamp(when.astimezone()) if isinstance(when, dt.datetime) else "unknown time"
-            source = row.get("source")
-            source_label = str(source) if source else str(CRON_JOBS_FILE)
-            detail = str(row.get("detail") or "No failure detail recorded.")
-            if len(detail) > 9000:
-                detail = detail[-9000:]
-            table_rows.append(
-                f"<tr><td>{idx}</td><td>{html.escape(str(row.get('name') or 'Unnamed cron'))}<br><code>{html.escape(str(row.get('job_id') or 'unknown'))}</code></td>"
-                f"<td><span class=\"badge warn\">{html.escape(str(row.get('status') or 'error'))}</span></td>"
-                f"<td>{html.escape(when_label)}</td><td><code>{html.escape(source_label)}</code></td></tr>"
-            )
-            detail_blocks.append(
-                f"<details class=\"cron-failure-detail\" {'open' if idx == 1 else ''}>"
-                f"<summary>{html.escape(str(row.get('name') or 'Unnamed cron'))} · {html.escape(str(row.get('status') or 'error'))} · {html.escape(when_label)}</summary>"
-                f"<pre>{html.escape(detail)}</pre></details>"
-            )
-        body = f'''
-<p>Recent failed Hermes cron runs from <code>{html.escape(str(CRON_JOBS_FILE))}</code> and <code>{html.escape(str(CRON_OUTPUT_DIR))}</code>.</p>
-<table><thead><tr><th>#</th><th>Job</th><th>Status</th><th>Run time</th><th>Source</th></tr></thead><tbody>{''.join(table_rows)}</tbody></table>
-{''.join(detail_blocks)}'''
-    return f'<section class="section cron-failure-log"><h2>Cron failure log</h2>{body}</section>'
+    sources = _cron_failure_sources()
+    return render_cron_failure_log(
+        compose_cron_failure_records(sources), sources
+    )
 
 
 

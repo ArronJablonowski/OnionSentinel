@@ -346,6 +346,13 @@ bounded Homebrew/Hermes command outcomes supplied by the portal. The module
 cannot construct a process environment or execute a command itself; the portal
 retains that host adapter and returns only a typed, bounded command outcome.
 
+`portal_cron_failures.py` owns bounded Hermes cron-failure collection and
+escaped Administration rendering. It treats run-level Markdown output as
+authoritative evidence, uses `jobs.json` only as a latest-error fallback,
+deduplicates matching runs within five seconds, redacts collected detail, and
+bounds both discovery and rendered output. An explicit source bundle supplies
+the two storage roots plus timestamp, formatting, and redaction callbacks.
+
 `portal_n8n_container_status.py` owns the bounded n8n Administration health
 record. An explicit source bundle exposes Docker and curl execution, time,
 formatting, environment, container identity, and health URL. The service

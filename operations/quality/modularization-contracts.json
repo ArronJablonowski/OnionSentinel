@@ -122,6 +122,16 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_cron_failures.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_cron_failures.py",
+      "required_symbols": [
+        "CronFailureSources",
+        "compose_cron_failure_records",
+        "render_cron_failure_log"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_n8n_container_status.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_n8n_container_status.py",
