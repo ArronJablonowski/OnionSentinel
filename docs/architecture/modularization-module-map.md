@@ -426,6 +426,14 @@ keeps JSONL access, database readers, reconciliation policy, live discovery,
 record decoration, and the concrete cache lifetime independently replaceable.
 The portal retains runtime wiring and compatibility facades.
 
+`portal_soc_alert_status_write.py` owns single-alert analyst-status input
+validation, stale legacy bulk-payload rejection-by-no-op, acknowledgement count
+inheritance, bounded reasons, production alert-store delegation, explicit
+offline-DR write authorization, and independent-review suppression gates. Its
+source bundle keeps clocks, database reads/writes, alert-store transport, and
+current status rendering outside the policy. The portal retains those runtime
+resources and a compatibility facade.
+
 `portal_cron_failures.py` owns bounded Hermes cron-failure collection and
 escaped Administration rendering. It treats run-level Markdown output as
 authoritative evidence, uses `jobs.json` only as a latest-error fallback,

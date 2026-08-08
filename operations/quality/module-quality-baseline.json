@@ -49,7 +49,7 @@
       "max_lines": 979
     },
     "onion-sentinel-dashboard/report_portal.py": {
-      "max_lines": 6943
+      "max_lines": 6886
     },
     "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py": {
       "max_lines": 2670
@@ -748,9 +748,6 @@
     "onion-sentinel-dashboard/report_portal.py::soc_alert_manually_escalated_group_ids": {
       "max_complexity": 22
     },
-    "onion-sentinel-dashboard/report_portal.py::update_soc_alert_status": {
-      "max_complexity": 20
-    },
     "onion-sentinel-dashboard/scripts/dashboard_pcap_components.py::render_pcap_evidence_markdown": {
       "max_complexity": 22
     },
@@ -1021,5 +1018,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "81d8f93b7bfccb8d458121438f6ec321a5289d67"
+  "source_release": "1564d235d37fdeaf34ff9a7d2929a811d859e74f"
 }

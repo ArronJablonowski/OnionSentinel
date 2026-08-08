@@ -390,6 +390,10 @@ from portal_llm_history_api import (
     llm_analysis_logs_response as compose_llm_analysis_logs_response,
     read_llm_agent_activity_snapshot as load_llm_agent_activity_snapshot,
 )
+from portal_soc_alert_status_write import (
+    SocAlertStatusWriteSources,
+    update_soc_alert_status as apply_soc_alert_status_update,
+)
 from portal_beacon_history import project_beacon_history
 from portal_n8n_container_status import (
     N8nContainerStatusSources,
@@ -4630,92 +4634,31 @@ def llm_analysis_logs_response(query: dict[str, list[str]]) -> dict:
     return compose_llm_analysis_logs_response(llm_history_api_sources(), query)
 
 
+def soc_alert_suppression_review_state(alert_id: str) -> dict:
+    try:
+        with soc_alert_db_connect() as conn:
+            return soc_alert_review_state_for_group(conn, alert_id)
+    except (FileNotFoundError, sqlite3.Error):
+        return _soc_review_defaults()
+
+
+def soc_alert_status_write_sources() -> SocAlertStatusWriteSources:
+    return SocAlertStatusWriteSources(
+        now_iso=now_iso_utc,
+        validate_store_id=valid_soc_alert_store_id,
+        status_response=soc_alert_status_response,
+        current_repeat_count=current_soc_alert_group_repeat_count,
+        suppression_review_state=soc_alert_suppression_review_state,
+        write_offline_status=write_soc_alert_status,
+        post_alert_store=alert_store_post_json,
+        alert_store_error=AlertStoreRequestError,
+        alert_store_configured=bool(SOC_ALERT_STORE_API_URL),
+        direct_write_allowed=SOC_ALERT_STORE_DIRECT_WRITE_ALLOWED,
+    )
+
+
 def update_soc_alert_status(payload: dict) -> tuple[bool, dict]:
-    now = now_iso_utc()
-
-    def valid_id(value: object) -> str:
-        alert_id = str(value or "").strip()
-        if re.fullmatch(r"[a-f0-9]{12}", alert_id):
-            return alert_id
-        return valid_soc_alert_store_id(alert_id)
-
-    if isinstance(payload.get("statuses"), dict):
-        # Historical dashboard builds used this endpoint to bulk-replace shared
-        # analyst state from browser localStorage. That is unsafe now that
-        # SQLite is the source of truth because an old tab can replay stale
-        # acknowledgements/suppressions. Keep the route compatible, but treat
-        # bulk browser state as read-only.
-        return True, soc_alert_status_response()
-
-    if isinstance(payload.get("acknowledged"), list):
-        # Legacy dashboard builds sent the entire browser-local acknowledgement
-        # list. Treat it as read-only for the same reason as the statuses map:
-        # old tabs must never replace shared server-side analyst state.
-        return True, soc_alert_status_response()
-
-    alert_id = valid_id(payload.get("id"))
-    if not alert_id:
-        return False, {"ok": False, "error": "Invalid SOC alert id"}
-    raw_status = str(payload.get("status") or "").strip().lower()
-    if not raw_status:
-        raw_status = "acknowledged" if bool(payload.get("acknowledged")) else "open"
-    if raw_status not in {"open", "acknowledged", "suppressed"}:
-        return False, {"ok": False, "error": "Invalid SOC alert status"}
-    try:
-        repeat_count = max(0, int(payload.get("repeat_count") or payload.get("acknowledged_count") or 0))
-    except (TypeError, ValueError):
-        repeat_count = 0
-    if raw_status == "acknowledged" and repeat_count <= 0:
-        repeat_count = current_soc_alert_group_repeat_count(alert_id)
-    reason = str(payload.get("reason") or "").strip()[:140]
-    request_payload = {
-        "id": alert_id,
-        "status": raw_status,
-        "repeat_count": repeat_count,
-        "reason": reason,
-        "updated_at": now,
-        "updated_by": "dashboard",
-    }
-    if not SOC_ALERT_STORE_API_URL:
-        # Offline DR tests can explicitly disable the API. Production uses the
-        # alert-store endpoint so only one process owns SQLite writes.
-        if not SOC_ALERT_STORE_DIRECT_WRITE_ALLOWED:
-            return False, {
-                "ok": False,
-                "error": (
-                    "Direct SQLite writes are disabled; configure the "
-                    "alert-store API or explicitly enter offline DR mode."
-                ),
-                "status": int(HTTPStatus.SERVICE_UNAVAILABLE),
-            }
-        if raw_status == "suppressed":
-            try:
-                with soc_alert_db_connect() as conn:
-                    review = soc_alert_review_state_for_group(conn, alert_id)
-            except (FileNotFoundError, sqlite3.Error):
-                review = _soc_review_defaults()
-            if review.get("final_review_status") in {
-                "disputed_pending_human",
-                "review_required_failed",
-                "review_completed_not_authorized",
-            }:
-                return False, {
-                    "ok": False,
-                    "error": "Required independent review needs explicit analyst adjudication before suppression.",
-                    "status": int(HTTPStatus.CONFLICT),
-                }
-        with SOC_ALERT_DB_WRITE_LOCK:
-            write_soc_alert_status(alert_id, request_payload)
-            return True, soc_alert_status_response()
-    try:
-        result = alert_store_post_json("/analyst-status", request_payload)
-    except AlertStoreRequestError as exc:
-        return False, {
-            "ok": False,
-            "error": f"Alert-store state update failed: {exc}",
-            "status": exc.status_code,
-        }
-    return True, result
+    return apply_soc_alert_status_update(soc_alert_status_write_sources(), payload)
 
 
 def valid_soc_alert_store_id(value: object) -> str:

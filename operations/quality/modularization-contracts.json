@@ -263,6 +263,16 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_soc_alert_status_write.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_alert_status_write.py",
+      "required_symbols": [
+        "SocAlertStatusWriteSources",
+        "update_soc_alert_status",
+        "valid_soc_alert_status_id"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_versions.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_versions.py",
