@@ -239,6 +239,17 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_llm_history_store.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_llm_history_store.py",
+      "required_symbols": [
+        "LlmHistoryStoreSources",
+        "read_adjudication_history_rows",
+        "read_primary_history_rows",
+        "read_second_opinion_history_rows"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_versions.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_versions.py",

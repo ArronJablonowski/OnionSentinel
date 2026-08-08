@@ -412,6 +412,13 @@ start-time derivation, chronological ordering, per-role totals, and history
 truncation metadata. The portal retains schema-adaptive read-only SQLite and
 JSONL queries, cache lifetime, pagination, and compatibility facades.
 
+`portal_llm_history_store.py` owns schema-adaptive, read-only SQLite table and
+column discovery; bounded primary, reviewer, and adjudicator queries; optional
+legacy-column projection; and alert-context joins. Its source bundle exposes
+only the connection context and history limit. The portal retains the database
+path/connection policy and delegates record interpretation to
+`portal_llm_history.py`.
+
 `portal_cron_failures.py` owns bounded Hermes cron-failure collection and
 escaped Administration rendering. It treats run-level Markdown output as
 authoritative evidence, uses `jobs.json` only as a latest-error fallback,

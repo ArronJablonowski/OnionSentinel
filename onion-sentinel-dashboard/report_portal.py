@@ -378,6 +378,12 @@ from portal_llm_history import (
     project_second_opinion_rows,
     reconcile_llm_primary_logs as reconcile_projected_llm_primary_logs,
 )
+from portal_llm_history_store import (
+    LlmHistoryStoreSources,
+    read_adjudication_history_rows,
+    read_primary_history_rows,
+    read_second_opinion_history_rows,
+)
 from portal_beacon_history import project_beacon_history
 from portal_n8n_container_status import (
     N8nContainerStatusSources,
@@ -4514,6 +4520,13 @@ LLM_AGENT_ACTIVITY_CACHE = ResponseCache(
 )
 
 
+def llm_history_store_sources() -> LlmHistoryStoreSources:
+    return LlmHistoryStoreSources(
+        connect=soc_alert_db_connect,
+        history_limit=LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
+    )
+
+
 def _llm_analysis_run_timestamp(value: object) -> float:
     return projected_llm_run_timestamp(value)
 
@@ -4534,74 +4547,7 @@ def read_llm_database_primary_logs(
     Cyber Threat Intel, Incident Responder, and SOC Analyst runs even if their
     local telemetry was rotated or missed during a rolling deployment.
     """
-    try:
-        with soc_alert_db_connect() as conn:
-            if not sqlite_table_exists(conn, "ai_analysis_runs"):
-                return []
-            run_columns = sqlite_table_columns(conn, "ai_analysis_runs")
-            required = {"analysis_id", "alert_id", "generated_at"}
-            if not required.issubset(run_columns):
-                return []
-            role_sql = (
-                "COALESCE(NULLIF(TRIM(r.agent_role), ''), 'soc-analyst')"
-                if "agent_role" in run_columns
-                else "'soc-analyst'"
-            )
-            model_sql = "r.model" if "model" in run_columns else "NULL"
-            model_path_sql = (
-                "r.model_path" if "model_path" in run_columns else "NULL"
-            )
-            alert_columns = (
-                sqlite_table_columns(conn, "alerts")
-                if sqlite_table_exists(conn, "alerts")
-                else set()
-            )
-            alert_projection = {
-                "rule_name": (
-                    "a.rule_name" if "rule_name" in alert_columns else "NULL"
-                ),
-                "source_ip": (
-                    "a.source_ip" if "source_ip" in alert_columns else "NULL"
-                ),
-                "destination_ip": (
-                    "a.destination_ip"
-                    if "destination_ip" in alert_columns
-                    else "NULL"
-                ),
-                "destination_port": (
-                    "a.destination_port"
-                    if "destination_port" in alert_columns
-                    else "NULL"
-                ),
-                "seen_count": (
-                    "a.seen_count" if "seen_count" in alert_columns else "1"
-                ),
-            }
-            join_sql = (
-                "LEFT JOIN alerts AS a ON a.alert_id = r.alert_id"
-                if alert_columns
-                else ""
-            )
-            rows = conn.execute(
-                f"""
-                SELECT r.analysis_id, r.alert_id, r.generated_at,
-                       {role_sql} AS agent_role,
-                       {model_sql} AS model, {model_path_sql} AS model_path,
-                       {alert_projection["rule_name"]} AS rule_name,
-                       {alert_projection["source_ip"]} AS source_ip,
-                       {alert_projection["destination_ip"]} AS destination_ip,
-                       {alert_projection["destination_port"]} AS destination_port,
-                       {alert_projection["seen_count"]} AS seen_count
-                FROM ai_analysis_runs AS r
-                {join_sql}
-                ORDER BY r.generated_at DESC, r.analysis_id DESC
-                LIMIT ?
-                """,
-                (max(1, min(LLM_ANALYSIS_COMBINED_HISTORY_LIMIT, int(limit))),),
-            ).fetchall()
-    except (FileNotFoundError, sqlite3.Error, TypeError, ValueError):
-        return []
-
+    rows = read_primary_history_rows(llm_history_store_sources(), limit=limit)
     return project_database_primary_rows(rows)
 
 
@@ -4636,32 +4582,9 @@ def read_llm_second_opinion_logs(
     Reviewer model, runtime, status, outcome, and error always come from the
     independent reviewer row.
     """
-    try:
-        with soc_alert_db_connect() as conn:
-            if not sqlite_table_exists(conn, "ai_second_opinion_runs"):
-                return []
-            columns = sqlite_table_columns(conn, "ai_second_opinion_runs")
-            reviewer_error = (
-                "reviewer_error"
-                if "reviewer_error" in columns
-                else "NULL AS reviewer_error"
-            )
-            rows = conn.execute(
-                f"""
-                SELECT analysis_id, alert_id, agent_role, trigger, status,
-                       {reviewer_error}, reviewer_model, reviewer_model_path,
-                       reviewer_outcome, reviewer_confidence, agreement,
-                       material_disagreement, reviewer_runtime_seconds,
-                       generated_at
-                FROM ai_second_opinion_runs
-                ORDER BY generated_at DESC, analysis_id DESC
-                LIMIT ?
-                """,
-                (max(1, min(LLM_ANALYSIS_COMBINED_HISTORY_LIMIT, int(limit))),),
-            ).fetchall()
-    except (FileNotFoundError, sqlite3.Error, TypeError, ValueError):
-        return []
-
+    rows = read_second_opinion_history_rows(
+        llm_history_store_sources(), limit=limit
+    )
     return project_second_opinion_rows(rows, primary_logs)
 
 
@@ -4671,28 +4594,9 @@ def read_llm_disagreement_adjudication_logs(
     limit: int = LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
 ) -> list[dict]:
     """Return durable shadow adjudicator executions as distinct audit runs."""
-    try:
-        with soc_alert_db_connect() as conn:
-            if not sqlite_table_exists(
-                conn,
-                "ai_disagreement_adjudication_runs",
-            ):
-                return []
-            rows = conn.execute(
-                """
-                SELECT analysis_id, alert_id, agent_role, status, mode,
-                       adjudicator_error, model_route, decision, confidence,
-                       confidence_score, adjudicator_runtime_seconds,
-                       human_adjudication_required, generated_at
-                FROM ai_disagreement_adjudication_runs
-                ORDER BY generated_at DESC, analysis_id DESC
-                LIMIT ?
-                """,
-                (max(1, min(LLM_ANALYSIS_COMBINED_HISTORY_LIMIT, int(limit))),),
-            ).fetchall()
-    except (FileNotFoundError, sqlite3.Error, TypeError, ValueError):
-        return []
-
+    rows = read_adjudication_history_rows(
+        llm_history_store_sources(), limit=limit
+    )
     return project_adjudication_rows(rows, primary_logs)
 
 
