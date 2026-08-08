@@ -279,6 +279,7 @@ from portal_cti_program_service import (
 from portal_soc_settings_write import SocSettingsWriteCallbacks, prepare_soc_settings_write
 from portal_admin_service_write import AdminServiceWriteCallbacks, prepare_admin_service_write
 from portal_resource_library_write import ResourceLibraryWriteCallbacks, prepare_resource_library_write
+from portal_soc_status_write import prepare_soc_status_write
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -8515,17 +8516,13 @@ class PortalHandler(BaseHTTPRequestHandler):
                 json.dumps(soc_write.payload, indent=2).encode(),
                 "application/json; charset=utf-8",
             )
-        if parsed.path == "/api/soc-alerts/status":
-            payload = parse_json_body(raw, empty_object=True).value_or({})
-            ok, data = update_soc_alert_status(payload)
-            if ok:
+        status_write = prepare_soc_status_write(
+            route, raw, update=update_soc_alert_status,
+        )
+        if status_write is not None:
+            if status_write.clear_cache:
                 SOC_ALERT_RESPONSE_CACHE.clear()
-            response_status = (
-                HTTPStatus.OK
-                if ok
-                else int(data.get("status") or HTTPStatus.BAD_REQUEST)
-            )
-            return self._send(response_status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+            return self._send(status_write.status, json.dumps(status_write.payload, indent=2).encode(), "application/json; charset=utf-8")
         settings_write = prepare_soc_settings_write(
             route,
             raw,

@@ -574,6 +574,13 @@ Hermes queueing, worker triggering, and dashboard refresh remain in
 allowlisting but no Administration or same-origin authorization to these four
 writes; this module makes that policy boundary visible without changing it.
 
+`portal_soc_status_write.py` owns the compatibility `/api/soc-alerts/status`
+request boundary: legacy empty-object JSON fallback, downstream mutation
+dispatch, explicit error-status preservation, 400 fallback, and success-only
+cache invalidation signaling. The existing `update_soc_alert_status` function
+retains identifier/status validation, stale-browser safeguards, review gates,
+alert-store transport, and disaster-recovery persistence policy.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and

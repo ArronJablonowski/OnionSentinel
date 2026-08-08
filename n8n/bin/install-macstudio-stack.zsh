@@ -714,6 +714,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/portal_cti_program_service.py" "$DASHBOAR
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_settings_write.py" "$DASHBOARD_RUNTIME_DIR/portal_soc_settings_write.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_service_write.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_service_write.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_resource_library_write.py" "$DASHBOARD_RUNTIME_DIR/portal_resource_library_write.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_status_write.py" "$DASHBOARD_RUNTIME_DIR/portal_soc_status_write.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_ai_model_policy.py" "$DASHBOARD_RUNTIME_DIR/portal_ai_model_policy.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_ai_settings_normalizer.py" "$DASHBOARD_RUNTIME_DIR/portal_ai_settings_normalizer.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_catalog_routes.py" "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py"
