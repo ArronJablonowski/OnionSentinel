@@ -44,6 +44,11 @@ from controlled_evaluation_isolation import (
     pin_controlled_tmpdir,
     validate_controlled_incident_evidence_route,
 )
+from scheduler_cli import (
+    SchedulerCliDefaults,
+    SchedulerCliPolicy,
+    parse_scheduler_args,
+)
 
 
 HOME = Path.home()
@@ -1574,190 +1579,50 @@ def severity_priority_sql(column: str = "triage_level") -> str:
     return f"CASE {column}\n            {cases}\n            ELSE {len(SEVERITY_PRIORITY) + 1}\n          END"
 
 
+def scheduler_cli_defaults() -> SchedulerCliDefaults:
+    """Resolve scheduler defaults at parse time for test and environment parity."""
+    return SchedulerCliDefaults(
+        db=DEFAULT_DB,
+        harness_db=DEFAULT_HARNESS_DB,
+        prompt_dir=DEFAULT_PROMPT_DIR,
+        analysis_dir=DEFAULT_ANALYSIS_DIR,
+        pcap_analysis_dir=DEFAULT_PCAP_ANALYSIS_DIR,
+        rollup_dir=DEFAULT_ROLLUP_DIR,
+        agent_memory_dir=DEFAULT_AGENT_MEMORY_DIR,
+        shared_memory_file=DEFAULT_SHARED_MEMORY_FILE,
+        asset_inventory_file=DEFAULT_ASSET_INVENTORY_FILE,
+        incident_evidence_dir=DEFAULT_INCIDENT_EVIDENCE_DIR,
+        incident_evidence_config=DEFAULT_INCIDENT_EVIDENCE_CONFIG,
+        investigation_pivot_dir=DEFAULT_INVESTIGATION_PIVOT_DIR,
+        live_osquery_config=DEFAULT_LIVE_OSQUERY_CONFIG,
+        disagreement_adjudicator_prompt=DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT,
+        ai_settings=DEFAULT_AI_SETTINGS,
+        investigation_harness_policy=DEFAULT_INVESTIGATION_HARNESS_POLICY,
+        detection_playbooks=DEFAULT_DETECTION_PLAYBOOKS,
+        investigation_skills=DEFAULT_INVESTIGATION_SKILLS,
+        lock=DEFAULT_LOCK,
+        drain=DEFAULT_DRAIN,
+        wake=DEFAULT_WAKE,
+        levels=DEFAULT_LEVELS,
+        model=DEFAULT_MODEL,
+        max_prompt_bytes=DEFAULT_MAX_PROMPT_BYTES,
+        portal_wake=DEFAULT_DASHBOARD_WAKE,
+        alert_store_url=os.environ.get(
+            "ALERT_STORE_URL", "http://127.0.0.1:8787"
+        ),
+    )
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Analyze the next eligible SOC alert using local AI")
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="Path to alert-store SQLite DB")
-    parser.add_argument(
-        "--harness-db",
-        type=Path,
-        default=DEFAULT_HARNESS_DB,
-        help="Path to the investigation-harness SQLite DB used for crash reconciliation",
-    )
-    parser.add_argument("--prompt-dir", type=Path, default=DEFAULT_PROMPT_DIR, help="Prompt package directory")
-    parser.add_argument("--analysis-dir", type=Path, default=DEFAULT_ANALYSIS_DIR, help="AI analysis output directory")
-    parser.add_argument(
-        "--prior-analysis-dir",
-        type=Path,
-        default=DEFAULT_ANALYSIS_DIR,
-        help="Frozen prior AI analysis directory used as prompt context",
-    )
-    parser.add_argument("--pcap-analysis-dir", type=Path, default=DEFAULT_PCAP_ANALYSIS_DIR, help="Parsed PCAP evidence directory")
-    parser.add_argument("--rollup-dir", type=Path, default=DEFAULT_ROLLUP_DIR, help="Frozen daily-rollup context directory")
-    parser.add_argument("--agent-memory-dir", type=Path, default=DEFAULT_AGENT_MEMORY_DIR, help="Frozen role-specific agent-memory directory")
-    parser.add_argument("--shared-memory-file", type=Path, default=DEFAULT_SHARED_MEMORY_FILE, help="Frozen shared agent-memory file")
-    parser.add_argument("--asset-inventory-file", type=Path, default=DEFAULT_ASSET_INVENTORY_FILE, help="Frozen asset inventory export")
-    parser.add_argument("--incident-evidence-dir", type=Path, default=DEFAULT_INCIDENT_EVIDENCE_DIR, help="Restricted Security Onion incident evidence directory")
-    parser.add_argument("--incident-evidence-config", type=Path, default=DEFAULT_INCIDENT_EVIDENCE_CONFIG, help="Restricted relay evidence transport config")
-    parser.add_argument(
-        "--investigation-pivot-dir",
-        type=Path,
-        default=DEFAULT_INVESTIGATION_PIVOT_DIR,
-        help="Directory for restricted dynamic-investigation pivot artifacts",
-    )
-    parser.add_argument(
-        "--live-osquery-config",
-        type=Path,
-        default=DEFAULT_LIVE_OSQUERY_CONFIG,
-        help="Live OSQuery capability configuration",
-    )
-    parser.add_argument(
-        "--disagreement-adjudicator-prompt-file",
-        type=Path,
-        default=DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT,
-        help="Bounded disagreement-adjudicator system prompt",
-    )
-    parser.add_argument("--ai-settings-file", type=Path, default=DEFAULT_AI_SETTINGS, help="AI model routing settings JSON")
-    parser.add_argument(
-        "--investigation-harness-policy",
-        type=Path,
-        default=DEFAULT_INVESTIGATION_HARNESS_POLICY,
-        help="Versioned Onion Sentinel investigation harness policy",
-    )
-    parser.add_argument(
-        "--detection-playbooks",
-        type=Path,
-        default=DEFAULT_DETECTION_PLAYBOOKS,
-        help="Deterministic detection validation playbooks",
-    )
-    parser.add_argument(
-        "--investigation-skills",
-        type=Path,
-        default=DEFAULT_INVESTIGATION_SKILLS,
-        help="Versioned read-only investigation skill registry",
-    )
-    parser.add_argument(
-        "--provider-lane",
-        choices=("any", "ollama", "cli"),
-        default="any",
-        help="Only claim jobs assigned to this inference provider",
-    )
-    parser.add_argument("--lock-file", type=Path, default=DEFAULT_LOCK, help="Non-overlap lock file")
-    parser.add_argument(
-        "--drain-file",
-        type=Path,
-        default=DEFAULT_DRAIN,
-        help=(
-            "Owner-only regular-file maintenance marker; when present, finish "
-            "the current durable job and claim no additional work"
+    return parse_scheduler_args(
+        scheduler_cli_defaults(),
+        SchedulerCliPolicy(
+            controlled_alert_id=CONTROLLED_ALERT_ID_RE,
+            controlled_dispatch_id=CONTROLLED_DISPATCH_ID_RE,
+            stable_group_key_valid=valid_controlled_stable_group_key,
+            stable_group_key_max_bytes=CONTROLLED_STABLE_GROUP_KEY_MAX_LENGTH,
         ),
     )
-    parser.add_argument("--wake-file", type=Path, default=DEFAULT_WAKE, help="Consumable launchd wake marker")
-    parser.add_argument("--levels", default=DEFAULT_LEVELS, help="Comma-separated triage levels to analyze")
-    parser.add_argument("--hours", type=int, default=87600, help="Lookback window for eligible alerts")
-    parser.add_argument("--max-per-run", type=int, default=0, help="Maximum unique alert groups to analyze per scheduler run; 0 drains the queue until no eligible alerts remain")
-    parser.add_argument(
-        "--only-group-id",
-        default="",
-        help=(
-            "Process only one exact 20-hex stable detection group. "
-            "Controlled runs must also supply --only-alert-id, "
-            "--only-stable-group-key, and --only-dispatch-id."
-        ),
-    )
-    parser.add_argument(
-        "--only-alert-id",
-        default="",
-        help=(
-            "Require the claimed durable payload to contain this exact bounded "
-            "Security Onion/Elastic alert ID. Requires --only-group-id and "
-            "--only-stable-group-key and --only-dispatch-id."
-        ),
-    )
-    parser.add_argument(
-        "--only-stable-group-key",
-        default="",
-        help=(
-            "Require the claimed durable payload to contain this exact bounded "
-            "stable group key. Requires every other --only-* identity field."
-        ),
-    )
-    parser.add_argument(
-        "--only-dispatch-id",
-        default="",
-        help=(
-            "Require the claimed durable payload to contain this exact "
-            "64-character lowercase SHA-256 dispatch ID. Requires "
-            "--only-group-id, --only-alert-id, and --only-stable-group-key."
-        ),
-    )
-    parser.add_argument("--related-limit", type=int, default=8, help="Related alert count passed to prompt builder")
-    parser.add_argument("--correlation-limit", type=int, default=8, help="Scored correlation candidates passed to prompt builder")
-    parser.add_argument("--correlation-min-score", type=int, default=15, help="Minimum deterministic correlation score")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="Optional Ollama model override; defaults to Settings page AI model routing config")
-    parser.add_argument("--timeout", type=int, default=600, help="Ollama request timeout in seconds")
-    parser.add_argument(
-        "--max-prompt-bytes",
-        type=int,
-        default=DEFAULT_MAX_PROMPT_BYTES,
-        help="Hard byte ceiling for each generated AI prompt package",
-    )
-    parser.add_argument("--portal-wake-file", type=Path, default=DEFAULT_DASHBOARD_WAKE, help="Wake file for the independent dashboard refresh worker")
-    parser.add_argument("--no-portal-refresh", action="store_true", help="Do not signal the independent dashboard refresh worker")
-    parser.add_argument("--alert-store-url", default=os.environ.get("ALERT_STORE_URL", "http://127.0.0.1:8787"), help="Alert-store URL for durable AI job status")
-    parser.add_argument("--include-tests", action="store_true", help="Allow test/validation alert IDs")
-    parser.add_argument("--dry-run", action="store_true", help="Print the selected alert without calling Ollama")
-    args = parser.parse_args()
-    if args.hours <= 0:
-        parser.error("--hours must be positive")
-    if args.timeout <= 0:
-        parser.error("--timeout must be positive")
-    if args.max_prompt_bytes < 256 * 1024:
-        parser.error("--max-prompt-bytes must be at least 262144")
-    if args.max_per_run < 0:
-        parser.error("--max-per-run must be zero or positive")
-    args.only_group_id = str(args.only_group_id or "").strip().lower()
-    args.only_alert_id = str(args.only_alert_id or "").strip()
-    args.only_stable_group_key = str(args.only_stable_group_key or "")
-    args.only_dispatch_id = str(args.only_dispatch_id or "").strip()
-    controlled_identity = (
-        bool(args.only_group_id),
-        bool(args.only_alert_id),
-        bool(args.only_stable_group_key),
-        bool(args.only_dispatch_id),
-    )
-    if any(controlled_identity) and not all(controlled_identity):
-        parser.error(
-            "--only-group-id, --only-alert-id, --only-stable-group-key, "
-            "and --only-dispatch-id must be supplied together"
-        )
-    if args.only_group_id and not re.fullmatch(r"[a-f0-9]{20}", args.only_group_id):
-        parser.error("--only-group-id must be one exact 20-hex stable group id")
-    if args.only_alert_id and not CONTROLLED_ALERT_ID_RE.fullmatch(
-        args.only_alert_id
-    ):
-        parser.error(
-            "--only-alert-id must be one bounded Security Onion/Elastic alert ID"
-        )
-    if args.only_stable_group_key and not valid_controlled_stable_group_key(
-        args.only_stable_group_key
-    ):
-        parser.error(
-            "--only-stable-group-key must be non-empty valid UTF-8, contain "
-            "no NUL, and be no longer than "
-            f"{CONTROLLED_STABLE_GROUP_KEY_MAX_LENGTH} bytes"
-        )
-    if args.only_dispatch_id and not CONTROLLED_DISPATCH_ID_RE.fullmatch(
-        args.only_dispatch_id
-    ):
-        parser.error(
-            "--only-dispatch-id must be one exact 64-character lowercase "
-            "SHA-256 hex digest"
-        )
-    if args.correlation_limit <= 0:
-        parser.error("--correlation-limit must be positive")
-    if args.correlation_min_score < 0 or args.correlation_min_score > 100:
-        parser.error("--correlation-min-score must be between 0 and 100")
-    return args
 
 
 def project_now() -> str:

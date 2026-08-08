@@ -253,6 +253,13 @@ reviewer, and resource-monitor test modules until those tests migrate.
 The launchd-facing wrapper keeps the current filename, arguments, lock files,
 wake files, provider lanes, and exit semantics.
 
+`scheduler_cli.py` now owns the launchd-facing argument schema, runtime path
+options, lane and queue controls, numeric bounds, and fail-closed controlled-
+evaluation identity validation. `auto-run-ai-analysis.py` retains a thin
+compatibility facade that resolves its existing mutable defaults and injects
+the alert-ID, dispatch-ID, and stable-group-key policies at parse time, so
+tests and operators keep the exact CLI and environment behavior.
+
 ### `onion_sentinel_harness.py`
 
 | Current responsibility | Target boundary | Notes |

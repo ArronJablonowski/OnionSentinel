@@ -29,6 +29,16 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_cli.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_cli.py",
+      "required_symbols": [
+        "SchedulerCliDefaults",
+        "SchedulerCliPolicy",
+        "parse_scheduler_args"
+      ]
+    },
+    {
       "path": "n8n/bin/onion_sentinel_harness.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/onion_sentinel_harness.py",
