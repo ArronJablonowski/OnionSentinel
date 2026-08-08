@@ -250,6 +250,19 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_llm_history_api.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_llm_history_api.py",
+      "required_symbols": [
+        "LlmHistoryApiSources",
+        "build_llm_agent_activity_snapshot",
+        "llm_analysis_log_limit",
+        "llm_analysis_log_page",
+        "llm_analysis_logs_response",
+        "read_llm_agent_activity_snapshot"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_versions.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_versions.py",

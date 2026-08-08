@@ -11,7 +11,6 @@ import html
 import importlib.util
 import ipaddress
 import json
-import math
 import os
 import re
 import shutil
@@ -383,6 +382,13 @@ from portal_llm_history_store import (
     read_adjudication_history_rows,
     read_primary_history_rows,
     read_second_opinion_history_rows,
+)
+from portal_llm_history_api import (
+    LlmHistoryApiSources,
+    llm_analysis_log_limit as bounded_llm_analysis_log_limit,
+    llm_analysis_log_page as bounded_llm_analysis_log_page,
+    llm_analysis_logs_response as compose_llm_analysis_logs_response,
+    read_llm_agent_activity_snapshot as load_llm_agent_activity_snapshot,
 )
 from portal_beacon_history import project_beacon_history
 from portal_n8n_container_status import (
@@ -4411,19 +4417,11 @@ def soc_alert_status_response() -> dict:
 
 
 def llm_analysis_log_limit(raw: object) -> int:
-    try:
-        value = int(str(raw or 25))
-    except ValueError:
-        value = 25
-    return max(1, min(50, value))
+    return bounded_llm_analysis_log_limit(raw)
 
 
 def llm_analysis_log_page(raw: object) -> int:
-    try:
-        value = int(str(raw or 1))
-    except ValueError:
-        value = 1
-    return max(1, value)
+    return bounded_llm_analysis_log_page(raw)
 
 
 def read_llm_analysis_logs(max_rows: int = 1000) -> list[dict]:
@@ -4604,79 +4602,32 @@ def _llm_log_sort_timestamp(record: dict) -> float:
     return projected_llm_log_sort_timestamp(record)
 
 
-def read_llm_agent_activity_snapshot() -> dict:
-    """Build one bounded, role-complete history snapshot for pagination."""
-    def compute() -> dict:
-        telemetry_total, _, telemetry_logs = (
-            SOC_ALERT_LLM_ANALYSIS_LOG_INDEX.page(
-                page=1,
-                limit=LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
-            )
-        )
-        database_logs = read_llm_database_primary_logs()
-        primary_logs, database_recovered_total = reconcile_llm_primary_logs(
-            telemetry_logs,
-            database_logs,
-        )
-        reviewer_logs = read_llm_second_opinion_logs(primary_logs)
-        adjudication_logs = read_llm_disagreement_adjudication_logs(
-            primary_logs,
-        )
-        return compose_llm_activity_snapshot(
-            telemetry_total,
-            len(telemetry_logs),
-            primary_logs,
-            len(database_logs),
-            database_recovered_total,
-            reviewer_logs,
-            adjudication_logs,
-            LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
-        )
-
-    return LLM_AGENT_ACTIVITY_CACHE.get_or_compute(
-        "role-complete-history",
-        compute,
+def llm_history_api_sources() -> LlmHistoryApiSources:
+    return LlmHistoryApiSources(
+        telemetry_page=lambda page, limit: (
+            SOC_ALERT_LLM_ANALYSIS_LOG_INDEX.page(page=page, limit=limit)
+        ),
+        read_database_primary=read_llm_database_primary_logs,
+        reconcile_primary=reconcile_llm_primary_logs,
+        read_reviewer=read_llm_second_opinion_logs,
+        read_adjudication=read_llm_disagreement_adjudication_logs,
+        compose_snapshot=compose_llm_activity_snapshot,
+        read_active=read_active_llm_analyses,
+        decorate=lambda record, live: decorate_llm_analysis_record(
+            record, live=live
+        ),
+        cache=LLM_AGENT_ACTIVITY_CACHE,
+        history_limit=LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
     )
 
 
+def read_llm_agent_activity_snapshot() -> dict:
+    """Return one cached, bounded, role-complete history snapshot."""
+    return load_llm_agent_activity_snapshot(llm_history_api_sources())
+
+
 def llm_analysis_logs_response(query: dict[str, list[str]]) -> dict:
-    requested_page = llm_analysis_log_page((query.get("page") or ["1"])[0])
-    limit = llm_analysis_log_limit((query.get("limit") or ["25"])[0])
-    activity = read_llm_agent_activity_snapshot()
-    primary_logs = activity["primary_logs"]
-    reviewer_logs = activity["reviewer_logs"]
-    adjudication_logs = activity["adjudication_logs"]
-    primary_total = len(primary_logs)
-    total = primary_total + len(reviewer_logs) + len(adjudication_logs)
-    total_pages = max(1, math.ceil(total / limit)) if total else 1
-    page = min(requested_page, total_pages)
-    combined = activity["combined"]
-    start = (page - 1) * limit
-    logs = combined[start:start + limit]
-    return {
-        "ok": True,
-        "page": page,
-        "limit": limit,
-        "total": total,
-        "primary_total": primary_total,
-        "telemetry_total": activity["telemetry_total"],
-        "database_recovered_total": activity[
-            "database_recovered_total"
-        ],
-        "second_opinion_total": len(reviewer_logs),
-        "disagreement_adjudication_total": len(adjudication_logs),
-        "agent_totals": activity["agent_totals"],
-        "history_truncated": activity["history_truncated"],
-        "total_pages": total_pages,
-        "logs": [
-            decorate_llm_analysis_record(record, live=False)
-            for record in logs
-        ],
-        "active_runs": [
-            decorate_llm_analysis_record(record, live=True)
-            for record in read_active_llm_analyses()
-        ] if page == 1 else [],
-    }
+    return compose_llm_analysis_logs_response(llm_history_api_sources(), query)
 
 
 def update_soc_alert_status(payload: dict) -> tuple[bool, dict]:

@@ -419,6 +419,13 @@ only the connection context and history limit. The portal retains the database
 path/connection policy and delegates record interpretation to
 `portal_llm_history.py`.
 
+`portal_llm_history_api.py` owns bounded page and page-size parsing,
+role-complete snapshot orchestration, short-lived cache composition, public
+history counters, and first-page-only live-run projection. Its source bundle
+keeps JSONL access, database readers, reconciliation policy, live discovery,
+record decoration, and the concrete cache lifetime independently replaceable.
+The portal retains runtime wiring and compatibility facades.
+
 `portal_cron_failures.py` owns bounded Hermes cron-failure collection and
 escaped Administration rendering. It treats run-level Markdown output as
 authoritative evidence, uses `jobs.json` only as a latest-error fallback,
