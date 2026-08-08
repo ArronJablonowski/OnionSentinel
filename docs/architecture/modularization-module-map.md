@@ -615,6 +615,13 @@ Administration-dashboard rejection intent. Administration authentication is
 lazy and consulted only for an invalid Administration action. The HTTP handler
 retains bounded body reads, form rendering, and socket writes.
 
+`portal_json_write_service.py` owns ordered application dispatch across CTI,
+Asset Inventory, SOC and Incident Response, legacy status, Settings,
+Administration service, and Resource Library JSON writes. It preserves
+same-origin and Administration authorization laziness and centralizes SOC
+response-cache invalidation. `report_portal.py` retains concrete callback
+composition, JSON serialization, Administration form handling, and sockets.
+
 `portal_resource_action_read.py` owns asynchronous Resource Library action ID
 validation, pending-state projection, and byte-preserving status reads. The
 portal retains the concrete action-status directory, JSON encoding for

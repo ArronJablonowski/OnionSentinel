@@ -232,11 +232,7 @@ from portal_soc_read_dispatch import (
     SocReadCallbacks,
     dispatch_soc_read,
 )
-from portal_soc_write_dispatch import (
-    SocWriteCallbacks,
-    dispatch_authorized_soc_write,
-)
-from portal_soc_write_request import prepare_soc_write_request
+from portal_soc_write_dispatch import SocWriteCallbacks, dispatch_authorized_soc_write
 from portal_software_inventory_service import (
     AssetLabelSnapshot,
     append_incomplete_asset_warning,
@@ -264,7 +260,6 @@ from portal_asset_mutation_service import (
     normalize_asset_mutation_payload,
     normalize_asset_review_payload,
 )
-from portal_asset_write_request import prepare_asset_write_request
 from portal_asset_repository import AssetInventoryRepository, DhcpStateRepository
 from portal_asset_store_client import (
     AlertStoreRequestError,
@@ -273,13 +268,11 @@ from portal_asset_store_client import (
 )
 from portal_cti_program_service import (
     CtiProgramCallbacks,
-    prepare_cti_program_write,
     read_cti_program,
 )
-from portal_soc_settings_write import SocSettingsWriteCallbacks, prepare_soc_settings_write
-from portal_admin_service_write import AdminServiceWriteCallbacks, prepare_admin_service_write
-from portal_resource_library_write import ResourceLibraryWriteCallbacks, prepare_resource_library_write
-from portal_soc_status_write import prepare_soc_status_write
+from portal_soc_settings_write import SocSettingsWriteCallbacks
+from portal_admin_service_write import AdminServiceWriteCallbacks
+from portal_resource_library_write import ResourceLibraryWriteCallbacks
 from portal_admin_form_service import AdminFormCallbacks, prepare_admin_form
 from portal_admin_read_service import prepare_admin_read
 from portal_health_read_service import compose_portal_health
@@ -288,6 +281,7 @@ from portal_catalog_read_service import CatalogReadCallbacks, dispatch_catalog_r
 from portal_catalog_delivery import CatalogDeliveryCallbacks, deliver_catalog_route
 from portal_general_read_service import GeneralReadCallbacks, dispatch_general_read
 from portal_post_intake import prepare_post_intake
+from portal_json_write_service import JsonWriteCallbacks, dispatch_json_write
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -8328,6 +8322,34 @@ def portal_general_read_callbacks(home: Callable[[], bytes]) -> GeneralReadCallb
     )
 
 
+def portal_json_write_callbacks(handler) -> JsonWriteCallbacks:
+    return JsonWriteCallbacks(
+        same_origin_authorized=lambda: handler._soc_review_write_authorized(),
+        cti_admin_authenticated=lambda: handler._cti_program_write_authorized(),
+        cti_program=portal_cti_program_callbacks(
+            lambda program: handler._cti_program_mutation_audit(program),
+        ),
+        asset_admin_authenticated=lambda: handler._admin_authenticated(),
+        asset_dispatcher=dispatch_asset_write,
+        soc_dispatcher=dispatch_authorized_soc_write,
+        soc=PORTAL_SOC_WRITE_CALLBACKS,
+        clear_soc_cache=SOC_ALERT_RESPONSE_CACHE.clear,
+        status_update=update_soc_alert_status,
+        settings_admin_authenticated=lambda: handler._soc_settings_write_authorized(),
+        settings=SocSettingsWriteCallbacks(
+            save_prompt=save_settings_prompt,
+            save_ai_settings=save_soc_ai_settings,
+            save_agent_model=save_soc_agent_model,
+        ),
+        admin_authenticated=lambda: handler._admin_authenticated(),
+        admin_service=AdminServiceWriteCallbacks(ensure_admin_token, start_admin_service),
+        resource_library=ResourceLibraryWriteCallbacks(
+            move_resource_to_removal, set_resource_tags,
+            rename_resource_file, set_resource_favorite,
+        ),
+    )
+
+
 class PortalHandler(BaseHTTPRequestHandler):
     server_version = "ArronReportPortal/1.0"
 
@@ -8463,7 +8485,6 @@ class PortalHandler(BaseHTTPRequestHandler):
             cti_program_path=CTI_PROGRAM_API_PATH,
             prompt_paths=SOC_SETTINGS_PROMPT_API_PATHS,
         )
-        is_asset_write = route.asset_write
         intake = prepare_post_intake(
             route, self.headers.get("Content-Length"),
             cti_file_bytes=cti_program.MAX_FILE_BYTES,
@@ -8475,94 +8496,16 @@ class PortalHandler(BaseHTTPRequestHandler):
                 return self._send(intake.status, renderer(intake.message, True))
             return self._send(intake.status, intake.body, intake.content_type)
         raw = self.rfile.read(intake.length).decode("utf-8", errors="replace")
-        if route.cti_program_write:
-            cti_write = prepare_cti_program_write(
-                route,
-                raw,
-                same_origin_authorized=self._soc_review_write_authorized(),
-                admin_authenticated=self._cti_program_write_authorized,
-                callbacks=portal_cti_program_callbacks(
-                    self._cti_program_mutation_audit,
-                ),
-            )
-            assert cti_write is not None
-            return self._send(
-                cti_write.status,
-                json.dumps(cti_write.payload, indent=2).encode(),
-                "application/json; charset=utf-8",
-            )
-        if is_asset_write:
-            asset_write = prepare_asset_write_request(
-                route,
-                raw,
-                same_origin_authorized=self._soc_review_write_authorized(),
-                admin_required=ASSET_INVENTORY_ADMIN_WRITE_REQUIRED,
-                admin_authenticated=self._admin_authenticated,
-                dispatcher=dispatch_asset_write,
-            )
-            assert asset_write is not None
-            return self._send(
-                asset_write.status,
-                json.dumps(asset_write.payload, indent=2).encode(),
-                "application/json; charset=utf-8",
-            )
-        soc_write = prepare_soc_write_request(
-            route,
-            raw,
-            same_origin_authorized=(
-                not (route.incident_reanalysis or route.review_write)
-                or self._soc_review_write_authorized()
-            ),
-            dispatcher=dispatch_authorized_soc_write,
-            callbacks=PORTAL_SOC_WRITE_CALLBACKS,
-        )
-        if soc_write is not None:
-            if soc_write.clear_cache:
-                SOC_ALERT_RESPONSE_CACHE.clear()
-            return self._send(
-                soc_write.status,
-                json.dumps(soc_write.payload, indent=2).encode(),
-                "application/json; charset=utf-8",
-            )
-        status_write = prepare_soc_status_write(
-            route, raw, update=update_soc_alert_status,
-        )
-        if status_write is not None:
-            if status_write.clear_cache:
-                SOC_ALERT_RESPONSE_CACHE.clear()
-            return self._send(status_write.status, json.dumps(status_write.payload, indent=2).encode(), "application/json; charset=utf-8")
-        settings_write = prepare_soc_settings_write(
-            route,
-            raw,
-            admin_authenticated=lambda: self._soc_settings_write_authorized(),
-            callbacks=SocSettingsWriteCallbacks(
-                save_prompt=save_settings_prompt,
-                save_ai_settings=save_soc_ai_settings,
-                save_agent_model=save_soc_agent_model,
-            ),
-        )
-        if settings_write is not None:
-            return self._send(
-                settings_write.status,
-                json.dumps(settings_write.payload, indent=2).encode(),
-                "application/json; charset=utf-8",
-            )
-        admin_service_write = prepare_admin_service_write(
+        json_write = dispatch_json_write(
             route, raw,
-            admin_authenticated=lambda: self._admin_authenticated(),
-            callbacks=AdminServiceWriteCallbacks(ensure_admin_token, start_admin_service),
+            asset_admin_required=ASSET_INVENTORY_ADMIN_WRITE_REQUIRED,
+            callbacks=portal_json_write_callbacks(self),
         )
-        if admin_service_write is not None:
-            return self._send(admin_service_write.status, json.dumps(admin_service_write.payload, indent=2).encode(), "application/json; charset=utf-8")
-        resource_write = prepare_resource_library_write(
-            route, raw,
-            callbacks=ResourceLibraryWriteCallbacks(
-                move_resource_to_removal, set_resource_tags,
-                rename_resource_file, set_resource_favorite,
-            ),
-        )
-        if resource_write is not None:
-            return self._send(resource_write.status, json.dumps(resource_write.payload, indent=2).encode(), "application/json; charset=utf-8")
+        if json_write is not None:
+            return self._send(
+                json_write.status, json.dumps(json_write.payload, indent=2).encode(),
+                "application/json; charset=utf-8",
+            )
         admin_form = prepare_admin_form(
             route, raw, client_ip=self.client_address[0],
             admin_authenticated=lambda: self._admin_authenticated(),

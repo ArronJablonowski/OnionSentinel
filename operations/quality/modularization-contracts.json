@@ -504,6 +504,16 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_json_write_service.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_json_write_service.py",
+      "required_symbols": [
+        "JsonWriteCallbacks",
+        "JsonWriteResult",
+        "dispatch_json_write"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_resource_action_read.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_resource_action_read.py",
