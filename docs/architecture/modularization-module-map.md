@@ -603,6 +603,18 @@ without failing the health response. Report discovery, runtime roots, local
 address selection, timestamps, JSON encoding, and socket writes remain in
 `report_portal.py`.
 
+`portal_resource_action_read.py` owns asynchronous Resource Library action ID
+validation, pending-state projection, and byte-preserving status reads. The
+portal retains the concrete action-status directory, JSON encoding for
+synthetic responses, content headers, and socket writes.
+
+`portal_catalog_read_service.py` owns public report-index projection and lazy
+dispatch of operational metric renderers. Ordinary metrics never scan the
+report catalog; only the catalog index and portal-update metric invoke the
+injected scan port. Report discovery and concrete HTML renderers remain in
+`report_portal.py`, along with static assets, report file resolution, response
+encoding, and socket writes.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and

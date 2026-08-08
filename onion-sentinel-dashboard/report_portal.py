@@ -283,6 +283,8 @@ from portal_soc_status_write import prepare_soc_status_write
 from portal_admin_form_service import AdminFormCallbacks, prepare_admin_form
 from portal_admin_read_service import prepare_admin_read
 from portal_health_read_service import compose_portal_health
+from portal_resource_action_read import read_resource_action_status
+from portal_catalog_read_service import CatalogReadCallbacks, dispatch_catalog_read
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -8643,31 +8645,26 @@ class PortalHandler(BaseHTTPRequestHandler):
                 body,
                 "application/json; charset=utf-8",
             )
-        if operation == "resource_action_status":
-            action_id = (query.get("id") or [""])[0]
-            if not re.fullmatch(r"[a-f0-9-]{32,36}", action_id):
-                return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid action id"}).encode(), "application/json; charset=utf-8")
-            status_path = RESOURCE_LIBRARY_ACTION_STATUS_DIR / f"{action_id}.json"
-            if not status_path.exists():
-                return self._send(HTTPStatus.OK, json.dumps({"ok": True, "state": "pending"}).encode(), "application/json; charset=utf-8")
-            return self._send(HTTPStatus.OK, status_path.read_bytes(), "application/json; charset=utf-8")
+        action_read = read_resource_action_status(
+            operation, query, status_directory=RESOURCE_LIBRARY_ACTION_STATUS_DIR,
+        )
+        if action_read is not None:
+            body = action_read.payload if action_read.encoded else json.dumps(action_read.payload).encode()
+            return self._send(action_read.status, body, "application/json; charset=utf-8")
         catalog_route = classify_catalog_route(path)
         catalog_operation = catalog_route.operation
-        if catalog_operation == "catalog_index":
-            reports = scan_reports()
-            data = [{"id": r.rid, "title": r.title, "path": r.rel, "category": r.category, "mtime": r.mtime, "size": r.size} for r in reports]
-            return self._send(HTTPStatus.OK, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        metric_routes = {
-            "metric_system_uptime": render_system_uptime_detail,
-            "metric_updates": render_prioritized_updates_detail,
-            "metric_macos_updates": render_macos_updates_detail,
-            "metric_hermes_backups": render_hermes_backups_detail,
-            "metric_local_disk": render_local_disk_detail,
-        }
-        if catalog_operation in metric_routes:
-            return self._send(HTTPStatus.OK, metric_routes[catalog_operation]())
-        if catalog_operation == "metric_portal_update":
-            return self._send(HTTPStatus.OK, render_portal_update_detail(scan_reports()))
+        catalog_read = dispatch_catalog_read(
+            catalog_route,
+            CatalogReadCallbacks(
+                scan_reports, render_system_uptime_detail,
+                render_prioritized_updates_detail, render_macos_updates_detail,
+                render_hermes_backups_detail, render_local_disk_detail,
+                render_portal_update_detail,
+            ),
+        )
+        if catalog_read is not None:
+            body = catalog_read.payload if catalog_read.encoded else json.dumps(catalog_read.payload, indent=2).encode()
+            return self._send(catalog_read.status, body, catalog_read.content_type)
         # Backward-compatible static aliases for Forest Room 5. These make old
         # /open/<id> pages, cached pages, and direct LAN asset URLs resolve their
         # relative image/PDF links instead of showing alt-text-only blank cards.

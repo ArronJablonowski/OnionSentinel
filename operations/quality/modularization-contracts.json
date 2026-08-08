@@ -485,6 +485,26 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_resource_action_read.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_resource_action_read.py",
+      "required_symbols": [
+        "ResourceActionReadResult",
+        "read_resource_action_status"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_catalog_read_service.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_catalog_read_service.py",
+      "required_symbols": [
+        "CatalogReadCallbacks",
+        "CatalogReadResult",
+        "dispatch_catalog_read",
+        "project_report_catalog"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_catalog_routes.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py",
