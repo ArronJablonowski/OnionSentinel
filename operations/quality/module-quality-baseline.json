@@ -49,7 +49,7 @@
       "max_lines": 979
     },
     "onion-sentinel-dashboard/report_portal.py": {
-      "max_lines": 6886
+      "max_lines": 6665
     },
     "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py": {
       "max_lines": 2670
@@ -715,12 +715,6 @@
     "onion-sentinel-dashboard/report_portal.py::_incident_query_linked_finding": {
       "max_complexity": 17
     },
-    "onion-sentinel-dashboard/report_portal.py::_soc_adjudication_verdict_contradictions": {
-      "max_complexity": 17
-    },
-    "onion-sentinel-dashboard/report_portal.py::_soc_derive_legacy_detection_outcome": {
-      "max_complexity": 22
-    },
     "onion-sentinel-dashboard/report_portal.py::category_for": {
       "max_complexity": 28
     },
@@ -729,9 +723,6 @@
     },
     "onion-sentinel-dashboard/report_portal.py::normalize_pcap_request": {
       "max_complexity": 31
-    },
-    "onion-sentinel-dashboard/report_portal.py::normalize_soc_adjudication_payload": {
-      "max_complexity": 34
     },
     "onion-sentinel-dashboard/report_portal.py::pcap_request_candidate_from_group": {
       "max_complexity": 31
@@ -1018,5 +1009,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "1564d235d37fdeaf34ff9a7d2929a811d859e74f"
+  "source_release": "0298d1c7dd9381335c14bcd23639c31149b7e0eb"
 }

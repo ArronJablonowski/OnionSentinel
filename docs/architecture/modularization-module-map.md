@@ -434,6 +434,13 @@ source bundle keeps clocks, database reads/writes, alert-store transport, and
 current status rendering outside the policy. The portal retains those runtime
 resources and a compatibility facade.
 
+`portal_soc_adjudication_policy.py` owns canonical analyst outcome and factored
+verdict enumerations, legacy verdict projection and derivation, impossible
+factor-combination detection, bounded human-review fields, duplicate-reference
+validation, and incident-resolution requirements. It is pure policy shared by
+the alert and incident write facades; HTTP routing, case lookup, database state,
+and append-only alert-store transport remain outside the module.
+
 `portal_cron_failures.py` owns bounded Hermes cron-failure collection and
 escaped Administration rendering. It treats run-level Markdown output as
 authoritative evidence, uses `jobs.json` only as a latest-error fallback,

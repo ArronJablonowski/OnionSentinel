@@ -394,6 +394,17 @@ from portal_soc_alert_status_write import (
     SocAlertStatusWriteSources,
     update_soc_alert_status as apply_soc_alert_status_update,
 )
+from portal_soc_adjudication_policy import (
+    SOC_ANALYST_ACTIVITY_DISPOSITIONS,
+    SOC_ANALYST_ADJUDICATION_OUTCOMES,
+    SOC_ANALYST_DETECTION_VALIDITIES,
+    SOC_ANALYST_EVENT_STATUSES,
+    SOC_ANALYST_HANDLING_VALUES,
+    adjudication_verdict_contradictions,
+    derive_legacy_detection_outcome,
+    legacy_verdict_factors,
+    normalize_soc_adjudication_payload as normalize_adjudication_payload,
+)
 from portal_beacon_history import project_beacon_history
 from portal_n8n_container_status import (
     N8nContainerStatusSources,
@@ -5273,169 +5284,21 @@ def soc_alert_escalate_response(group_id: str, payload: dict | None = None) -> t
     }
 
 
-SOC_ANALYST_ADJUDICATION_OUTCOMES = {
-    "true_positive_malicious",
-    "true_positive_suspicious",
-    "true_positive_authorized_benign",
-    "false_positive_logic_rule",
-    "false_positive_data_parser",
-    "false_positive_bad_intel_ioc",
-    "false_negative",
-    "duplicate",
-    "informational_no_action",
-    "inconclusive",
-}
-SOC_ANALYST_EVENT_STATUSES = {"observed", "not_observed", "unknown"}
-SOC_ANALYST_DETECTION_VALIDITIES = {
-    "matched_intent",
-    "logic_error",
-    "parser_error",
-    "intel_error",
-    "not_applicable",
-    "unknown",
-}
-SOC_ANALYST_ACTIVITY_DISPOSITIONS = {
-    "malicious",
-    "suspicious",
-    "authorized_benign",
-    "benign",
-    "unknown",
-}
-SOC_ANALYST_HANDLING_VALUES = {
-    "contain",
-    "escalate",
-    "investigate",
-    "monitor",
-    "no_action",
-}
-
-
 def _soc_legacy_verdict_factors(outcome: str) -> dict[str, str | None]:
-    """Return the canonical factored form used by the analysis runner."""
-    handling_for_risk = "investigate"
-    mapping: dict[str, tuple[str, str, str, str]] = {
-        "true_positive_malicious": (
-            "observed", "matched_intent", "malicious", "contain",
-        ),
-        "true_positive_suspicious": (
-            "observed", "matched_intent", "suspicious", handling_for_risk,
-        ),
-        "true_positive_authorized_benign": (
-            "observed", "matched_intent", "authorized_benign", "no_action",
-        ),
-        "false_positive_logic_rule": (
-            "observed", "logic_error", "unknown", "monitor",
-        ),
-        "false_positive_data_parser": (
-            "unknown", "parser_error", "unknown", "investigate",
-        ),
-        "false_positive_bad_intel_ioc": (
-            "observed", "intel_error", "unknown", "monitor",
-        ),
-        "false_negative": (
-            "observed", "not_applicable", "malicious", "escalate",
-        ),
-        "duplicate": ("observed", "unknown", "unknown", "no_action"),
-        "informational_no_action": (
-            "observed", "not_applicable", "benign", "no_action",
-        ),
-        "inconclusive": ("unknown", "unknown", "unknown", "investigate"),
-    }
-    event_status, detection_validity, activity_disposition, handling = mapping[
-        outcome
-    ]
-    return {
-        "event_status": event_status,
-        "detection_validity": detection_validity,
-        "activity_disposition": activity_disposition,
-        "handling": handling,
-        "duplicate_of": None,
-    }
+    return legacy_verdict_factors(outcome)
 
 
 def _soc_derive_legacy_detection_outcome(
     factors: dict[str, str | None],
 ) -> str:
-    """Mirror the runner's deterministic compatibility-outcome derivation."""
-    duplicate_of = str(factors.get("duplicate_of") or "").strip()
-    validity = str(factors.get("detection_validity") or "unknown")
-    event_status = str(factors.get("event_status") or "unknown")
-    disposition = str(factors.get("activity_disposition") or "unknown")
-    handling = str(factors.get("handling") or "investigate")
-    if duplicate_of:
-        return "duplicate"
-    if validity == "parser_error":
-        return "false_positive_data_parser"
-    if validity == "logic_error":
-        return "false_positive_logic_rule"
-    if validity == "intel_error":
-        return "false_positive_bad_intel_ioc"
-    if validity == "matched_intent" and event_status == "observed":
-        if disposition == "malicious":
-            return "true_positive_malicious"
-        if disposition == "suspicious":
-            return "true_positive_suspicious"
-        if disposition == "authorized_benign":
-            return "true_positive_authorized_benign"
-        if disposition == "benign" and handling == "no_action":
-            return "informational_no_action"
-    if validity == "not_applicable" and event_status == "observed":
-        if disposition == "malicious":
-            return "false_negative"
-        if disposition in {"benign", "authorized_benign"} and handling == "no_action":
-            return "informational_no_action"
-    return "inconclusive"
+    return derive_legacy_detection_outcome(factors)
 
 
 def _soc_adjudication_verdict_contradictions(
     outcome: str,
     explicit_factors: dict[str, str | None],
 ) -> list[str]:
-    """Reject impossible combinations before they become durable labels."""
-    supplied = {
-        key: value
-        for key, value in explicit_factors.items()
-        if value not in (None, "")
-    }
-    if not supplied:
-        return []
-    factors = _soc_legacy_verdict_factors(outcome)
-    factors.update(supplied)
-    derived = _soc_derive_legacy_detection_outcome(factors)
-    contradictions: list[str] = []
-    if derived != outcome:
-        contradictions.append(
-            f"factored verdict derives {derived}, not {outcome}"
-        )
-    event_status = str(factors["event_status"])
-    validity = str(factors["detection_validity"])
-    disposition = str(factors["activity_disposition"])
-    handling = str(factors["handling"])
-    duplicate_of = str(factors.get("duplicate_of") or "").strip()
-    if event_status == "not_observed" and validity == "matched_intent":
-        contradictions.append(
-            "an unobserved event cannot be a validated detection-intent match"
-        )
-    if disposition == "malicious" and handling in {"monitor", "no_action"}:
-        contradictions.append(
-            "malicious activity cannot use monitor/no_action handling"
-        )
-    if disposition in {"authorized_benign", "benign"} and handling == "contain":
-        contradictions.append("benign or authorized activity cannot use contain handling")
-    if duplicate_of and handling in {"contain", "escalate"}:
-        contradictions.append(
-            "a duplicate record cannot independently authorize containment or escalation"
-        )
-    if outcome.startswith("false_positive_"):
-        if disposition in {"malicious", "suspicious"}:
-            contradictions.append(
-                "a false-positive label cannot authoritatively classify the activity as malicious or suspicious"
-            )
-        if handling in {"contain", "escalate"}:
-            contradictions.append(
-                "a false-positive label cannot independently authorize containment or escalation"
-            )
-    return contradictions
+    return adjudication_verdict_contradictions(outcome, explicit_factors)
 
 
 def normalize_soc_adjudication_payload(
@@ -5444,95 +5307,11 @@ def normalize_soc_adjudication_payload(
     group_id: str,
     case_id: str = "",
 ) -> tuple[bool, dict]:
-    """Validate bounded human review fields before crossing the write boundary."""
-    payload = payload if isinstance(payload, dict) else {}
-    group_id = str(group_id or "").strip().lower()
-    case_id = str(case_id or "").strip().lower()
-    if not re.fullmatch(r"[a-f0-9]{12}", group_id):
-        return False, {"ok": False, "error": "Invalid SOC alert group id"}
-    if case_id and not re.fullmatch(r"ir-[a-z0-9_-]{1,64}", case_id):
-        return False, {"ok": False, "error": "Invalid incident case id"}
-    outcome = str(payload.get("outcome_override") or "").strip().lower()
-    confidence = str(payload.get("confidence") or "").strip().lower()
-    rationale = str(payload.get("rationale") or "").strip()[:4000]
-    evidence_gap = str(payload.get("evidence_gap") or "").strip()[:4000]
-    next_action = str(payload.get("next_action") or "").strip()[:4000]
-    reviewer = str(payload.get("reviewer") or "").strip()[:100]
-    resolution_reason = str(payload.get("case_resolution_reason") or "").strip()[:2000]
-    if "resolve_case" in payload and not isinstance(payload.get("resolve_case"), bool):
-        return False, {
-            "ok": False,
-            "error": "resolve_case must be a JSON boolean.",
-        }
-    resolve_case = payload.get("resolve_case") is True
-    analysis_id = str(payload.get("analysis_id") or "").strip()[:160]
-    factored_values: dict[str, str | None] = {}
-    for field, allowed in (
-        ("event_status", SOC_ANALYST_EVENT_STATUSES),
-        ("detection_validity", SOC_ANALYST_DETECTION_VALIDITIES),
-        ("activity_disposition", SOC_ANALYST_ACTIVITY_DISPOSITIONS),
-        ("handling", SOC_ANALYST_HANDLING_VALUES),
-    ):
-        value = str(payload.get(field) or "").strip().lower()
-        if value and value not in allowed:
-            return False, {
-                "ok": False,
-                "error": f"Select a valid {field.replace('_', ' ')}.",
-            }
-        factored_values[field] = value or None
-    duplicate_value = payload.get("duplicate_of")
-    if duplicate_value is None:
-        duplicate_of = None
-    elif isinstance(duplicate_value, str):
-        duplicate_of = duplicate_value.strip()[:256]
-        if not duplicate_of:
-            return False, {
-                "ok": False,
-                "error": "duplicate_of must be a non-empty string identifier or null.",
-            }
-    else:
-        return False, {
-            "ok": False,
-            "error": "duplicate_of must be a string identifier or null.",
-        }
-    if outcome not in SOC_ANALYST_ADJUDICATION_OUTCOMES:
-        return False, {"ok": False, "error": "Select a valid analyst outcome."}
-    if confidence not in {"low", "medium", "high"}:
-        return False, {"ok": False, "error": "Select low, medium, or high confidence."}
-    if not rationale or not reviewer:
-        return False, {"ok": False, "error": "Reviewer and rationale are required."}
-    contradictions = _soc_adjudication_verdict_contradictions(
-        outcome,
-        {**factored_values, "duplicate_of": duplicate_of},
+    return normalize_adjudication_payload(
+        payload,
+        group_id=group_id,
+        case_id=case_id,
     )
-    if contradictions:
-        return False, {
-            "ok": False,
-            "error": (
-                "Analyst outcome conflicts with the explicit verdict factors: "
-                + "; ".join(contradictions)
-            )[:1000],
-        }
-    if resolve_case and (not case_id or not resolution_reason):
-        return False, {
-            "ok": False,
-            "error": "A case resolution reason is required when resolving a case.",
-        }
-    return True, {
-        "group_id": group_id,
-        "case_id": case_id or None,
-        "analysis_id": analysis_id,
-        "outcome_override": outcome,
-        "confidence": confidence,
-        "rationale": rationale,
-        "evidence_gap": evidence_gap,
-        "next_action": next_action,
-        "reviewer": reviewer,
-        **factored_values,
-        "duplicate_of": duplicate_of,
-        "resolve_case": resolve_case,
-        "case_resolution_reason": resolution_reason,
-    }
 
 
 def _soc_alert_store_mutation(

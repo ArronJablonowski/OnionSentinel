@@ -273,6 +273,17 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_soc_adjudication_policy.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_adjudication_policy.py",
+      "required_symbols": [
+        "adjudication_verdict_contradictions",
+        "derive_legacy_detection_outcome",
+        "legacy_verdict_factors",
+        "normalize_soc_adjudication_payload"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_versions.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_versions.py",
