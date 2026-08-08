@@ -560,6 +560,20 @@ agent-route policy, and atomic configuration persistence remain with the
 existing settings functions. `report_portal.py` retains the concrete
 Administration-session check and HTTP response serialization.
 
+`portal_admin_service_write.py` owns the service-start request shape,
+Administration-before-token authorization order, action-token validation,
+service identifier normalization, existing start-service dispatch, and
+200/400/403 response projection. Concrete session lookup, token storage, app
+launching, and live service-status checks remain in `report_portal.py`.
+
+`portal_resource_library_write.py` owns payload normalization and dispatch for
+the four classified remove, tag, rename, and favorite mutations, including
+their existing 200/400 result mapping. Filesystem resolution, metadata writes,
+Hermes queueing, worker triggering, and dashboard refresh remain in
+`report_portal.py`. The current compatibility contract applies route
+allowlisting but no Administration or same-origin authorization to these four
+writes; this module makes that policy boundary visible without changing it.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and

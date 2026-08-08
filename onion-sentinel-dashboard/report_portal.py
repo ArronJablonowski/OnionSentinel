@@ -277,6 +277,8 @@ from portal_cti_program_service import (
     read_cti_program,
 )
 from portal_soc_settings_write import SocSettingsWriteCallbacks, prepare_soc_settings_write
+from portal_admin_service_write import AdminServiceWriteCallbacks, prepare_admin_service_write
+from portal_resource_library_write import ResourceLibraryWriteCallbacks, prepare_resource_library_write
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -8540,31 +8542,22 @@ class PortalHandler(BaseHTTPRequestHandler):
                 json.dumps(settings_write.payload, indent=2).encode(),
                 "application/json; charset=utf-8",
             )
-        if parsed.path == "/api/admin/start-service":
-            payload = parse_json_body(raw, empty_object=True).value_or({})
-            if not self._admin_authenticated():
-                return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in before starting services."}).encode(), "application/json; charset=utf-8")
-            if str(payload.get("token", "")) != ensure_admin_token():
-                return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Admin action token validation failed."}).encode(), "application/json; charset=utf-8")
-            service_id = str(payload.get("service", "")).strip()
-            ok, message, status = start_admin_service(service_id)
-            body = {"ok": ok, "message": message, "service": status}
-            if not ok:
-                body["error"] = message
-            return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(body, indent=2).encode(), "application/json; charset=utf-8")
-        if parsed.path.startswith("/api/resource-library/"):
-            payload = parse_json_body(raw, empty_object=True).value_or({})
-            if parsed.path == "/api/resource-library/remove":
-                ok, data = move_resource_to_removal(str(payload.get("id", "")).strip(), str(payload.get("source", "")).strip())
-            elif parsed.path == "/api/resource-library/tags":
-                ok, data = set_resource_tags(str(payload.get("id", "")).strip(), payload.get("tags", []))
-            elif parsed.path == "/api/resource-library/rename":
-                ok, data = rename_resource_file(str(payload.get("id", "")).strip(), str(payload.get("source", "")).strip(), str(payload.get("new_name", "")).strip())
-            elif parsed.path == "/api/resource-library/favorite":
-                ok, data = set_resource_favorite(str(payload.get("id", "")).strip(), bool(payload.get("favorite")))
-            else:
-                ok, data = False, {"ok": False, "error": "Unknown Resource Library API"}
-            return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        admin_service_write = prepare_admin_service_write(
+            route, raw,
+            admin_authenticated=lambda: self._admin_authenticated(),
+            callbacks=AdminServiceWriteCallbacks(ensure_admin_token, start_admin_service),
+        )
+        if admin_service_write is not None:
+            return self._send(admin_service_write.status, json.dumps(admin_service_write.payload, indent=2).encode(), "application/json; charset=utf-8")
+        resource_write = prepare_resource_library_write(
+            route, raw,
+            callbacks=ResourceLibraryWriteCallbacks(
+                move_resource_to_removal, set_resource_tags,
+                rename_resource_file, set_resource_favorite,
+            ),
+        )
+        if resource_write is not None:
+            return self._send(resource_write.status, json.dumps(resource_write.payload, indent=2).encode(), "application/json; charset=utf-8")
         form = parse_qs(raw, keep_blank_values=True)
         token = form.get("token", [""])[0]
         if token != ensure_admin_token():
