@@ -6185,10 +6185,12 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
         ):
             self.assertIn(wiring, source)
 
-        scheduler_source = SCHEDULER_PATH.read_text(encoding="utf-8")
+        scheduler_startup_source = (
+            ROOT / "n8n" / "bin" / "scheduler_startup.py"
+        ).read_text(encoding="utf-8")
         self.assertIn(
-            "if indexed_mode and controlled_evaluation_dir is None:",
-            scheduler_source,
+            "if not indexed_mode or controlled_dir is not None:",
+            scheduler_startup_source,
         )
 
         with tempfile.TemporaryDirectory() as temporary:

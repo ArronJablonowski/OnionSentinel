@@ -578,6 +578,7 @@ cp "$REPO_DIR/n8n/bin/scheduler_indexed_selection.py" "$STACK_DIR/bin/scheduler_
 cp "$REPO_DIR/n8n/bin/scheduler_indexed_state.py" "$STACK_DIR/bin/scheduler_indexed_state.py"
 cp "$REPO_DIR/n8n/bin/scheduler_job_reporting.py" "$STACK_DIR/bin/scheduler_job_reporting.py"
 cp "$REPO_DIR/n8n/bin/scheduler_legacy_selection.py" "$STACK_DIR/bin/scheduler_legacy_selection.py"
+cp "$REPO_DIR/n8n/bin/scheduler_startup.py" "$STACK_DIR/bin/scheduler_startup.py"
 cp "$REPO_DIR/n8n/bin/scheduler_terminal_recovery.py" "$STACK_DIR/bin/scheduler_terminal_recovery.py"
 cp "$REPO_DIR/n8n/bin/agent_memory.py" "$STACK_DIR/bin/agent_memory.py"
 cp "$REPO_DIR/n8n/bin/manage-agent-memory.py" "$STACK_DIR/bin/manage-agent-memory.py"

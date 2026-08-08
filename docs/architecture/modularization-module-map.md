@@ -292,6 +292,14 @@ an explicit request and injected artifact/query sources. Indexed deployments
 do not depend on this filesystem-backed path, allowing it to be retired safely
 after the supported upgrade window.
 
+`scheduler_startup.py` owns pre-lock preflight and lock-owning runtime
+initialization. Maintenance drain remains the first check; controlled runtime
+and token validation precede capacity and database checks; controlled spools
+recover before inference; legacy CLI lanes fail closed; and production-only
+deferred indexing plus terminal-success recovery complete before initial queue
+reconciliation. Filesystem locking itself remains in the thin entrypoint so
+the lock lifetime still encloses the full drain and settlement sequence.
+
 `scheduler_terminal_recovery.py` owns the read-only proof that a stranded
 processing lease already produced an exact, committed terminal result. It
 requires matching provider lane, group, alert, role, attempt window, harness

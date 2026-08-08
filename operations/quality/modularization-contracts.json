@@ -90,6 +90,18 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_startup.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_startup.py",
+      "required_symbols": [
+        "SchedulerInitialization",
+        "SchedulerPreflight",
+        "SchedulerStartupSources",
+        "initialize_scheduler_run",
+        "prepare_scheduler_run"
+      ]
+    },
+    {
       "path": "n8n/bin/onion_sentinel_harness.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/onion_sentinel_harness.py",

@@ -70,6 +70,11 @@ from scheduler_legacy_selection import (
     LegacySelectionSources,
     select_next_legacy_alert,
 )
+from scheduler_startup import (
+    SchedulerStartupSources,
+    initialize_scheduler_run,
+    prepare_scheduler_run,
+)
 from scheduler_terminal_recovery import (
     TerminalRecoverySources,
     reconcile_terminal_success,
@@ -3391,19 +3396,48 @@ def reconcile_terminal_success_durable_jobs(args: argparse.Namespace) -> int:
     )
 
 
+def detect_indexed_scheduler_mode(path: Path) -> bool:
+    """Inspect scheduler schema without granting database mutation access."""
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        return indexed_scheduler_available(conn)
+    finally:
+        conn.close()
+
+
+def scheduler_startup_sources() -> SchedulerStartupSources:
+    """Bind startup services at call time for compatibility and testing."""
+    return SchedulerStartupSources(
+        stop_for_drain=stop_for_maintenance_drain,
+        controlled_runtime=controlled_evaluation_runtime,
+        consume_controlled_token=consume_controlled_evaluation_token,
+        require_capacity=require_runtime_capacity,
+        path_exists=lambda path: path.exists(),
+        consume_wake_marker=consume_wake_marker,
+        detect_indexed_mode=detect_indexed_scheduler_mode,
+        recover_controlled_spool=recover_controlled_evaluation_spool,
+        flush_deferred_results=flush_deferred_analysis_results,
+        recover_terminal_success=reconcile_terminal_success_durable_jobs,
+        reconcile_worker_state=reconcile_worker_state,
+        emit=lambda message: print(message, flush=True),
+        emit_error=lambda message: print(message, file=sys.stderr),
+        now=project_now,
+    )
+
+
 def main() -> int:
     args = parse_args()
-    if stop_for_maintenance_drain(getattr(args, "drain_file", DEFAULT_DRAIN)):
-        return 0
-    controlled_evaluation_dir = controlled_evaluation_runtime(args)
-    consume_controlled_evaluation_token(
-        controlled_evaluation_dir is not None
+    startup_sources = scheduler_startup_sources()
+    preflight = prepare_scheduler_run(
+        startup_sources,
+        args,
+        drain_file=getattr(args, "drain_file", DEFAULT_DRAIN),
     )
-    launch_levels = args.levels
-    require_runtime_capacity(args.analysis_dir, 0, label="AI analysis")
-    if not args.db.exists():
-        print(f"{project_now()} SQLite DB not found: {args.db}", file=sys.stderr)
-        return 2
+    if not preflight.proceed:
+        return preflight.exit_code
+    controlled_evaluation_dir = preflight.controlled_evaluation_dir
+    launch_levels = preflight.launch_levels
 
     args.lock_file.parent.mkdir(parents=True, exist_ok=True)
     with args.lock_file.open("w") as lock_handle:
@@ -3413,67 +3447,14 @@ def main() -> int:
             print(f"{project_now()} another AI analysis run is already active")
             return 0
 
-        if controlled_evaluation_dir is None:
-            consume_wake_marker(args.wake_file)
-        args.prompt_dir.mkdir(parents=True, exist_ok=True)
-        args.analysis_dir.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
-        try:
-            indexed_mode = indexed_scheduler_available(conn)
-        finally:
-            conn.close()
-
-        if (
-            controlled_evaluation_dir is not None
-            and recover_controlled_evaluation_spool(
-                args,
-                controlled_evaluation_dir,
-            )
-        ):
-            print(
-                f"{project_now()} recovered one exact controlled result "
-                "and completed its prior lease without inference",
-                flush=True,
-            )
-            return 0
-
-        if not indexed_mode and args.provider_lane == "cli":
-            # Legacy databases do not expose the durable job payload that owns
-            # the agent role. A CLI worker therefore cannot prove that a job is
-            # assigned to its privacy/cost boundary and must fail closed.
-            print(
-                f"{project_now()} CLI provider lane requires the indexed scheduler; no work claimed",
-                flush=True,
-            )
-            return 0
-
-        if indexed_mode and controlled_evaluation_dir is None:
-            # A model result is first written atomically to local disk, then
-            # indexed through alert-store. Publish any result left behind by a
-            # transient callback failure before considering another inference.
-            flush_deferred_analysis_results(args)
-            try:
-                recovered = reconcile_terminal_success_durable_jobs(args)
-            except (OSError, sqlite3.Error, RuntimeError) as error:
-                print(
-                    f"{project_now()} terminal harness recovery deferred: {error}",
-                    file=sys.stderr,
-                )
-            else:
-                if recovered:
-                    print(
-                        f"{project_now()} recovered {recovered} terminal-success "
-                        "durable AI job(s) without duplicate inference",
-                        flush=True,
-                    )
-        reconciled = reconcile_worker_state(
+        initialization = initialize_scheduler_run(
+            startup_sources,
             args,
-            indexed_mode,
-            controlled_evaluation=controlled_evaluation_dir is not None,
+            controlled_evaluation_dir=controlled_evaluation_dir,
         )
-        if reconciled:
-            print(f"{project_now()} reconciled {reconciled} completed durable AI job(s)", flush=True)
+        if not initialization.proceed:
+            return 0
+        indexed_mode = initialization.indexed_mode
         selected_groups: set[str] = set()
         analyzed_count = 0
         attempted_count = 0
