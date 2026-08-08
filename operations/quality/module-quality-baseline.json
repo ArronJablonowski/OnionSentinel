@@ -10,7 +10,7 @@
       "max_lines": 812
     },
     "n8n/bin/auto-run-ai-analysis.py": {
-      "max_lines": 4697
+      "max_lines": 4562
     },
     "n8n/bin/bounded_process.py": {
       "max_lines": 997
@@ -49,7 +49,7 @@
       "max_lines": 979
     },
     "onion-sentinel-dashboard/report_portal.py": {
-      "max_lines": 6450
+      "max_lines": 5645
     },
     "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py": {
       "max_lines": 2670
@@ -130,10 +130,6 @@
     },
     "n8n/bin/auto-run-ai-analysis.py::orphaned_pending_ai_job_ids": {
       "max_complexity": 18
-    },
-    "n8n/bin/auto-run-ai-analysis.py::parse_args": {
-      "max_complexity": 22,
-      "max_lines": 184
     },
     "n8n/bin/auto-run-ai-analysis.py::post_controlled_recovery_result": {
       "max_complexity": 20
@@ -709,9 +705,6 @@
     "onion-sentinel-dashboard/report_portal.py::PortalHandler.do_GET": {
       "max_complexity": 17
     },
-    "onion-sentinel-dashboard/report_portal.py::_hermes_auth_readiness_error": {
-      "max_complexity": 30
-    },
     "onion-sentinel-dashboard/report_portal.py::_incident_query_linked_finding": {
       "max_complexity": 17
     },
@@ -721,14 +714,8 @@
     "onion-sentinel-dashboard/report_portal.py::find_resource_library_pdf": {
       "max_complexity": 24
     },
-    "onion-sentinel-dashboard/report_portal.py::save_soc_agent_model": {
-      "max_complexity": 25
-    },
     "onion-sentinel-dashboard/report_portal.py::scan_reports": {
       "max_complexity": 17
-    },
-    "onion-sentinel-dashboard/report_portal.py::soc_alert_manually_escalated_group_ids": {
-      "max_complexity": 22
     },
     "onion-sentinel-dashboard/scripts/dashboard_pcap_components.py::render_pcap_evidence_markdown": {
       "max_complexity": 22
@@ -1000,5 +987,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "b168e2de019ec9ee65b441dd193c4d6dfd60ca39"
+  "source_release": "c7a413cadfdcde6c7d45f67ac6df882c0dabe6ce"
 }
