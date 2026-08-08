@@ -314,6 +314,14 @@ and injects an immutable policy containing the existing model-roster, route-
 identity, executable, and assignment helpers. The normalizer has no persistence,
 HTTP, filesystem reads or writes, process execution, or network access.
 
+`portal_ai_settings_store.py` owns locked settings reads, atomic owner-only JSON
+writes, normalized full-roster saves, and per-agent primary/reviewer/adjudicator
+assignment transactions. It enforces enabled-route membership and distinct
+provider/model identities before mutation and projects the stable settings and
+GeoIP response schema. Its source bundle exposes normalization, CLI readiness,
+route composition/identity, GeoIP projection, roles, the settings path, and
+lock; HTTP authorization and response serialization remain outside the module.
+
 `portal_ai_model_policy.py` owns the model catalog and reusable route policy
 injected into the settings normalizer: safe defaults, bounded Ollama rosters,
 literal boolean parsing, executable and provider-model validation, Codex roster

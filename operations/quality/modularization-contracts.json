@@ -96,6 +96,18 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_ai_settings_store.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_ai_settings_store.py",
+      "required_symbols": [
+        "AiSettingsStoreSources",
+        "read_soc_ai_settings",
+        "save_soc_agent_model",
+        "save_soc_ai_settings",
+        "write_soc_ai_settings"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_dashboard.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_dashboard.py",

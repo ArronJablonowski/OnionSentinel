@@ -753,6 +753,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/portal_catalog_delivery.py" "$DASHBOARD_R
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_ai_model_policy.py" "$DASHBOARD_RUNTIME_DIR/portal_ai_model_policy.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_cli_provider_readiness.py" "$DASHBOARD_RUNTIME_DIR/portal_cli_provider_readiness.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_ai_settings_normalizer.py" "$DASHBOARD_RUNTIME_DIR/portal_ai_settings_normalizer.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_ai_settings_store.py" "$DASHBOARD_RUNTIME_DIR/portal_ai_settings_store.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_catalog_routes.py" "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_incident_actions.py" "$DASHBOARD_RUNTIME_DIR/portal_incident_actions.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_incident_list_service.py" "$DASHBOARD_RUNTIME_DIR/portal_incident_list_service.py"

@@ -49,6 +49,13 @@ from portal_ai_settings_normalizer import (
     SocAiSettingsNormalizationPolicy,
     normalize_soc_ai_settings as normalize_ai_settings,
 )
+from portal_ai_settings_store import (
+    AiSettingsStoreSources,
+    read_soc_ai_settings as read_persisted_soc_ai_settings,
+    save_soc_agent_model as save_persisted_soc_agent_model,
+    save_soc_ai_settings as save_persisted_soc_ai_settings,
+    write_soc_ai_settings as write_persisted_soc_ai_settings,
+)
 from portal_ai_model_policy import (
     CLI_HARNESS_MODEL_PATTERN,
     CODEX_CLI_MODEL_CATALOG,
@@ -1657,33 +1664,38 @@ def maxmind_geoip_databases_status(settings: dict) -> dict:
     }
 
 
+def _enabled_model_routes_for_settings(settings: dict) -> list[str]:
+    return _enabled_agent_model_routes(
+        settings["enabled_ollama_models"],
+        settings["codex_cli_models"],
+        hermes_agent_enabled=settings["hermes_agent_enabled"],
+        hermes_agent_model=settings["hermes_agent_model"],
+        hermes_agent_reasoning_effort=settings["hermes_agent_reasoning_effort"],
+        openclaw_enabled=settings["openclaw_enabled"],
+        openclaw_model=settings["openclaw_model"],
+        openclaw_reasoning_effort=settings["openclaw_reasoning_effort"],
+    )
+
+
+def soc_ai_settings_store_sources() -> AiSettingsStoreSources:
+    return AiSettingsStoreSources(
+        path=SOC_AI_SETTINGS_FILE,
+        lock=SOC_AI_SETTINGS_LOCK,
+        normalize=normalize_soc_ai_settings,
+        readiness=_enabled_cli_harnesses_ready,
+        enabled_routes=_enabled_model_routes_for_settings,
+        route_identity=_model_route_identity,
+        geoip_databases=maxmind_geoip_databases_status,
+        geoip_city=lambda settings: maxmind_geoip_database_status(
+            settings, "city"
+        ),
+        roles=CYBER_SECURITY_AGENT_ROLES,
+    )
+
+
 def read_soc_ai_settings() -> dict:
     """Return the current SOC AI model-routing settings."""
-    with SOC_AI_SETTINGS_LOCK:
-        try:
-            raw = json.loads(SOC_AI_SETTINGS_FILE.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            raw = {}
-        except Exception as exc:
-            return {"ok": False, "error": f"Could not read SOC AI settings: {exc}", "path": str(SOC_AI_SETTINGS_FILE)}
-    ok, normalized = normalize_soc_ai_settings(raw)
-    if not ok:
-        return {
-            "ok": False,
-            "error": str(
-                (normalized.get("error") if isinstance(normalized, dict) else "")
-                or "SOC AI settings validation failed."
-            ),
-            "path": str(SOC_AI_SETTINGS_FILE),
-        }
-    return {
-        "ok": True,
-        "settings": normalized,
-        "geoip_databases": maxmind_geoip_databases_status(normalized),
-        # Compatibility alias for older dashboard builds during rolling deploys.
-        "geoip_database": maxmind_geoip_database_status(normalized, "city"),
-        "path": str(SOC_AI_SETTINGS_FILE),
-    }
+    return read_persisted_soc_ai_settings(soc_ai_settings_store_sources())
 
 
 def list_ollama_models() -> list[str]:
@@ -1853,25 +1865,9 @@ def ollama_models_response(force_refresh: bool = False) -> dict:
 
 def _write_soc_ai_settings(normalized: dict) -> tuple[bool, dict]:
     """Write one fully normalized settings document while the caller holds the lock."""
-    try:
-        SOC_AI_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = SOC_AI_SETTINGS_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(normalized, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        try:
-            tmp.chmod(0o600)
-        except Exception:
-            pass
-        tmp.replace(SOC_AI_SETTINGS_FILE)
-    except Exception as exc:
-        return False, {"ok": False, "error": f"Could not save SOC AI settings: {exc}", "path": str(SOC_AI_SETTINGS_FILE)}
-    return True, {
-        "ok": True,
-        "message": "SOC AI model and MaxMind GeoIP settings saved.",
-        "settings": normalized,
-        "geoip_databases": maxmind_geoip_databases_status(normalized),
-        "geoip_database": maxmind_geoip_database_status(normalized, "city"),
-        "path": str(SOC_AI_SETTINGS_FILE),
-    }
+    return write_persisted_soc_ai_settings(
+        soc_ai_settings_store_sources(), normalized
+    )
 
 
 def _resolve_cli_harness_for_settings(
@@ -1903,109 +1899,16 @@ def _enabled_cli_harnesses_ready(settings: dict) -> tuple[bool, str]:
 
 def save_soc_ai_settings(payload: object) -> tuple[bool, dict]:
     """Atomically save the complete SOC AI model-routing configuration."""
-    with SOC_AI_SETTINGS_LOCK:
-        ok, normalized = normalize_soc_ai_settings(payload if isinstance(payload, dict) else {})
-        if not ok:
-            return False, normalized
-        ready, readiness_error = _enabled_cli_harnesses_ready(normalized)
-        if not ready:
-            return False, {"ok": False, "error": readiness_error}
-        return _write_soc_ai_settings(normalized)
+    return save_persisted_soc_ai_settings(
+        soc_ai_settings_store_sources(), payload
+    )
 
 
 def save_soc_agent_model(payload: object) -> tuple[bool, dict]:
     """Atomically update one agent's primary, reviewer, and adjudicator routes."""
-    payload = payload if isinstance(payload, dict) else {}
-    role = str(payload.get("role") or "").strip()
-    model_route = str(payload.get("model_route") or payload.get("model") or "").strip()[:260]
-    second_model_route = str(
-        payload.get("second_opinion_model_route")
-        or payload.get("second_opinion_model")
-        or ""
-    ).strip()[:260]
-    adjudicator_model_route = str(
-        payload.get("adjudicator_model_route")
-        or payload.get("adjudicator_model")
-        or ""
-    ).strip()[:260]
-    if role not in CYBER_SECURITY_AGENT_ROLES:
-        return False, {"ok": False, "error": "Cyber Security Agent role is invalid."}
-    with SOC_AI_SETTINGS_LOCK:
-        try:
-            raw = json.loads(SOC_AI_SETTINGS_FILE.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            raw = {}
-        except Exception as exc:
-            return False, {"ok": False, "error": f"Could not read SOC AI settings: {exc}", "path": str(SOC_AI_SETTINGS_FILE)}
-        ok, current = normalize_soc_ai_settings(raw)
-        if not ok:
-            return False, current
-        ready, readiness_error = _enabled_cli_harnesses_ready(current)
-        if not ready:
-            return False, {"ok": False, "error": readiness_error}
-        enabled_routes = _enabled_agent_model_routes(
-            current["enabled_ollama_models"],
-            current["codex_cli_models"],
-            hermes_agent_enabled=current["hermes_agent_enabled"],
-            hermes_agent_model=current["hermes_agent_model"],
-            hermes_agent_reasoning_effort=current["hermes_agent_reasoning_effort"],
-            openclaw_enabled=current["openclaw_enabled"],
-            openclaw_model=current["openclaw_model"],
-            openclaw_reasoning_effort=current["openclaw_reasoning_effort"],
-        )
-        if model_route not in enabled_routes:
-            return False, {
-                "ok": False,
-                "error": "That model is not enabled. Save the global model roster before assigning it to an agent.",
-            }
-        if second_model_route and second_model_route not in enabled_routes:
-            return False, {
-                "ok": False,
-                "error": "That second-opinion model is not enabled. Save the global model roster first.",
-            }
-        if adjudicator_model_route and adjudicator_model_route not in enabled_routes:
-            return False, {
-                "ok": False,
-                "error": "That adjudicator model is not enabled. Save the global model roster first.",
-            }
-        if (
-            second_model_route
-            and _model_route_identity(second_model_route, current)
-            == _model_route_identity(model_route, current)
-        ):
-            return False, {
-                "ok": False,
-                "error": (
-                    "The second-opinion model must differ from the assigned "
-                    "primary and resolve to a different provider/model identity."
-                ),
-            }
-        adjudicator_identity = _model_route_identity(adjudicator_model_route, current)
-        if adjudicator_model_route and adjudicator_identity in {
-            _model_route_identity(model_route, current),
-            _model_route_identity(second_model_route, current),
-        }:
-            return False, {
-                "ok": False,
-                "error": (
-                    "The adjudicator must differ from both the primary and "
-                    "second-opinion provider/model identities."
-                ),
-            }
-        current["agent_models"][role] = model_route
-        current["agent_second_opinion_models"][role] = second_model_route
-        current["agent_adjudicator_models"][role] = adjudicator_model_route
-        ok, normalized = normalize_soc_ai_settings(current)
-        if not ok:
-            return False, normalized
-        saved, response = _write_soc_ai_settings(normalized)
-        if saved:
-            response["message"] = f"Model assignment saved for {role}."
-            response["role"] = role
-            response["model_route"] = normalized["agent_models"][role]
-            response["second_opinion_model_route"] = normalized["agent_second_opinion_models"][role]
-            response["adjudicator_model_route"] = normalized["agent_adjudicator_models"][role]
-        return saved, response
+    return save_persisted_soc_agent_model(
+        soc_ai_settings_store_sources(), payload
+    )
 
 
 def admin_status_path(action_id: str) -> Path:
