@@ -421,6 +421,10 @@ from portal_soc_pcap_request_store import (
     pcap_capture_file_from_json as extract_pcap_capture_file,
     read_pcap_request_candidate,
 )
+from portal_soc_pcap_request_service import (
+    PcapRequestServiceSources,
+    request_soc_alert_pcap,
+)
 from portal_beacon_history import project_beacon_history
 from portal_n8n_container_status import (
     N8nContainerStatusSources,
@@ -3870,37 +3874,22 @@ def alert_store_get_json(path: str, timeout: float = 5.0) -> dict:
     return result
 
 
+def pcap_request_service_sources() -> PcapRequestServiceSources:
+    return PcapRequestServiceSources(
+        connect_write=soc_alert_db_write_connect,
+        table_exists=sqlite_table_exists,
+        read_candidate=pcap_request_candidate_from_group,
+        normalize_request=normalize_pcap_request,
+        insert_request=insert_pcap_request,
+        post_alert_store=alert_store_post_json,
+        alert_store_configured=bool(SOC_ALERT_STORE_API_URL),
+    )
+
+
 def soc_alert_pcap_request_response(group_id: str, payload: dict) -> tuple[int, dict]:
-    group_id = str(group_id or "").strip().lower()
-    if not re.fullmatch(r"[a-f0-9]{12}", group_id):
-        return soc_alert_api_error("Invalid SOC alert group id")
-    if SOC_ALERT_STORE_API_URL:
-        try:
-            data = alert_store_post_json("/pcap/request", {**payload, "group_id": group_id})
-        except RuntimeError as exc:
-            return soc_alert_api_error(f"Alert-store PCAP request failed: {exc}", 503)
-        data.update({"pcap_status_key": "queued", "pcap_status_label": "Queued"})
-        return 202, data
-    try:
-        with soc_alert_db_write_connect() as conn:
-            if not sqlite_table_exists(conn, "pcap_requests"):
-                return soc_alert_api_error("PCAP broker queue is unavailable", 503)
-            candidate = pcap_request_candidate_from_group(conn, group_id)
-            if not candidate:
-                return soc_alert_api_error("SOC alert group not found", 404)
-            request, error = normalize_pcap_request(payload, {**candidate, "group_id": group_id})
-            if not request:
-                return soc_alert_api_error(error)
-            row = insert_pcap_request(conn, request)
-    except Exception as exc:
-        return soc_alert_api_error(str(exc), 503)
-    return 202, {
-        "ok": True,
-        "status": row["status"] if row else "pending",
-        "pcap_status_key": "queued",
-        "pcap_status_label": "Queued",
-        "request": {key: row[key] for key in row.keys()} if row else request,
-    }
+    return request_soc_alert_pcap(
+        pcap_request_service_sources(), group_id, payload
+    )
 
 
 def soc_alert_group_summary_available(conn: sqlite3.Connection) -> bool:

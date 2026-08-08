@@ -461,6 +461,12 @@ from raw event JSON, and idempotent pending-queue insertion/requeue behavior.
 Its source bundle exposes schema inspection and the clock; connection ownership,
 request policy, and production alert-store dispatch remain outside the store.
 
+`portal_soc_pcap_request_service.py` owns PCAP request group validation,
+production alert-store delegation, queued response metadata, and the explicit
+API-disabled fallback that composes candidate lookup, normalization, and durable
+queue insertion. Its callback bundle keeps connection ownership, transport,
+policy, and repository implementations independently replaceable.
+
 `portal_cron_failures.py` owns bounded Hermes cron-failure collection and
 escaped Administration rendering. It treats run-level Markdown output as
 authoritative evidence, uses `jobs.json` only as a latest-error fallback,
