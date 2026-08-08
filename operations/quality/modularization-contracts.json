@@ -406,6 +406,17 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_cti_program_service.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_cti_program_service.py",
+      "required_symbols": [
+        "CtiProgramCallbacks",
+        "CtiProgramResult",
+        "prepare_cti_program_write",
+        "read_cti_program"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_catalog_routes.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py",

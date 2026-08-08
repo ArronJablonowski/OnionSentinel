@@ -543,6 +543,15 @@ Administration check. `report_portal.py` retains owner-controlled credential
 loading, loopback HTTP transport, concrete cache state, and compatibility
 response facades.
 
+`portal_cti_program_service.py` owns CTI workspace request orchestration:
+route acceptance, same-origin-before-Administration authorization ordering,
+JSON parsing, conflict/validation/storage error mapping, success-only audit
+triggering, and public response projection. `cti_program.py` remains the sole
+owner of workspace schema validation, optimistic revisions, credential-reference
+policy, atomic persistence, and public redaction. `report_portal.py` retains the
+concrete browser-origin and Administration-session checks, runtime storage
+configuration, HTTP serialization, security headers, and socket writes.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and

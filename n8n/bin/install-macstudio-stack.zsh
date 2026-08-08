@@ -710,6 +710,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/portal_asset_repository.py" "$DASHBOARD_R
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_asset_store_client.py" "$DASHBOARD_RUNTIME_DIR/portal_asset_store_client.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_asset_mutation_service.py" "$DASHBOARD_RUNTIME_DIR/portal_asset_mutation_service.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_asset_write_request.py" "$DASHBOARD_RUNTIME_DIR/portal_asset_write_request.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_cti_program_service.py" "$DASHBOARD_RUNTIME_DIR/portal_cti_program_service.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_ai_model_policy.py" "$DASHBOARD_RUNTIME_DIR/portal_ai_model_policy.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_ai_settings_normalizer.py" "$DASHBOARD_RUNTIME_DIR/portal_ai_settings_normalizer.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_catalog_routes.py" "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py"

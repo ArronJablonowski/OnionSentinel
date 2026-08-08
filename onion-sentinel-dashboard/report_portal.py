@@ -271,6 +271,11 @@ from portal_asset_store_client import (
     AssetStoreClient,
     load_asset_store_write_token,
 )
+from portal_cti_program_service import (
+    CtiProgramCallbacks,
+    prepare_cti_program_write,
+    read_cti_program,
+)
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -4846,6 +4851,20 @@ def dispatch_asset_write(path: str, payload: object) -> tuple[int, dict]:
     return callback(payload)
 
 
+def portal_cti_program_callbacks(
+    audit,
+) -> CtiProgramCallbacks:
+    """Bind current CTI storage functions without defeating test patching."""
+    return CtiProgramCallbacks(
+        load=cti_program.load_program,
+        save=cti_program.save_program,
+        public_response=cti_program.public_response,
+        audit=audit,
+        conflict_error=cti_program.CTIProgramConflict,
+        program_error=cti_program.CTIProgramError,
+    )
+
+
 def alert_store_get_json(path: str, timeout: float = 5.0) -> dict:
     """Read a bounded, non-secret alert-store operational endpoint."""
     if not SOC_ALERT_STORE_API_URL:
@@ -8429,7 +8448,6 @@ class PortalHandler(BaseHTTPRequestHandler):
             cti_program_path=CTI_PROGRAM_API_PATH,
             prompt_paths=SOC_SETTINGS_PROMPT_API_PATHS,
         )
-        is_cti_program_write = route.cti_program_write
         is_asset_write = route.asset_write
         if not route.accepted:
             return self._send(HTTPStatus.NOT_FOUND, b"Not found", "text/plain; charset=utf-8")
@@ -8445,51 +8463,20 @@ class PortalHandler(BaseHTTPRequestHandler):
                 return self._send(HTTPStatus.BAD_REQUEST, render_admin_dashboard("Invalid admin action request size.", True))
             return self._send(HTTPStatus.BAD_REQUEST, render_admin_login("Invalid request size.", True))
         raw = self.rfile.read(length).decode("utf-8", errors="replace")
-        if is_cti_program_write:
-            if not self._soc_review_write_authorized():
-                return self._send(
-                    HTTPStatus.FORBIDDEN,
-                    json.dumps({
-                        "ok": False,
-                        "error": "CTI workspace changes must come from the same-origin Onion Sentinel dashboard.",
-                    }).encode(),
-                    "application/json; charset=utf-8",
-                )
-            if not self._cti_program_write_authorized():
-                return self._send(
-                    HTTPStatus.FORBIDDEN,
-                    json.dumps({
-                        "ok": False,
-                        "authentication_required": True,
-                        "error": "Sign in to Onion Sentinel Administration before editing the CTI workspace.",
-                    }).encode(),
-                    "application/json; charset=utf-8",
-                )
-            payload = parse_json_body(raw).value_or(None)
-            try:
-                program = cti_program.save_program(payload)
-            except cti_program.CTIProgramConflict as exc:
-                return self._send(
-                    HTTPStatus.CONFLICT,
-                    json.dumps({"ok": False, "error": str(exc)}).encode(),
-                    "application/json; charset=utf-8",
-                )
-            except cti_program.CTIProgramError as exc:
-                return self._send(
-                    HTTPStatus.BAD_REQUEST,
-                    json.dumps({"ok": False, "error": str(exc)}).encode(),
-                    "application/json; charset=utf-8",
-                )
-            except OSError:
-                return self._send(
-                    HTTPStatus.INTERNAL_SERVER_ERROR,
-                    json.dumps({"ok": False, "error": "Could not persist the CTI workspace."}).encode(),
-                    "application/json; charset=utf-8",
-                )
-            self._cti_program_mutation_audit(program)
+        if route.cti_program_write:
+            cti_write = prepare_cti_program_write(
+                route,
+                raw,
+                same_origin_authorized=self._soc_review_write_authorized(),
+                admin_authenticated=self._cti_program_write_authorized,
+                callbacks=portal_cti_program_callbacks(
+                    self._cti_program_mutation_audit,
+                ),
+            )
+            assert cti_write is not None
             return self._send(
-                HTTPStatus.OK,
-                json.dumps(cti_program.public_response(program), indent=2).encode(),
+                cti_write.status,
+                json.dumps(cti_write.payload, indent=2).encode(),
                 "application/json; charset=utf-8",
             )
         if is_asset_write:
@@ -8667,18 +8654,10 @@ class PortalHandler(BaseHTTPRequestHandler):
             status, data = software_inventory_response(query=query)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if operation == "cti_program":
-            try:
-                data = cti_program.public_response(cti_program.load_program())
-                status = HTTPStatus.OK
-            except cti_program.CTIProgramError as exc:
-                data = {"ok": False, "error": str(exc)}
-                status = HTTPStatus.INTERNAL_SERVER_ERROR
-            except OSError:
-                data = {"ok": False, "error": "Could not read the CTI workspace."}
-                status = HTTPStatus.INTERNAL_SERVER_ERROR
+            result = read_cti_program(portal_cti_program_callbacks(lambda _program: None))
             return self._send(
-                status,
-                json.dumps(data, indent=2).encode(),
+                result.status,
+                json.dumps(result.payload, indent=2).encode(),
                 "application/json; charset=utf-8",
             )
         if operation == "soc_alert_events":

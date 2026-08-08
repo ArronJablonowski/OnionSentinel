@@ -474,7 +474,7 @@ class AssetInventoryPageTests(unittest.TestCase):
             "ASSET_INVENTORY_ADMIN_WRITE_REQUIRED",
             portal_source,
         )
-        self.assertIn('"authentication_required": True', portal_source)
+        self.assertIn('"authentication_required"', asset_write_policy)
         self.assertIn(
             "prepare_asset_write_request(",
             portal_source,
