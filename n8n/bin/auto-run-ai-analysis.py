@@ -55,6 +55,10 @@ from scheduler_job_reporting import (
     SchedulerReportingSources,
     transition_ai_job_status,
 )
+from scheduler_indexed_state import (
+    indexed_reconcilable_ai_job_ids as load_indexed_reconcilable_ai_job_ids,
+    indexed_scheduler_available as indexed_scheduler_state_available,
+)
 from scheduler_terminal_recovery import (
     TerminalRecoverySources,
     reconcile_terminal_success,
@@ -2343,63 +2347,13 @@ def reconcilable_ai_job_ids(
 
 
 def indexed_scheduler_available(conn: sqlite3.Connection) -> bool:
-    """Return whether durable jobs and analysis results can drive scheduling."""
-    tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    if not {"alerts", "durable_jobs", "ai_analysis_runs"}.issubset(tables):
-        return False
-    alert_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(alerts)")}
-    job_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(durable_jobs)")}
-    run_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(ai_analysis_runs)")}
-    return {"stable_group_id", "stable_group_key"}.issubset(alert_columns) and {
-        "id", "job_type", "dedupe_key", "status", "payload_json", "priority",
-        "attempt_count", "max_attempts", "next_attempt_at", "processing_started_at",
-        "rerun_requested", "requested_at",
-    }.issubset(job_columns) and {"group_id", "generated_at"}.issubset(run_columns)
+    """Compatibility delegate for indexed scheduler capability detection."""
+    return indexed_scheduler_state_available(conn)
 
 
 def indexed_reconcilable_ai_job_ids(conn: sqlite3.Connection) -> set[str]:
-    """Find recovered jobs already satisfied by a committed analysis result.
-
-    A job is never reconciled merely because an old analysis exists. The
-    indexed run must be at least as new as the processing attempt that produced
-    it, which preserves fresh alert, enrichment, PCAP, and manual rerun intent.
-    """
-    if not indexed_scheduler_available(conn):
-        return set()
-    completed = {
-        str(row[0] or "").strip()
-        for row in conn.execute(
-            """
-            SELECT j.dedupe_key
-            FROM durable_jobs AS j
-            WHERE j.job_type = 'ai_analysis' AND j.status = 'pending'
-              AND COALESCE(j.rerun_requested, 0) = 0
-              AND j.processing_started_at IS NOT NULL
-              AND EXISTS (
-                SELECT 1 FROM ai_analysis_runs AS r
-                WHERE r.group_id = j.dedupe_key
-                  AND julianday(replace(r.generated_at, '  ', 'T')) >=
-                      julianday(replace(j.processing_started_at, '  ', 'T'))
-              )
-            """
-        ).fetchall()
-        if str(row[0] or "").strip()
-    }
-    orphaned = {
-        str(row[0] or "").strip()
-        for row in conn.execute(
-            """
-            SELECT j.dedupe_key
-            FROM durable_jobs AS j
-            WHERE j.job_type = 'ai_analysis' AND j.status = 'pending'
-              AND NOT EXISTS (
-                SELECT 1 FROM alerts AS a WHERE a.stable_group_id = j.dedupe_key
-              )
-            """
-        ).fetchall()
-        if str(row[0] or "").strip()
-    }
-    return completed | orphaned
+    """Compatibility delegate for indexed committed-result reconciliation."""
+    return load_indexed_reconcilable_ai_job_ids(conn)
 
 
 def select_next_alert_indexed(

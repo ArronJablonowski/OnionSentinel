@@ -268,6 +268,13 @@ transport, bounded JSON decoding, mutation headers, sleep, and controlled-route
 policy. The launchd wrapper retains a stable `report_ai_job_status` facade and
 binds its existing transport globals at call time for compatibility.
 
+`scheduler_indexed_state.py` owns the schema capability check for indexed
+scheduling and the read-only reconciliation query for pending jobs already
+satisfied by a same-attempt committed analysis or orphaned by alert removal.
+Fresh jobs, stale analysis rows, and explicit rerun requests remain eligible
+for scheduler execution. The launchd wrapper keeps stable compatibility
+delegates while later priority-selection extraction consumes this repository.
+
 `scheduler_terminal_recovery.py` owns the read-only proof that a stranded
 processing lease already produced an exact, committed terminal result. It
 requires matching provider lane, group, alert, role, attempt window, harness

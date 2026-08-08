@@ -50,6 +50,15 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_indexed_state.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_indexed_state.py",
+      "required_symbols": [
+        "indexed_reconcilable_ai_job_ids",
+        "indexed_scheduler_available"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_terminal_recovery.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_terminal_recovery.py",
