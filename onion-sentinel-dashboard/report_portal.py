@@ -89,6 +89,11 @@ from portal_admin_versions import (
     AdminVersionSources,
     compose_admin_action_version_info,
 )
+from portal_admin_availability import (
+    AdminAvailabilitySources,
+    AdminCommandOutcome,
+    compose_admin_action_availability,
+)
 from portal_pcap_health import PcapHealthSources, compose_pcap_workflow_health
 from portal_home_dashboard import (
     HomeDashboardSources,
@@ -2404,64 +2409,35 @@ def admin_action_version_info(action_id: str) -> dict[str, str]:
 
 def check_admin_action_available(action_id: str, skip_expensive: bool = False) -> tuple[bool, str]:
     """Return whether an admin action can be started because relevant updates exist."""
-    if action_id == "reboot":
-        return True, "Reboot is available when no other admin action is running and typed confirmation is provided."
-    if skip_expensive:
-        return True, "Availability check skipped while another admin action is running."
-    if action_id == "macos-update":
-        data = read_macos_update_status()
-        try:
-            count = int(data.get("count", -1))
-        except Exception:
-            count = -1
-        checked_at = str(data.get("checked_at") or "unknown time")
-        if count > 0:
-            return True, f"{count} macOS update(s) available. Last checked {checked_at}."
-        if count == 0:
-            return False, f"No macOS updates available. Last checked {checked_at}."
-        return False, f"macOS update availability is unknown. Refresh the update check first. Last checked {checked_at}."
-    if action_id == "brew-update":
+    def run_command(
+        command: list[str], timeout: int, combine_stderr: bool
+    ) -> AdminCommandOutcome:
         try:
             proc = subprocess.run(
-                ["/opt/homebrew/bin/brew", "outdated", "--quiet"],
+                command,
                 text=True,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=20,
+                stderr=subprocess.STDOUT if combine_stderr else subprocess.PIPE,
+                timeout=timeout,
                 env=ADMIN_COMMAND_ENV,
             )
-            outdated = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-            if outdated:
-                preview = ", ".join(outdated[:5])
-                suffix = "" if len(outdated) <= 5 else f" and {len(outdated) - 5} more"
-                return True, f"{len(outdated)} Homebrew package(s) outdated: {preview}{suffix}."
-            if proc.returncode == 0:
-                return False, "No Homebrew updates available."
-            return False, f"Could not determine Homebrew update availability: {proc.stderr.strip() or 'brew outdated failed'}."
-        except Exception as exc:
-            return False, f"Could not determine Homebrew update availability: {exc}"
-    if action_id == "hermes-update":
-        try:
-            proc = subprocess.run(
-                [HERMES_BIN, "update", "--check"],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                timeout=45,
-                env=ADMIN_COMMAND_ENV,
+            return AdminCommandOutcome(
+                returncode=proc.returncode,
+                stdout=proc.stdout or "",
+                stderr="" if combine_stderr else (proc.stderr or ""),
             )
-            output = proc.stdout.strip()
-            lower = output.lower()
-            if "update available" in lower or "commit behind" in lower:
-                return True, "Hermes Agent update is available."
-            if "up to date" in lower or "already up" in lower or "no update" in lower:
-                return False, "No Hermes Agent update available."
-            if proc.returncode == 0:
-                return False, f"No Hermes Agent update detected. Check output: {output[-240:] or 'empty output'}."
-            return False, f"Could not determine Hermes Agent update availability: {output[-240:] or 'hermes update --check failed'}."
         except Exception as exc:
-            return False, f"Could not determine Hermes Agent update availability: {exc}"
-    return True, "No update availability rule is configured for this action."
+            return AdminCommandOutcome(returncode=None, error=str(exc))
+
+    return compose_admin_action_availability(
+        action_id,
+        skip_expensive,
+        AdminAvailabilitySources(
+            read_macos_update_status=read_macos_update_status,
+            run_command=run_command,
+            hermes_bin=HERMES_BIN,
+        ),
+    )
 
 
 def local_ip() -> str:

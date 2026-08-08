@@ -340,6 +340,12 @@ paths. Provider-specific parsing and presentation are split into small
 collectors, while `report_portal.py` retains process environment construction
 and the public compatibility facade.
 
+`portal_admin_availability.py` owns the decision policy that enables or blocks
+Administration update actions. It evaluates cached macOS update state and
+bounded Homebrew/Hermes command outcomes supplied by the portal. The module
+cannot construct a process environment or execute a command itself; the portal
+retains that host adapter and returns only a typed, bounded command outcome.
+
 `portal_n8n_container_status.py` owns the bounded n8n Administration health
 record. An explicit source bundle exposes Docker and curl execution, time,
 formatting, environment, container identity, and health URL. The service

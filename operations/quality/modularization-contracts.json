@@ -103,6 +103,16 @@
       "required_symbols": []
     },
     {
+      "path": "onion-sentinel-dashboard/portal_admin_availability.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_availability.py",
+      "required_symbols": [
+        "AdminAvailabilitySources",
+        "AdminCommandOutcome",
+        "compose_admin_action_availability"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_versions.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_versions.py",
