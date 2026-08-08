@@ -276,6 +276,7 @@ from portal_cti_program_service import (
     prepare_cti_program_write,
     read_cti_program,
 )
+from portal_soc_settings_write import SocSettingsWriteCallbacks, prepare_soc_settings_write
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -8523,24 +8524,22 @@ class PortalHandler(BaseHTTPRequestHandler):
                 else int(data.get("status") or HTTPStatus.BAD_REQUEST)
             )
             return self._send(response_status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if parsed.path in SOC_SETTINGS_PROMPT_API_PATHS:
-            payload = parse_json_body(raw, empty_object=True).value_or({})
-            if not self._soc_settings_write_authorized():
-                return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
-            ok, data = save_settings_prompt(parsed.path, payload.get("prompt", ""))
-            return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if parsed.path == "/api/soc-settings/ai-model":
-            payload = parse_json_body(raw, empty_object=True).value_or({})
-            if not self._soc_settings_write_authorized():
-                return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
-            ok, data = save_soc_ai_settings(payload)
-            return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if parsed.path == "/api/soc-settings/agent-model":
-            payload = parse_json_body(raw, empty_object=True).value_or({})
-            if not self._soc_settings_write_authorized():
-                return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
-            ok, data = save_soc_agent_model(payload)
-            return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        settings_write = prepare_soc_settings_write(
+            route,
+            raw,
+            admin_authenticated=lambda: self._soc_settings_write_authorized(),
+            callbacks=SocSettingsWriteCallbacks(
+                save_prompt=save_settings_prompt,
+                save_ai_settings=save_soc_ai_settings,
+                save_agent_model=save_soc_agent_model,
+            ),
+        )
+        if settings_write is not None:
+            return self._send(
+                settings_write.status,
+                json.dumps(settings_write.payload, indent=2).encode(),
+                "application/json; charset=utf-8",
+            )
         if parsed.path == "/api/admin/start-service":
             payload = parse_json_body(raw, empty_object=True).value_or({})
             if not self._admin_authenticated():

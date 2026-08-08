@@ -417,6 +417,17 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_soc_settings_write.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_settings_write.py",
+      "required_symbols": [
+        "SocSettingsWriteCallbacks",
+        "SocSettingsWriteResult",
+        "is_soc_settings_write",
+        "prepare_soc_settings_write"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_catalog_routes.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py",

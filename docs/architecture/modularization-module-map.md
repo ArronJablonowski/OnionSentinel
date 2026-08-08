@@ -552,6 +552,14 @@ policy, atomic persistence, and public redaction. `report_portal.py` retains the
 concrete browser-origin and Administration-session checks, runtime storage
 configuration, HTTP serialization, security headers, and socket writes.
 
+`portal_soc_settings_write.py` owns the classified prompt, AI-model, and
+agent-model settings write families; legacy empty-object JSON fallback;
+Administration authorization; existing saver dispatch; and uniform 200/400/403
+response mapping. Prompt content validation, provider/model normalization,
+agent-route policy, and atomic configuration persistence remain with the
+existing settings functions. `report_portal.py` retains the concrete
+Administration-session check and HTTP response serialization.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and
