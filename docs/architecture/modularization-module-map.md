@@ -397,6 +397,14 @@ aggregation, and live dashboard overlays. It composes the narrower
 decision as a callback. The portal retains bounded status-file discovery,
 process snapshots, queue reads, and compatibility facades.
 
+`portal_llm_active_store.py` owns nonnegative queue projection, size-bounded
+status-record parsing, non-symlink newest-file discovery, exact runner-PID and
+legacy prompt-path process matching, single-snapshot liveness filtering, and
+deterministic active-run ordering. Its source bundle exposes only the active
+directory, byte/record limits, and a bounded process-command snapshot callback.
+The portal retains the static dashboard read, actual `ps` subprocess, runtime
+paths, and compatibility facades.
+
 `portal_cron_failures.py` owns bounded Hermes cron-failure collection and
 escaped Administration rendering. It treats run-level Markdown output as
 authoritative evidence, uses `jobs.json` only as a latest-error fallback,

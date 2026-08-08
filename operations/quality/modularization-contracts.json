@@ -209,6 +209,19 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_llm_active_store.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_llm_active_store.py",
+      "required_symbols": [
+        "ActiveLlmSources",
+        "active_llm_record_paths",
+        "llm_analysis_process_active",
+        "llm_queue_size",
+        "read_active_llm_analyses",
+        "read_bounded_llm_record"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_versions.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_versions.py",

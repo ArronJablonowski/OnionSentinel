@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import datetime as dt
-import heapq
 import hashlib
 import hmac
 import html
@@ -357,6 +356,14 @@ from portal_llm_activity import (
     decorate_llm_analysis_record as project_llm_analysis_record,
     llm_agent_execution_state as project_llm_agent_execution_state,
     merge_live_llm_activity as project_live_llm_activity,
+)
+from portal_llm_active_store import (
+    ActiveLlmSources,
+    active_llm_record_paths,
+    llm_analysis_process_active as active_llm_process_present,
+    llm_queue_size,
+    read_active_llm_analyses as load_active_llm_analyses,
+    read_bounded_llm_record,
 )
 from portal_beacon_history import project_beacon_history
 from portal_n8n_container_status import (
@@ -4407,73 +4414,31 @@ def read_llm_analysis_logs(max_rows: int = 1000) -> list[dict]:
 
 def current_llm_queue_size() -> int:
     static_status = read_soc_alert_json_file(SOC_ALERT_STATIC_STATUS_FILE)
-    ai_counts = static_status.get("ai", {}).get("counts", {}) if isinstance(static_status, dict) else {}
-    try:
-        return max(0, int(ai_counts.get("queued") or 0))
-    except (TypeError, ValueError):
-        return 0
+    return llm_queue_size(static_status)
 
 
 def read_bounded_llm_analysis_record(path: Path) -> dict:
-    """Read one trusted local status record without accepting unbounded input."""
-    try:
-        with path.open("rb") as handle:
-            raw = handle.read(SOC_ALERT_LLM_ANALYSIS_RECORD_MAX_BYTES + 1)
-        if len(raw) > SOC_ALERT_LLM_ANALYSIS_RECORD_MAX_BYTES:
-            return {}
-        data = json.loads(raw.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    return read_bounded_llm_record(path, SOC_ALERT_LLM_ANALYSIS_RECORD_MAX_BYTES)
 
 
 def active_llm_analysis_record_paths() -> list[Path]:
-    """Return a bounded newest-first set of regular per-run status files."""
-    newest: list[tuple[int, str, Path]] = []
-    try:
-        with os.scandir(SOC_ALERT_LLM_ANALYSIS_ACTIVE_DIR) as entries:
-            for entry in entries:
-                if not entry.name.endswith(".json") or not entry.is_file(follow_symlinks=False):
-                    continue
-                try:
-                    mtime_ns = entry.stat(follow_symlinks=False).st_mtime_ns
-                except OSError:
-                    continue
-                item = (mtime_ns, entry.name, Path(entry.path))
-                if len(newest) < SOC_ALERT_LLM_ANALYSIS_ACTIVE_LIMIT:
-                    heapq.heappush(newest, item)
-                elif item[:2] > newest[0][:2]:
-                    heapq.heapreplace(newest, item)
-    except OSError:
-        return []
-    return [item[2] for item in sorted(newest, reverse=True)]
+    return active_llm_record_paths(
+        SOC_ALERT_LLM_ANALYSIS_ACTIVE_DIR,
+        SOC_ALERT_LLM_ANALYSIS_ACTIVE_LIMIT,
+    )
+
+
+def active_llm_sources() -> ActiveLlmSources:
+    return ActiveLlmSources(
+        active_directory=SOC_ALERT_LLM_ANALYSIS_ACTIVE_DIR,
+        record_max_bytes=SOC_ALERT_LLM_ANALYSIS_RECORD_MAX_BYTES,
+        active_limit=SOC_ALERT_LLM_ANALYSIS_ACTIVE_LIMIT,
+        process_commands=llm_analysis_process_commands,
+    )
 
 
 def read_active_llm_analyses() -> list[dict]:
-    """Read only live per-run records, using one bounded process snapshot."""
-    records = [
-        record
-        for path in active_llm_analysis_record_paths()
-        if (record := read_bounded_llm_analysis_record(path))
-        and record.get("status") == "running"
-    ]
-    if not records:
-        return []
-    commands = llm_analysis_process_commands()
-    active = [
-        record
-        for record in records
-        if llm_analysis_process_active(
-            str(record.get("prompt_package") or ""),
-            commands,
-            record.get("runner_pid"),
-        )
-    ]
-    active.sort(key=lambda record: (
-        str(record.get("started_at") or ""),
-        str(record.get("log_id") or ""),
-    ))
-    return active
+    return load_active_llm_analyses(active_llm_sources())
 
 
 def llm_agent_execution_state(record: object) -> dict:
@@ -4525,23 +4490,7 @@ def llm_analysis_process_active(
     runner_pid: object = None,
 ) -> bool:
     commands = commands if commands is not None else llm_analysis_process_commands()
-    try:
-        expected_pid = int(str(runner_pid or "").strip())
-    except (TypeError, ValueError):
-        expected_pid = 0
-    if expected_pid > 0:
-        for command in commands:
-            parts = command.strip().split(maxsplit=1)
-            if (
-                len(parts) == 2
-                and parts[0] == str(expected_pid)
-                and "run-local-ai-analysis.py" in parts[1]
-            ):
-                return True
-        return False
-    if prompt_package:
-        return any("run-local-ai-analysis.py" in command and prompt_package in command for command in commands)
-    return any("run-local-ai-analysis.py" in command for command in commands)
+    return active_llm_process_present(prompt_package, commands, runner_pid)
 
 
 LLM_ANALYSIS_COMBINED_HISTORY_LIMIT = 5000
