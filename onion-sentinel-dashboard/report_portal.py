@@ -280,6 +280,7 @@ from portal_soc_settings_write import SocSettingsWriteCallbacks, prepare_soc_set
 from portal_admin_service_write import AdminServiceWriteCallbacks, prepare_admin_service_write
 from portal_resource_library_write import ResourceLibraryWriteCallbacks, prepare_resource_library_write
 from portal_soc_status_write import prepare_soc_status_write
+from portal_admin_form_service import AdminFormCallbacks, prepare_admin_form
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -8555,30 +8556,21 @@ class PortalHandler(BaseHTTPRequestHandler):
         )
         if resource_write is not None:
             return self._send(resource_write.status, json.dumps(resource_write.payload, indent=2).encode(), "application/json; charset=utf-8")
-        form = parse_qs(raw, keep_blank_values=True)
-        token = form.get("token", [""])[0]
-        if token != ensure_admin_token():
-            if parsed.path == "/admin/action" and self._admin_authenticated():
-                return self._send(HTTPStatus.FORBIDDEN, render_admin_dashboard("Admin action token validation failed.", True))
-            return self._send(HTTPStatus.FORBIDDEN, render_admin_login("Form token validation failed.", True))
-        if parsed.path == "/admin/login":
-            if not admin_password_configured():
-                return self._send(HTTPStatus.SERVICE_UNAVAILABLE, render_admin_login("Admin password is not configured yet. Run the local password setup script first.", True))
-            password = form.get("password", [""])[0]
-            if not verify_admin_password(password):
-                return self._send(HTTPStatus.UNAUTHORIZED, render_admin_login("Invalid admin password.", True))
-            session_id = create_admin_session(self.client_address[0])
-            return self._redirect("/admin", {"Set-Cookie": admin_session_cookie_header(session_id)})
-        if parsed.path == "/admin/logout":
-            destroy_admin_session(self._admin_session_id())
-            return self._redirect("/admin/login", {"Set-Cookie": expired_admin_session_cookie_header()})
-        if not self._admin_authenticated():
-            return self._send(HTTPStatus.FORBIDDEN, render_admin_login("Sign in before running Administration actions.", True))
-        action_id = form.get("action", [""])[0]
-        confirmation = form.get("confirmation", [""])[0]
-        ok, message = start_admin_action(action_id, confirmation)
-        query = f"?{'admin_msg' if ok else 'admin_error'}={quote(message)}"
-        return self._redirect(f"/admin{query}", status=HTTPStatus.SEE_OTHER)
+        admin_form = prepare_admin_form(
+            route, raw, client_ip=self.client_address[0],
+            admin_authenticated=lambda: self._admin_authenticated(),
+            callbacks=AdminFormCallbacks(
+                ensure_admin_token, admin_password_configured, verify_admin_password,
+                create_admin_session, admin_session_cookie_header,
+                self._admin_session_id, destroy_admin_session,
+                expired_admin_session_cookie_header, start_admin_action,
+            ),
+        )
+        assert admin_form is not None
+        if admin_form.redirect:
+            return self._redirect(admin_form.redirect, admin_form.headers, status=admin_form.status)
+        renderer = render_admin_dashboard if admin_form.view == "dashboard" else render_admin_login
+        return self._send(admin_form.status, renderer(admin_form.message, admin_form.error))
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)

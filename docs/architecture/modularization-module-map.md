@@ -581,6 +581,13 @@ cache invalidation signaling. The existing `update_soc_alert_status` function
 retains identifier/status validation, stale-browser safeguards, review gates,
 alert-store transport, and disaster-recovery persistence policy.
 
+`portal_admin_form_service.py` owns Administration form parsing, action-token
+ordering, login/password decision flow, session creation/destruction ports,
+action authorization and dispatch, cookie-header projection, and encoded
+post-action redirects. Password hashing and storage, session persistence,
+concrete cookie construction, action execution, HTML rendering, client-address
+lookup, and socket writes remain in `report_portal.py`.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and
