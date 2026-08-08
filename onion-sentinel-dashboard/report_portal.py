@@ -27,6 +27,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -285,6 +286,7 @@ from portal_health_read_service import compose_portal_health
 from portal_resource_action_read import read_resource_action_status
 from portal_catalog_read_service import CatalogReadCallbacks, dispatch_catalog_read
 from portal_catalog_delivery import CatalogDeliveryCallbacks, deliver_catalog_route
+from portal_general_read_service import GeneralReadCallbacks, dispatch_general_read
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -8307,6 +8309,24 @@ def portal_soc_read_callbacks() -> SocReadCallbacks:
     )
 
 
+def portal_general_read_callbacks(home: Callable[[], bytes]) -> GeneralReadCallbacks:
+    def cti_program_read() -> tuple[int, dict]:
+        result = read_cti_program(portal_cti_program_callbacks(lambda _program: None))
+        return result.status, result.payload
+    return GeneralReadCallbacks(
+        home=home,
+        health=lambda: compose_portal_health(
+            scan_reports(), SCAN_ROOTS, local_address=local_ip(), generated_at=now_iso_local(),
+        ),
+        resource_favorites=resource_favorites,
+        system_health_beacons=n8n_beacon_history_response,
+        asset_inventory=lambda query: asset_inventory_response(query=query),
+        dhcp_asset_discovery=dhcp_asset_discovery_response,
+        software_inventory=lambda query: software_inventory_response(query=query),
+        cti_program=cti_program_read,
+    )
+
+
 class PortalHandler(BaseHTTPRequestHandler):
     server_version = "ArronReportPortal/1.0"
 
@@ -8567,10 +8587,17 @@ class PortalHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query, keep_blank_values=True)
         route = classify_get_route(path, cti_program_path=CTI_PROGRAM_API_PATH, prompt_paths=SOC_SETTINGS_PROMPT_API_PATHS)
         operation = route.operation
-        if operation == "home":
-            reports = scan_reports()
-            body = render_home(reports, self.server.server_address[0], self.server.server_address[1])
-            return self._send(HTTPStatus.OK, body)
+        general_read = dispatch_general_read(
+            operation, query=query,
+            callbacks=portal_general_read_callbacks(lambda: render_home(
+                scan_reports(), self.server.server_address[0], self.server.server_address[1],
+            )),
+        )
+        if general_read is not None:
+            body = general_read.payload if general_read.encoded else json.dumps(
+                general_read.payload, indent=2,
+            ).encode()
+            return self._send(general_read.status, body, general_read.content_type)
         admin_read = prepare_admin_read(
             operation, query,
             admin_authenticated=lambda: self._admin_authenticated(),
@@ -8584,34 +8611,6 @@ class PortalHandler(BaseHTTPRequestHandler):
                 renderer = render_admin_dashboard if admin_read.view == "dashboard" else render_admin_login
                 return self._send(admin_read.status, renderer(admin_read.message, admin_read.error))
             return self._send(admin_read.status, json.dumps(admin_read.payload, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "health":
-            data = compose_portal_health(
-                scan_reports(), SCAN_ROOTS,
-                local_address=local_ip(), generated_at=now_iso_local(),
-            )
-            return self._send(HTTPStatus.OK, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "resource_favorites":
-            data = {"ok": True, "favorites": resource_favorites()}
-            return self._send(HTTPStatus.OK, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "system_health_beacons":
-            data = n8n_beacon_history_response(query)
-            return self._send(HTTPStatus.OK, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "asset_inventory":
-            status, data = asset_inventory_response(query=query)
-            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "dhcp_asset_discovery":
-            status, data = dhcp_asset_discovery_response()
-            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "software_inventory":
-            status, data = software_inventory_response(query=query)
-            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "cti_program":
-            result = read_cti_program(portal_cti_program_callbacks(lambda _program: None))
-            return self._send(
-                result.status,
-                json.dumps(result.payload, indent=2).encode(),
-                "application/json; charset=utf-8",
-            )
         if operation == "soc_alert_events":
             return self._send_soc_alert_events()
         soc_read = dispatch_soc_read(

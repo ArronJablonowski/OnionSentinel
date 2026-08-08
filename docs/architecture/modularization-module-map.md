@@ -603,6 +603,12 @@ without failing the health response. Report discovery, runtime roots, local
 address selection, timestamps, JSON encoding, and socket writes remain in
 `report_portal.py`.
 
+`portal_general_read_service.py` owns lazy dispatch and response projection for
+the portal home, health, favorites, beacon history, asset inventory, DHCP
+discovery, software inventory, and CTI reads. Exact-route selection invokes
+only its corresponding injected callback. `report_portal.py` retains runtime
+dependency composition, JSON serialization, HTML rendering, and socket writes.
+
 `portal_resource_action_read.py` owns asynchronous Resource Library action ID
 validation, pending-state projection, and byte-preserving status reads. The
 portal retains the concrete action-status directory, JSON encoding for

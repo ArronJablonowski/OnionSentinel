@@ -485,6 +485,16 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_general_read_service.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_general_read_service.py",
+      "required_symbols": [
+        "GeneralReadCallbacks",
+        "GeneralReadResult",
+        "dispatch_general_read"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_resource_action_read.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_resource_action_read.py",
