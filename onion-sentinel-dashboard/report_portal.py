@@ -55,6 +55,14 @@ from portal_ai_settings_store import (
     save_soc_ai_settings as save_persisted_soc_ai_settings,
     write_soc_ai_settings as write_persisted_soc_ai_settings,
 )
+from portal_agent_content_store import (
+    AgentMemorySources,
+    read_agent_memory as read_allowlisted_agent_memory,
+    read_allowlisted_prompt,
+    read_prompt_file as read_agent_prompt_file,
+    save_allowlisted_prompt,
+    save_prompt_file as save_agent_prompt_file,
+)
 from portal_ai_model_policy import (
     CLI_HARNESS_MODEL_PATTERN,
     CODEX_CLI_MODEL_CATALOG,
@@ -1445,13 +1453,7 @@ def expired_admin_session_cookie_header() -> str:
 
 def read_prompt_file(path: Path, label: str) -> dict:
     """Read one allowlisted settings prompt without accepting a caller-supplied path."""
-    try:
-        prompt = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        prompt = ""
-    except Exception as exc:
-        return {"ok": False, "error": f"Could not read {label} prompt: {exc}", "path": str(path)}
-    return {"ok": True, "prompt": prompt, "path": str(path)}
+    return read_agent_prompt_file(path, label)
 
 
 def read_soc_analyst_prompt() -> dict:
@@ -1481,11 +1483,7 @@ def read_incident_responder_prompt() -> dict:
 
 def read_settings_prompt(api_path: str) -> dict:
     """Read a primary or reviewer prompt selected only from the fixed API route map."""
-    entry = SOC_SETTINGS_PROMPT_FILES.get(api_path)
-    if entry is None:
-        return {"ok": False, "error": "Unknown SOC settings prompt route."}
-    label, path = entry
-    return read_prompt_file(path, label)
+    return read_allowlisted_prompt(api_path, SOC_SETTINGS_PROMPT_FILES)
 
 
 def agent_memory_files() -> dict[str, tuple[str, Path]]:
@@ -1502,69 +1500,24 @@ def agent_memory_files() -> dict[str, tuple[str, Path]]:
 
 def read_agent_memory(memory_key: object) -> tuple[int, dict]:
     """Read one allowlisted Markdown memory file without permitting path input."""
-    key = str(memory_key or "").strip().lower()
-    entry = agent_memory_files().get(key)
-    if entry is None:
-        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Unknown agent memory key."}
-
-    label, path = entry
-    try:
-        resolved_dir = AGENT_MEMORY_DIR.resolve(strict=True)
-        resolved_path = path.resolve(strict=True)
-        resolved_path.relative_to(resolved_dir)
-        stat = resolved_path.stat()
-        if not resolved_path.is_file():
-            raise FileNotFoundError(str(resolved_path))
-        if stat.st_size > AGENT_MEMORY_VIEW_MAX_BYTES:
-            return HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {
-                "ok": False,
-                "key": key,
-                "label": label,
-                "path": str(path),
-                "bytes": stat.st_size,
-                "read_only": True,
-                "error": f"{label} exceeds the {AGENT_MEMORY_VIEW_MAX_BYTES}-byte viewer limit.",
-            }
-        content = resolved_path.read_text(encoding="utf-8", errors="replace")
-    except FileNotFoundError:
-        return HTTPStatus.NOT_FOUND, {"ok": False, "error": f"{label} does not exist."}
-    except ValueError:
-        return HTTPStatus.FORBIDDEN, {"ok": False, "error": "Agent memory path escaped the configured memory directory."}
-    except Exception as exc:
-        return HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": f"Could not read {label}: {exc}"}
-
-    modified_at = dt.datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec="seconds").replace("T", "  ")
-    return HTTPStatus.OK, {
-        "ok": True,
-        "key": key,
-        "label": label,
-        "path": str(path),
-        "content": content,
-        "bytes": stat.st_size,
-        "modified_at": modified_at,
-        "read_only": True,
-    }
+    return read_allowlisted_agent_memory(
+        AgentMemorySources(
+            directory=AGENT_MEMORY_DIR,
+            files=agent_memory_files(),
+            max_bytes=AGENT_MEMORY_VIEW_MAX_BYTES,
+        ),
+        memory_key,
+    )
 
 
 def save_prompt_file(prompt: object, path: Path, label: str) -> tuple[bool, dict]:
     """Atomically save an editable SOC settings prompt."""
-    normalized = str(prompt or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not normalized:
-        return False, {"ok": False, "error": f"{label} prompt cannot be empty.", "path": str(path)}
-    if len(normalized.encode("utf-8")) > SOC_ANALYST_PROMPT_MAX_BYTES:
-        return False, {"ok": False, "error": f"{label} prompt exceeds {SOC_ANALYST_PROMPT_MAX_BYTES} bytes.", "path": str(path)}
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(normalized + "\n", encoding="utf-8")
-        try:
-            tmp.chmod(0o600)
-        except Exception:
-            pass
-        tmp.replace(path)
-    except Exception as exc:
-        return False, {"ok": False, "error": f"Could not save {label} prompt: {exc}", "path": str(path)}
-    return True, {"ok": True, "message": f"{label} prompt saved.", "path": str(path), "bytes": len((normalized + "\n").encode("utf-8"))}
+    return save_agent_prompt_file(
+        prompt,
+        path,
+        label,
+        max_bytes=SOC_ANALYST_PROMPT_MAX_BYTES,
+    )
 
 
 def save_soc_analyst_prompt(prompt: object) -> tuple[bool, dict]:
@@ -1594,11 +1547,12 @@ def save_incident_responder_prompt(prompt: object) -> tuple[bool, dict]:
 
 def save_settings_prompt(api_path: str, prompt: object) -> tuple[bool, dict]:
     """Save a primary or reviewer prompt selected only from the fixed API route map."""
-    entry = SOC_SETTINGS_PROMPT_FILES.get(api_path)
-    if entry is None:
-        return False, {"ok": False, "error": "Unknown SOC settings prompt route."}
-    label, path = entry
-    return save_prompt_file(prompt, path, label)
+    return save_allowlisted_prompt(
+        api_path,
+        prompt,
+        SOC_SETTINGS_PROMPT_FILES,
+        max_bytes=SOC_ANALYST_PROMPT_MAX_BYTES,
+    )
 
 
 SOC_AI_SETTINGS_LOCK = threading.RLock()

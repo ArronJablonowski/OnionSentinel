@@ -122,6 +122,19 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_agent_content_store.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_agent_content_store.py",
+      "required_symbols": [
+        "AgentMemorySources",
+        "read_agent_memory",
+        "read_allowlisted_prompt",
+        "read_prompt_file",
+        "save_allowlisted_prompt",
+        "save_prompt_file"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_dashboard.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_dashboard.py",

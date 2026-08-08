@@ -322,6 +322,13 @@ GeoIP response schema. Its source bundle exposes normalization, CLI readiness,
 route composition/identity, GeoIP projection, roles, the settings path, and
 lock; HTTP authorization and response serialization remain outside the module.
 
+`portal_agent_content_store.py` owns trusted prompt reads, normalized and
+atomic owner-only prompt writes, fixed-map route selection, and read-only agent
+memory viewing. Memory reads require an allowlisted key, resolved containment
+beneath the configured root, a regular file, and the configured size bound;
+responses expose content and safe metadata but no write capability. The portal
+retains runtime path maps, limits, HTTP authorization, and compatibility facades.
+
 `portal_ai_model_policy.py` owns the model catalog and reusable route policy
 injected into the settings normalizer: safe defaults, bounded Ollama rosters,
 literal boolean parsing, executable and provider-model validation, Codex roster
