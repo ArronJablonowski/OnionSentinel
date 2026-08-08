@@ -10,7 +10,7 @@
       "max_lines": 812
     },
     "n8n/bin/auto-run-ai-analysis.py": {
-      "max_lines": 4244
+      "max_lines": 4198
     },
     "n8n/bin/bounded_process.py": {
       "max_lines": 997
@@ -979,5 +979,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "bf01a30e816591a256441bbd36af011e18eaf1f4"
+  "source_release": "e66ca12f0f65c7a7a05020f9dcf4b64a335eead1"
 }
