@@ -50,6 +50,16 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_terminal_recovery.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_terminal_recovery.py",
+      "required_symbols": [
+        "TerminalRecoverySources",
+        "reconcile_terminal_success",
+        "terminal_success_recovery_candidates"
+      ]
+    },
+    {
       "path": "n8n/bin/onion_sentinel_harness.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/onion_sentinel_harness.py",

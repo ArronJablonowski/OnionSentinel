@@ -268,6 +268,15 @@ transport, bounded JSON decoding, mutation headers, sleep, and controlled-route
 policy. The launchd wrapper retains a stable `report_ai_job_status` facade and
 binds its existing transport globals at call time for compatibility.
 
+`scheduler_terminal_recovery.py` owns the read-only proof that a stranded
+processing lease already produced an exact, committed terminal result. It
+requires matching provider lane, group, alert, role, attempt window, harness
+run, analysis row, and—when applicable—the Incident Response case pointer
+before its injected reporting port may complete the lease. This prevents crash
+recovery from issuing duplicate inference or adopting an unrelated artifact.
+The launchd wrapper retains compatibility delegates and binds its read-only
+SQLite connector and status reporter at call time.
+
 ### `onion_sentinel_harness.py`
 
 | Current responsibility | Target boundary | Notes |
