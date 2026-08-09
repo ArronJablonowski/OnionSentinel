@@ -557,6 +557,15 @@ time bounds. Each relationship carries an interpretation limit and remains a
 lead rather than evidence of authorization or maliciousness. JSON decoding and
 row access are injected by the builder facade.
 
+`prompt_detection_context.py` owns ordered preparation of the exact detection
+group, deterministic investigation-skill selection, rule/playbook predicate
+validation, bounded packet features, and time-aware asset resolution. The
+legacy builder composition root injects every database, parser, registry, and
+resolver operation; the module opens no database and reads no runtime file on
+its own. Exact-group selection failures stop playbook and asset processing, and
+only exact selected rows are admitted to packet validation, asset resolution,
+and subsequent query planning.
+
 `prompt_package_compactor.py` owns deterministic prompt admission reduction.
 It stabilizes declared serialized size, attempts lossless compact JSON first,
 then applies an ordered set of bounded historical, asset, enrichment, PCAP,

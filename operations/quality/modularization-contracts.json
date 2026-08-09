@@ -70,6 +70,17 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_detection_context.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_detection_context.py",
+      "required_symbols": [
+        "DetectionContextRequest",
+        "DetectionContextSources",
+        "PreparedDetectionContext",
+        "prepare_detection_context"
+      ]
+    },
+    {
       "path": "n8n/bin/prompt_investigation_query_context.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_investigation_query_context.py",

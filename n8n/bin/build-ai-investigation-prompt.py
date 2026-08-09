@@ -78,6 +78,11 @@ from prompt_investigation_query_context import (
     QueryContextSources,
     build_investigation_query_context,
 )
+from prompt_detection_context import (
+    DetectionContextRequest,
+    DetectionContextSources,
+    prepare_detection_context,
+)
 from prompt_package_compactor import (
     PackageCompactionSources,
     compact_package_to_budget as compact_prompt_package,
@@ -1878,76 +1883,60 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
         args.correlation_min_score,
     )
     compact_selected = compact_alert(selected)
-    validation_rows = alert_group_rows(
-        conn,
-        selected,
-        include_tests=args.include_tests,
-        extra_columns=(
-            "alert_json",
-            "raw_event_json",
-            "rule_id",
-            "timestamp",
-            "source_port",
-            "network_protocol",
-            "transport_protocol",
-            "destination_port",
+    detection_context = prepare_detection_context(
+        DetectionContextSources(
+            row_value=sqlite_value,
+            alert_group_rows=lambda *positional, **keywords: alert_group_rows(
+                conn,
+                *positional,
+                **keywords,
+            ),
+            parse_alert_json=parse_alert_json,
+            parse_json_object=parse_json_object,
+            extract_rule_context=extract_rule_context,
+            load_investigation_skills=load_investigation_skills,
+            resolve_investigation_skills=resolve_investigation_skills,
+            exact_detection_group_rows=exact_detection_group_rows,
+            load_detection_playbooks=load_detection_playbooks,
+            resolve_detection_playbook=resolve_detection_playbook,
+            marker_specs=marker_specs,
+            extract_group_packet_features=extract_group_packet_features,
+            build_detection_validation=build_detection_validation,
+            load_asset_inventory=load_asset_inventory,
+            asset_observables_and_events=asset_observables_and_events,
+            resolve_asset_context=resolve_asset_context,
         ),
-        row_limit=MAX_DETECTION_GROUP_ROWS + 1,
-    )
-    selected_alert = parse_alert_json(str(sqlite_value(selected, "alert_json") or ""))
-    selected_raw_event = parse_json_object(str(sqlite_value(selected, "raw_event_json") or ""))
-    rule_context = extract_rule_context(
-        selected_alert,
-        selected_raw_event,
-        sqlite_value(selected, "rule_id"),
-    )
-    skill_registry = load_investigation_skills(
-        Path(getattr(args, "investigation_skills", DEFAULT_INVESTIGATION_SKILLS_FILE))
-    )
-    skill_selection = resolve_investigation_skills(
-        skill_registry,
-        {
-            "event_dataset": sqlite_value(selected, "event_dataset"),
-            "transport_protocol": sqlite_value(selected, "transport_protocol"),
-            "network_protocol": sqlite_value(selected, "network_protocol"),
-            "destination_port": sqlite_value(selected, "destination_port"),
-            "rule_name": sqlite_value(selected, "rule_name"),
-        },
-        str(args.agent_role),
-    )
-    exact_validation_rows, validation_scope = exact_detection_group_rows(
-        validation_rows,
-        rule_context,
-    )
-    playbook_registry = load_detection_playbooks(
-        Path(getattr(args, "detection_playbooks", DEFAULT_DETECTION_PLAYBOOKS_FILE))
-    )
-    playbook = resolve_detection_playbook(playbook_registry, rule_context)
-    packet_features = extract_group_packet_features(
-        exact_validation_rows,
-        marker_specs(rule_context, playbook),
-    )
-    packet_features["group_scope"] = validation_scope
-    if validation_scope["input_truncated"]:
-        packet_features["truncated"] = True
-    detection_validation = build_detection_validation(
-        rule_context,
-        packet_features,
-        playbook,
-    )
-    asset_inventory = load_asset_inventory(
-        Path(getattr(args, "asset_inventory_file", DEFAULT_ASSET_INVENTORY_FILE))
-    )
-    asset_observables, network_events = asset_observables_and_events(exact_validation_rows)
-    asset_context = resolve_asset_context(
-        asset_inventory,
-        asset_observables,
-        sqlite_value(selected, "timestamp") or sqlite_value(selected, "last_seen"),
-        network_events,
+        DetectionContextRequest(
+            selected=selected,
+            include_tests=bool(args.include_tests),
+            agent_role=str(args.agent_role),
+            investigation_skills_path=Path(
+                getattr(
+                    args,
+                    "investigation_skills",
+                    DEFAULT_INVESTIGATION_SKILLS_FILE,
+                )
+            ),
+            detection_playbooks_path=Path(
+                getattr(
+                    args,
+                    "detection_playbooks",
+                    DEFAULT_DETECTION_PLAYBOOKS_FILE,
+                )
+            ),
+            asset_inventory_path=Path(
+                getattr(
+                    args,
+                    "asset_inventory_file",
+                    DEFAULT_ASSET_INVENTORY_FILE,
+                )
+            ),
+            maximum_group_rows=MAX_DETECTION_GROUP_ROWS,
+        ),
     )
     investigation_capability, investigation_local_context = investigation_query_context(
         selected,
-        exact_validation_rows,
+        detection_context.exact_validation_rows,
         str(analyst_state.get("group_id") or ""),
         str(args.agent_role),
         bool(
@@ -1974,8 +1963,8 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             "grouped_alert_context": group_context,
             "public_enrichment": enrichment_context,
                 "pcap_evidence": pcap_context,
-                "detection_validation": detection_validation,
-            "asset_context": asset_context,
+                "detection_validation": detection_context.detection_validation,
+            "asset_context": detection_context.asset_context,
             "authorization_evidence": authorization_evidence,
             "analyst_state": analyst_state,
             "correlated_alert_context": correlation_context,
@@ -2040,9 +2029,9 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
                 "pcap_evidence": pcap_context,
                 "investigation_query_capability": investigation_capability,
                 "_local_investigation_query_context": investigation_local_context,
-                "investigation_skills": skill_selection,
-                "detection_validation": detection_validation,
-                "asset_context": asset_context,
+                "investigation_skills": detection_context.investigation_skills,
+                "detection_validation": detection_context.detection_validation,
+                "asset_context": detection_context.asset_context,
                 "authorization_evidence": authorization_evidence,
                 "analyst_state": analyst_state,
                 "prior_analyses": (

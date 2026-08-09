@@ -550,6 +550,7 @@ cp "$REPO_DIR/n8n/bin/prompt_incident_grounding.py" "$STACK_DIR/bin/prompt_incid
 cp "$REPO_DIR/n8n/bin/prompt_builder_cli.py" "$STACK_DIR/bin/prompt_builder_cli.py"
 cp "$REPO_DIR/n8n/bin/prompt_correlation_context.py" "$STACK_DIR/bin/prompt_correlation_context.py"
 cp "$REPO_DIR/n8n/bin/prompt_correlation_facts.py" "$STACK_DIR/bin/prompt_correlation_facts.py"
+cp "$REPO_DIR/n8n/bin/prompt_detection_context.py" "$STACK_DIR/bin/prompt_detection_context.py"
 cp "$REPO_DIR/n8n/bin/prompt_investigation_query_context.py" "$STACK_DIR/bin/prompt_investigation_query_context.py"
 cp "$REPO_DIR/n8n/bin/prompt_package_compactor.py" "$STACK_DIR/bin/prompt_package_compactor.py"
 cp "$REPO_DIR/n8n/bin/prompt_package_view_model.py" "$STACK_DIR/bin/prompt_package_view_model.py"
