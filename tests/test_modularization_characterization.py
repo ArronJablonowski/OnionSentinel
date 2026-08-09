@@ -26,7 +26,7 @@ EXPECTED_SEAMS = {
 }
 
 
-def test_symbols(path: Path) -> set[tuple[str, str]]:
+def declared_test_symbols(path: Path) -> set[tuple[str, str]]:
     """Return class/test pairs declared in one unittest source file."""
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     symbols: set[tuple[str, str]] = set()
@@ -79,7 +79,7 @@ class ModularizationCharacterizationTests(unittest.TestCase):
                         seen.add(reference)
                         path = REPO_ROOT / relative
                         self.assertTrue(path.is_file())
-                        cache.setdefault(path, test_symbols(path))
+                        cache.setdefault(path, declared_test_symbols(path))
                         self.assertIn((class_name, test_name), cache[path])
 
     def test_characterization_uses_bounded_repository_fixtures_only(self) -> None:
