@@ -153,6 +153,41 @@ class ProviderSettingsPackageTests(unittest.TestCase):
                 policy=POLICY, dependencies=dependencies(),
             )
 
+    def test_merge_protects_structured_fields_and_runs_normalizers_in_order(self) -> None:
+        target = {
+            "mode": "ollama", "enabled_ollama_models": ["existing"],
+            "ollama_model": "existing", "ollama_url": "http://existing",
+            "hybrid_policy": "invalid", "known_text": "before",
+        }
+        calls = []
+
+        def stage(name):
+            return lambda settings_value, raw: calls.append(
+                (name, settings_value, raw)
+            ) or settings_value
+
+        result = settings.merge(
+            target,
+            {"enabled_ollama_models": ["untrusted-direct-copy"], "known_text": " trimmed "},
+            policy=settings.MergePolicy(
+                protected_keys=frozenset({"enabled_ollama_models"}),
+                hybrid_policies=frozenset({"approved"}),
+                default_hybrid_policy="approved",
+                fallback_ollama_model="fallback",
+                default_ollama_url="http://default",
+            ),
+            dependencies=settings.MergeDependencies(
+                normalize_codex=stage("codex"),
+                normalize_harnesses=stage("harness"),
+                apply_roster=stage("roster"),
+            ),
+        )
+        self.assertIs(result, target)
+        self.assertEqual(target["enabled_ollama_models"], ["existing"])
+        self.assertEqual(target["known_text"], "trimmed")
+        self.assertEqual(target["hybrid_policy"], "approved")
+        self.assertEqual([item[0] for item in calls], ["codex", "harness", "roster"])
+
     def test_package_has_no_io_or_execution_primitives(self) -> None:
         source = (ROOT / "n8n/onion_sentinel/analysis/providers/settings.py").read_text()
         for primitive in ("subprocess", "urlopen(", "import requests", "open("):

@@ -1585,6 +1585,32 @@ def _provider_settings_dependencies():
     )
 
 
+def _provider_settings_merge_policy():
+    return _provider_settings().MergePolicy(
+        protected_keys=frozenset({
+            "enabled_ollama_models", "codex_cli_models", "gpt_cli_enabled",
+            "hermes_agent_enabled", "openclaw_enabled", "agent_models",
+            "agent_second_opinion_models", "agent_adjudicator_models",
+        }),
+        hybrid_policies=frozenset({
+            "cloud_for_critical_high_or_recommended",
+            "cloud_when_recommended_only",
+        }),
+        default_hybrid_policy="cloud_for_critical_high_or_recommended",
+        fallback_ollama_model=FALLBACK_OLLAMA_MODEL,
+        default_ollama_url=DEFAULT_OLLAMA_URL,
+    )
+
+
+def _provider_settings_merge_dependencies():
+    module = _provider_settings()
+    return module.MergeDependencies(
+        normalize_codex=normalize_codex_cli_settings,
+        normalize_harnesses=normalize_cli_harness_settings,
+        apply_roster=apply_model_roster,
+    )
+
+
 def _reporting_incident():
     _provider_routing()
     from onion_sentinel.analysis.reporting import incident
@@ -3143,28 +3169,10 @@ def load_ai_settings(path: Path) -> dict[str, Any]:
         raise RuntimeArtifactError(f"invalid AI settings in {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise RuntimeArtifactError(f"AI settings root must be an object: {path}")
-    for key, value in data.items():
-        if key in {
-            "enabled_ollama_models",
-            "codex_cli_models",
-            "gpt_cli_enabled",
-            "hermes_agent_enabled",
-            "openclaw_enabled",
-            "agent_models",
-            "agent_second_opinion_models",
-            "agent_adjudicator_models",
-        }:
-            continue
-        if key in settings and value is not None:
-            settings[key] = str(value).strip() if isinstance(value, str) else value
-    normalize_codex_cli_settings(settings, data)
-    normalize_cli_harness_settings(settings, data)
-    apply_model_roster(settings, data)
-    if settings.get("hybrid_policy") not in {"cloud_for_critical_high_or_recommended", "cloud_when_recommended_only"}:
-        settings["hybrid_policy"] = "cloud_for_critical_high_or_recommended"
-    settings["ollama_model"] = str(settings.get("ollama_model") or FALLBACK_OLLAMA_MODEL).strip()
-    settings["ollama_url"] = str(settings.get("ollama_url") or DEFAULT_OLLAMA_URL).strip()
-    return settings
+    return _provider_settings().merge(
+        settings, data, policy=_provider_settings_merge_policy(),
+        dependencies=_provider_settings_merge_dependencies(),
+    )
 
 
 def resolve_codex_cli(settings: dict[str, Any]) -> str:

@@ -30,6 +30,22 @@ class Dependencies:
     error_type: type[Exception]
 
 
+@dataclass(frozen=True)
+class MergePolicy:
+    protected_keys: frozenset[str]
+    hybrid_policies: frozenset[str]
+    default_hybrid_policy: str
+    fallback_ollama_model: str
+    default_ollama_url: str
+
+
+@dataclass(frozen=True)
+class MergeDependencies:
+    normalize_codex: Callable[[dict[str, Any], dict[str, Any]], None]
+    normalize_harnesses: Callable[[dict[str, Any], dict[str, Any]], None]
+    apply_roster: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
+
+
 def codex_models(
     value: Any, *, legacy_model: str, legacy_effort: str,
     legacy_enabled: bool, policy: Policy, dependencies: Dependencies,
@@ -339,3 +355,26 @@ def _set_compatibility_mode(
     )
     if enabled_models:
         settings["ollama_model"] = enabled_models[0]
+
+
+def merge(
+    settings: dict[str, Any], raw: dict[str, Any], *,
+    policy: MergePolicy, dependencies: MergeDependencies,
+) -> dict[str, Any]:
+    """Merge a parsed settings object through all provider policy gates."""
+    for key, value in raw.items():
+        if key in policy.protected_keys or key not in settings or value is None:
+            continue
+        settings[key] = str(value).strip() if isinstance(value, str) else value
+    dependencies.normalize_codex(settings, raw)
+    dependencies.normalize_harnesses(settings, raw)
+    dependencies.apply_roster(settings, raw)
+    if settings.get("hybrid_policy") not in policy.hybrid_policies:
+        settings["hybrid_policy"] = policy.default_hybrid_policy
+    settings["ollama_model"] = str(
+        settings.get("ollama_model") or policy.fallback_ollama_model
+    ).strip()
+    settings["ollama_url"] = str(
+        settings.get("ollama_url") or policy.default_ollama_url
+    ).strip()
+    return settings
