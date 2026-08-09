@@ -54,7 +54,7 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
     def test_automatic_incident_routing_failure_rolls_back_for_upstream_retry(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
         start = code.index("async function maybeQueueAutomaticIncidentResponse")
-        end = code.index("async function completePcapAnalysis", start)
+        end = code.index("function readJsonBody", start)
         function = code[start:end]
 
         self.assertIn("queueIncidentResponseForGroup", function)

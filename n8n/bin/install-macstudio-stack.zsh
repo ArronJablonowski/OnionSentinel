@@ -104,6 +104,7 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/services/durable_job_service.js" \
     "$ALERT_STORE_STAGE_DIR/services/analysis_request_service.js" \
     "$ALERT_STORE_STAGE_DIR/services/analysis_result_service.js" \
+    "$ALERT_STORE_STAGE_DIR/services/pcap_analysis_completion.js" \
     "$ALERT_STORE_STAGE_DIR/services/pcap_service.js" \
     "$ALERT_STORE_STAGE_DIR/services/enrichment_service.js" \
     "$ALERT_STORE_STAGE_DIR/services/alert_ingest_service.js" \
