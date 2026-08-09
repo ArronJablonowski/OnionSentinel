@@ -564,6 +564,12 @@ mandatory readiness, and advisory-only execution without loading a registry.
 The same module also validates the canonical, content-free skill summary in
 offline cohort exports so collection and grading share one proof boundary.
 
+`operations/cohort_evaluation_job_proof.py` owns deterministic dispatch
+identity, accepted/read-back/completed durable-job provenance, and the exact
+dispatch-to-analysis completion window used by offline grading. Regexes,
+canonical hashing, stable-key validation, timestamp parsing, and error type are
+injected so the module remains independent of storage, network, and CLI code.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

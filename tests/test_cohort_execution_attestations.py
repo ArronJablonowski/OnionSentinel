@@ -21,6 +21,7 @@ import cohort_execution_trace  # noqa: E402
 import cohort_execution_render  # noqa: E402
 import cohort_execution_result  # noqa: E402
 import cohort_export  # noqa: E402
+import cohort_evaluation_job_proof  # noqa: E402
 
 
 def load_legacy_cohort():
@@ -88,6 +89,18 @@ class CohortExecutionAttestationBoundaryTests(unittest.TestCase):
         self.assertIs(
             evaluator.validate_exported_skill_summary,
             cohort_execution_skills.validate_exported_skill_summary,
+        )
+
+    def test_offline_evaluator_uses_extracted_durable_job_validator(self):
+        evaluator = load_cohort_evaluator()
+
+        self.assertIs(
+            evaluator.derive_expected_dispatch_id,
+            cohort_evaluation_job_proof.expected_dispatch_id,
+        )
+        self.assertIs(
+            evaluator.validate_durable_job_proof,
+            cohort_evaluation_job_proof.validate_durable_job_proof,
         )
 
     def test_skill_projection_rejects_extra_identity_fields(self):

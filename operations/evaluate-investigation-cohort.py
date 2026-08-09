@@ -81,6 +81,11 @@ from cohort_execution_skills import (
     SkillAttestationPolicy,
     validate_exported_skill_summary,
 )
+from cohort_evaluation_job_proof import (
+    DurableJobPolicy,
+    expected_dispatch_id as derive_expected_dispatch_id,
+    validate_durable_job_proof,
+)
 
 
 RESULT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v4"
@@ -755,52 +760,28 @@ def _expected_dispatch_id(
     member: Mapping[str, Any],
     dispatch_kind: str,
 ) -> str:
-    if (
-        not COHORT_ID_RE.fullmatch(cohort_id)
-        or not SHA256_RE.fullmatch(frozen_plan_sha256)
-        or dispatch_kind not in {"analyze", "escalate", "reanalyze"}
-    ):
-        raise CohortEvaluationError(
-            "export cannot derive an exact dispatch identity"
-        )
-    try:
-        rank = int(member.get("rank"))
-    except (TypeError, ValueError) as exc:
-        raise CohortEvaluationError(
-            "export member has an invalid dispatch rank"
-        ) from exc
-    dashboard_group_id = str(member.get("dashboard_group_id") or "")
-    stable_group_id = str(member.get("stable_group_id") or "")
-    stable_group_key = _stable_group_key(
-        member.get("stable_group_key"),
-        "export member stable_group_key",
+    return derive_expected_dispatch_id(
+        cohort_id=cohort_id,
+        frozen_plan_sha256=frozen_plan_sha256,
+        member=member,
+        dispatch_kind=dispatch_kind,
+        policy=_durable_job_policy(),
+        error=CohortEvaluationError,
     )
-    representative_alert_id = str(
-        member.get("representative_alert_id") or ""
-    )
-    if (
-        rank < 1
-        or not DASHBOARD_GROUP_ID_RE.fullmatch(dashboard_group_id)
-        or not STABLE_GROUP_ID_RE.fullmatch(stable_group_id)
-        or not REPRESENTATIVE_ALERT_ID_RE.fullmatch(
-            representative_alert_id
-        )
-    ):
-        raise CohortEvaluationError(
-            "export member has malformed dispatch identity fields"
-        )
-    return sha256_value(
-        {
-            "schema": DISPATCH_ID_SCHEMA,
-            "cohort_id": cohort_id,
-            "frozen_plan_sha256": frozen_plan_sha256,
-            "rank": rank,
-            "dashboard_group_id": dashboard_group_id,
-            "stable_group_id": stable_group_id,
-            "stable_group_key": stable_group_key,
-            "representative_alert_id": representative_alert_id,
-            "dispatch_kind": dispatch_kind,
-        }
+
+
+def _durable_job_policy() -> DurableJobPolicy:
+    return DurableJobPolicy(
+        cohort_id_pattern=COHORT_ID_RE,
+        frozen_digest_pattern=SHA256_RE,
+        dashboard_group_id_pattern=DASHBOARD_GROUP_ID_RE,
+        stable_group_id_pattern=STABLE_GROUP_ID_RE,
+        representative_alert_id_pattern=REPRESENTATIVE_ALERT_ID_RE,
+        payload_digest_pattern=SHA256_RE,
+        dispatch_id_schema=DISPATCH_ID_SCHEMA,
+        hash_value=sha256_value,
+        stable_group_key=_stable_group_key,
+        parse_timestamp=_parse_timestamp,
     )
 
 
@@ -814,146 +795,17 @@ def _validate_durable_job_proof(
     frozen_plan_sha256: str,
     label: str,
 ) -> dict[str, Any]:
-    dispatch = (
-        member.get("dispatch")
-        if isinstance(member.get("dispatch"), dict)
-        else {}
-    )
-    accepted = (
-        dispatch.get("accepted")
-        if isinstance(dispatch.get("accepted"), dict)
-        else {}
-    )
-    readback = (
-        dispatch.get("readback")
-        if isinstance(dispatch.get("readback"), dict)
-        else {}
-    )
-    job = result.get("job") if isinstance(result.get("job"), dict) else {}
-    dispatch_kind = str(dispatch.get("kind") or "")
-    expected_dispatch_id = _expected_dispatch_id(
+    return validate_durable_job_proof(
+        member=member,
+        result=result,
+        analysis=analysis,
+        contract=contract,
         cohort_id=cohort_id,
         frozen_plan_sha256=frozen_plan_sha256,
-        member=member,
-        dispatch_kind=dispatch_kind,
+        label=label,
+        policy=_durable_job_policy(),
+        error=CohortEvaluationError,
     )
-    stable_group_id = str(member.get("stable_group_id") or "")
-    stable_group_key = _stable_group_key(
-        member.get("stable_group_key"),
-        f"{label} stable_group_key",
-    )
-    representative_alert_id = str(
-        member.get("representative_alert_id") or ""
-    )
-    release_id = str(contract.get("expected_release_id") or "")
-    expected_job_type = (
-        "ai_analysis"
-        if dispatch_kind == "analyze"
-        else "incident_response_analysis"
-    )
-    if str(dispatch.get("dispatch_id") or "") != expected_dispatch_id:
-        raise CohortEvaluationError(
-            f"{label} dispatch identity does not match"
-        )
-    provenance = (
-        ("accepted response", accepted),
-        ("durable readback", readback),
-        ("terminal durable job", job),
-    )
-    expected_shared = {
-        "dispatch_id": expected_dispatch_id,
-        "cohort_id": cohort_id,
-        "stable_group_key": stable_group_key,
-        "release_id": release_id,
-        "expected_assigned_route": str(
-            contract.get("expected_assigned_route") or ""
-        ),
-        "expected_reviewer_route": str(
-            contract.get("expected_reviewer_route") or ""
-        ),
-    }
-    for source_label, source in provenance:
-        for field, expected in expected_shared.items():
-            if str(source.get(field) or "") != expected:
-                raise CohortEvaluationError(
-                    f"{label} {source_label} {field} does not match"
-                )
-        if source.get("reviewer_required") is not True:
-            raise CohortEvaluationError(
-                f"{label} {source_label} reviewer_required does not match"
-            )
-    for source_label, source in (
-        ("accepted response", accepted),
-        ("durable readback", readback),
-        ("terminal durable job", job),
-    ):
-        if (
-            str(source.get("stable_group_id") or "") != stable_group_id
-            or str(source.get("representative_alert_id") or "")
-            != representative_alert_id
-        ):
-            raise CohortEvaluationError(
-                f"{label} {source_label} stable/representative identity "
-                "does not match"
-            )
-    try:
-        readback_job_id = int(readback.get("job_id"))
-        terminal_job_id = int(job.get("id"))
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise CohortEvaluationError(
-            f"{label} durable job ID is invalid"
-        ) from exc
-    payload_sha256 = str(job.get("payload_sha256") or "")
-    if (
-        readback_job_id < 1
-        or terminal_job_id != readback_job_id
-        or not SHA256_RE.fullmatch(payload_sha256)
-        or str(readback.get("job_payload_sha256") or "")
-        != payload_sha256
-        or str(job.get("status") or "") != "completed"
-        or str(job.get("job_type") or "") != expected_job_type
-        or str(job.get("dedupe_key") or "") != stable_group_id
-    ):
-        raise CohortEvaluationError(
-            f"{label} exact completed durable job proof is invalid"
-        )
-    dispatch_started = _parse_timestamp(
-        dispatch.get("started_at"),
-        f"{label} dispatch started_at",
-    )
-    requested_at = _parse_timestamp(
-        job.get("requested_at"),
-        f"{label} job requested_at",
-    )
-    generated_at = _parse_timestamp(
-        analysis.get("generated_at"),
-        f"{label} analysis generated_at",
-    )
-    completed_at = _parse_timestamp(
-        job.get("completed_at"),
-        f"{label} job completed_at",
-    )
-    last_completed_at = _parse_timestamp(
-        job.get("last_completed_at"),
-        f"{label} job last_completed_at",
-    )
-    updated_at = _parse_timestamp(
-        job.get("updated_at"),
-        f"{label} job updated_at",
-    )
-    if (
-        requested_at < dispatch_started
-        or generated_at < dispatch_started
-        or generated_at < requested_at
-        or generated_at > completed_at
-        or generated_at > last_completed_at
-        or completed_at > last_completed_at
-        or last_completed_at > updated_at
-    ):
-        raise CohortEvaluationError(
-            f"{label} analysis is outside its exact durable job window"
-        )
-    return dict(job)
 
 
 def _validate_skill_selection_attestation_proof(

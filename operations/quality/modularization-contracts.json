@@ -96,6 +96,16 @@
       ]
     },
     {
+      "path": "operations/cohort_evaluation_job_proof.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_evaluation_job_proof.py",
+      "required_symbols": [
+        "DurableJobPolicy",
+        "expected_dispatch_id",
+        "validate_durable_job_proof"
+      ]
+    },
+    {
       "path": "operations/cohort_execution_models.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_execution_models.py",
