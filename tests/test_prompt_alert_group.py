@@ -18,6 +18,7 @@ from prompt_alert_group import (  # noqa: E402
     AlertGroupRowsRequest,
     AlertGroupSources,
     BASE_GROUP_COLUMNS,
+    build_analyst_state_context,
     build_execution_lineage,
     build_grouped_alert_context,
     fetch_alert_group_rows,
@@ -44,7 +45,7 @@ def selected(**changes) -> dict:
     return value
 
 
-def sources(columns=None, query=None, test_filter=None) -> AlertGroupSources:
+def sources(columns=None, query=None, query_row=None, test_filter=None) -> AlertGroupSources:
     def safe_int(value):
         try:
             return int(value or 0)
@@ -56,6 +57,7 @@ def sources(columns=None, query=None, test_filter=None) -> AlertGroupSources:
             return_value=set(BASE_GROUP_COLUMNS) if columns is None else set(columns)
         ),
         row_value=lambda row, key: row.get(key),
+        query_row=query_row or mock.Mock(return_value=None),
         query_rows=query or mock.Mock(return_value=[]),
         test_filter_sql=test_filter
         or mock.Mock(return_value=("alert_id NOT LIKE ?", ["test-%"])),
@@ -224,6 +226,49 @@ class PromptAlertGroupTests(unittest.TestCase):
             legacy,
             {"group_id": "digest:key:alert-1", "manual_reanalysis": False},
         )
+
+    def test_analyst_state_projects_latest_decision_and_defaults_fail_soft(self):
+        decision = {
+            "status": "acknowledged",
+            "repeat_count": 4,
+            "reason": "Expected scanner",
+            "updated_at": "2026-08-08T12:00:00Z",
+            "updated_by": "analyst",
+        }
+        query = mock.Mock(return_value=decision)
+        dependencies = sources(query_row=query)
+
+        context = build_analyst_state_context(
+            dependencies,
+            "connection",
+            selected(),
+        )
+        missing = build_analyst_state_context(
+            sources(query_row=mock.Mock(return_value=None)),
+            "connection",
+            selected(),
+        )
+        unavailable = build_analyst_state_context(
+            sources(
+                query_row=mock.Mock(
+                    side_effect=sqlite3.OperationalError("missing table")
+                )
+            ),
+            "connection",
+            selected(),
+        )
+
+        self.assertEqual(context["status"], "acknowledged")
+        self.assertEqual(context["repeat_count_at_decision"], 4)
+        self.assertEqual(context["reason"], "Expected scanner")
+        self.assertEqual(
+            query.call_args.args[2],
+            ["digest:key:alert-1", "key:alert-1"],
+        )
+        self.assertIn("ORDER BY updated_at DESC LIMIT 1", query.call_args.args[1])
+        self.assertEqual(missing["status"], "open")
+        self.assertEqual(missing["repeat_count_at_decision"], 0)
+        self.assertEqual(unavailable["status"], "open")
 
 
 if __name__ == "__main__":

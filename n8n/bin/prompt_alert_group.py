@@ -38,6 +38,7 @@ class AlertGroupSources:
 
     table_columns: Callable[[Any, str], set[str]]
     row_value: Callable[[Any, str], Any]
+    query_row: Callable[[Any, str, Iterable[Any]], Any]
     query_rows: Callable[[Any, str, Iterable[Any]], list[Any]]
     test_filter_sql: Callable[[str], tuple[str, list[Any]]]
     safe_int: Callable[[Any], int]
@@ -214,4 +215,34 @@ def build_execution_lineage(
     return {
         "group_id": stable_group_id,
         "manual_reanalysis": bool(blind_reanalysis),
+    }
+
+
+def build_analyst_state_context(
+    sources: AlertGroupSources,
+    connection: Any,
+    selected: Any,
+) -> dict:
+    """Project the latest analyst decision for the selected duplicate group."""
+    group_key = sources.alert_group_key(selected)
+    group_id = sources.alert_group_id(group_key)
+    try:
+        state = sources.query_row(
+            connection,
+            """SELECT status, repeat_count, reason, updated_at, updated_by
+               FROM analyst_alert_group_state WHERE group_id = ? OR group_key = ?
+               ORDER BY updated_at DESC LIMIT 1""",
+            [group_id, group_key],
+        )
+    except sqlite3.OperationalError:
+        state = None
+    value = sources.row_value
+    return {
+        "group_id": group_id,
+        "group_key": group_key,
+        "status": value(state, "status") if state else "open",
+        "repeat_count_at_decision": value(state, "repeat_count") if state else 0,
+        "reason": value(state, "reason") if state else None,
+        "updated_at": value(state, "updated_at") if state else None,
+        "updated_by": value(state, "updated_by") if state else None,
     }

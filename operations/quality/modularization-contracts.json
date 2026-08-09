@@ -57,12 +57,24 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_alert_queries.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_alert_queries.py",
+      "required_symbols": [
+        "AlertQuerySources",
+        "AlertSelectionRequest",
+        "related_alert_context",
+        "select_prompt_alert"
+      ]
+    },
+    {
       "path": "n8n/bin/prompt_alert_group.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_alert_group.py",
       "required_symbols": [
         "AlertGroupRowsRequest",
         "AlertGroupSources",
+        "build_analyst_state_context",
         "build_execution_lineage",
         "build_grouped_alert_context",
         "fetch_alert_group_rows"

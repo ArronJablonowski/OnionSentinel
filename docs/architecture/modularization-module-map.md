@@ -583,7 +583,17 @@ fail-soft behavior, and a separate timeline sample bound. Schema inspection,
 query execution, row access, integer normalization, test filtering, and group
 key derivation remain injected by the builder facade. The module also derives
 stable durable-harness lineage from collector group identity and marks manual
-blind reanalysis without accepting model-authored identifiers.
+blind reanalysis without accepting model-authored identifiers. It also projects
+the latest indexed analyst decision for that group and defaults fail-soft to an
+open state when the legacy decision schema is unavailable.
+
+`prompt_alert_queries.py` owns exact and priority-based alert selection plus
+bounded related-alert history. Priority selection normalizes requested severity
+levels, uses an injected local clock for the lookback, applies the test-alert
+policy, and preserves severity/score/recency ordering. Related history is
+limited in SQL and pivots only on the selected rule and explicit source or
+destination endpoints. Query execution, filtering, row access, and time remain
+injected by the builder facade.
 
 `prompt_detection_context.py` owns ordered preparation of the exact detection
 group, deterministic investigation-skill selection, rule/playbook predicate

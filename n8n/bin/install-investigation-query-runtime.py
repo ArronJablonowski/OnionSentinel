@@ -30,6 +30,7 @@ HARDENED_BUILDER = "build-ai-investigation-prompt.py"
 HARDENED_BUILDER_DEPENDENCIES = (
     "prompt_alert_group.py",
     "prompt_alert_projection.py",
+    "prompt_alert_queries.py",
     "prompt_authorization_context.py",
     "prompt_builder_cli.py",
     "prompt_correlation_context.py",

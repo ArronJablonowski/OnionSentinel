@@ -70,9 +70,16 @@ from prompt_alert_projection import (
 from prompt_alert_group import (
     AlertGroupRowsRequest,
     AlertGroupSources,
+    build_analyst_state_context,
     build_execution_lineage,
     build_grouped_alert_context,
     fetch_alert_group_rows,
+)
+from prompt_alert_queries import (
+    AlertQuerySources,
+    AlertSelectionRequest,
+    related_alert_context,
+    select_prompt_alert,
 )
 from prompt_pcap_evidence import (
     PcapEvidenceRequest,
@@ -522,6 +529,7 @@ def _alert_group_sources() -> AlertGroupSources:
     return AlertGroupSources(
         table_columns=table_columns,
         row_value=sqlite_value,
+        query_row=row,
         query_rows=rows,
         test_filter_sql=test_filter_sql,
         safe_int=safe_int,
@@ -553,27 +561,8 @@ def alert_group_rows(
 
 
 def analyst_state_context(conn: sqlite3.Connection, selected: sqlite3.Row) -> dict:
-    group_key = alert_group_key(selected)
-    group_id = alert_group_id(group_key)
-    try:
-        state = row(
-            conn,
-            """SELECT status, repeat_count, reason, updated_at, updated_by
-               FROM analyst_alert_group_state WHERE group_id = ? OR group_key = ?
-               ORDER BY updated_at DESC LIMIT 1""",
-            [group_id, group_key],
-        )
-    except sqlite3.OperationalError:
-        state = None
-    return {
-        "group_id": group_id,
-        "group_key": group_key,
-        "status": state["status"] if state else "open",
-        "repeat_count_at_decision": state["repeat_count"] if state else 0,
-        "reason": state["reason"] if state else None,
-        "updated_at": state["updated_at"] if state else None,
-        "updated_by": state["updated_by"] if state else None,
-    }
+    """Compatibility delegate for the latest analyst group decision."""
+    return build_analyst_state_context(_alert_group_sources(), conn, selected)
 
 
 def prior_analysis_context(
@@ -657,80 +646,39 @@ def pcap_evidence_context(conn: sqlite3.Connection, selected: sqlite3.Row, analy
     )
 
 
-def select_alert(conn: sqlite3.Connection, args: argparse.Namespace) -> sqlite3.Row:
-    if args.alert_id:
-        selected = row(conn, "SELECT * FROM alerts WHERE alert_id = ?", [args.alert_id])
-        if not selected:
-            raise SystemExit(f"alert_id not found: {args.alert_id}")
-        return selected
-
-    levels = [level.strip().lower() for level in args.levels.split(",") if level.strip()]
-    if not levels:
-        raise SystemExit("--levels must contain at least one level")
-    since = (dt.datetime.now().astimezone() - dt.timedelta(hours=args.hours)).replace(microsecond=0).isoformat().replace("T", "  ")
-    filter_sql = ""
-    filter_params: list[object] = []
-    if not args.include_tests:
-        test_sql, filter_params = test_filter_sql()
-        filter_sql = f"AND {test_sql}"
-    placeholders = ", ".join("?" for _ in levels)
-    selected = row(
-        conn,
-        f"""
-        SELECT *
-        FROM alerts
-        WHERE replace(replace(last_seen, 'T', ' '), 'Z', '') >= replace(replace(?, 'T', ' '), 'Z', '')
-          AND triage_level IN ({placeholders})
-          AND COALESCE(filter_status, 'accepted') IN ('accepted', 'escalated', 'unknown')
-          {filter_sql}
-        ORDER BY
-          CASE triage_level WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END,
-          triage_score DESC,
-          replace(replace(last_seen, 'T', ' '), 'Z', '') DESC
-        LIMIT 1
-        """,
-        [since, *levels, *filter_params],
+def _alert_query_sources() -> AlertQuerySources:
+    return AlertQuerySources(
+        query_row=row,
+        query_rows=rows,
+        test_filter_sql=test_filter_sql,
+        row_value=sqlite_value,
+        now_local=lambda: dt.datetime.now().astimezone(),
     )
-    if not selected:
-        raise SystemExit("no matching alert found")
-    return selected
+
+
+def select_alert(conn: sqlite3.Connection, args: argparse.Namespace) -> sqlite3.Row:
+    """Compatibility delegate for explicit or priority alert selection."""
+    return select_prompt_alert(
+        _alert_query_sources(),
+        AlertSelectionRequest(
+            connection=conn,
+            alert_id=str(args.alert_id or ""),
+            levels_csv=str(args.levels or ""),
+            hours=int(args.hours),
+            include_tests=bool(args.include_tests),
+        ),
+    )
 
 
 def related_alerts(conn: sqlite3.Connection, selected: sqlite3.Row, limit: int, include_tests: bool) -> list[dict]:
-    filter_sql = ""
-    filter_params: list[object] = []
-    if not include_tests:
-        test_sql, filter_params = test_filter_sql("alert_id")
-        filter_sql = f"AND {test_sql}"
-    found = rows(
+    """Compatibility delegate for bounded related-alert history."""
+    return related_alert_context(
+        _alert_query_sources(),
         conn,
-        f"""
-        SELECT alert_id, last_seen, rule_name, source_ip, destination_ip,
-               triage_level, triage_score, filter_status, routing, seen_count
-        FROM alerts
-        WHERE alert_id != ?
-          AND (
-            rule_name = ?
-            OR source_ip = ?
-            OR destination_ip = ?
-            OR (source_ip = ? AND destination_ip = ?)
-          )
-          {filter_sql}
-        ORDER BY last_seen DESC
-        LIMIT ?
-        """,
-        [
-            selected["alert_id"],
-            selected["rule_name"],
-            selected["source_ip"],
-            selected["destination_ip"],
-            selected["source_ip"],
-            selected["destination_ip"],
-            *filter_params,
-            limit,
-        ],
+        selected,
+        limit,
+        include_tests,
     )
-    return [dict(item) for item in found]
 
 
 def _authorization_context_sources() -> AuthorizationContextSources:
