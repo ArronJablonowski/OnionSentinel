@@ -19,6 +19,7 @@ DURABLE_JOB_ROUTES = REPO_ROOT / "n8n" / "alert_store" / "routes" / "durable_job
 PCAP_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "pcap_service.js"
 ENRICHMENT_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "enrichment_service.js"
 ALERT_INGEST_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "alert_ingest_service.js"
+NOTIFICATION_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "notification_service.js"
 ANALYST_REVIEW_POLICY = REPO_ROOT / "n8n" / "alert_store" / "lib" / "analyst_review_policy.js"
 
 
@@ -39,6 +40,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.pcap_service = PCAP_SERVICE.read_text(encoding="utf-8")
         cls.enrichment_service = ENRICHMENT_SERVICE.read_text(encoding="utf-8")
         cls.alert_ingest_service = ALERT_INGEST_SERVICE.read_text(encoding="utf-8")
+        cls.notification_service = NOTIFICATION_SERVICE.read_text(encoding="utf-8")
         cls.analyst_review_policy = ANALYST_REVIEW_POLICY.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
@@ -102,8 +104,11 @@ class AlertStoreResilienceTest(unittest.TestCase):
 
     def test_notification_outbox_has_bounded_retry(self) -> None:
         self.assertIn("TELEGRAM_OUTBOX_MAX_ATTEMPTS", self.code)
-        self.assertIn("outboxRetryTimestamp", self.code)
-        self.assertIn("terminal ? 'failed' : 'pending'", self.code)
+        self.assertIn("outboxRetryTimestamp", self.notification_service)
+        self.assertIn(
+            "terminal ? 'failed' : 'pending'",
+            self.notification_service,
+        )
 
     def test_analyst_state_is_owned_by_alert_store(self) -> None:
         self.assertIn("CREATE TABLE IF NOT EXISTS analyst_alert_group_state", self.code)
