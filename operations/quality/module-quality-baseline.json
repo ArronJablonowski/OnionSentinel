@@ -64,7 +64,7 @@
       "max_lines": 3014
     },
     "operations/run-incident-harness-cohort.py": {
-      "max_lines": 3919
+      "max_lines": 3668
     },
     "relay/app/relay.py": {
       "max_lines": 2098
@@ -760,10 +760,6 @@
     "operations/run-incident-harness-cohort.py::load_private_manifest": {
       "max_complexity": 27
     },
-    "operations/run-incident-harness-cohort.py::monitor_member": {
-      "max_complexity": 62,
-      "max_lines": 229
-    },
     "operations/run-incident-harness-cohort.py::validate_member_preflight": {
       "max_complexity": 18
     },
@@ -831,5 +827,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "1b1f9be5a644ae0706d7241ded78aeae5f27f02c"
+  "source_release": "73af8812fe791cea4b8e8a91e32bd3a3d3a9d992"
 }

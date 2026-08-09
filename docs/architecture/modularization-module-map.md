@@ -546,6 +546,17 @@ payload replacement, cohort/release/route mutation, altered case/run identity,
 and jobs predating the recorded POST window before exposing bounded job state
 to terminal monitoring.
 
+`operations/cohort_monitor_contract.py` owns durable-job timestamp ordering,
+terminal-state interpretation, and the exact completed-analysis job window.
+It rejects missing or malformed temporal evidence, post-terminal analysis, and
+results generated before the accepted job began.
+
+`operations/cohort_monitor_workflow.py` owns per-member and whole-cohort
+terminal observation. It reconciles accepted SOC and Incident Responder jobs
+with exact fresh analysis identities, case and reanalysis state, second-opinion
+metadata, bounded polling, and digest-sealed monitor snapshots through injected
+read-only data and time ports.
+
 `prompt_incident_evidence_projection.py` owns the model-facing, in-memory
 projection of already-validated incident evidence. It applies deterministic
 prefix limits to Elastic hits and OSQuery rows, records source and retained

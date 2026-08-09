@@ -77,6 +77,17 @@ from cohort_monitor_binding import (
     CohortMonitorBindingSources,
     monitor_dispatch_job_binding as prove_monitor_dispatch_binding,
 )
+from cohort_monitor_contract import (
+    CohortMonitorContract,
+    durable_job_monitor_state as resolve_durable_job_monitor_state,
+    validate_completed_analysis_job_window as validate_analysis_job_window,
+)
+from cohort_monitor_workflow import (
+    CohortMonitorSources,
+    monitor_cohort as run_monitor_cohort,
+    monitor_cohort_once as run_monitor_cohort_once,
+    monitor_member as observe_monitor_member,
+)
 
 
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -2479,51 +2490,16 @@ def _second_opinion_metadata(
     return dict(row) if row else None
 
 
-def _durable_job_monitor_state(job: Mapping[str, Any]) -> str:
-    """Return the bound job state after validating its terminal timestamps."""
+def _cohort_monitor_contract() -> CohortMonitorContract:
+    return CohortMonitorContract(
+        cohort_error=CohortError,
+        parse_timestamp=_parse_timestamp,
+    )
 
-    status = str(job.get("status") or "")
-    state = {
-        "pending": "queued",
-        "processing": "running",
-        "completed": "completed",
-        "failed": "failed",
-    }.get(status)
-    if state is None:
-        raise CohortError(
-            f"accepted durable job has unsupported status: {status!r}"
-        )
-    requested_at = _parse_timestamp(
-        job.get("requested_at"),
-        "accepted durable job requested_at",
-    )
-    updated_at = _parse_timestamp(
-        job.get("updated_at"),
-        "accepted durable job updated_at",
-    )
-    if updated_at < requested_at:
-        raise CohortError(
-            "accepted durable job timestamp order is inconsistent"
-        )
-    if status != "completed":
-        return state
-    completed_at = _parse_timestamp(
-        job.get("completed_at"),
-        "accepted durable job completed_at",
-    )
-    last_completed_at = _parse_timestamp(
-        job.get("last_completed_at"),
-        "accepted durable job last_completed_at",
-    )
-    if (
-        completed_at < requested_at
-        or last_completed_at < completed_at
-        or updated_at < last_completed_at
-    ):
-        raise CohortError(
-            "accepted durable job completion timestamps are inconsistent"
-        )
-    return state
+
+def _durable_job_monitor_state(job: Mapping[str, Any]) -> str:
+    """Compatibility adapter for durable-job monitor state validation."""
+    return resolve_durable_job_monitor_state(_cohort_monitor_contract(), job)
 
 
 def _validate_completed_analysis_job_window(
@@ -2532,48 +2508,59 @@ def _validate_completed_analysis_job_window(
     job: Mapping[str, Any],
     analysis: Mapping[str, Any],
 ) -> None:
-    """Bind one credited analysis to its exact accepted job's lifetime."""
+    """Compatibility adapter for credited analysis time-window validation."""
+    validate_analysis_job_window(
+        _cohort_monitor_contract(),
+        dispatch=dispatch,
+        job=job,
+        analysis=analysis,
+    )
 
-    if str(job.get("status") or "") != "completed":
-        raise CohortError(
-            "credited analysis does not belong to a completed durable job"
-        )
-    dispatch_started = _parse_timestamp(
-        dispatch.get("started_at"),
-        "credited dispatch started_at",
+
+def _reanalysis_monitor_case(
+    connection: sqlite3.Connection,
+    run_id: str,
+    case_id: str,
+) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        SELECT run_id, case_id, group_id, dashboard_group_id,
+               representative_alert_id, status, skip_reason, latest_error,
+               queued_at, started_at, completed_at, latest_attempt_id,
+               analysis_id, executed_model, executed_provider,
+               executed_model_path, result_generated_at, updated_at
+        FROM incident_reanalysis_run_cases
+        WHERE run_id = ? AND case_id = ?
+        """,
+        (run_id, case_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _cohort_monitor_sources() -> CohortMonitorSources:
+    return CohortMonitorSources(
+        cohort_error=CohortError,
+        terminal_monitor_states=frozenset(TERMINAL_MONITOR_STATES),
+        monitor_dispatch_job_binding=_monitor_dispatch_job_binding,
+        durable_job_monitor_state=_durable_job_monitor_state,
+        analysis_ids_for_group=_analysis_ids_for_group,
+        analysis_metadata=_analysis_metadata,
+        validate_completed_analysis_job_window=(
+            _validate_completed_analysis_job_window
+        ),
+        second_opinion_metadata=_second_opinion_metadata,
+        utc_now=utc_now,
+        load_aliases=load_aliases,
+        case_for_stable=_case_for_stable,
+        reanalysis_run_case=_reanalysis_monitor_case,
+        resolve_alias=resolve_alias,
+        frozen_analysis_ids=_frozen_analysis_ids,
+        load_private_manifest=load_private_manifest,
+        connect_read_only=connect_read_only,
+        write_private_json=write_private_json,
+        monotonic=time.monotonic,
+        sleep=time.sleep,
     )
-    requested_at = _parse_timestamp(
-        job.get("requested_at"),
-        "credited durable job requested_at",
-    )
-    generated_at = _parse_timestamp(
-        analysis.get("generated_at"),
-        "credited analysis generated_at",
-    )
-    completed_at = _parse_timestamp(
-        job.get("completed_at"),
-        "credited durable job completed_at",
-    )
-    last_completed_at = _parse_timestamp(
-        job.get("last_completed_at"),
-        "credited durable job last_completed_at",
-    )
-    updated_at = _parse_timestamp(
-        job.get("updated_at"),
-        "credited durable job updated_at",
-    )
-    if (
-        requested_at < dispatch_started
-        or generated_at < dispatch_started
-        or generated_at < requested_at
-        or generated_at > completed_at
-        or generated_at > last_completed_at
-        or completed_at > last_completed_at
-        or last_completed_at > updated_at
-    ):
-        raise CohortError(
-            "credited analysis falls outside its exact durable job window"
-        )
 
 
 def monitor_member(
@@ -2581,256 +2568,20 @@ def monitor_member(
     manifest: Mapping[str, Any],
     member: Mapping[str, Any],
 ) -> dict[str, Any]:
-    dispatch = member.get("dispatch") or {}
-    if dispatch.get("state") != "accepted":
-        raise CohortError(
-            f"member {member.get('rank')} was not unambiguously accepted"
-        )
-    accepted = dispatch.get("accepted") or {}
-    stable_id = str(member["stable_group_id"])
-    kind = str(dispatch.get("kind") or "")
-    job = _monitor_dispatch_job_binding(connection, manifest, member)
-    job_state = _durable_job_monitor_state(job)
-    if kind == "analyze":
-        prior_ids = set(
-            (member.get("pre_state") or {}).get("soc_analysis_ids") or []
-        )
-        current_ids = set(
-            _analysis_ids_for_group(
-                connection,
-                stable_id,
-                agent_role="soc-analyst",
-            )
-        )
-        if not prior_ids.issubset(current_ids):
-            raise CohortError(
-                f"prior SOC analysis identity disappeared for {stable_id}"
-            )
-        new_ids = sorted(current_ids - prior_ids)
-        if len(new_ids) > 1:
-            raise CohortError(
-                f"more than one new SOC analysis exists for {stable_id}; "
-                "the cohort result is ambiguous"
-            )
-        if new_ids and job_state == "completed":
-            analysis_id = new_ids[0]
-            state = "completed"
-            analysis = _analysis_metadata(
-                connection,
-                analysis_id,
-                stable_id,
-                expected_alert_id=str(member["representative_alert_id"]),
-                expected_agent_role="soc-analyst",
-            )
-            _validate_completed_analysis_job_window(
-                dispatch=dispatch,
-                job=job,
-                analysis=analysis,
-            )
-        elif new_ids and job_state == "failed":
-            raise CohortError(
-                f"SOC job for {stable_id} failed but a fresh analysis exists"
-            )
-        else:
-            analysis_id = ""
-            state = job_state
-            if state == "completed":
-                raise CohortError(
-                    f"SOC job for {stable_id} is completed "
-                    "without one exact new analysis"
-                )
-            analysis = None
-        return {
-            "state": state,
-            "checked_at": utc_now(),
-            "case_id": "",
-            "run_id": "",
-            "analysis_id": analysis_id,
-            "job": job,
-            "analysis": analysis,
-            "second_opinion": (
-                _second_opinion_metadata(connection, analysis_id)
-                if analysis_id
-                else None
-            ),
-        }
-    case_id = str(accepted.get("case_id") or "")
-    aliases = load_aliases(connection)
-    case = _case_for_stable(connection, stable_id, aliases)
-    if not case or str(case.get("case_id") or "") != case_id:
-        raise CohortError(f"exact incident case identity was lost: {case_id}")
-    if (
-        str(case.get("dashboard_group_id") or "")
-        != str(member["dashboard_group_id"])
-        or str(case.get("representative_alert_id") or "")
-        != str(member["representative_alert_id"])
-    ):
-        raise CohortError(f"incident case identity drifted: {case_id}")
-    source_status = str(case.get("agent_status") or "")
-    analysis_id = ""
-    run_case: dict[str, Any] | None = None
-    if kind == "reanalyze":
-        run_id = str(accepted.get("run_id") or "")
-        row = connection.execute(
-            """
-            SELECT run_id, case_id, group_id, dashboard_group_id,
-                   representative_alert_id, status, skip_reason, latest_error,
-                   queued_at, started_at, completed_at, latest_attempt_id,
-                   analysis_id, executed_model, executed_provider,
-                   executed_model_path, result_generated_at, updated_at
-            FROM incident_reanalysis_run_cases
-            WHERE run_id = ? AND case_id = ?
-            """,
-            (run_id, case_id),
-        ).fetchone()
-        if not row:
-            raise CohortError(
-                f"exact reanalysis run case is missing: {run_id}/{case_id}"
-            )
-        run_case = dict(row)
-        if (
-            resolve_alias(str(row["group_id"] or ""), aliases) != stable_id
-            or str(row["dashboard_group_id"] or "")
-            != str(member["dashboard_group_id"])
-            or str(row["representative_alert_id"] or "")
-            != str(member["representative_alert_id"])
-        ):
-            raise CohortError(
-                f"exact reanalysis identity drifted: {run_id}/{case_id}"
-            )
-        source_status = str(row["status"] or "")
-        analysis_id = str(row["analysis_id"] or "")
-    elif kind == "escalate":
-        source_status = {
-            "queued": "queued",
-            "analyzing": "running",
-            "analyzed": "completed",
-            "failed": "failed",
-        }.get(source_status, source_status or "unknown")
-        analysis_id = str(case.get("latest_analysis_id") or "")
-    else:
-        raise CohortError(f"unsupported dispatch kind: {kind!r}")
-
-    prior_ids = _frozen_analysis_ids(
-        member,
-        agent_role="incident-responder",
-        pre_state_field="incident_analysis_ids",
+    """Compatibility adapter for exact terminal member observation."""
+    return observe_monitor_member(
+        _cohort_monitor_sources(), connection, manifest, member
     )
-    current_ids = set(
-        _analysis_ids_for_group(
-            connection,
-            stable_id,
-            agent_role="incident-responder",
-        )
-    )
-    if not prior_ids.issubset(current_ids):
-        raise CohortError(
-            f"prior Incident Responder analysis identity disappeared for "
-            f"{stable_id}"
-        )
-    fresh_ids = sorted(current_ids - prior_ids)
-    if len(fresh_ids) > 1:
-        raise CohortError(
-            f"more than one new Incident Responder analysis exists for "
-            f"{stable_id}; the cohort result is ambiguous"
-        )
-    fresh_analysis_id = fresh_ids[0] if fresh_ids else ""
-    if analysis_id and analysis_id != fresh_analysis_id:
-        raise CohortError(
-            f"incident result pointer is not the exact fresh analysis for "
-            f"{stable_id}"
-        )
-
-    if job_state in {"queued", "running"}:
-        status = job_state
-        analysis_id = ""
-    elif job_state == "failed":
-        if source_status != "failed" or fresh_analysis_id:
-            raise CohortError(
-                f"incident result state disagrees with failed accepted job "
-                f"for {stable_id}"
-            )
-        status = "failed"
-        analysis_id = ""
-    elif source_status == "skipped" and not fresh_analysis_id:
-        status = "skipped"
-        analysis_id = ""
-    elif (
-        source_status == "completed"
-        and fresh_analysis_id
-        and analysis_id == fresh_analysis_id
-    ):
-        status = "completed"
-    else:
-        raise CohortError(
-            f"incident result state does not agree with completed accepted "
-            f"job for {stable_id}"
-        )
-
-    analysis = (
-        _analysis_metadata(
-            connection,
-            analysis_id,
-            stable_id,
-            expected_alert_id=str(member["representative_alert_id"]),
-        )
-        if analysis_id
-        else None
-    )
-    if analysis is not None:
-        _validate_completed_analysis_job_window(
-            dispatch=dispatch,
-            job=job,
-            analysis=analysis,
-        )
-    return {
-        "state": status,
-        "checked_at": utc_now(),
-        "case_id": case_id,
-        "run_id": str(accepted.get("run_id") or ""),
-        "analysis_id": analysis_id,
-        "job": job,
-        "case_agent_status": str(case.get("agent_status") or ""),
-        "run_case": {
-            key: value
-            for key, value in (run_case or {}).items()
-            if key not in {"latest_error", "skip_reason"}
-        }
-        if run_case
-        else None,
-        "analysis": analysis,
-        "second_opinion": (
-            _second_opinion_metadata(connection, analysis_id)
-            if analysis_id
-            else None
-        ),
-    }
 
 
 def monitor_cohort_once(
     database_path: Path,
     manifest_path: Path,
 ) -> tuple[dict[str, Any], bool]:
-    manifest = load_private_manifest(manifest_path)
-    connection = connect_read_only(database_path)
-    try:
-        connection.execute("BEGIN")
-        terminal = True
-        for index, member in enumerate(manifest["members"]):
-            monitor = monitor_member(connection, manifest, member)
-            member["monitor"] = monitor
-            manifest["members"][index] = member
-            terminal = terminal and monitor["state"] in TERMINAL_MONITOR_STATES
-    finally:
-        connection.close()
-    manifest["last_monitored_at"] = utc_now()
-    manifest["state"] = "terminal" if terminal else "monitoring"
-    manifest = write_private_json(
-        manifest_path,
-        manifest,
-        digest_field="manifest_sha256",
+    """Compatibility adapter for one sealed cohort monitor snapshot."""
+    return run_monitor_cohort_once(
+        _cohort_monitor_sources(), database_path, manifest_path
     )
-    return manifest, terminal
 
 
 def monitor_cohort(
@@ -2840,16 +2591,14 @@ def monitor_cohort(
     timeout: float,
     poll_interval: float,
 ) -> tuple[dict[str, Any], bool]:
-    if timeout < 0:
-        raise CohortError("monitor timeout must not be negative")
-    if poll_interval < 0.2 or poll_interval > 60:
-        raise CohortError("poll interval must be between 0.2 and 60 seconds")
-    deadline = time.monotonic() + timeout
-    while True:
-        manifest, terminal = monitor_cohort_once(database_path, manifest_path)
-        if terminal or timeout == 0 or time.monotonic() >= deadline:
-            return manifest, terminal
-        time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
+    """Compatibility adapter for bounded cohort polling."""
+    return run_monitor_cohort(
+        _cohort_monitor_sources(),
+        database_path,
+        manifest_path,
+        timeout=timeout,
+        poll_interval=poll_interval,
+    )
 
 
 def _load_trace_evaluator() -> Any:
