@@ -260,6 +260,13 @@ compatibility facade that resolves its existing mutable defaults and injects
 the alert-ID, dispatch-ID, and stable-group-key policies at parse time, so
 tests and operators keep the exact CLI and environment behavior.
 
+`scheduler_claim.py` owns compare-and-set processing acquisition,
+server-authoritative job/alert/group replacement, controlled claim identity,
+IR reanalysis-attempt binding, contention projection, and automatic-threshold
+retirement. Its mutable claim receipt is populated immediately after a server
+transition so any later validation error still exposes only the exact owned
+lease to the outer retry/release handler.
+
 `scheduler_job_reporting.py` owns the bounded `/jobs/status` mutation contract,
 terminal status projection, exact controlled-claim validation, indeterminate-
 request retry policy, rolling-deployment 404 behavior, conflict rejection, and

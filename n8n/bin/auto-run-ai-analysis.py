@@ -49,6 +49,12 @@ from scheduler_cli import (
     SchedulerCliPolicy,
     parse_scheduler_args,
 )
+from scheduler_claim import (
+    SchedulerClaimRequest,
+    SchedulerClaimState,
+    SchedulerClaimSources,
+    acquire_scheduler_claim,
+)
 from scheduler_job_reporting import (
     ClaimedAiLease,
     ControlledClaimRejected,
@@ -3443,6 +3449,19 @@ def scheduler_settlement_sources() -> SchedulerSettlementSources:
     )
 
 
+def scheduler_claim_sources() -> SchedulerClaimSources:
+    """Bind exact claim and server-authoritative identity services."""
+    return SchedulerClaimSources(
+        exact_expectations=controlled_claim_expectations,
+        report_status=report_ai_job_status,
+        load_claimed_job=claimed_durable_ai_job,
+        require_controlled_identity=require_controlled_claim_identity,
+        job_reanalysis_attempt_id=job_reanalysis_attempt_id,
+        emit=lambda message: print(message, flush=True),
+        now=project_now,
+    )
+
+
 def main() -> int:
     args = parse_args()
     startup_sources = scheduler_startup_sources()
@@ -3557,144 +3576,47 @@ def main() -> int:
             processing_recorded = False
             processing_lease_token = ""
             reanalysis_attempt_id = ""
-            exact_claim: dict[str, object] = {}
             controlled_exact_lease_owned = False
             controlled_result_identity: dict[str, object] | None = None
             try:
                 controlled_identity_requested = (
                     controlled_evaluation_dir is not None
                 )
-                if controlled_identity_requested and not (
-                    indexed_mode and durable_intent
-                ):
-                    raise ControlledClaimRejected(
-                        "controlled AI run requires a durable AI job claim"
-                    )
-                exact_claim = (
-                    controlled_claim_expectations(args, selected, job_payload)
-                    if controlled_identity_requested
-                    else {}
-                )
-                processing_transition = report_ai_job_status(
-                    args.alert_store_url,
-                    selected_group_id,
-                    "processing",
-                    job_type=durable_job_type,
-                    **exact_claim,
-                )
-                processing_recorded = bool(processing_transition)
-                processing_lease_token = (
-                    processing_transition if isinstance(processing_transition, str) else ""
-                )
-                controlled_exact_lease_owned = bool(
-                    controlled_identity_requested
-                    and processing_recorded
-                    and int(
-                        getattr(processing_transition, "job_id", 0) or 0
-                    )
-                    == int(exact_claim.get("expected_job_id") or 0)
-                )
-                if indexed_mode and durable_intent and not processing_recorded:
-                    if controlled_identity_requested:
-                        raise ControlledClaimRejected(
-                            "controlled durable AI job disappeared before "
-                            "its processing lease was recorded"
-                        )
-                    # Another worker won the compare-and-set claim after this
-                    # worker selected the same pending row. This is normal
-                    # queue contention, not an analysis failure. The group is
-                    # already excluded from this worker's next selection, and
-                    # a lost claim must not consume its bounded work budget.
-                    attempted_count = max(0, attempted_count - 1)
-                    print(
-                        f"{project_now()} AI group {selected_group_id} "
-                        "claim contention: another worker acquired the "
-                        "durable processing lease",
-                        flush=True,
-                    )
-                    continue
-                claimed_triage_level = str(
-                    selected["triage_level"] or ""
-                ).strip().lower()
-                if indexed_mode and durable_intent:
-                    try:
-                        (
-                            job_payload,
-                            alert_id,
-                            selected_group_id,
-                            claimed_triage_level,
-                        ) = claimed_durable_ai_job(
-                            processing_transition,
-                            args.db,
-                            expected_job_type=durable_job_type,
-                            expected_group_id=selected_group_id,
-                            expected_job_id=int(
-                                exact_claim.get("expected_job_id") or 0
+                claim_state = SchedulerClaimState()
+                try:
+                    claim = acquire_scheduler_claim(
+                        scheduler_claim_sources(),
+                        SchedulerClaimRequest(
+                            args=args,
+                            selected=selected,
+                            job_payload=job_payload,
+                            alert_id=alert_id,
+                            group_id=selected_group_id,
+                            job_type=durable_job_type,
+                            indexed_mode=indexed_mode,
+                            durable_intent=durable_intent,
+                            controlled=controlled_identity_requested,
+                            allowed_analysis_levels=tuple(
+                                allowed_analysis_levels
                             ),
-                        )
-                    except RuntimeError as error:
-                        if controlled_identity_requested:
-                            raise ControlledClaimRejected(str(error)) from error
-                        raise
-                if controlled_identity_requested:
-                    require_controlled_claim_identity(
-                        args,
-                        job_payload,
-                        claimed_alert_id=alert_id,
-                        claimed_group_id=selected_group_id,
-                        claimed_job_id=int(
-                            getattr(processing_transition, "job_id", 0) or 0
-                        ),
-                        expected_job_id=int(
-                            exact_claim.get("expected_job_id") or 0
+                            state=claim_state,
                         ),
                     )
-                if durable_job_type == "incident_response_analysis":
-                    claimed_reanalysis_run_id = str(
-                        job_payload.get("reanalysis_run_id") or ""
-                    ).strip()
-                    claimed_attempt_id = str(
-                        getattr(
-                            processing_transition,
-                            "reanalysis_attempt_id",
-                            "",
-                        )
-                        or ""
-                    ).strip()
-                    if claimed_reanalysis_run_id or claimed_attempt_id:
-                        expected_attempt_id = job_reanalysis_attempt_id(
-                            job_payload,
-                            processing_lease_token,
-                        )
-                        if (
-                            not expected_attempt_id
-                            or claimed_attempt_id != expected_attempt_id
-                        ):
-                            raise RuntimeError(
-                                "incident reanalysis lease identity did not "
-                                "match its server-bound attempt"
-                            )
-                        reanalysis_attempt_id = claimed_attempt_id
-                automatic_analysis_below_floor = (
-                    indexed_mode
-                    and durable_intent
-                    and durable_job_type == "ai_analysis"
-                    and job_payload.get("manual_reanalysis") is not True
-                    and claimed_triage_level not in set(allowed_analysis_levels)
-                )
-                if automatic_analysis_below_floor:
-                    report_ai_job_status(
-                        args.alert_store_url,
-                        selected_group_id,
-                        "completed",
-                        lease_token=processing_lease_token,
-                        job_type=durable_job_type,
+                finally:
+                    processing_transition = claim_state.processing_transition
+                    processing_recorded = claim_state.processing_recorded
+                    processing_lease_token = claim_state.lease_token
+                    controlled_exact_lease_owned = (
+                        claim_state.controlled_exact_lease_owned
                     )
-                    print(
-                        f"{project_now()} skipped automatic AI analysis for "
-                        f"{claimed_triage_level} group below configured threshold",
-                        flush=True,
-                    )
+                if claim.disposition == "contended":
+                    attempted_count = max(0, attempted_count - 1)
+                    continue
+                job_payload = claim.job_payload
+                alert_id = claim.alert_id
+                selected_group_id = claim.group_id
+                reanalysis_attempt_id = claim.reanalysis_attempt_id
+                if claim.disposition == "retired":
                     continue
                 def renew_processing_lease() -> None:
                     renewed = report_ai_job_status(

@@ -39,6 +39,18 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_claim.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_claim.py",
+      "required_symbols": [
+        "SchedulerClaimRequest",
+        "SchedulerClaimResult",
+        "SchedulerClaimSources",
+        "SchedulerClaimState",
+        "acquire_scheduler_claim"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_job_reporting.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_job_reporting.py",

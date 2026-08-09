@@ -573,6 +573,7 @@ cp "$REPO_DIR/n8n/bin/export-adjudicated-analysis-replays.py" "$STACK_DIR/bin/ex
 cp "$REPO_DIR/n8n/bin/bounded_http.py" "$STACK_DIR/bin/bounded_http.py"
 cp "$REPO_DIR/n8n/bin/bounded_process.py" "$STACK_DIR/bin/bounded_process.py"
 cp "$REPO_DIR/n8n/bin/auto-run-ai-analysis.py" "$STACK_DIR/bin/auto-run-ai-analysis.py"
+cp "$REPO_DIR/n8n/bin/scheduler_claim.py" "$STACK_DIR/bin/scheduler_claim.py"
 cp "$REPO_DIR/n8n/bin/scheduler_cli.py" "$STACK_DIR/bin/scheduler_cli.py"
 cp "$REPO_DIR/n8n/bin/scheduler_indexed_selection.py" "$STACK_DIR/bin/scheduler_indexed_selection.py"
 cp "$REPO_DIR/n8n/bin/scheduler_indexed_state.py" "$STACK_DIR/bin/scheduler_indexed_state.py"
