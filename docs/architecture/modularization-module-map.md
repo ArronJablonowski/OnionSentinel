@@ -528,6 +528,12 @@ analyze, escalate, and single-case reanalysis dispatches. It is transport- and
 database-free; the composition root supplies stable-group identity, dispatch
 digests, release validation, and fail-closed error types.
 
+`operations/cohort_dispatch_readback.py` owns read-only post-acceptance proof
+for SOC analysis, incident escalation, and single-case reanalysis. It binds the
+HTTP acceptance identity to one active durable job, unchanged job payload,
+exact case/run row, representative alert, and zero premature analyses before
+the queue workflow may persist an accepted state.
+
 `prompt_incident_evidence_projection.py` owns the model-facing, in-memory
 projection of already-validated incident evidence. It applies deterministic
 prefix limits to Elastic hits and OSQuery rows, records source and retained

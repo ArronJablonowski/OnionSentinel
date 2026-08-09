@@ -57,6 +57,10 @@ from cohort_dispatch_contract import (
     validate_dispatch_job_payload as validate_job_payload,
     validate_success_response as validate_dispatch_response,
 )
+from cohort_dispatch_readback import (
+    CohortDispatchReadbackSources,
+    verify_dispatch_readback as prove_dispatch_readback,
+)
 from cohort_http import (
     CohortHttpPolicy,
     HttpResult,
@@ -1829,204 +1833,38 @@ def _validate_dispatch_job_payload(
     )
 
 
+def _cohort_dispatch_readback_sources() -> CohortDispatchReadbackSources:
+    return CohortDispatchReadbackSources(
+        ambiguous_dispatch_error=AmbiguousDispatchError,
+        active_job_states=frozenset(ACTIVE_JOB_STATES),
+        active_agent_states=frozenset(ACTIVE_AGENT_STATES),
+        active_reanalysis_states=frozenset(ACTIVE_REANALYSIS_STATES),
+        connect_read_only=connect_read_only,
+        load_aliases=load_aliases,
+        member_stable_group_key=_member_stable_group_key,
+        durable_dispatch_job=_durable_dispatch_job,
+        validate_dispatch_job_payload=_validate_dispatch_job_payload,
+        verify_zero_fresh_analyses=_verify_zero_fresh_analyses,
+        deterministic_dispatch_id=deterministic_dispatch_id,
+        case_for_stable=_case_for_stable,
+        resolve_alias=resolve_alias,
+    )
+
+
 def _verify_dispatch_readback(
     database_path: Path,
     manifest: Mapping[str, Any],
     member: Mapping[str, Any],
     accepted: Mapping[str, Any],
 ) -> dict[str, Any]:
-    connection = connect_read_only(database_path)
-    try:
-        aliases = load_aliases(connection)
-        stable_id = str(member["stable_group_id"])
-        stable_group_key = _member_stable_group_key(member)
-        kind = str((member.get("dispatch") or {}).get("kind") or "")
-        if kind == "analyze":
-            job = _durable_dispatch_job(
-                connection,
-                job_type="ai_analysis",
-                stable_group_id=stable_id,
-            )
-            job_binding = _validate_dispatch_job_payload(
-                manifest,
-                member,
-                job,
-                manual_reanalysis=True,
-            )
-            _verify_zero_fresh_analyses(
-                connection,
-                member,
-                stable_id,
-                agent_role="soc-analyst",
-                pre_state_field="soc_analysis_ids",
-            )
-            job_status = str(job.get("status") or "")
-            if job_status not in ACTIVE_JOB_STATES:
-                raise AmbiguousDispatchError(
-                    "SOC analysis acceptance did not leave one exact active job"
-                )
-            return {
-                "stable_group_id": stable_id,
-                "stable_group_key": stable_group_key,
-                "dashboard_group_id": str(member["dashboard_group_id"]),
-                "representative_alert_id": str(
-                    member["representative_alert_id"]
-                ),
-                "cohort_id": str(manifest["cohort_id"]),
-                "dispatch_id": deterministic_dispatch_id(manifest, member),
-                "release_id": str(
-                    manifest["execution_contract"]["expected_release_id"]
-                ),
-                "expected_assigned_route": job_binding[
-                    "expected_assigned_route"
-                ],
-                "expected_reviewer_route": job_binding[
-                    "expected_reviewer_route"
-                ],
-                "reviewer_required": job_binding["reviewer_required"],
-                "job_id": int(job["id"]),
-                "job_status": job_status,
-                "job_payload_sha256": job_binding["payload_sha256"],
-                "analysis_id": "",
-                "fresh_analysis_count": 0,
-            }
-        _verify_zero_fresh_analyses(
-            connection,
-            member,
-            stable_id,
-            agent_role="incident-responder",
-            pre_state_field="incident_analysis_ids",
-        )
-        case_id = str(accepted["case_id"])
-        case = _case_for_stable(connection, stable_id, aliases)
-        if (
-            not case
-            or str(case.get("case_id") or "") != case_id
-            or str(case.get("dashboard_group_id") or "")
-            != str(member["dashboard_group_id"])
-            or str(case.get("representative_alert_id") or "")
-            != str(member["representative_alert_id"])
-            or str(case.get("agent_status") or "")
-            not in ACTIVE_AGENT_STATES
-        ):
-            raise AmbiguousDispatchError(
-                "dashboard accepted the request but exact case readback failed"
-            )
-        output = {
-            "case_id": case_id,
-            "stable_group_id": stable_id,
-            "stable_group_key": stable_group_key,
-            "dashboard_group_id": str(member["dashboard_group_id"]),
-            "representative_alert_id": str(member["representative_alert_id"]),
-            "release_id": str(
-                manifest["execution_contract"]["expected_release_id"]
-            ),
-            "expected_assigned_route": manifest["execution_contract"][
-                "expected_assigned_route"
-            ],
-            "expected_reviewer_route": manifest["execution_contract"][
-                "expected_reviewer_route"
-            ],
-            "reviewer_required": manifest["execution_contract"][
-                "reviewer_required"
-            ],
-            "agent_status": str(case.get("agent_status") or ""),
-            "fresh_analysis_count": 0,
-        }
-        if kind == "escalate":
-            job = _durable_dispatch_job(
-                connection,
-                job_type="incident_response_analysis",
-                stable_group_id=stable_id,
-            )
-            job_binding = _validate_dispatch_job_payload(
-                manifest,
-                member,
-                job,
-                manual_reanalysis=False,
-                expected_case_id=case_id,
-            )
-            job_status = str(job.get("status") or "")
-            if job_status not in ACTIVE_JOB_STATES:
-                raise AmbiguousDispatchError(
-                    "escalation acceptance did not leave one exact active job"
-                )
-            output.update(
-                {
-                    "cohort_id": str(manifest["cohort_id"]),
-                    "dispatch_id": deterministic_dispatch_id(
-                        manifest,
-                        member,
-                    ),
-                    "job_id": int(job["id"]),
-                    "job_status": job_status,
-                    "job_payload_sha256": job_binding[
-                        "payload_sha256"
-                    ],
-                }
-            )
-        if kind == "reanalyze":
-            run_id = str(accepted.get("run_id") or "")
-            row = connection.execute(
-                """
-                SELECT run_id, case_id, group_id, dashboard_group_id,
-                       representative_alert_id, status, queued_at, updated_at
-                FROM incident_reanalysis_run_cases
-                WHERE run_id = ? AND case_id = ?
-                """,
-                (run_id, case_id),
-            ).fetchone()
-            if (
-                not row
-                or resolve_alias(str(row["group_id"] or ""), aliases) != stable_id
-                or str(row["dashboard_group_id"] or "")
-                != str(member["dashboard_group_id"])
-                or str(row["representative_alert_id"] or "")
-                != str(member["representative_alert_id"])
-                or str(row["status"] or "")
-                not in ACTIVE_REANALYSIS_STATES
-            ):
-                raise AmbiguousDispatchError(
-                    "dashboard accepted reanalysis but exact run readback failed"
-                )
-            job = _durable_dispatch_job(
-                connection,
-                job_type="incident_response_analysis",
-                stable_group_id=stable_id,
-            )
-            job_binding = _validate_dispatch_job_payload(
-                manifest,
-                member,
-                job,
-                manual_reanalysis=True,
-                expected_case_id=case_id,
-                expected_reanalysis_run_id=run_id,
-            )
-            job_status = str(job.get("status") or "")
-            if job_status not in ACTIVE_JOB_STATES:
-                raise AmbiguousDispatchError(
-                    "reanalysis acceptance did not leave one exact active job"
-                )
-            output.update(
-                {
-                    "run_id": run_id,
-                    "run_case_status": str(row["status"]),
-                    "queued_at": str(row["queued_at"] or ""),
-                    "cohort_id": str(manifest["cohort_id"]),
-                    "dispatch_id": deterministic_dispatch_id(
-                        manifest,
-                        member,
-                    ),
-                    "job_id": int(job["id"]),
-                    "job_status": job_status,
-                    "job_payload_sha256": job_binding[
-                        "payload_sha256"
-                    ],
-                }
-            )
-        return output
-    finally:
-        connection.close()
+    """Compatibility adapter for durable dispatch readback proof."""
+    return prove_dispatch_readback(
+        _cohort_dispatch_readback_sources(),
+        database_path,
+        manifest,
+        member,
+        accepted,
+    )
 
 
 def _monitor_dispatch_job_binding(
