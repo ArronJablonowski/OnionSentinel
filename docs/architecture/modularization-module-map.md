@@ -601,6 +601,13 @@ action counts, shadow acceptance checks, promotion-scope warnings, and paired
 cross-role comparison. All thresholds, rubric weights, verdict fields, and
 promotion cohort size are supplied by an immutable scoring policy.
 
+`operations/cohort_evaluation_workflow.py` composes the pure paired-role grading
+workflow after private inputs have been loaded and normalized. It validates the
+shared frozen cohort, binds independent adjudication by stable group, evaluates
+both roles through injected scoring ports, and assembles the sealed report data.
+Filesystem access, private output, Markdown rendering, and CLI behavior remain
+outside this module.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

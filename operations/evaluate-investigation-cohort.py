@@ -32,7 +32,6 @@ import argparse
 import datetime as dt
 import hashlib
 import json
-import math
 import os
 import re
 import stat
@@ -114,6 +113,15 @@ from cohort_evaluation_scoring import (
     median as _median,
     role_aggregate as aggregate_role_scores,
     round_stat as _round_stat,
+)
+from cohort_evaluation_workflow import (
+    EvaluationWorkflowPolicy,
+    adjudications_by_stable_id,
+    assemble_report,
+    build_role_reports,
+    result_source,
+    validate_paired_results,
+    validate_request,
 )
 
 
@@ -1048,6 +1056,43 @@ def _cross_role_comparison(
     return compare_roles(roles, SUPPORTED_ROLES, _scoring_policy())
 
 
+def _workflow_policy() -> EvaluationWorkflowPolicy:
+    return EvaluationWorkflowPolicy(
+        supported_roles=SUPPORTED_ROLES,
+        minimum_role_count=MIN_GRADED_ROLE_COUNT,
+        maximum_role_count=MAX_GRADED_ROLE_COUNT,
+        controlled_profile=CONTROLLED_EVALUATION_PROFILE,
+        report_schema=REPORT_SCHEMA,
+        rubric_weights=RUBRIC_WEIGHTS,
+        pass_score=PASS_SCORE,
+        review_score=REVIEW_SCORE,
+        minimum_pass_rate=MINIMUM_PASS_RATE,
+        production_role_count=EXPECTED_ROLE_COUNT,
+        hard_failure_codes=tuple(HARD_FAILURE_CODES),
+        utc_now=utc_now,
+        hash_value=sha256_value,
+        case_evaluation=_case_evaluation,
+        role_aggregate=_role_aggregate,
+        cross_role_comparison=_cross_role_comparison,
+    )
+
+
+def _load_result_sources(
+    result_paths: Mapping[str, Path],
+    roles: Sequence[str],
+    expected_count: int,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    loaded_results: dict[str, dict[str, Any]] = {}
+    result_sources: dict[str, dict[str, Any]] = {}
+    for role in roles:
+        loaded, source_sha256 = load_result_export(
+            result_paths[role], role=role, expected_count=expected_count
+        )
+        loaded_results[role] = loaded
+        result_sources[role] = result_source(loaded, source_sha256)
+    return loaded_results, result_sources
+
+
 def evaluate_cohorts(
     *,
     result_paths: Mapping[str, Path],
@@ -1055,87 +1100,17 @@ def evaluate_cohorts(
     expected_count: int = EXPECTED_ROLE_COUNT,
     required_evaluation_profile: str = "",
 ) -> dict[str, Any]:
-    if (
-        isinstance(expected_count, bool)
-        or not isinstance(expected_count, int)
-        or expected_count < MIN_GRADED_ROLE_COUNT
-        or expected_count > MAX_GRADED_ROLE_COUNT
-    ):
-        raise CohortEvaluationError(
-            "expected_count must be an integer between "
-            f"{MIN_GRADED_ROLE_COUNT} and {MAX_GRADED_ROLE_COUNT} per role"
-        )
-    roles = tuple(role for role in SUPPORTED_ROLES if role in result_paths)
-    if set(result_paths) != set(SUPPORTED_ROLES):
-        raise CohortEvaluationError(
-            "grading requires both incident-responder and soc-analyst "
-            "result exports"
-        )
-    loaded_results: dict[str, dict[str, Any]] = {}
-    result_sources: dict[str, dict[str, Any]] = {}
-    for role in roles:
-        loaded, source_sha256 = load_result_export(
-            result_paths[role],
-            role=role,
-            expected_count=expected_count,
-        )
-        loaded_results[role] = loaded
-        result_sources[role] = {
-            "cohort_id": loaded["cohort_id"],
-            "source_file_sha256": source_sha256,
-            "export_sha256": loaded["export_sha256"],
-            "source_rows_sha256": loaded["source_rows_sha256"],
-            "ordered_identity_sha256": loaded[
-                "ordered_identity_sha256"
-            ],
-            "ordered_detection_sha256": loaded[
-                "ordered_detection_sha256"
-            ],
-            "frozen_plan_sha256": loaded["frozen_plan_sha256"],
-            "expected_release_id": loaded["execution_contract"][
-                "expected_release_id"
-            ],
-            "expected_assigned_route": loaded["execution_contract"][
-                "expected_assigned_route"
-            ],
-            "expected_reviewer_route": loaded["execution_contract"][
-                "expected_reviewer_route"
-            ],
-            "reviewer_required": loaded["execution_contract"][
-                "reviewer_required"
-            ],
-            "evaluation_profile": loaded["execution_contract"][
-                "evaluation_profile"
-            ],
-        }
-    incident_result = loaded_results["incident-responder"]
-    soc_result = loaded_results["soc-analyst"]
-    if (
-        incident_result["source_rows_sha256"]
-        != soc_result["source_rows_sha256"]
-        or incident_result["ordered_identity_sha256"]
-        != soc_result["ordered_identity_sha256"]
-        or incident_result["ordered_identities"]
-        != soc_result["ordered_identities"]
-        or incident_result["ordered_detection_projection"]
-        != soc_result["ordered_detection_projection"]
-        or incident_result["execution_contract"]
-        != soc_result["execution_contract"]
-    ):
-        raise CohortEvaluationError(
-            "SOC Analyst and Incident Responder exports are not the same "
-            "frozen source cohort with the same execution contract and order"
-        )
-    required_profile = str(required_evaluation_profile or "").strip()
-    if required_profile and (
-        required_profile != CONTROLLED_EVALUATION_PROFILE
-        or incident_result["execution_contract"]["evaluation_profile"]
-        != required_profile
-    ):
-        raise CohortEvaluationError(
-            "result exports do not declare the required evaluation profile"
-        )
-
+    policy = _workflow_policy()
+    roles = validate_request(result_paths, expected_count, policy, CohortEvaluationError)
+    loaded_results, result_sources = _load_result_sources(
+        result_paths, roles, expected_count
+    )
+    incident_result = validate_paired_results(
+        loaded_results,
+        required_evaluation_profile,
+        policy,
+        CohortEvaluationError,
+    )
     adjudication_raw, adjudication_source_sha256 = load_private_json(
         adjudication_path, "independent adjudication"
     )
@@ -1144,129 +1119,25 @@ def evaluate_cohorts(
         expected_roles=roles,
         expected_count=expected_count,
     )
-    for role in roles:
-        if (
-            adjudication["source_cohorts"][role]
-            != loaded_results[role]["cohort_id"]
-        ):
-            raise CohortEvaluationError(
-                f"{role} source cohort ID does not match adjudication"
-            )
-    adjudications_by_stable = {
-        item["stable_group_id"]: item for item in adjudication["cases"]
-    }
-    expected_stable_ids = set(adjudications_by_stable)
-    for role in roles:
-        result_stable_ids = set(loaded_results[role]["members"])
-        if result_stable_ids != expected_stable_ids:
-            missing = sorted(expected_stable_ids - result_stable_ids)
-            unexpected = sorted(result_stable_ids - expected_stable_ids)
-            raise CohortEvaluationError(
-                f"{role} stable cohort differs from adjudication "
-                f"(missing={missing}, unexpected={unexpected})"
-            )
-        for stable_id, result_member in loaded_results[role]["members"].items():
-            expected_detection_sha256 = adjudications_by_stable[stable_id][
-                "ground_truth"
-            ]["detection_sha256"]
-            if (
-                result_member["detection_sha256"]
-                != expected_detection_sha256
-            ):
-                raise CohortEvaluationError(
-                    f"{role} detection snapshot differs from adjudication "
-                    f"for {stable_id}"
-                )
-
-    role_reports: dict[str, dict[str, Any]] = {}
-    for role in roles:
-        result_members = loaded_results[role]["members"]
-        cases = [
-            _case_evaluation(
-                role=role,
-                result=result_members[stable_id],
-                adjudication=adjudications_by_stable[stable_id],
-            )
-            for stable_id in sorted(
-                result_members,
-                key=lambda item: result_members[item]["rank"],
-            )
-        ]
-        role_reports[role] = {
-            "aggregate": _role_aggregate(role, cases, expected_count),
-            "cases": cases,
-        }
-
-    report: dict[str, Any] = {
-        "schema": REPORT_SCHEMA,
-        "generated_at": utc_now(),
-        "experiment_id": adjudication["experiment_id"],
-        "expected_count": expected_count,
-        "rubric": {
-            "criteria": RUBRIC_WEIGHTS,
-            "maximum_score": 100,
-            "pass_score": PASS_SCORE,
-            "review_score": REVIEW_SCORE,
-            "pass_requires_exact_verdict": True,
-            "hard_failure_codes": sorted(HARD_FAILURE_CODES),
-            "hard_failure_effective_score": 0,
-            "minimum_pass_rate": MINIMUM_PASS_RATE,
-            "required_pass_count": math.ceil(
-                expected_count * MINIMUM_PASS_RATE
-            ),
-            "default_production_promotion_count": EXPECTED_ROLE_COUNT,
-        },
-        "adjudication": {
-            "source_file_sha256": adjudication_source_sha256,
-            "independent_review": True,
-            "reviewer_count": adjudication["reviewer_count"],
-            "adjudicated_at": adjudication["adjudicated_at"],
-            "methodology_sha256": adjudication["methodology_sha256"],
-        },
-        "execution_contract": dict(
-            incident_result["execution_contract"]
-        ),
-        "result_sources": result_sources,
-        "dual_role_execution_gate": {
-            "passed": True,
-            "role_count": 2,
-            "analysis_count": expected_count * 2,
-            "source_rows_sha256": incident_result[
-                "source_rows_sha256"
-            ],
-            "ordered_identity_sha256": incident_result[
-                "ordered_identity_sha256"
-            ],
-            "ordered_detection_sha256": incident_result[
-                "ordered_detection_sha256"
-            ],
-            "controls": {
-                "fresh_results": True,
-                "harness_enabled": True,
-                "harness_mode": "shadow",
-                "terminal_chains_valid": True,
-                "routes_verified": True,
-                "read_only_ledgers": True,
-                "positive_successful_tool_ledgers": True,
-                "collector_query_audits_bound": True,
-                "memory_frozen": True,
-                "bypass_or_partial_results": 0,
-            },
-        },
-        "roles": role_reports,
-        "cross_role": _cross_role_comparison(role_reports),
-        "content_policy": {
-            "contains_raw_alerts": False,
-            "contains_prompts": False,
-            "contains_raw_model_responses": False,
-            "contains_query_text": False,
-            "contains_query_results": False,
-            "contains_credentials": False,
-            "contains_ground_truth_digests": True,
-        },
-    }
-    report["report_sha256"] = sha256_value(report)
-    return report
+    by_stable = adjudications_by_stable_id(
+        adjudication, loaded_results, roles, CohortEvaluationError
+    )
+    role_reports = build_role_reports(
+        loaded=loaded_results,
+        adjudications=by_stable,
+        roles=roles,
+        expected_count=expected_count,
+        policy=policy,
+    )
+    return assemble_report(
+        adjudication=adjudication,
+        adjudication_source_sha256=adjudication_source_sha256,
+        incident=incident_result,
+        result_sources=result_sources,
+        role_reports=role_reports,
+        expected_count=expected_count,
+        policy=policy,
+    )
 
 
 def _ensure_private_parent(path: Path) -> Path:

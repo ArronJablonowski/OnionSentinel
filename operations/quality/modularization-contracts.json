@@ -158,6 +158,20 @@
       ]
     },
     {
+      "path": "operations/cohort_evaluation_workflow.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_evaluation_workflow.py",
+      "required_symbols": [
+        "EvaluationWorkflowPolicy",
+        "validate_request",
+        "result_source",
+        "validate_paired_results",
+        "adjudications_by_stable_id",
+        "build_role_reports",
+        "assemble_report"
+      ]
+    },
+    {
       "path": "operations/cohort_execution_models.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_execution_models.py",
