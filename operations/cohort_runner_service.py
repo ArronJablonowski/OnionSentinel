@@ -187,6 +187,13 @@ from cohort_storage_state import (
     summary_rows as query_summary_rows,
     verify_zero_fresh_analyses as prove_zero_fresh_analyses,
 )
+from cohort_source_rows import (
+    CohortSourceRowPolicy,
+    source_detection_projection as project_source_detection,
+    source_identity as read_source_identity,
+    validate_source_detection as prove_source_detection,
+    validate_source_pre_state as prove_source_pre_state,
+)
 
 
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -753,66 +760,13 @@ def freeze_cohort(
 
 
 def _source_identity(row: Mapping[str, Any]) -> tuple[str, str, str]:
-    dashboard_id = str(
-        row.get("dashboard_group_id")
-        or row.get("legacy_group_id")
-        or row.get("group_id")
-        or ""
-    ).strip().lower()
-    stable_id = str(row.get("stable_group_id") or "").strip().lower()
-    representative_alert_id = str(
-        row.get("representative_alert_id") or ""
-    ).strip()
-    if not DASHBOARD_GROUP_ID_RE.fullmatch(dashboard_id):
-        raise CohortError(
-            f"source row has invalid dashboard group ID: {dashboard_id!r}"
-        )
-    if not STABLE_GROUP_ID_RE.fullmatch(stable_id):
-        raise CohortError(
-            f"source row has invalid stable group ID: {stable_id!r}"
-        )
-    if not REPRESENTATIVE_ALERT_ID_RE.fullmatch(representative_alert_id):
-        raise CohortError(
-            f"source row {dashboard_id} has an invalid representative "
-            "alert ID"
-        )
-    return dashboard_id, stable_id, representative_alert_id
+    return read_source_identity(row, _source_row_policy())
 
 
 def _source_detection_projection(
     source: Mapping[str, Any],
 ) -> dict[str, Any]:
-    supplied_detection = source.get("detection")
-    if supplied_detection is not None and not isinstance(
-        supplied_detection,
-        dict,
-    ):
-        raise CohortError("source row detection must be an object")
-    comparisons: dict[str, Any] = {}
-    for key in SUMMARY_EXPORT_COLUMNS:
-        if key == "group_id":
-            continue
-        if key in source:
-            comparisons[key] = source[key]
-        if isinstance(supplied_detection, dict) and key in supplied_detection:
-            comparisons[key] = supplied_detection[key]
-    if "cohort_seen_at" in source:
-        comparisons["cohort_seen_at"] = source["cohort_seen_at"]
-    if (
-        isinstance(supplied_detection, dict)
-        and "cohort_seen_at" in supplied_detection
-    ):
-        comparisons["cohort_seen_at"] = supplied_detection["cohort_seen_at"]
-    if "stable_group_key" in source:
-        comparisons["stable_group_key"] = source["stable_group_key"]
-    if (
-        isinstance(supplied_detection, dict)
-        and "stable_group_key" in supplied_detection
-    ):
-        comparisons["stable_group_key"] = supplied_detection[
-            "stable_group_key"
-        ]
-    return comparisons
+    return project_source_detection(source, _source_row_policy())
 
 
 def _validate_source_detection(
@@ -820,23 +774,12 @@ def _validate_source_detection(
     current: Mapping[str, Any],
     dashboard_id: str,
 ) -> dict[str, Any]:
-    try:
-        comparisons = _source_detection_projection(source)
-    except CohortError as exc:
-        raise CohortError(
-            f"source row {dashboard_id} detection must be an object"
-        ) from exc
-    for key, value in comparisons.items():
-        if key == "stable_group_key":
-            # The summary table does not own this identity field. It is
-            # compared against the exact raw alert by representative binding.
-            continue
-        if current.get(key) != value:
-            raise CohortError(
-                f"source row {dashboard_id} no longer matches frozen "
-                f"detection field {key}"
-            )
-    return comparisons
+    return prove_source_detection(
+        source,
+        current,
+        dashboard_id,
+        _source_row_policy(),
+    )
 
 
 def _validate_source_pre_state(
@@ -844,22 +787,22 @@ def _validate_source_pre_state(
     current: Mapping[str, Any],
     dashboard_id: str,
 ) -> None:
-    if "pre_state" in source and source["pre_state"] != current:
-        raise CohortError(
-            f"source row {dashboard_id} pre-state changed after selection"
-        )
-    case = current.get("incident_case") or {}
-    aliases = {
-        "case_id": "case_id",
-        "case_status": "status",
-        "case_agent_status": "agent_status",
-        "latest_analysis_id": "latest_analysis_id",
-    }
-    for source_key, case_key in aliases.items():
-        if source_key in source and source[source_key] != case.get(case_key):
-            raise CohortError(
-                f"source row {dashboard_id} no longer matches {source_key}"
-            )
+    prove_source_pre_state(
+        source,
+        current,
+        dashboard_id,
+        _source_row_policy(),
+    )
+
+
+def _source_row_policy() -> CohortSourceRowPolicy:
+    return CohortSourceRowPolicy(
+        error=CohortError,
+        dashboard_group_id_pattern=DASHBOARD_GROUP_ID_RE,
+        stable_group_id_pattern=STABLE_GROUP_ID_RE,
+        representative_alert_id_pattern=REPRESENTATIVE_ALERT_ID_RE,
+        summary_export_columns=SUMMARY_EXPORT_COLUMNS,
+    )
 
 
 def _cohort_freeze_policy() -> CohortFreezePolicy:

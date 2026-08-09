@@ -51,6 +51,18 @@
       ]
     },
     {
+      "path": "operations/cohort_source_rows.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_source_rows.py",
+      "required_symbols": [
+        "CohortSourceRowPolicy",
+        "source_identity",
+        "source_detection_projection",
+        "validate_source_detection",
+        "validate_source_pre_state"
+      ]
+    },
+    {
       "path": "operations/run-incident-harness-cohort.py",
       "deployment": "repository-only",
       "runtime_path": "operations/run-incident-harness-cohort.py",

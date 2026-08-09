@@ -43,6 +43,7 @@ import cohort_private_input  # noqa: E402
 import cohort_artifact_io  # noqa: E402
 import cohort_storage_core  # noqa: E402
 import cohort_storage_state  # noqa: E402
+import cohort_source_rows  # noqa: E402
 
 
 class IncidentHarnessCohortTests(unittest.TestCase):
@@ -134,6 +135,20 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         self.assertIs(
             cohort.build_incident_pre_state,
             cohort_storage_state.incident_pre_state,
+        )
+
+    def test_runner_uses_extracted_source_row_contracts(self) -> None:
+        self.assertIs(
+            cohort.read_source_identity,
+            cohort_source_rows.source_identity,
+        )
+        self.assertIs(
+            cohort.project_source_detection,
+            cohort_source_rows.source_detection_projection,
+        )
+        self.assertIs(
+            cohort.prove_source_detection,
+            cohort_source_rows.validate_source_detection,
         )
 
     def test_query_audit_projection_excludes_query_and_result_content(self) -> None:

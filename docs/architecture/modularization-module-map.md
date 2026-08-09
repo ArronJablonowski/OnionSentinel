@@ -806,6 +806,11 @@ durable-job, reanalysis, and analysis-identity queries plus exact SOC/Incident
 Responder frozen pre-state projections and dispatch-race proof. It consumes the
 storage-core policy and exposes no filesystem or HTTP behavior.
 
+`operations/cohort_source_rows.py` owns imported source-row identity,
+detection-field projection, frozen-detection comparison, and pre-state
+comparison contracts. Validation patterns, exported fields, and the fail-closed
+error type are injected by the composition service.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental
