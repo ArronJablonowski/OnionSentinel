@@ -105,6 +105,18 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_builder_compatibility.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_builder_compatibility.py",
+      "required_symbols": [
+        "compact_package_to_budget",
+        "incident_prompt_mandatory_grounding_digest",
+        "load_json_bounded",
+        "project_incident_evidence_hits",
+        "project_incident_evidence_osquery_rows"
+      ]
+    },
+    {
       "path": "n8n/bin/prompt_builder_io.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_builder_io.py",

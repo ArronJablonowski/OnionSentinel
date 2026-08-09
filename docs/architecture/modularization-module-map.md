@@ -634,6 +634,12 @@ adapters. It binds immutable policy to the pure query/detection modules and
 reuses the evidence facade's alert-group and parsing ports. The legacy builder
 re-exports these entry points without retaining their dependency assembly.
 
+`prompt_builder_compatibility.py` preserves the prompt builder's public helper
+surface while delegating bounded I/O, SQLite access, incident-evidence
+projection, mandatory grounding, and package compaction to their focused
+modules. This keeps legacy callers stable without returning those concerns to
+the CLI composition root.
+
 `prompt_evidence_admission.py` owns governed admission of exact-row query
 context, public-enrichment indicators, agent memory, correlation context, and
 restricted Incident Responder evidence. It binds query authorization to the
