@@ -37,7 +37,7 @@
       "max_lines": 2018
     },
     "n8n/bin/run-local-ai-analysis.py": {
-      "max_lines": 10497
+      "max_lines": 6535
     },
     "onion-sentinel-dashboard/ac_hunter_review.py": {
       "max_lines": 2225
@@ -399,118 +399,8 @@
     "n8n/bin/report-production-soak.py::summarize": {
       "max_complexity": 28
     },
-    "n8n/bin/run-local-ai-analysis.py::SystemResourceMonitor._sample_once": {
-      "max_complexity": 20
-    },
-    "n8n/bin/run-local-ai-analysis.py::_append_live_osquery_audit_batch": {
-      "max_complexity": 19
-    },
-    "n8n/bin/run-local-ai-analysis.py::_exact_hosted_columnar_envelope": {
-      "max_complexity": 73,
-      "max_lines": 178
-    },
-    "n8n/bin/run-local-ai-analysis.py::_has_trusted_endpoint_evidence": {
-      "max_complexity": 19,
-      "max_lines": 159
-    },
-    "n8n/bin/run-local-ai-analysis.py::_has_trusted_endpoint_evidence.relevant_live_result": {
-      "max_complexity": 32
-    },
-    "n8n/bin/run-local-ai-analysis.py::_load_bounded_regular_json": {
-      "max_complexity": 19
-    },
-    "n8n/bin/run-local-ai-analysis.py::_sanitize_hosted_investigation_evidence": {
-      "max_complexity": 49,
-      "max_lines": 162
-    },
-    "n8n/bin/run-local-ai-analysis.py::_trusted_endpoint_evidence_fields": {
-      "max_complexity": 33
-    },
-    "n8n/bin/run-local-ai-analysis.py::_trusted_live_osquery_case_observables": {
-      "max_complexity": 21
-    },
-    "n8n/bin/run-local-ai-analysis.py::_validated_discovered_observables": {
-      "max_complexity": 38,
-      "max_lines": 183
-    },
-    "n8n/bin/run-local-ai-analysis.py::_validated_discovered_observables.visit": {
-      "max_complexity": 20
-    },
-    "n8n/bin/run-local-ai-analysis.py::analyze_with_config": {
-      "max_complexity": 16,
-      "max_lines": 110
-    },
-    "n8n/bin/run-local-ai-analysis.py::apply_configured_second_opinion": {
-      "max_complexity": 34,
-      "max_lines": 396
-    },
-    "n8n/bin/run-local-ai-analysis.py::apply_model_roster": {
-      "max_complexity": 24
-    },
-    "n8n/bin/run-local-ai-analysis.py::build_llm_log_record": {
-      "max_complexity": 38,
-      "max_lines": 105
-    },
-    "n8n/bin/run-local-ai-analysis.py::controlled_evaluation_result_identity": {
-      "max_complexity": 35,
-      "max_lines": 101
-    },
-    "n8n/bin/run-local-ai-analysis.py::controlled_evaluation_runtime": {
-      "max_complexity": 46,
-      "max_lines": 190
-    },
-    "n8n/bin/run-local-ai-analysis.py::deterministic_incident_pivot_requests": {
-      "max_complexity": 77,
-      "max_lines": 329
-    },
-    "n8n/bin/run-local-ai-analysis.py::incident_live_osquery_audit": {
-      "max_complexity": 28,
-      "max_lines": 126
-    },
-    "n8n/bin/run-local-ai-analysis.py::investigation_request_semantic_digest": {
-      "max_complexity": 33
-    },
     "n8n/bin/run-local-ai-analysis.py::main": {
       "max_lines": 250
-    },
-    "n8n/bin/run-local-ai-analysis.py::model_safe_copy": {
-      "max_complexity": 25
-    },
-    "n8n/bin/run-local-ai-analysis.py::normalize_cli_harness_settings": {
-      "max_complexity": 17
-    },
-    "n8n/bin/run-local-ai-analysis.py::normalize_codex_cli_settings": {
-      "max_complexity": 24
-    },
-    "n8n/bin/run-local-ai-analysis.py::normalize_correlation_assessment": {
-      "max_complexity": 17
-    },
-    "n8n/bin/run-local-ai-analysis.py::normalize_scope_dispositions": {
-      "max_complexity": 22
-    },
-    "n8n/bin/run-local-ai-analysis.py::parse_args": {
-      "max_lines": 116
-    },
-    "n8n/bin/run-local-ai-analysis.py::precommit_controlled_evaluation_reviewer_gate": {
-      "max_complexity": 37,
-      "max_lines": 112
-    },
-    "n8n/bin/run-local-ai-analysis.py::prompt_alert_summary": {
-      "max_complexity": 24
-    },
-    "n8n/bin/run-local-ai-analysis.py::read_gpu_temperature_celsius": {
-      "max_complexity": 17
-    },
-    "n8n/bin/run-local-ai-analysis.py::require_controlled_evaluation_routes": {
-      "max_complexity": 24
-    },
-    "n8n/bin/run-local-ai-analysis.py::run_bounded_disagreement_adjudication": {
-      "max_complexity": 20,
-      "max_lines": 177
-    },
-    "n8n/bin/run-local-ai-analysis.py::validate_response": {
-      "max_complexity": 24,
-      "max_lines": 168
     },
     "n8n/bin/run-recovery-restore-drill.py::verify_bundle": {
       "max_complexity": 32
@@ -706,5 +596,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "eb9e8bd7bf94a8c3950a2731a8d331d028da8484"
+  "source_release": "74ab50080c53d7141a493f143a897a53569ac3a8"
 }
