@@ -25,6 +25,7 @@ evaluator = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(evaluator)
 import cohort_evaluation_query_audit  # noqa: E402
 import cohort_evaluation_execution_contract  # noqa: E402
+import cohort_evaluation_execution_proof  # noqa: E402
 import cohort_evaluation_result_policy  # noqa: E402
 import cohort_execution_result  # noqa: E402
 
@@ -62,6 +63,12 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         self.assertIs(
             evaluator.normalize_observed_labels,
             cohort_evaluation_result_policy.observed_labels,
+        )
+
+    def test_evaluator_uses_execution_proof_orchestrator(self) -> None:
+        self.assertIs(
+            evaluator.admit_execution_proof,
+            cohort_evaluation_execution_proof.validate_execution_proof,
         )
 
     def setUp(self) -> None:

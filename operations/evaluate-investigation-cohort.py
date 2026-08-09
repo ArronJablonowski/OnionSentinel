@@ -84,17 +84,10 @@ from cohort_evaluation_job_proof import (
     expected_dispatch_id as derive_expected_dispatch_id,
     validate_durable_job_proof,
 )
-from cohort_evaluation_harness_gate import (
-    HarnessGatePolicy,
-    validate_harness_gate,
-)
-from cohort_evaluation_execution_admission import (
-    ExecutionAdmission,
-    admit_fresh_analysis,
-    admit_public_proof,
-    validate_harness_freshness,
-    validate_harness_identity,
-    validate_response_binding,
+from cohort_evaluation_harness_gate import HarnessGatePolicy
+from cohort_evaluation_execution_proof import (
+    ExecutionProofPolicy,
+    validate_execution_proof as admit_execution_proof,
 )
 from cohort_evaluation_result_member import (
     ResultMemberPolicy,
@@ -599,71 +592,23 @@ def _validate_skill_selection_attestation_proof(
     )
 
 
-def _validate_query_bound_harness(
-    *,
-    harness: Mapping[str, Any],
-    admission: ExecutionAdmission,
-    role: str,
-    canonical_response_sha256: str,
-    label: str,
-) -> None:
-    query_audit = _query_audit_execution_binding(admission.analysis)
-    if harness.get("query_audit") != query_audit:
-        raise CohortEvaluationError(
-            f"{label} collector query-audit binding does not match"
-        )
-    validate_harness_gate(
-        harness=harness,
-        query_audit=query_audit,
-        role=role,
-        canonical_response_sha256=canonical_response_sha256,
-        label=label,
-        policy=HarnessGatePolicy(
+def _execution_proof_policy() -> ExecutionProofPolicy:
+    return ExecutionProofPolicy(
+        digest_pattern=SHA256_RE,
+        error=CohortEvaluationError,
+        prior_analysis_ids=_prior_analysis_ids,
+        parse_timestamp=_parse_timestamp,
+        validate_embedded_digest=_validate_embedded_digest,
+        validate_durable_job_proof=_validate_durable_job_proof,
+        validate_skill_summary=_validate_skill_selection_attestation_proof,
+        expected_task_kind=_expected_task_kind,
+        query_audit_binding=_query_audit_execution_binding,
+        harness_gate_policy=HarnessGatePolicy(
             sha256_pattern=SHA256_RE,
             hash_value=sha256_value,
             bounded_model_call_proof_valid=_bounded_model_call_proof_valid,
         ),
-        error=CohortEvaluationError,
     )
-
-
-def _admit_execution_harness(
-    *,
-    member: Mapping[str, Any],
-    admission: ExecutionAdmission,
-    role: str,
-    contract: Mapping[str, Any],
-    label: str,
-) -> tuple[Mapping[str, Any], Mapping[str, Any], str]:
-    response_sha256 = validate_response_binding(
-        admission=admission,
-        role=role,
-        contract=contract,
-        digest_pattern=SHA256_RE,
-        label=label,
-        error=CohortEvaluationError,
-    )
-    proof, harness = admit_public_proof(
-        member=member,
-        admission=admission,
-        contract=contract,
-        label=label,
-        validate_embedded_digest=_validate_embedded_digest,
-        parse_timestamp=_parse_timestamp,
-        error=CohortEvaluationError,
-    )
-    _validate_skill_selection_attestation_proof(harness, label)
-    validate_harness_identity(
-        harness=harness,
-        member=member,
-        admission=admission,
-        role=role,
-        contract=contract,
-        expected_task_kind=_expected_task_kind,
-        label=label,
-        error=CohortEvaluationError,
-    )
-    return proof, harness, response_sha256
 
 
 def _validate_execution_proof(
@@ -675,44 +620,15 @@ def _validate_execution_proof(
     frozen_plan_sha256: str,
     label: str,
 ) -> dict[str, Any]:
-    admission = admit_fresh_analysis(
+    return admit_execution_proof(
         member=member,
-        label=label,
-        prior_analysis_ids=_prior_analysis_ids,
-        parse_timestamp=_parse_timestamp,
-        error=CohortEvaluationError,
-    )
-    _validate_durable_job_proof(
-        member=member,
-        result=admission.result,
-        analysis=admission.analysis,
+        role=role,
         contract=contract,
         cohort_id=cohort_id,
         frozen_plan_sha256=frozen_plan_sha256,
         label=label,
+        policy=_execution_proof_policy(),
     )
-    proof, harness, response_sha256 = _admit_execution_harness(
-        member=member,
-        admission=admission,
-        role=role,
-        contract=contract,
-        label=label,
-    )
-    _validate_query_bound_harness(
-        harness=harness,
-        admission=admission,
-        role=role,
-        canonical_response_sha256=response_sha256,
-        label=label,
-    )
-    validate_harness_freshness(
-        harness=harness,
-        admission=admission,
-        label=label,
-        parse_timestamp=_parse_timestamp,
-        error=CohortEvaluationError,
-    )
-    return dict(proof)
 
 
 def load_result_export(

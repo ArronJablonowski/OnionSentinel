@@ -713,6 +713,12 @@ content gate and bounded observed-verdict projection. It rejects exports that
 do not explicitly exclude sensitive payload classes and converts malformed
 duplicate identifiers into a non-creditable sentinel label for scoring.
 
+`operations/cohort_evaluation_execution_proof.py` orchestrates fresh-analysis,
+durable-dispatch, public-proof, skill, identity, query, model/tool gate, and
+timestamp admission through injected immutable policy. The lower-level proof
+validators remain canonical in their focused modules; this layer only orders
+them and returns the sealed public proof after every gate succeeds.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

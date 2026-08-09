@@ -24,6 +24,7 @@ import cohort_export  # noqa: E402
 import cohort_evaluation_job_proof  # noqa: E402
 import cohort_evaluation_harness_gate  # noqa: E402
 import cohort_evaluation_execution_admission  # noqa: E402
+import cohort_evaluation_execution_proof  # noqa: E402
 import cohort_evaluation_result_member  # noqa: E402
 import cohort_evaluation_result_export  # noqa: E402
 import cohort_evaluation_scoring  # noqa: E402
@@ -115,23 +116,27 @@ class CohortExecutionAttestationBoundaryTests(unittest.TestCase):
         evaluator = load_cohort_evaluator()
 
         self.assertIs(
-            evaluator.validate_harness_gate,
+            cohort_evaluation_execution_proof.validate_harness_gate,
             cohort_evaluation_harness_gate.validate_harness_gate,
+        )
+        self.assertIs(
+            evaluator.admit_execution_proof,
+            cohort_evaluation_execution_proof.validate_execution_proof,
         )
 
     def test_offline_evaluator_uses_extracted_execution_admission(self):
         evaluator = load_cohort_evaluator()
 
         self.assertIs(
-            evaluator.admit_fresh_analysis,
+            cohort_evaluation_execution_proof.admit_fresh_analysis,
             cohort_evaluation_execution_admission.admit_fresh_analysis,
         )
         self.assertIs(
-            evaluator.validate_response_binding,
+            cohort_evaluation_execution_proof.validate_response_binding,
             cohort_evaluation_execution_admission.validate_response_binding,
         )
         self.assertIs(
-            evaluator.admit_public_proof,
+            cohort_evaluation_execution_proof.admit_public_proof,
             cohort_evaluation_execution_admission.admit_public_proof,
         )
 
