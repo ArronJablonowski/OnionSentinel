@@ -2184,6 +2184,12 @@ injected ports, and the workflow always denies automation authority.
 Authorization-sensitive conclusion guards live under
 `onion_sentinel.analysis.conclusions`; orchestration preserves their existing
 order after factored-verdict normalization and deterministic rule validation.
+`analysis.conclusions.response` owns the complete ordered response boundary:
+safe schema repair, intermediate tool-protocol removal, incident-report shape
+handling, closed-vocabulary checks, factored verdict normalization, every
+authorization/evidence/tuning guard, scope disposition, confidence
+calibration, and final report reconciliation. Runtime-specific policies and
+guard implementations remain injected, making ordering directly testable.
 Collector-owned rule-intent reconciliation is isolated in the same package,
 with endpoint trust, verdict normalization, and bounded-text policy injected
 from their authoritative runtime owners.

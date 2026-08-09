@@ -2182,6 +2182,58 @@ def _conclusion_incident_completeness():
     return incident_completeness
 
 
+def _conclusion_response():
+    _provider_routing()
+    from onion_sentinel.analysis.conclusions import response
+    return response
+
+
+def _conclusion_response_policy():
+    module = _conclusion_response()
+    return module.Policy(
+        required_keys=frozenset(REQUIRED_KEYS),
+        strict_required_keys=frozenset(STRICT_FACTORED_REQUIRED_KEYS),
+        default_values=DEFAULT_RESPONSE_VALUES,
+        strict_default_values=STRICT_RESPONSE_VALUES,
+        list_keys=frozenset(LIST_KEYS),
+        confidence_values=frozenset(CONFIDENCE_VALUES),
+        tuning_values=frozenset(TUNING_VALUES),
+        detection_outcome_values=frozenset(DETECTION_OUTCOME_VALUES),
+        legacy_detection_outcomes=frozenset({
+            "true_positive_benign", "authorized_benign",
+            "false_positive_rule_logic", "false_positive_parser",
+            "false_positive_intel",
+        }),
+    )
+
+
+def _conclusion_response_dependencies():
+    module = _conclusion_response()
+    return module.Dependencies(
+        boolean_setting=boolean_setting,
+        coerce_list=coerce_list,
+        normalize_correlation=normalize_correlation_assessment,
+        normalize_memory=normalize_memory_candidates,
+        normalize_hypotheses=normalize_hypotheses,
+        is_incident_responder=_is_incident_responder_package,
+        validate_report_shape=validate_incident_response_report_shape,
+        normalize_report=normalize_incident_response_report,
+        normalize_factored=normalize_factored_verdict,
+        guards=(
+            apply_deterministic_evidence_guard,
+            apply_authorized_benign_evidence_guard,
+            apply_policy_sensitive_activity_guard,
+            apply_incident_evidence_completeness_guard,
+            reconcile_supplied_endpoint_evidence_gaps,
+            validate_evidence_references,
+            apply_tuning_coherence_guard,
+        ),
+        normalize_scope=normalize_scope_dispositions,
+        calibrate_confidence=calibrate_response_confidence,
+        reconcile_report=reconcile_incident_response_report,
+    )
+
+
 def _incident_completeness_dependencies():
     module = _conclusion_incident_completeness()
     return module.Dependencies(
@@ -8045,164 +8097,12 @@ def validate_response(
     dashboard still needs an artifact for every unique alert, so use explicit
     defaults for missing fields and preserve the model output that was present.
     """
-    normalized = dict(response)
-    # Query requests are an intermediate local-tool protocol, never part of a
-    # completed analysis artifact or a hosted second-opinion payload.
-    normalized.pop("investigation_query_requests", None)
-    normalized.pop("pcap_query_requests", None)
-    normalized.pop("live_osquery_requests", None)
-    strict_factored_contract = bool(
-        isinstance(prompt_package, dict)
-        and (
-            isinstance(prompt_package.get("review_contract"), dict)
-            or _is_incident_responder_package(prompt_package)
-            or (
-                isinstance(prompt_package.get("response_schema"), dict)
-                and STRICT_FACTORED_REQUIRED_KEYS.issubset(
-                    prompt_package["response_schema"]
-                )
-            )
-        )
-    )
-    required_keys = set(REQUIRED_KEYS)
-    if strict_factored_contract:
-        required_keys.update(STRICT_FACTORED_REQUIRED_KEYS)
-    missing = sorted(required_keys.difference(normalized))
-    for key in missing:
-        normalized[key] = DEFAULT_RESPONSE_VALUES.get(
-            key,
-            STRICT_RESPONSE_VALUES.get(key, "n/a"),
-        )
-    if missing:
-        normalized["_schema_repair"] = {
-            "missing_keys": missing,
-            "repair_note": "Filled safe defaults so the alert still receives local AI analysis.",
-        }
-    for key in LIST_KEYS:
-        normalized[key] = coerce_list(normalized.get(key))
-    normalized["detection_outcome"] = str(normalized["detection_outcome"])
-    normalized["bluf"] = str(normalized["bluf"])
-    normalized["summary"] = str(normalized["summary"])
-    normalized["likely_meaning"] = str(normalized["likely_meaning"])
-    normalized["severity_reasoning"] = str(normalized["severity_reasoning"])
-    normalized["alert_frequency_assessment"] = str(normalized["alert_frequency_assessment"])
-    normalized["tuning_reason"] = str(normalized["tuning_reason"])
-    normalized["confidence"] = str(normalized["confidence"]).lower()
-    normalized["tuning_recommendation"] = str(normalized["tuning_recommendation"]).lower()
-    normalized["escalation_needed"] = boolean_setting(normalized["escalation_needed"])
-    normalized["hosted_second_opinion_recommended"] = boolean_setting(
-        normalized["hosted_second_opinion_recommended"]
-    )
-    normalized["second_opinion_recommended"] = boolean_setting(
-        normalized.get("second_opinion_recommended", False)
-    )
-    normalized["second_opinion_reason"] = str(normalized.get("second_opinion_reason") or "")[:1000]
-    normalized["correlation_assessment"] = normalize_correlation_assessment(normalized.get("correlation_assessment"))
-    normalized["memory_candidates"] = normalize_memory_candidates(normalized.get("memory_candidates"))
-    if strict_factored_contract or "hypotheses" in normalized:
-        normalized["hypotheses"] = normalize_hypotheses(
-            normalized.get("hypotheses")
-        )
-    incident_responder = _is_incident_responder_package(prompt_package)
-    if incident_responder:
-        raw_report = normalized.get("incident_response_report")
-        report_validation = validate_incident_response_report_shape(raw_report)
-        normalized["incident_response_report"] = normalize_incident_response_report(
-            raw_report
-        )
-        normalized["_incident_response_report_validation"] = report_validation
-        if not report_validation["valid"]:
-            repair = (
-                dict(normalized.get("_schema_repair"))
-                if isinstance(normalized.get("_schema_repair"), dict)
-                else {}
-            )
-            repaired_keys = {
-                str(item)
-                for item in repair.get("missing_keys", [])
-                if isinstance(repair.get("missing_keys"), list)
-            }
-            repaired_keys.update(
-                f"incident_response_report.{key}"
-                for key in report_validation["missing_fields"]
-            )
-            if not report_validation["model_report_present"]:
-                repaired_keys.add("incident_response_report")
-            repair["missing_keys"] = sorted(repaired_keys)
-            repair["repair_note"] = (
-                "Filled safe defaults and marked the Incident Responder output "
-                "for human review because its required report was incomplete."
-            )
-            normalized["_schema_repair"] = repair
-    elif "incident_response_report" in normalized:
-        normalized["incident_response_report"] = normalize_incident_response_report(
-            normalized.get("incident_response_report")
-        )
-        # Preserve the legacy SOC analyst projection. Nested numeric
-        # confidence is an Incident Responder contract and must not silently
-        # expand unsolicited SOC output.
-        normalized["incident_response_report"].pop("confidence_score", None)
-
-    if normalized["confidence"] not in CONFIDENCE_VALUES:
-        normalized["_invalid_confidence"] = normalized["confidence"]
-        normalized["confidence"] = "low"
-    if normalized["tuning_recommendation"] not in TUNING_VALUES:
-        normalized["_invalid_tuning_recommendation"] = normalized["tuning_recommendation"]
-        normalized["tuning_recommendation"] = "needs_more_data"
-    raw_outcome_key = re.sub(
-        r"[^a-z0-9]+",
-        "_",
-        normalized["detection_outcome"].strip().lower(),
-    ).strip("_")
-    if (
-        raw_outcome_key not in DETECTION_OUTCOME_VALUES
-        and raw_outcome_key
-        not in {
-            "true_positive_benign",
-            "authorized_benign",
-            "false_positive_rule_logic",
-            "false_positive_parser",
-            "false_positive_intel",
-        }
-    ):
-        normalized["_invalid_detection_outcome"] = normalized["detection_outcome"]
-    normalized = normalize_factored_verdict(normalized)
-    normalized = apply_deterministic_evidence_guard(
-        normalized,
+    return _conclusion_response().normalize(
+        response,
         prompt_package,
+        policy=_conclusion_response_policy(),
+        dependencies=_conclusion_response_dependencies(),
     )
-    normalized = apply_authorized_benign_evidence_guard(
-        normalized,
-        prompt_package,
-    )
-    normalized = apply_policy_sensitive_activity_guard(
-        normalized,
-        prompt_package,
-    )
-    normalized = apply_incident_evidence_completeness_guard(
-        normalized,
-        prompt_package,
-    )
-    normalized = reconcile_supplied_endpoint_evidence_gaps(
-        normalized,
-        prompt_package,
-    )
-    normalized = validate_evidence_references(normalized, prompt_package)
-    normalized = apply_tuning_coherence_guard(
-        normalized,
-        prompt_package,
-    )
-    normalized = normalize_scope_dispositions(
-        normalized,
-        prompt_package,
-    )
-    normalized = calibrate_response_confidence(normalized)
-    normalized = reconcile_incident_response_report(
-        normalized,
-        prompt_package,
-    )
-    normalized.setdefault("final_disposition_status", "primary_unreviewed")
-    return normalized
 
 
 def markdown_list(items: list[str]) -> str:
