@@ -808,6 +808,16 @@
       ]
     },
     {
+      "path": "n8n/bin/local_ai_pipeline_adapters.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/local_ai_pipeline_adapters.py",
+      "required_symbols": [
+        "analysis_review_ports",
+        "prepare_runtime",
+        "write_outputs"
+      ]
+    },
+    {
       "path": "n8n/bin/run-local-ai-analysis.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/run-local-ai-analysis.py",
@@ -817,9 +827,7 @@
         "apply_investigation_query_loop",
         "main",
         "parse_args",
-        "render_markdown",
-        "validate_response",
-        "write_outputs"
+        "validate_response"
       ]
     },
     {

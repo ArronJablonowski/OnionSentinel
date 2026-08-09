@@ -16,8 +16,12 @@ ROOT = Path(__file__).resolve().parents[1]
 N8N_ROOT = ROOT / "n8n"
 if str(N8N_ROOT) not in sys.path:
     sys.path.insert(0, str(N8N_ROOT))
+BIN_ROOT = N8N_ROOT / "bin"
+if str(BIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(BIN_ROOT))
 
 from onion_sentinel.analysis.reporting import publication
+import local_ai_pipeline_adapters as PIPELINE_ADAPTERS
 
 
 RUNNER_PATH = ROOT / "n8n" / "bin" / "run-local-ai-analysis.py"
@@ -137,7 +141,7 @@ class ReportingPublicationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "must not be a symlink"):
                 publication.publish(self.plan(linked))
 
-    def test_legacy_write_outputs_delegates_to_private_publication(self) -> None:
+    def test_pipeline_adapter_delegates_to_private_publication(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             root = Path(name) / "output"
             args = SimpleNamespace(
@@ -167,12 +171,11 @@ class ReportingPublicationTests(unittest.TestCase):
                     "recommended_tuning_actions": [],
                 }
             )
-            with mock.patch.object(
-                RUNNER,
-                "project_now",
-                return_value="2026-08-06  12:34:56-06:00",
-            ):
-                json_path, markdown_path, generated_at = RUNNER.write_outputs(
+            bindings = vars(RUNNER).copy()
+            bindings["project_now"] = lambda: "2026-08-06  12:34:56-06:00"
+            json_path, markdown_path, generated_at = (
+                PIPELINE_ADAPTERS.write_outputs(
+                    bindings,
                     Path("/synthetic/prompt.json"),
                     {
                         "alert": {
@@ -186,6 +189,7 @@ class ReportingPublicationTests(unittest.TestCase):
                     args,
                     "analysis-1",
                 )
+            )
             self.assertEqual(generated_at, "2026-08-06  12:34:56-06:00")
             self.assertEqual(json_path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(markdown_path.stat().st_mode & 0o777, 0o600)

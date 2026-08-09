@@ -480,11 +480,14 @@ class PcapAnalysisWorkflowTest(unittest.TestCase):
             "recommended_tuning_actions": [],
         }
         normalized = self.ai_runner.validate_response(response)
-        markdown = self.ai_runner.render_markdown(
+        markdown = self.ai_runner._reporting_markdown().render(
             {"alert": {"alert_id": "alert-1", "rule_name": "Unit Test", "triage_level": "low"}, "analysis_policy": {}},
             normalized,
             "2026-07-07  10:00:00-06:00",
             self.root / "analysis.json",
+            normalize_correlation=self.ai_runner.normalize_correlation_assessment,
+            safe_filename=self.ai_runner.safe_filename,
+            bounded_text_list=self.ai_runner.bounded_text_list,
         )
 
         self.assertIn("## BLUF", markdown)

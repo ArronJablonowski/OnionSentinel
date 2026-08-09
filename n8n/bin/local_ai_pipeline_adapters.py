@@ -6,6 +6,47 @@ import sys
 from typing import Any, Callable, Mapping
 
 
+def write_outputs(
+    bindings: Mapping[str, Any],
+    prompt_path: Any,
+    prompt_package: dict[str, Any],
+    response: dict[str, Any],
+    args: Any,
+    analysis_id: str,
+) -> tuple[Any, Any, str]:
+    """Bind package-owned rendering and publication to legacy runtime values."""
+    b = bindings
+    generated_at = b["project_now"]()
+    reporting = b["_reporting_markdown"]()
+    publication = b["_reporting_publication"]()
+    plan = publication.build_plan(
+        prompt_path,
+        prompt_package,
+        response,
+        args,
+        analysis_id,
+        generated_at=generated_at,
+        safe_filename=b["safe_filename"],
+        filename_timestamp=b["filename_timestamp"],
+        render_markdown=lambda package, result, generated, json_path: (
+            reporting.render(
+                package,
+                result,
+                generated,
+                json_path,
+                normalize_correlation=b["normalize_correlation_assessment"],
+                safe_filename=b["safe_filename"],
+                bounded_text_list=b["bounded_text_list"],
+            )
+        ),
+        saved_response_input_mode=b["SAVED_RESPONSE_INPUT_MODE"],
+        default_second_opinion_prompt_file=(
+            b["DEFAULT_SECOND_OPINION_PROMPT_FILE"]
+        ),
+    )
+    return publication.publish(plan)
+
+
 def prepare_runtime(
     bindings: Mapping[str, Any],
     module: Any,

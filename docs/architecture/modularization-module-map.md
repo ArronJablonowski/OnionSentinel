@@ -75,6 +75,12 @@ line ranges below remain historical navigation aids for the extraction ledger.
   callables to package ports. It contains no investigation or persistence
   policy. `run-local-ai-analysis.py::main` is limited to stage composition,
   state handoff, terminal error classification, and the compatibility CLI.
+- Concrete Markdown rendering and atomic output-publication binding now live
+  in `local_ai_pipeline_adapters.write_outputs`; the runner transaction port
+  delegates directly and no longer retains `render_markdown` or
+  `write_outputs` compatibility symbols. The production installer and
+  executable compatibility manifest direct-copy this required adapter beside
+  the runner.
 - `analysis.query.runtime_adapter` owns the concrete per-invocation binding of
   provider, governed-query, harness-observation, prompt-admission, and audit
   ports to the package query coordinator. The legacy query entry point now

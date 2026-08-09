@@ -5702,47 +5702,6 @@ def markdown_list(items: list[str]) -> str:
     return _reporting_incident().markdown_list(items)
 
 
-def render_markdown(
-    prompt_package: dict[str, Any],
-    response: dict[str, Any],
-    generated_at: str,
-    json_path: Path,
-) -> str:
-    return _reporting_markdown().render(
-        prompt_package,
-        response,
-        generated_at,
-        json_path,
-        normalize_correlation=normalize_correlation_assessment,
-        safe_filename=safe_filename,
-        bounded_text_list=bounded_text_list,
-    )
-
-
-def write_outputs(
-    prompt_path: Path,
-    prompt_package: dict[str, Any],
-    response: dict[str, Any],
-    args: argparse.Namespace,
-    analysis_id: str,
-) -> tuple[Path, Path, str]:
-    generated_at = project_now()
-    plan = _reporting_publication().build_plan(
-        prompt_path,
-        prompt_package,
-        response,
-        args,
-        analysis_id,
-        generated_at=generated_at,
-        safe_filename=safe_filename,
-        filename_timestamp=filename_timestamp,
-        render_markdown=render_markdown,
-        saved_response_input_mode=SAVED_RESPONSE_INPUT_MODE,
-        default_second_opinion_prompt_file=DEFAULT_SECOND_OPINION_PROMPT_FILE,
-    )
-    return _reporting_publication().publish(plan)
-
-
 def _bootstrap_pipeline(module: Any, pipeline_module: Any, args: argparse.Namespace) -> Any:
     return module.bootstrap(
         args, environment=os.environ,
@@ -5795,6 +5754,7 @@ def _memory_guard_ports(
 
 def _publication_ports(
     module: Any,
+    legacy_adapters: Any,
     *,
     args: argparse.Namespace,
     run_id: str,
@@ -5807,8 +5767,8 @@ def _publication_ports(
     observe: Callable[[Callable[[], Any]], Any],
 ) -> Any:
     return module.PublicationPorts(
-        write_outputs=lambda: write_outputs(
-            prompt_path, prompt_package, response, args, run_id),
+        write_outputs=lambda: legacy_adapters.write_outputs(
+            globals(), prompt_path, prompt_package, response, args, run_id),
         build_payload=lambda generated, artifact: analysis_index_payload(
             run_id, prompt_package, response, args.reanalysis_attempt_id,
             started_at, generated, artifact),
@@ -6150,7 +6110,7 @@ def main() -> int:
                 indeterminate_message=CONTROLLED_RESULT_SUBMISSION_INDETERMINATE,
             ),
             ports=_publication_ports(
-                transaction_module, args=args, run_id=run_id,
+                transaction_module, legacy_adapters, args=args, run_id=run_id,
                 prompt_path=prompt_path, prompt_package=prompt_package,
                 response=response, started_at=started_at,
                 runtime_paths=runtime_paths, harness=harness_runtime,
