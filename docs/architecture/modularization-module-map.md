@@ -139,6 +139,10 @@ line ranges below remain historical navigation aids for the extraction ledger.
 - Canonical, digest-bound operator authorization validation now lives in
   `analysis.conclusions.authorization_evidence`; the runner retains private
   compatibility delegates used by characterization tests.
+- Selected-event versus grouped-history disposition normalization now lives in
+  `analysis.conclusions.scope`. Multi-observation history defaults to
+  unresolved monitoring unless the model supplies valid scoped values, while
+  invalid scope vocabulary is retained in a bounded validation audit.
 - Bounded evidence-reference normalization, source-class grouping, and
   immutable query/result digest binding now live in
   `analysis.evidence.references` as the first ARR-78 query-engine boundary.

@@ -2282,6 +2282,25 @@ def _conclusion_response():
     return response
 
 
+def _conclusion_scope():
+    _provider_routing()
+    from onion_sentinel.analysis.conclusions import scope
+    return scope
+
+
+def _conclusion_scope_policy():
+    return _conclusion_scope().Policy(
+        disposition_values=frozenset(ACTIVITY_DISPOSITION_VALUES),
+        handling_values=frozenset(HANDLING_VALUES),
+    )
+
+
+def _conclusion_scope_dependencies():
+    return _conclusion_scope().Dependencies(
+        bounded_text_list=bounded_text_list,
+    )
+
+
 def _conclusion_response_policy():
     module = _conclusion_response()
     return module.Policy(
@@ -7180,101 +7199,13 @@ def normalize_scope_dispositions(
     response: dict[str, Any],
     prompt_package: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Keep the selected event distinct from broader grouped history."""
-    raw = (
-        response.get("scope_dispositions")
-        if isinstance(response.get("scope_dispositions"), dict)
-        else {}
+    """Compatibility delegate for selected-event and group dispositions."""
+    return _conclusion_scope().normalize(
+        response,
+        prompt_package,
+        policy=_conclusion_scope_policy(),
+        dependencies=_conclusion_scope_dependencies(),
     )
-    raw_group = (
-        raw.get("group_history")
-        if isinstance(raw.get("group_history"), dict)
-        else {}
-    )
-    grouped = (
-        prompt_package.get("grouped_alert_context")
-        if isinstance(prompt_package, dict)
-        and isinstance(prompt_package.get("grouped_alert_context"), dict)
-        else {}
-    )
-    try:
-        observation_count = max(
-            1,
-            int(grouped.get("total_observations") or 1),
-        )
-    except (TypeError, ValueError, OverflowError):
-        observation_count = 1
-
-    group_disposition = re.sub(
-        r"[^a-z0-9]+",
-        "_",
-        str(raw_group.get("activity_disposition") or "").lower(),
-    ).strip("_")
-    group_handling = re.sub(
-        r"[^a-z0-9]+",
-        "_",
-        str(raw_group.get("handling") or "").lower(),
-    ).strip("_")
-    invalid_fields: list[str] = []
-    if group_disposition not in ACTIVITY_DISPOSITION_VALUES:
-        if group_disposition:
-            invalid_fields.append(
-                "scope_dispositions.group_history.activity_disposition"
-            )
-        group_disposition = (
-            str(response.get("activity_disposition") or "unknown")
-            if observation_count == 1
-            else "unknown"
-        )
-    if group_handling not in HANDLING_VALUES:
-        if group_handling:
-            invalid_fields.append(
-                "scope_dispositions.group_history.handling"
-            )
-        group_handling = (
-            str(response.get("handling") or "investigate")
-            if observation_count == 1
-            else "monitor"
-        )
-
-    supplied_group = bool(raw_group)
-    response["scope_dispositions"] = {
-        "selected_event": {
-            "activity_disposition": str(
-                response.get("activity_disposition") or "unknown"
-            ),
-            "handling": str(response.get("handling") or "investigate"),
-            "evidence_basis": bounded_text_list(
-                (
-                    raw.get("selected_event") or {}
-                ).get("evidence_basis")
-                if isinstance(raw.get("selected_event"), dict)
-                else [],
-                limit=20,
-                item_limit=1000,
-            ),
-        },
-        "group_history": {
-            "activity_disposition": group_disposition,
-            "handling": group_handling,
-            "evidence_basis": bounded_text_list(
-                raw_group.get("evidence_basis"),
-                limit=20,
-                item_limit=1000,
-            ),
-        },
-    }
-    response["_scope_disposition_validation"] = {
-        "schema": "onion-sentinel-scope-disposition-v1",
-        "selected_event_is_top_level_verdict": True,
-        "group_observation_count": observation_count,
-        "group_history_model_supplied": supplied_group,
-        "group_history_defaulted_to_unresolved": bool(
-            observation_count > 1 and not supplied_group
-        ),
-        "invalid_fields": invalid_fields,
-    }
-    return response
 
 
 def _has_trusted_endpoint_evidence(prompt_package: dict[str, Any] | None) -> bool:
