@@ -68,6 +68,8 @@ function createPcapPolicy({
     const sourceIp = safeString(merged.source_ip, 64);
     const destinationIp = safeString(merged.destination_ip, 64);
     if (!sourceIp || !destinationIp) throw new Error('pcap request requires source_ip and destination_ip');
+    // Exact representative alerts are anchored to their immutable event time.
+    // Ingestion and group rollup clocks can move when old events are replayed.
     const selectedEventTimestamp = normalizeTimestampValue(
       candidate.event_timestamp || candidate.timestamp,
     );

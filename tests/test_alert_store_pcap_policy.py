@@ -8,6 +8,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ALERT_STORE = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
 HEALTH_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "health_service.js"
 PCAP_ROUTES = REPO_ROOT / "n8n" / "alert_store" / "routes" / "pcap_routes.js"
+PCAP_POLICY = REPO_ROOT / "n8n" / "alert_store" / "lib" / "pcap_policy.js"
 SOC_ANALYSIS_POLICY = REPO_ROOT / "n8n" / "alert_store" / "lib" / "soc_analysis_policy.js"
 COMPOSE = REPO_ROOT / "n8n" / "docker-compose.yml"
 ENV_EXAMPLE = REPO_ROOT / "n8n" / ".env.example"
@@ -85,18 +86,28 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
 
     def test_pcap_requests_reject_work_outside_configured_capture_retention(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
+        pcap_policy = PCAP_POLICY.read_text(encoding="utf-8")
         env_example = ENV_EXAMPLE.read_text(encoding="utf-8")
         self.assertIn("PCAP_CAPTURE_RETENTION_SECONDS", code)
         self.assertIn("async function rejectExpiredPendingPcapRequests", code)
-        self.assertIn("PCAP request exceeds configured capture retention", code)
+        self.assertIn("PCAP request exceeds configured capture retention", pcap_policy)
         self.assertIn("PCAP_CAPTURE_RETENTION_SECONDS=345600", env_example)
 
     def test_pcap_requests_include_suricata_capture_file_when_available(self) -> None:
-        code = ALERT_STORE.read_text()
+        pcap_policy = PCAP_POLICY.read_text(encoding="utf-8")
 
-        self.assertIn("nestedField(rawEventJson, 'suricata.capture_file')", code)
-        self.assertIn("capture_file: safeString(merged.capture_file, 512) || null", code)
-        self.assertIn("capture_file: requestJson.capture_file || null", code)
+        self.assertIn(
+            "nestedField(rawEventJson, 'suricata.capture_file')",
+            pcap_policy,
+        )
+        self.assertIn(
+            "capture_file: safeString(merged.capture_file, 512) || null",
+            pcap_policy,
+        )
+        self.assertIn(
+            "capture_file: requestJson.capture_file || null",
+            pcap_policy,
+        )
 
     def test_pcap_parser_state_is_durable_and_reported_by_worker(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
@@ -133,9 +144,10 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
 
     def test_pcap_terminal_outcomes_and_storage_metrics_are_durable(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
+        pcap_policy = PCAP_POLICY.read_text(encoding="utf-8")
         health_service = HEALTH_SERVICE.read_text(encoding="utf-8")
         self.assertIn("ensureColumn('pcap_requests', 'outcome', 'TEXT')", code)
-        self.assertIn("function classifyPcapOutcome", code)
+        self.assertIn("function classifyPcapOutcome", pcap_policy)
         self.assertIn("backfillPcapOutcomes", code)
         self.assertIn("pcap_outcomes", health_service)
         self.assertIn("pcap_storage", health_service)
@@ -143,7 +155,8 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
 
     def test_singular_no_matching_packet_errors_are_normalized(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
-        self.assertIn("detail.includes('no matching packet')", code)
+        pcap_policy = PCAP_POLICY.read_text(encoding="utf-8")
+        self.assertIn("detail.includes('no matching packet')", pcap_policy)
         self.assertIn("outcome = 'failed'", code)
         self.assertIn("requestedOutcome !== 'failed'", code)
 
