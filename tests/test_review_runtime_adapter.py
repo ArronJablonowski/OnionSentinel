@@ -51,17 +51,6 @@ class ReviewRuntimeAdapterTests(unittest.TestCase):
         safe_copy.assert_called_once_with(
             {"owner_ref": "private"}, reviewer_safe=True)
 
-    def test_known_field_paths_include_every_pack_prefix(self) -> None:
-        paths = runtime_adapter.known_field_paths({
-            "INVESTIGATION_QUERY_PACK_DEFINITIONS": {
-                "dns": {"fields": ["zeek.dns.query.name"]},
-            }
-        })
-        self.assertIn("zeek.dns", paths)
-        self.assertIn("zeek.dns.query", paths)
-        self.assertIn("zeek.dns.query.name", paths)
-        self.assertIn("network.community_id", paths)
-
     def test_independent_package_uses_only_live_bounded_catalog_ports(self) -> None:
         package_module = mock.Mock()
         package_module.build.side_effect = lambda *_args, **kwargs: kwargs

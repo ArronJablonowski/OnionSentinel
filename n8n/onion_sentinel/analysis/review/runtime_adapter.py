@@ -32,20 +32,6 @@ def catalog_dependencies(b: Mapping[str, Any]) -> Any:
     )
 
 
-def known_field_paths(b: Mapping[str, Any]) -> frozenset[str]:
-    paths = {
-        "dns.question.name", "event.dataset", "event.module", "host.name",
-        "network.community_id", "process.name", "rule.id", "rule.name",
-        "rule.uuid", "suricata.flags", "source.ip", "destination.ip", "user.name",
-    }
-    for pack in b["INVESTIGATION_QUERY_PACK_DEFINITIONS"].values():
-        for field in pack.get("fields", []):
-            parts = str(field).lower().split(".")
-            for length in range(2, len(parts) + 1):
-                paths.add(".".join(parts[:length]))
-    return frozenset(paths)
-
-
 def observable_catalog(
     b: Mapping[str, Any], prompt_package: dict[str, Any],
 ) -> list[dict[str, str]]:

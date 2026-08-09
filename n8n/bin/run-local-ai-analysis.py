@@ -2542,7 +2542,16 @@ REVIEW_NON_DOMAIN_SUFFIXES = frozenset(
 )
 def _review_known_field_paths() -> frozenset[str]:
     """Return reviewed dotted field paths and their non-domain prefixes."""
-    return _review_runtime_adapter().known_field_paths(globals())
+    paths = {
+        "dns.question.name", "event.dataset", "event.module", "host.name",
+        "network.community_id", "process.name", "rule.id", "rule.name",
+        "rule.uuid", "suricata.flags", "source.ip", "destination.ip", "user.name",
+    }
+    for pack in INVESTIGATION_QUERY_PACK_DEFINITIONS.values():
+        for field in pack.get("fields", []):
+            parts = str(field).lower().split(".")
+            paths.update(".".join(parts[:length]) for length in range(2, len(parts) + 1))
+    return frozenset(paths)
 
 
 REVIEW_KNOWN_FIELD_PATHS = _review_known_field_paths()
@@ -2631,14 +2640,7 @@ def reviewer_observable_catalog(prompt_package: dict[str, Any]) -> list[dict[str
 def reviewer_non_domain_taxonomy_catalog(
     prompt_package: dict[str, Any],
 ) -> list[str]:
-    """Return exact dotted dataset/module labels that are not DNS names.
-
-    Dataset and module values such as ``suricata.alert`` share the lexical
-    shape of an FQDN.  They are safe to exempt from the narrative domain check
-    only when a collector-owned, semantically typed field in the current
-    evidence package supplies that exact value.  Arbitrary dotted prose and
-    values under unrelated keys never enter this catalog.
-    """
+    """Return collector-typed dotted dataset/module labels, not DNS names."""
     return _review_runtime_adapter().taxonomy_catalog(globals(), prompt_package)
 
 
@@ -2652,16 +2654,7 @@ def reviewer_non_domain_artifact_catalog(
 def reviewer_non_domain_rule_shorthand_catalog(
     prompt_package: dict[str, Any],
 ) -> list[str]:
-    """Return bounded detector-rule shorthands such as ``ET.BPFDoor``.
-
-    Review prose sometimes joins the uppercase detector namespace and a rule
-    token with a dot.  That looks like an FQDN lexically, but it is not a
-    foreign network observable when both components came from the current,
-    semantically typed rule label.  Only an uppercase 2-8 character namespace
-    at the start of that label may create these shorthands, and an exact dotted
-    value already present in the label is deliberately excluded so real DNS
-    names continue through the domain-observable validator.
-    """
+    """Return collector-typed detector-rule shorthands such as ET.BPFDoor."""
     return _review_runtime_adapter().rule_shorthand_catalog(
         globals(), prompt_package)
 
