@@ -31,6 +31,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
@@ -284,28 +285,41 @@ from cohort_freeze_state_composition import (
     validate_representative_binding as _validate_representative_binding,
     verify_zero_fresh_analyses as _verify_zero_fresh_analyses,
 )
-
-
-TRACE_EVALUATOR_PATH = Path(__file__).with_name("evaluate-harness-traces.py")
-
-
-def _parse_timestamp(value: Any, label: str) -> dt.datetime:
-    text = str(value or "").strip()
-    if not text:
-        raise CohortError(f"{label} is missing")
-    text = re.sub(
-        r"^(\d{4}-\d{2}-\d{2})\s+",
-        r"\1T",
-        text,
-        count=1,
-    )
-    try:
-        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise CohortError(f"{label} is not an ISO-8601 timestamp") from exc
-    if parsed.tzinfo is None:
-        raise CohortError(f"{label} must include a timezone")
-    return parsed.astimezone(dt.timezone.utc)
+from cohort_runtime_composition import (
+    TRACE_EVALUATOR_PATH,
+    analysis_metadata as _analysis_metadata,
+    analysis_metadata_policy as _analysis_metadata_policy,
+    bounded_query_audit_metadata as _bounded_query_audit_metadata,
+    cohort_dispatch_contract as _cohort_dispatch_contract,
+    cohort_monitor_contract as _cohort_monitor_contract,
+    dispatch_contract_ports as _dispatch_contract_ports,
+    dispatch_readback_sources as _cohort_dispatch_readback_sources,
+    dispatch_sources as runtime_dispatch_sources,
+    durable_job_monitor_state as _durable_job_monitor_state,
+    execution_proof_policy as _execution_proof_policy,
+    expected_task_kind as _expected_task_kind,
+    export_cohort as runtime_export_cohort,
+    export_sources as runtime_export_sources,
+    harness_execution_proof as runtime_harness_execution_proof,
+    load_trace_evaluator as runtime_load_trace_evaluator,
+    monitor_binding_sources as _cohort_monitor_binding_sources,
+    monitor_cohort,
+    monitor_cohort_once,
+    monitor_dispatch_job_binding as _monitor_dispatch_job_binding,
+    monitor_member,
+    monitor_sources as _cohort_monitor_sources,
+    monitor_contract_ports as _monitor_contract_ports,
+    parse_timestamp as _parse_timestamp,
+    prior_analysis_ids as _prior_analysis_ids,
+    query_audit_execution_binding as _query_audit_execution_binding,
+    query_audit_policy as _query_audit_policy,
+    queue_cohort as runtime_queue_cohort,
+    request_for_member as _request_for_member,
+    validate_completed_analysis_job_window as _validate_completed_analysis_job_window,
+    validate_dispatch_job_payload as _validate_dispatch_job_payload,
+    validate_success_response as _validate_success_response,
+    verify_dispatch_readback as _verify_dispatch_readback,
+)
 
 
 def freeze_cohort(
@@ -463,134 +477,15 @@ def freeze_cohort_from_rows(
     )
 
 
-def _dispatch_contract_ports() -> DispatchContractPorts:
-    return DispatchContractPorts(
-        validate_release_id=validate_release_id,
-        member_stable_group_key=_member_stable_group_key,
-        deterministic_dispatch_id=deterministic_dispatch_id,
-    )
-
-
-def _cohort_dispatch_contract() -> Any:
-    return build_dispatch_contract(_dispatch_contract_ports())
-
-
-def _request_for_member(
-    base_url: str,
-    manifest: Mapping[str, Any],
-    member: Mapping[str, Any],
-) -> tuple[str, dict[str, Any]]:
-    """Compatibility adapter for frozen dispatch request construction."""
-    return build_adapter_dispatch_request(
-        _dispatch_contract_ports(), base_url, manifest, member
-    )
-
-
-def _validate_success_response(
-    manifest: Mapping[str, Any],
-    member: Mapping[str, Any],
-    result: HttpResult,
-) -> dict[str, Any]:
-    """Compatibility adapter for dashboard acceptance validation."""
-    return validate_adapter_dispatch_response(
-        _dispatch_contract_ports(), manifest, member, result
-    )
-
-
-def _validate_dispatch_job_payload(
-    manifest: Mapping[str, Any],
-    member: Mapping[str, Any],
-    job: Mapping[str, Any],
-    *,
-    manual_reanalysis: bool,
-    expected_case_id: str = "",
-    expected_reanalysis_run_id: str = "",
-) -> dict[str, Any]:
-    """Compatibility adapter for durable dispatch payload validation."""
-    return validate_adapter_job_payload(
-        _dispatch_contract_ports(),
-        manifest,
-        member,
-        job,
-        manual_reanalysis=manual_reanalysis,
-        expected_case_id=expected_case_id,
-        expected_reanalysis_run_id=expected_reanalysis_run_id,
-    )
-
-
-def _cohort_dispatch_readback_sources() -> CohortDispatchReadbackSources:
-    return CohortDispatchReadbackSources(
-        ambiguous_dispatch_error=AmbiguousDispatchError,
-        active_job_states=frozenset(ACTIVE_JOB_STATES),
-        active_agent_states=frozenset(ACTIVE_AGENT_STATES),
-        active_reanalysis_states=frozenset(ACTIVE_REANALYSIS_STATES),
-        connect_read_only=connect_read_only,
-        load_aliases=load_aliases,
-        member_stable_group_key=_member_stable_group_key,
-        durable_dispatch_job=_durable_dispatch_job,
-        validate_dispatch_job_payload=_validate_dispatch_job_payload,
-        verify_zero_fresh_analyses=_verify_zero_fresh_analyses,
-        deterministic_dispatch_id=deterministic_dispatch_id,
-        case_for_stable=_case_for_stable,
-        resolve_alias=resolve_alias,
-    )
-
-
-def _verify_dispatch_readback(
-    database_path: Path,
-    manifest: Mapping[str, Any],
-    member: Mapping[str, Any],
-    accepted: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Compatibility adapter for durable dispatch readback proof."""
-    return prove_dispatch_readback(
-        _cohort_dispatch_readback_sources(),
-        database_path,
-        manifest,
-        member,
-        accepted,
-    )
-
-
-def _cohort_monitor_binding_sources() -> CohortMonitorBindingSources:
-    return CohortMonitorBindingSources(
-        cohort_error=CohortError,
-        sha256_pattern=SHA256_RE,
-        constant_time_equal=_constant_time_equal,
-        member_stable_group_key=_member_stable_group_key,
-        load_aliases=load_aliases,
-        current_summary_identity=_current_summary_identity,
-        validate_representative_binding=_validate_representative_binding,
-        durable_dispatch_job=_durable_dispatch_job,
-        validate_dispatch_job_payload=_validate_dispatch_job_payload,
-        deterministic_dispatch_id=deterministic_dispatch_id,
-        parse_timestamp=_parse_timestamp,
-        sha256_value=sha256_value,
-    )
-
-
-def _monitor_dispatch_job_binding(
-    connection: sqlite3.Connection,
-    manifest: Mapping[str, Any],
-    member: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Compatibility adapter for monitor-time durable-job rebinding."""
-    return prove_monitor_dispatch_binding(
-        _cohort_monitor_binding_sources(), connection, manifest, member
-    )
-
-
 def _cohort_dispatch_sources() -> CohortDispatchSources:
-    """Bind legacy queue patch points to the extracted dispatch workflow."""
-    return CohortDispatchSources(
-        cohort_error=CohortError,
-        ambiguous_dispatch_error=AmbiguousDispatchError,
+    """Rebind legacy façade patch points to the extracted runtime."""
+    return replace(
+        runtime_dispatch_sources(),
         load_private_manifest=load_private_manifest,
         validate_loopback_base_url=validate_loopback_base_url,
         load_evaluation_token=load_evaluation_token,
         validate_frozen_cohort=validate_frozen_cohort,
         deterministic_dispatch_id=deterministic_dispatch_id,
-        utc_now=utc_now,
         write_private_json=write_private_json,
         connect_read_only=connect_read_only,
         validate_member_preflight=validate_member_preflight,
@@ -598,10 +493,7 @@ def _cohort_dispatch_sources() -> CohortDispatchSources:
         validate_success_response=_validate_success_response,
         verify_dispatch_readback=_verify_dispatch_readback,
         dashboard_post_json=dashboard_post_json,
-        sha256_value=sha256_value,
     )
-
-
 def queue_cohort(
     database_path: Path,
     manifest_path: Path,
@@ -612,7 +504,6 @@ def queue_cohort(
     poster: Poster | None = None,
     evaluation_token_file: Path | None = None,
 ) -> dict[str, Any]:
-    """Compatibility adapter for the extracted cohort queue state machine."""
     return run_queue_cohort(
         _cohort_dispatch_sources(),
         database_path,
@@ -625,188 +516,8 @@ def queue_cohort(
     )
 
 
-def _analysis_metadata_policy() -> AnalysisMetadataPolicy:
-    return AnalysisMetadataPolicy(
-        error=CohortError,
-        require_columns=_require_columns,
-        response_sha256=alert_store_response_sha256,
-        query_audit_projection=_bounded_query_audit_metadata,
-    )
-
-
-def _analysis_metadata(
-    connection: sqlite3.Connection,
-    analysis_id: str,
-    stable_group_id: str,
-    *,
-    expected_alert_id: str,
-    expected_agent_role: str = "incident-responder",
-) -> dict[str, Any]:
-    return load_analysis_metadata(
-        connection,
-        analysis_id,
-        stable_group_id,
-        expected_alert_id=expected_alert_id,
-        expected_agent_role=expected_agent_role,
-        policy=_analysis_metadata_policy(),
-    )
-
-
-def _bounded_query_audit_metadata(response: Mapping[str, Any]) -> dict[str, Any]:
-    return project_query_audit(response)
-
-
-def _query_audit_policy() -> QueryAuditPolicy:
-    return QueryAuditPolicy(
-        successful_statuses=frozenset(
-            {"ok", "complete", "completed", "success", "succeeded"}
-        ),
-        sha256_pattern=SHA256_RE,
-        sha256_value=sha256_value,
-    )
-
-
-def _query_audit_execution_binding(
-    analysis: Mapping[str, Any],
-) -> dict[str, Any]:
-    return normalize_query_audit_binding(analysis, _query_audit_policy())
-
-
-def _second_opinion_metadata(
-    connection: sqlite3.Connection,
-    analysis_id: str,
-) -> dict[str, Any] | None:
-    return read_second_opinion_metadata(
-        connection,
-        analysis_id,
-    )
-
-
-def _monitor_contract_ports() -> MonitorContractPorts:
-    return MonitorContractPorts(parse_timestamp=_parse_timestamp)
-
-
-def _cohort_monitor_contract() -> Any:
-    return build_monitor_contract(_monitor_contract_ports())
-
-
-def _durable_job_monitor_state(job: Mapping[str, Any]) -> str:
-    """Compatibility adapter for durable-job monitor state validation."""
-    return resolve_adapter_job_monitor_state(_monitor_contract_ports(), job)
-
-
-def _validate_completed_analysis_job_window(
-    *,
-    dispatch: Mapping[str, Any],
-    job: Mapping[str, Any],
-    analysis: Mapping[str, Any],
-) -> None:
-    """Compatibility adapter for credited analysis time-window validation."""
-    validate_adapter_analysis_window(
-        _monitor_contract_ports(),
-        dispatch=dispatch,
-        job=job,
-        analysis=analysis,
-    )
-
-
-def _cohort_monitor_sources() -> CohortMonitorSources:
-    return CohortMonitorSources(
-        cohort_error=CohortError,
-        terminal_monitor_states=frozenset(TERMINAL_MONITOR_STATES),
-        monitor_dispatch_job_binding=_monitor_dispatch_job_binding,
-        durable_job_monitor_state=_durable_job_monitor_state,
-        analysis_ids_for_group=_analysis_ids_for_group,
-        analysis_metadata=_analysis_metadata,
-        validate_completed_analysis_job_window=(
-            _validate_completed_analysis_job_window
-        ),
-        second_opinion_metadata=_second_opinion_metadata,
-        utc_now=utc_now,
-        load_aliases=load_aliases,
-        case_for_stable=_case_for_stable,
-        reanalysis_run_case=_reanalysis_monitor_case,
-        resolve_alias=resolve_alias,
-        frozen_analysis_ids=_frozen_analysis_ids,
-        load_private_manifest=load_private_manifest,
-        connect_read_only=connect_read_only,
-        write_private_json=write_private_json,
-        monotonic=time.monotonic,
-        sleep=time.sleep,
-    )
-
-
-def monitor_member(
-    connection: sqlite3.Connection,
-    manifest: Mapping[str, Any],
-    member: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Compatibility adapter for exact terminal member observation."""
-    return observe_monitor_member(
-        _cohort_monitor_sources(), connection, manifest, member
-    )
-
-
-def monitor_cohort_once(
-    database_path: Path,
-    manifest_path: Path,
-) -> tuple[dict[str, Any], bool]:
-    """Compatibility adapter for one sealed cohort monitor snapshot."""
-    return run_monitor_cohort_once(
-        _cohort_monitor_sources(), database_path, manifest_path
-    )
-
-
-def monitor_cohort(
-    database_path: Path,
-    manifest_path: Path,
-    *,
-    timeout: float,
-    poll_interval: float,
-) -> tuple[dict[str, Any], bool]:
-    """Compatibility adapter for bounded cohort polling."""
-    return run_monitor_cohort(
-        _cohort_monitor_sources(),
-        database_path,
-        manifest_path,
-        timeout=timeout,
-        poll_interval=poll_interval,
-    )
-
-
 def _load_trace_evaluator() -> Any:
-    spec = importlib.util.spec_from_file_location(
-        "onion_sentinel_cohort_trace_evaluator",
-        TRACE_EVALUATOR_PATH,
-    )
-    if spec is None or spec.loader is None:
-        raise CohortError("could not load the harness trace evaluator")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _prior_analysis_ids(member: Mapping[str, Any]) -> set[str]:
-    """Compatibility adapter for frozen prior-analysis identities."""
-    return collect_prior_analysis_ids(member)
-
-
-def _expected_task_kind(role: str, dispatch_kind: str) -> str:
-    """Compatibility adapter for role/dispatch task-kind binding."""
-    return resolve_expected_task_kind(role, dispatch_kind, CohortError)
-
-
-def _execution_proof_policy() -> ExecutionProofPolicy:
-    return ExecutionProofPolicy(
-        error=CohortError,
-        parse_timestamp=_parse_timestamp,
-        sha256_pattern=SHA256_RE,
-        skill_id_pattern=SKILL_ID_RE,
-        maximum_selected_skills=MAX_ATTESTED_INVESTIGATION_SKILLS,
-        model_call_contract_schema=MODEL_CALL_CONTRACT_SCHEMA,
-        maximum_model_calls=MAX_RUNTIME_MODEL_CALLS,
-        sha256_value=sha256_value,
-    )
+    return runtime_load_trace_evaluator()
 
 
 def _harness_execution_proof(
@@ -829,16 +540,10 @@ def _harness_execution_proof(
 
 
 def _cohort_export_sources() -> CohortExportSources:
-    return CohortExportSources(
-        cohort_error=CohortError,
-        export_schema=EXPORT_SCHEMA,
+    return replace(
+        runtime_export_sources(),
         monitor_cohort_once=monitor_cohort_once,
         harness_execution_proof=_harness_execution_proof,
-        member_stable_group_key=_member_stable_group_key,
-        utc_now=utc_now,
-        sha256_value=sha256_value,
-        ordered_identity_projection=ordered_identity_projection,
-        write_private_json=write_private_json,
     )
 
 
@@ -849,7 +554,6 @@ def export_cohort(
     *,
     harness_database_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Compatibility adapter for a digest-sealed terminal cohort export."""
     return run_export_cohort(
         _cohort_export_sources(),
         database_path,
@@ -857,6 +561,8 @@ def export_cohort(
         output_path,
         harness_database_path=harness_database_path,
     )
+
+
 
 
 def build_parser() -> argparse.ArgumentParser:

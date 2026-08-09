@@ -846,6 +846,11 @@ admission, cohort state projections, representative identity binding, and
 frozen-member preflight into one bounded service used by freeze, dispatch, and
 monitor workflows.
 
+`operations/cohort_runtime_composition.py` composes bounded dispatch,
+acceptance readback, terminal monitoring, analysis/query metadata, execution
+proof, and digest-sealed export. The runner service re-exports this API as a
+thin compatibility façade.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

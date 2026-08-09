@@ -181,6 +181,29 @@
       ]
     },
     {
+      "path": "operations/cohort_runtime_composition.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_runtime_composition.py",
+      "required_symbols": [
+        "parse_timestamp",
+        "dispatch_contract_ports",
+        "dispatch_readback_sources",
+        "monitor_binding_sources",
+        "dispatch_sources",
+        "queue_cohort",
+        "analysis_metadata",
+        "query_audit_execution_binding",
+        "monitor_sources",
+        "monitor_member",
+        "monitor_cohort_once",
+        "monitor_cohort",
+        "execution_proof_policy",
+        "harness_execution_proof",
+        "export_sources",
+        "export_cohort"
+      ]
+    },
+    {
       "path": "operations/run-incident-harness-cohort.py",
       "deployment": "repository-only",
       "runtime_path": "operations/run-incident-harness-cohort.py",

@@ -57,9 +57,6 @@
     "operations/benchmark-ollama-cybersecurity.py": {
       "max_lines": 1164
     },
-    "operations/cohort_runner_service.py": {
-      "max_lines": 882
-    },
     "relay/app/relay.py": {
       "max_lines": 2098
     },
@@ -709,5 +706,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "6dcef87b213968be9069ddef4d9c1b7ce3686cc3"
+  "source_release": "eb9e8bd7bf94a8c3950a2731a8d331d028da8484"
 }
