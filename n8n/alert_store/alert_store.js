@@ -34,6 +34,7 @@ const {createAiReviewRepository} = require('./repositories/ai_review_repository'
 const {createPcapRequestRepository} = require('./repositories/pcap_request_repository');
 const {createPcapTransferRepository} = require('./repositories/pcap_transfer_repository');
 const {createHealthService} = require('./services/health_service');
+const {createAiAnalysisAcceptance} = require('./services/ai_analysis_acceptance');
 const {createIncidentAnalysisCompletion} = require('./services/incident_analysis_completion');
 const {createIncidentReanalysisBindingService} = require('./services/incident_reanalysis_binding');
 const {createHealthRoutes} = require('./routes/health_routes');
@@ -2830,226 +2831,7 @@ async function backfillAlertObservables() {
 }
 
 async function recordAiAnalysisResult(payload) {
-  const alertId = safeString(payload?.alert_id, 1024);
-  const analysisId = safeString(payload?.analysis_id, 128).toLowerCase();
-  if (!alertId || !analysisId || !/^[a-z0-9_-]{8,128}$/.test(analysisId)) {
-    throw new Error('analysis_id and alert_id are required');
-  }
-  const alertRow = await get(
-    'SELECT alert_id, stable_group_id, stable_group_key FROM alerts WHERE alert_id = ?',
-    [alertId],
-  );
-  if (!alertRow) throw new Error('analysis alert_id not found');
-  const response = payload?.response && typeof payload.response === 'object' ? payload.response : {};
-  const generatedAt = safeString(payload?.generated_at, 64) || nowUtc();
-  const groupId = alertRow.stable_group_id;
-  if (!groupId) throw new Error('analysis alert has no stable group identity');
-  const requestedAgentRole = safeString(payload?.agent_role || 'soc-analyst', 64).toLowerCase();
-  const agentRole = supportedAgentRoles.has(requestedAgentRole) ? requestedAgentRole : 'soc-analyst';
-  const model = safeString(payload?.model || response._analysis_model, 200);
-  const modelPath = safeString(payload?.model_path || response._analysis_model_path, 100);
-  const detectionOutcome = safeString(response.detection_outcome, 100);
-  const bluf = safeString(response.bluf, 4000);
-  const summary = safeString(response.summary, 8000);
-  const confidence = safeString(response.confidence, 16).toLowerCase();
-  const artifactPath = safeString(payload?.artifact_path, 2048);
-  const evidenceHash = safeString(payload?.evidence_hash, 128).toLowerCase();
-  const responseJson = jsonText(response);
-  const storedResponseSha256 = crypto
-    .createHash('sha256')
-    .update(canonicalJsonText(response))
-    .digest('hex');
-
-  // analysis_id is an immutable acceptance key, not an upsert handle. An
-  // exact replay is a read-only success; any changed provenance or content is
-  // rejected before second-opinion, case, event, or correlation state can be
-  // rewritten.
-  const accepted = await get(
-    `SELECT analysis_id, group_id, alert_id, agent_role, generated_at, model,
-            model_path, detection_outcome, bluf, summary, confidence,
-            artifact_path, evidence_hash, response_json
-     FROM ai_analysis_runs WHERE analysis_id = ?`,
-    [analysisId],
-  );
-  if (accepted) {
-    const existingResponse = parseJsonObject(accepted.response_json);
-    const comparisons = {
-      group_id: [safeString(accepted.group_id, 64), groupId],
-      alert_id: [safeString(accepted.alert_id, 1024), alertId],
-      agent_role: [safeString(accepted.agent_role, 64), agentRole],
-      generated_at: [
-        normalizeTimestampValue(accepted.generated_at),
-        normalizeTimestampValue(generatedAt),
-      ],
-      model: [safeString(accepted.model, 200), model],
-      model_path: [safeString(accepted.model_path, 100), modelPath],
-      detection_outcome: [
-        safeString(accepted.detection_outcome, 100),
-        detectionOutcome,
-      ],
-      bluf: [safeString(accepted.bluf, 4000), bluf],
-      summary: [safeString(accepted.summary, 8000), summary],
-      confidence: [safeString(accepted.confidence, 16).toLowerCase(), confidence],
-      artifact_path: [safeString(accepted.artifact_path, 2048), artifactPath],
-      evidence_hash: [
-        safeString(accepted.evidence_hash, 128).toLowerCase(),
-        evidenceHash,
-      ],
-      response_json: [
-        canonicalJsonText(existingResponse),
-        canonicalJsonText(response),
-      ],
-    };
-    const changedFields = Object.entries(comparisons)
-      .filter(([, values]) => values[0] !== values[1])
-      .map(([field]) => field);
-    if (changedFields.length) {
-      const error = new Error(
-        `analysis_id already exists with different immutable fields: ${changedFields.join(', ')}`,
-      );
-      error.statusCode = 409;
-      throw error;
-    }
-    const existingAttempt = await get(
-      `SELECT attempt_id, run_id, case_id, started_at,
-              rowid AS attempt_order
-       FROM incident_reanalysis_attempts WHERE analysis_id = ?`,
-      [analysisId],
-    );
-    const hasAttemptField = Object.prototype.hasOwnProperty.call(
-      payload || {},
-      'reanalysis_attempt_id',
-    );
-    const suppliedAttemptId = safeString(
-      payload?.reanalysis_attempt_id,
-      80,
-    ).toLowerCase();
-    if (suppliedAttemptId && !/^ira-[a-f0-9]{40}$/.test(suppliedAttemptId)) {
-      const error = new Error('reanalysis_attempt_id is invalid');
-      error.statusCode = 400;
-      throw error;
-    }
-    if (
-      (existingAttempt && hasAttemptField
-        && suppliedAttemptId !== existingAttempt.attempt_id)
-      || (!existingAttempt && suppliedAttemptId)
-    ) {
-      const error = new Error(
-        'analysis_id replay does not match its immutable reanalysis attempt',
-      );
-      error.statusCode = 409;
-      throw error;
-    }
-    const incidentReanalysisBinding = existingAttempt
-      ? await incidentReanalysisBindingAuthority(existingAttempt)
-      : null;
-    const secondOpinionRow = await get(
-      'SELECT 1 AS present FROM ai_second_opinion_runs WHERE analysis_id = ?',
-      [analysisId],
-    );
-    const adjudicationRow = await get(
-      'SELECT 1 AS present FROM ai_disagreement_adjudication_runs WHERE analysis_id = ?',
-      [analysisId],
-    );
-    const correlationRow = await get(
-      'SELECT COUNT(*) AS count FROM alert_correlations WHERE analysis_id = ?',
-      [analysisId],
-    );
-    return {
-      ok: true,
-      status: 'analysis_indexed',
-      idempotent: true,
-      analysis_id: analysisId,
-      stored_response_sha256: storedResponseSha256,
-      group_id: groupId,
-      correlations: Number(correlationRow?.count || 0),
-      second_opinion_recorded: Boolean(secondOpinionRow),
-      disagreement_adjudication_recorded: Boolean(adjudicationRow),
-      reanalysis_run_id: incidentReanalysisBinding?.run_id || null,
-      reanalysis_attempt_id: incidentReanalysisBinding?.attempt_id || null,
-      reanalysis_authoritative: incidentReanalysisBinding
-        ? incidentReanalysisBinding.authoritative !== false
-        : null,
-    };
-  }
-
-  await run(
-    `INSERT INTO ai_analysis_runs (
-       analysis_id, group_id, alert_id, agent_role, generated_at, model, model_path,
-       detection_outcome, bluf, summary, confidence, artifact_path,
-       evidence_hash, response_json, created_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(analysis_id) DO NOTHING`,
-    [
-      analysisId,
-      groupId,
-      alertId,
-      agentRole,
-      generatedAt,
-      model,
-      modelPath,
-      detectionOutcome,
-      bluf,
-      summary,
-      confidence,
-      artifactPath,
-      evidenceHash,
-      responseJson,
-      nowUtc(),
-    ],
-  );
-
-  const secondOpinionRecorded = await aiReviewRepository.recordSecondOpinion({
-    analysisId,
-    groupId,
-    alertId,
-    agentRole,
-    generatedAt,
-    model: payload?.model,
-    modelPath: payload?.model_path,
-    response,
-  });
-  const disagreementAdjudicationRecorded = (
-    await aiReviewRepository.recordDisagreementAdjudication({
-      analysisId,
-      groupId,
-      alertId,
-      agentRole,
-      generatedAt,
-      response,
-    })
-  );
-
-  const incidentReanalysisBinding = await incidentAnalysisCompletion.complete({
-    agentRole,
-    groupId,
-    analysisId,
-    payload,
-    response,
-    generatedAt,
-  });
-
-  const correlations = await aiCorrelationRepository.recordCorrelations({
-    groupId,
-    analysisId,
-    assessment: response.correlation_assessment,
-    candidates: payload?.correlation_candidates,
-  });
-  return {
-    ok: true,
-    status: 'analysis_indexed',
-    analysis_id: analysisId,
-    stored_response_sha256: storedResponseSha256,
-    group_id: groupId,
-    correlations,
-    second_opinion_recorded: secondOpinionRecorded,
-    disagreement_adjudication_recorded: disagreementAdjudicationRecorded,
-    reanalysis_run_id: incidentReanalysisBinding?.run_id || null,
-    reanalysis_attempt_id: incidentReanalysisBinding?.attempt_id || null,
-    reanalysis_authoritative: incidentReanalysisBinding
-      ? incidentReanalysisBinding.authoritative !== false
-      : null,
-  };
+  return aiAnalysisAcceptance.record(payload);
 }
 
 function validAnalystGroupId(value) {
@@ -8687,6 +8469,21 @@ const incidentAnalysisCompletion = createIncidentAnalysisCompletion({
   jsonText,
   nowUtc,
   bindIncidentReanalysisResult,
+});
+const aiAnalysisAcceptance = createAiAnalysisAcceptance({
+  get,
+  run,
+  safeString,
+  jsonText,
+  nowUtc,
+  parseJsonObject,
+  canonicalJsonText,
+  normalizeTimestampValue,
+  supportedAgentRoles,
+  incidentReanalysisBindingAuthority,
+  aiReviewRepository,
+  incidentAnalysisCompletion,
+  aiCorrelationRepository,
 });
 
 async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppression, campaign = null) {
