@@ -35,6 +35,8 @@ import trace_evaluation_model_routes  # noqa: E402
 import trace_evaluation_run  # noqa: E402
 import trace_evaluation_output  # noqa: E402
 import trace_evaluation_summary  # noqa: E402
+import trace_evaluation_events  # noqa: E402
+import trace_evaluation_contract  # noqa: E402
 
 HARNESS_SPEC = importlib.util.spec_from_file_location(
     "evaluator_test_harness_module",
@@ -643,6 +645,25 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
         self.assertIs(
             evaluator.summarize_trace_runs,
             trace_evaluation_summary.summarize,
+        )
+
+    def test_evaluator_uses_extracted_event_and_contract_services(self):
+        self.assertIs(
+            evaluator.trace_budget_operation_id,
+            trace_evaluation_events.budget_operation_id,
+        )
+        self.assertIs(
+            evaluator.evaluate_tool_coverage_gaps,
+            trace_evaluation_events.unresolved_tool_coverage_gaps,
+        )
+        self.assertIs(evaluator.safe_json, trace_evaluation_contract.safe_json)
+        self.assertIs(
+            evaluator.EvaluationError,
+            trace_evaluation_contract.EvaluationError,
+        )
+        self.assertEqual(
+            evaluator.RUN_IDENTITY_COLUMNS,
+            trace_evaluation_contract.RUN_IDENTITY_COLUMNS,
         )
 
     def test_resolved_repair_is_not_reported_as_tool_coverage_gap(self) -> None:
@@ -1955,6 +1976,20 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
             (
                 'cp "$REPO_DIR/operations/trace_evaluation_summary.py" '
                 '"$STACK_DIR/bin/trace_evaluation_summary.py"'
+            ),
+            source,
+        )
+        self.assertIn(
+            (
+                'cp "$REPO_DIR/operations/trace_evaluation_events.py" '
+                '"$STACK_DIR/bin/trace_evaluation_events.py"'
+            ),
+            source,
+        )
+        self.assertIn(
+            (
+                'cp "$REPO_DIR/operations/trace_evaluation_contract.py" '
+                '"$STACK_DIR/bin/trace_evaluation_contract.py"'
             ),
             source,
         )

@@ -569,6 +569,18 @@ budget, memory, coverage, skill, and data-quality dimensions; small report
 section builders preserve the stable aggregate JSON schema while database reads,
 normalization, ratios, timestamps, and limits remain injected composition ports.
 
+`operations/trace_evaluation_events.py` owns logical tool-query terminal outcome
+resolution plus safe terminal and budget control-event projection. It preserves
+failed attempts in the ledger while allowing only a later terminal success for
+the same query identity to resolve a coverage gap, and derives stable legacy and
+current budget operation identities without exporting response content.
+
+`operations/trace_evaluation_contract.py` owns stable trace report schemas,
+limits, manifest and run identity columns, status vocabularies, error identity,
+and pure canonicalization, digest, normalization, ratio, integer, and bounded
+JSON primitives. The evaluator imports these symbols as its public compatibility
+surface while remaining a sub-600-line composition root.
+
 `operations/cohort_freezing.py` owns database-newest and exact-imported-row
 cohort freezing. Immutable policy and explicit source ports bind identity
 validation, read-only database snapshots, representative-alert custody,

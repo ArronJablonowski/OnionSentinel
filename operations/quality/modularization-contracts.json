@@ -292,6 +292,29 @@
       ]
     },
     {
+      "path": "operations/trace_evaluation_events.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/trace_evaluation_events.py",
+      "required_symbols": [
+        "TraceEventPolicy",
+        "tool_query_id",
+        "unresolved_tool_coverage_gaps",
+        "terminal_execution_summary",
+        "budget_operation_id"
+      ]
+    },
+    {
+      "path": "operations/trace_evaluation_contract.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/trace_evaluation_contract.py",
+      "required_symbols": [
+        "EvaluationError",
+        "RUN_IDENTITY_COLUMNS",
+        "canonical_json",
+        "safe_json"
+      ]
+    },
+    {
       "path": "operations/cohort_execution_models.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_execution_models.py",

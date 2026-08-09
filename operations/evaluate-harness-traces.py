@@ -11,11 +11,8 @@ from __future__ import annotations
 import argparse
 import collections
 import contextlib
-import datetime as dt
-import hashlib
 import json
 import os
-import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -73,249 +70,82 @@ from trace_evaluation_summary import (
     TraceSummaryServices,
     summarize as summarize_trace_runs,
 )
+from trace_evaluation_events import (
+    TraceEventPolicy,
+    budget_operation_id as trace_budget_operation_id,
+    terminal_execution_summary as evaluate_terminal_execution_summary,
+    tool_query_id as trace_tool_query_id,
+    unresolved_tool_coverage_gaps as evaluate_tool_coverage_gaps,
+)
+from trace_evaluation_contract import (
+    ADJUDICATION_CALL_IDS,
+    ADJUDICATION_PURPOSE,
+    CURRENT_SQL_SCHEMA_VERSION,
+    DEFAULT_DB,
+    EvaluationError,
+    FAILURE_STATUSES,
+    FOLLOWUP_CALL_RE,
+    GAP_COVERAGE,
+    JOB_ENVELOPE_DIGEST_FIELDS,
+    LEDGER_MANIFEST_SCHEMA,
+    LEDGER_MANIFEST_SCHEMA_V1,
+    LEGACY_RUN_IDENTITY_COLUMNS_V1,
+    MATERIAL_REVIEW_FIELDS,
+    MAX_ATTESTED_INVESTIGATION_SKILLS,
+    MAX_REPORTED_IDS,
+    MAX_RUNTIME_MODEL_CALLS,
+    MODEL_CALL_CONTRACT_SCHEMA,
+    OPTIONAL_TABLES,
+    PRIMARY_INITIAL_CALL_ID,
+    PRIMARY_INITIAL_PURPOSE,
+    QUERY_PLANNING_CALL_ID,
+    QUERY_PLANNING_PURPOSE,
+    QUERY_PLANNING_REPAIR_CALL_ID,
+    QUERY_PLANNING_REPAIR_PURPOSE,
+    REJECTION_STATUSES,
+    REPORT_SCHEMA,
+    REQUIRED_TABLES,
+    REVIEWER_REPAIR_CALL_IDS,
+    REVIEWER_REPAIR_PURPOSE,
+    RUN_IDENTITY_COLUMNS,
+    SHA256_RE,
+    SKILL_SELECTION_ATTESTATION_KEYS,
+    SKILL_SELECTION_ID_RE,
+    SUCCESS_STATUSES,
+    SUPPLEMENTAL_REVIEW_CALL_ID,
+    SUPPLEMENTAL_REVIEW_PURPOSE,
+    SUPPORTED_LEDGER_MANIFEST_SCHEMAS,
+    TERMINAL_STATUSES,
+    VALIDATION_FAILED_STATUS,
+    canonical_json,
+    digest_json,
+    nonnegative_int,
+    normalize_status,
+    ratio,
+    safe_json,
+    utc_now,
+)
 
 
-REPORT_SCHEMA = "onion-sentinel-harness-trace-evaluation-v1"
-LEDGER_MANIFEST_SCHEMA_V1 = "onion-sentinel-harness-ledger-manifest-v1"
-LEDGER_MANIFEST_SCHEMA = "onion-sentinel-harness-ledger-manifest-v2"
-CURRENT_SQL_SCHEMA_VERSION = 4
-DEFAULT_DB = (
-    Path.home()
-    / "n8n-local"
-    / "alert_store_data"
-    / "investigation-harness.sqlite3"
-)
-REQUIRED_TABLES = frozenset({"harness_runs", "harness_events"})
-OPTIONAL_TABLES = frozenset(
-    {
-        "harness_evidence",
-        "harness_hypotheses",
-        "harness_decisions",
-        "harness_model_calls",
-        "harness_tool_calls",
-        "harness_budget_reservations",
-    }
-)
-TERMINAL_STATUSES = frozenset(
-    {"succeeded", "failed", "cancelled"}
-)
-SUCCESS_STATUSES = frozenset(
-    {"ok", "complete", "completed", "success", "succeeded"}
-)
-REVIEWER_REPAIR_PURPOSE = "independent second-opinion review"
-REVIEWER_REPAIR_CALL_IDS = (
-    "independent-review-1",
-    "independent-review-2",
-)
-ADJUDICATION_PURPOSE = "bounded disagreement adjudication"
-ADJUDICATION_CALL_IDS = (
-    "disagreement-adjudication-1",
-    "disagreement-adjudication-2",
-)
-VALIDATION_FAILED_STATUS = "validation-failed"
-MODEL_CALL_CONTRACT_SCHEMA = "onion-sentinel-model-call-contract-v1"
-MAX_RUNTIME_MODEL_CALLS = 6
-PRIMARY_INITIAL_CALL_ID = "primary-initial"
-PRIMARY_INITIAL_PURPOSE = "initial primary analysis"
-QUERY_PLANNING_CALL_ID = "primary-query-planning-retry-1"
-QUERY_PLANNING_PURPOSE = "evaluation query-planning retry 1 of 1"
-QUERY_PLANNING_REPAIR_CALL_ID = "primary-query-planning-repair-1"
-QUERY_PLANNING_REPAIR_PURPOSE = "primary query-planning repair 1 of 1"
-FOLLOWUP_CALL_RE = re.compile(r"primary-followup-([1-3])")
-SUPPLEMENTAL_REVIEW_CALL_ID = "independent-review-supplemental-1"
-SUPPLEMENTAL_REVIEW_PURPOSE = (
-    "independent reviewer supplemental reconciliation round 1"
-)
-REJECTION_STATUSES = frozenset(
-    {"rejected", "denied", "blocked", "unauthorized", "forbidden"}
-)
-FAILURE_STATUSES = frozenset(
-    {"error", "failed", "failure", "timeout", "timed-out", "missing"}
-)
-GAP_COVERAGE = frozenset(
-    {"", "unknown", "evidence-gap", "missing", "unavailable", "not-collected"}
-)
+def _trace_event_policy() -> TraceEventPolicy:
+    return TraceEventPolicy(
+        success_statuses=SUCCESS_STATUSES,
+        rejection_statuses=REJECTION_STATUSES,
+        gap_coverage=GAP_COVERAGE,
+        normalize_status=normalize_status,
+        nonnegative_int=nonnegative_int,
+        safe_json=safe_json,
+    )
 
 
 def tool_query_id(row: Mapping[str, Any]) -> str:
-    """Return the logical query id encoded in a collector-owned call id."""
-    call_id = str(row.get("call_id") or "")
-    round_number = nonnegative_int(row.get("round_number"))
-    prefix = f"round-{round_number}-"
-    return call_id[len(prefix) :] if call_id.startswith(prefix) else ""
+    return trace_tool_query_id(row, _trace_event_policy())
 
 
 def unresolved_tool_coverage_gaps(
     tool_calls: Iterable[Mapping[str, Any]],
 ) -> list[str]:
-    """Keep failed attempts auditable while grading their terminal outcome.
-
-    The runtime permits a single deterministic repair only under the original
-    query id and validates that it cannot widen scope.  Therefore an earlier
-    gap for that id is resolved only when a later ledger row is successful;
-    an unrepaired or terminally failed id remains a coverage gap.
-    """
-    ordered = sorted(
-        tool_calls,
-        key=lambda row: (
-            nonnegative_int(row.get("round_number")),
-            str(row.get("call_id") or ""),
-        ),
-    )
-    terminal_by_query_id: dict[str, Mapping[str, Any]] = {}
-    standalone_gaps: list[str] = []
-    for row in ordered:
-        query_id = tool_query_id(row)
-        if query_id:
-            terminal_by_query_id[query_id] = row
-        elif (
-            normalize_status(row.get("coverage")) in GAP_COVERAGE
-            or normalize_status(row.get("status"))
-            not in (SUCCESS_STATUSES | REJECTION_STATUSES)
-        ):
-            standalone_gaps.append(str(row.get("call_id") or ""))
-    unresolved = list(standalone_gaps)
-    for row in terminal_by_query_id.values():
-        if (
-            normalize_status(row.get("coverage")) in GAP_COVERAGE
-            or normalize_status(row.get("status"))
-            not in SUCCESS_STATUSES
-        ):
-            unresolved.append(str(row.get("call_id") or ""))
-    return unresolved
-MATERIAL_REVIEW_FIELDS = (
-    "detection_outcome",
-    "event_status",
-    "detection_validity",
-    "activity_disposition",
-    "handling",
-    "duplicate_of",
-)
-MAX_REPORTED_IDS = 100
-SKILL_SELECTION_ATTESTATION_KEYS = frozenset(
-    {
-        "registry_version",
-        "registry_sha256",
-        "selected",
-        "selected_count",
-        "truncated",
-        "advisory_mode",
-    }
-)
-SKILL_SELECTION_ID_RE = re.compile(
-    r"^[A-Za-z0-9.][A-Za-z0-9._:@+=/-]{0,255}$"
-)
-SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
-MAX_ATTESTED_INVESTIGATION_SKILLS = 4
-JOB_ENVELOPE_DIGEST_FIELDS = (
-    "run_id",
-    "trace_id",
-    "correlation_id",
-    "case_id",
-    "alert_id",
-    "role",
-    "task_kind",
-    "assigned_route",
-    "assigned_reviewer_route",
-    "prompt_digest",
-    "evidence_manifest_digest",
-    "configuration_digest",
-    "parent_run_id",
-)
-RUN_IDENTITY_COLUMNS = (
-    "run_id",
-    "trace_id",
-    "correlation_id",
-    "case_id",
-    "alert_id",
-    "role",
-    "task_kind",
-    "assigned_route",
-    "assigned_reviewer_route",
-    "prompt_digest",
-    "evidence_manifest_digest",
-    "configuration_digest",
-    "policy_version",
-    "policy_digest",
-    "policy_mode",
-    "parent_run_id",
-    "job_digest",
-    "started_at",
-)
-LEGACY_RUN_IDENTITY_COLUMNS_V1 = tuple(
-    column
-    for column in RUN_IDENTITY_COLUMNS
-    if column != "assigned_reviewer_route"
-)
-SUPPORTED_LEDGER_MANIFEST_SCHEMAS = frozenset(
-    {LEDGER_MANIFEST_SCHEMA_V1, LEDGER_MANIFEST_SCHEMA}
-)
-
-
-class EvaluationError(RuntimeError):
-    """The requested trace evaluation cannot be completed safely."""
-
-
-def utc_now() -> str:
-    return (
-        dt.datetime.now(dt.timezone.utc)
-        .replace(microsecond=0)
-        .isoformat()
-        .replace("+00:00", "Z")
-    )
-
-
-def canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        default=str,
-    )
-
-
-def digest_json(value: Any) -> str:
-    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
-
-
-def ratio(numerator: int | float, denominator: int | float) -> float | None:
-    if not denominator:
-        return None
-    return round(float(numerator) / float(denominator), 4)
-
-
-def normalize_status(value: object) -> str:
-    return str(value or "").strip().lower().replace("_", "-")
-
-
-def nonnegative_int(value: object) -> int:
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError, OverflowError):
-        return 0
-
-
-def safe_json(
-    value: object,
-    default: Any,
-    malformed: collections.Counter[str],
-    label: str,
-) -> Any:
-    if not isinstance(value, str):
-        malformed[label] += 1
-        return default
-    try:
-        decoded = json.loads(value)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        malformed[label] += 1
-        return default
-    if not isinstance(decoded, type(default)):
-        malformed[label] += 1
-        return default
-    return decoded
-
-
+    return evaluate_tool_coverage_gaps(tool_calls, _trace_event_policy())
 def _trace_skill_policy() -> TraceSkillPolicy:
     return TraceSkillPolicy(
         attestation_keys=SKILL_SELECTION_ATTESTATION_KEYS,
@@ -526,79 +356,16 @@ def terminal_execution_summary(
     run_status: object,
     malformed: collections.Counter[str],
 ) -> dict[str, Any]:
-    """Project collector-owned completion controls without exporting content."""
-
-    normalized_status = normalize_status(run_status)
-    terminal_event = next(
-        (
-            event
-            for event in reversed(list(events))
-            if str(event.get("event_type") or "")
-            == f"run.{normalized_status}"
-        ),
-        None,
+    return evaluate_terminal_execution_summary(
+        events, run_status, malformed, _trace_event_policy()
     )
-    if terminal_event is None:
-        return {}
-    payload = safe_json(
-        terminal_event.get("payload_json"),
-        {},
-        malformed,
-        "event.terminal.payload_json",
-    )
-    summary = payload.get("summary")
-    if not isinstance(summary, dict):
-        return {}
-    output: dict[str, Any] = {}
-    for field in (
-        "analysis_id",
-        "submitted_response_sha256",
-        "stored_response_sha256",
-        "evaluation_memory_frozen",
-    ):
-        value = summary.get(field)
-        if isinstance(value, (str, int, float, bool, type(None))):
-            output[field] = value
-    return output
 
 
 def budget_operation_id(
     event: Mapping[str, Any],
     payload: Mapping[str, Any],
 ) -> str:
-    """Return a stable operation identity across preflight and legacy events."""
-    event_type = str(event.get("event_type") or "")
-    idempotency_key = str(event.get("idempotency_key") or "")
-    if event_type == "policy.budget":
-        if payload.get("operation_id"):
-            return str(payload["operation_id"])
-        prefix = "policy.budget:"
-        if idempotency_key.startswith(prefix) and idempotency_key[len(prefix) :]:
-            suffix = idempotency_key[len(prefix) :]
-            operation_id, separator, decision_digest = suffix.rpartition(":")
-            if (
-                separator
-                and operation_id
-                and len(decision_digest) == 24
-                and all(character in "0123456789abcdef" for character in decision_digest)
-            ):
-                return operation_id
-            return suffix
-        observed = payload.get("observed")
-        if isinstance(observed, dict):
-            if observed.get("call_id"):
-                return f"model:{observed['call_id']}"
-            if observed.get("round") is not None:
-                return f"query-round:{observed['round']}"
-        operation = str(payload.get("operation") or "budget-preflight")
-        return f"{operation}:{event.get('sequence') or 'unknown'}"
-    if event_type == "queries.completed":
-        if payload.get("round") is not None:
-            return f"query-round:{payload['round']}"
-        prefix = "queries.completed:"
-        if idempotency_key.startswith(prefix) and idempotency_key[len(prefix) :]:
-            return f"query-round:{idempotency_key[len(prefix) :]}"
-    return f"{event_type or 'budget'}:{event.get('sequence') or 'unknown'}"
+    return trace_budget_operation_id(event, payload)
 
 
 def _model_route_policy() -> ModelRoutePolicy:

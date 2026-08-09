@@ -57,9 +57,6 @@
     "operations/benchmark-ollama-cybersecurity.py": {
       "max_lines": 1164
     },
-    "operations/evaluate-harness-traces.py": {
-      "max_lines": 809
-    },
     "operations/evaluate-investigation-cohort.py": {
       "max_lines": 1303
     },
@@ -651,9 +648,6 @@
     "operations/evaluate-analysis-replays.py::summarize": {
       "max_complexity": 27
     },
-    "operations/evaluate-harness-traces.py::budget_operation_id": {
-      "max_complexity": 23
-    },
     "operations/evaluate-investigation-cohort.py::_execution_contract": {
       "max_complexity": 16
     },
@@ -757,5 +751,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "213d2cb5b97a4ccfe189400268c89dc9099ef589"
+  "source_release": "8d3fff194c74093b1ea7512a7f546d719963d8cc"
 }
