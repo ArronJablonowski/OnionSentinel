@@ -102,6 +102,10 @@ from cohort_evaluation_result_member import (
     ResultMemberPolicy,
     normalize_export_member,
 )
+from cohort_evaluation_result_export import (
+    ResultExportPolicy,
+    normalize_result_export,
+)
 
 
 RESULT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v4"
@@ -965,72 +969,20 @@ def load_result_export(
 ) -> tuple[dict[str, Any], str]:
     label = f"{ROLE_LABELS[role]} result export"
     document, source_file_sha256 = load_private_json(path, label)
-    if document.get("schema") != RESULT_SCHEMA:
-        raise CohortEvaluationError(f"{label} has an unsupported schema")
-    _validate_embedded_digest(document, "export_sha256")
-    _safe_export_content_policy(document, label)
-    if int(document.get("count") or 0) != expected_count:
-        raise CohortEvaluationError(
-            f"{label} count does not match expected count"
-        )
-    top_role = str(document.get("agent_role") or "").strip().lower()
-    if top_role != role:
-        raise CohortEvaluationError(
-            f"{label} declares agent role {top_role!r}, expected {role!r}"
-        )
-    contract = _execution_contract(document.get("execution_contract"), label)
-    selection = document.get("selection")
-    if not isinstance(selection, dict):
-        raise CohortEvaluationError(f"{label} has no frozen selection proof")
-    source_sha256 = str(selection.get("source_sha256") or "")
-    ordered_identity_sha256 = str(
-        selection.get("ordered_identity_sha256") or ""
-    )
-    if (
-        selection.get("mode") != "imported_rows"
-        or selection.get("order_preserved") is not True
-        or int(selection.get("source_count") or 0) != expected_count
-        or not SHA256_RE.fullmatch(source_sha256)
-        or not SHA256_RE.fullmatch(ordered_identity_sha256)
-    ):
-        raise CohortEvaluationError(
-            f"{label} is not bound to an exact imported source cohort"
-        )
-    execution_gate = document.get("execution_gate")
-    if (
-        not isinstance(execution_gate, dict)
-        or execution_gate.get("status") != "passed"
-        or int(execution_gate.get("expected_count") or 0) != expected_count
-        or int(execution_gate.get("passed_count") or 0) != expected_count
-        or str(execution_gate.get("contract_sha256") or "")
-        != sha256_value(contract)
-    ):
-        raise CohortEvaluationError(
-            f"{label} has not passed its machine execution gate"
-        )
-    members = document.get("members")
-    if not isinstance(members, list) or len(members) != expected_count:
-        raise CohortEvaluationError(
-            f"{label} must contain exactly {expected_count} members"
-        )
-    normalized_members: dict[str, dict[str, Any]] = {}
-    ordered_identities: list[dict[str, Any]] = []
-    ordered_detection_projection: list[dict[str, Any]] = []
-    ranks: set[int] = set()
-    for index, member in enumerate(members):
-        if not isinstance(member, dict):
-            raise CohortEvaluationError(f"{label} member {index} is invalid")
-        normalized = normalize_export_member(
-            member=member,
-            role=role,
-            contract=contract,
-            cohort_id=str(document.get("cohort_id") or ""),
-            frozen_plan_sha256=str(document.get("frozen_plan_sha256") or ""),
-            expected_count=expected_count,
-            ranks=ranks,
-            known_stable_ids=set(normalized_members),
-            label=label,
-            policy=ResultMemberPolicy(
+    normalized = normalize_result_export(
+        document=document,
+        role=role,
+        expected_count=expected_count,
+        label=label,
+        policy=ResultExportPolicy(
+            result_schema=RESULT_SCHEMA,
+            manifest_schema=MANIFEST_SCHEMA,
+            digest_pattern=SHA256_RE,
+            hash_value=sha256_value,
+            validate_embedded_digest=_validate_embedded_digest,
+            safe_content_policy=_safe_export_content_policy,
+            execution_contract=_execution_contract,
+            member_policy=ResultMemberPolicy(
                 stable_group_id_pattern=STABLE_GROUP_ID_RE,
                 verdict_fields=VERDICT_FIELDS,
                 stable_group_key=_stable_group_key,
@@ -1039,85 +991,10 @@ def load_result_export(
                 observed_labels=_observed_labels,
                 query_audit_summary=_query_audit_summary,
             ),
-            error=CohortEvaluationError,
-        )
-        ranks.add(normalized.rank)
-        ordered_identities.append(normalized.identity)
-        ordered_detection_projection.append(normalized.detection_projection)
-        normalized_members[normalized.stable_group_id] = normalized.normalized
-    ordered_identities.sort(key=lambda item: int(item["rank"]))
-    ordered_detection_projection.sort(key=lambda item: int(item["rank"]))
-    if (
-        sha256_value(ordered_identities) != ordered_identity_sha256
-        or str(execution_gate.get("ordered_identity_sha256") or "")
-        != ordered_identity_sha256
-        or ranks != set(range(1, expected_count + 1))
-    ):
-        raise CohortEvaluationError(
-            f"{label} ordered cohort identity proof does not match"
-        )
-    sorted_members = sorted(
-        members,
-        key=lambda item: int(item.get("rank") or 0),
-    )
-    if len(sorted_members) != len(ordered_identities):
-        raise CohortEvaluationError(
-            f"{label} frozen member projection is incomplete"
-        )
-    frozen_plan = {
-        "schema": MANIFEST_SCHEMA,
-        "cohort_id": document.get("cohort_id"),
-        "agent_role": top_role,
-        "count": expected_count,
-        "created_at": document.get("frozen_at"),
-        "selection": selection,
-        "execution_contract": contract,
-        "members": [
-            {
-                **identity,
-                "pre_state_sha256": sha256_value(
-                    member.get("pre_state")
-                    if isinstance(member.get("pre_state"), dict)
-                    else {}
-                ),
-                "detection_sha256": sha256_value(
-                    member.get("detection")
-                    if isinstance(member.get("detection"), dict)
-                    else {}
-                ),
-                "dispatch_kind": str(
-                    (member.get("dispatch") or {}).get("kind") or ""
-                ),
-            }
-            for identity, member in zip(
-                ordered_identities,
-                sorted_members,
-            )
-        ],
-    }
-    frozen_plan_sha256 = str(document.get("frozen_plan_sha256") or "")
-    if (
-        not SHA256_RE.fullmatch(frozen_plan_sha256)
-        or frozen_plan_sha256 != sha256_value(frozen_plan)
-    ):
-        raise CohortEvaluationError(
-            f"{label} frozen plan digest does not match"
-        )
-    return {
-        "role": role,
-        "cohort_id": str(document.get("cohort_id") or ""),
-        "export_sha256": str(document.get("export_sha256") or ""),
-        "source_rows_sha256": source_sha256,
-        "ordered_identity_sha256": ordered_identity_sha256,
-        "ordered_identities": ordered_identities,
-        "ordered_detection_projection": ordered_detection_projection,
-        "ordered_detection_sha256": sha256_value(
-            ordered_detection_projection
         ),
-        "frozen_plan_sha256": frozen_plan_sha256,
-        "execution_contract": contract,
-        "members": normalized_members,
-    }, source_file_sha256
+        error=CohortEvaluationError,
+    )
+    return normalized, source_file_sha256
 
 
 def _round_stat(value: float | int) -> float:

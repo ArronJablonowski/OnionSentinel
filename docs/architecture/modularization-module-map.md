@@ -589,6 +589,12 @@ identity to the detection, enforces unique bounded rank and role, invokes the
 execution-proof port, and emits ordered identity, detection-digest, verdict,
 provider, second-opinion, and query-audit projections without file access.
 
+`operations/cohort_evaluation_result_export.py` owns sealed export admission,
+frozen selection and execution-gate validation, ordered member-set proof,
+frozen-plan reconstruction, and the bounded grading projection. Hashing,
+content policy, execution-contract validation, and member policy are injected;
+the legacy loader is reduced to private file input plus this normalization call.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

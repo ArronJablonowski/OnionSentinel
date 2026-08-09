@@ -138,6 +138,15 @@
       ]
     },
     {
+      "path": "operations/cohort_evaluation_result_export.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_evaluation_result_export.py",
+      "required_symbols": [
+        "ResultExportPolicy",
+        "normalize_result_export"
+      ]
+    },
+    {
       "path": "operations/cohort_execution_models.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_execution_models.py",
