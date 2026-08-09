@@ -131,6 +131,12 @@ line ranges below remain historical navigation aids for the extraction ledger.
 - Commit-gated memory planning, immutable pending/committed journal records,
   response-digest binding, privacy-preserving receipts, and idempotent
   post-crash replay now live in `analysis.persistence.memory_journal`.
+- The concrete alert-store transport, controlled-result retry, spool,
+  quarantine, journal stage/promotion/replay, memory-plan, and post-commit
+  persistence bindings now live in the 301-line
+  `analysis.persistence.runtime_adapter`. It resolves injected compatibility
+  callables from the runner at invocation time, preserving test/operator seams
+  and exact crash-recovery ordering without a duplicate runner implementation.
 - Pure legacy-outcome canonicalization, orthogonal verdict derivation,
   model-field admission, contradiction detection, and compatibility audit
   records now live in `analysis.conclusions.verdict`.

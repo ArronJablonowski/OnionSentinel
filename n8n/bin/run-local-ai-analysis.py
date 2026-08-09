@@ -648,6 +648,14 @@ def _runtime_io():
     return runtime_io
 
 
+def _persistence_runtime_adapter():
+    package_root = str(BIN_DIR.parent)
+    if package_root not in sys.path:
+        sys.path.insert(0, package_root)
+    from onion_sentinel.analysis.persistence import runtime_adapter
+    return runtime_adapter
+
+
 def _system_resource_dependencies():
     module = _system_resources()
     return module.Dependencies(
@@ -734,15 +742,9 @@ def analysis_index_payload(
     generated_at: str,
     artifact_path: Path,
 ) -> dict[str, Any]:
-    return _analysis_index_persistence().build_payload(
-        analysis_id,
-        prompt_package,
-        response,
-        reanalysis_attempt_id,
-        analysis_started_at,
-        generated_at,
-        artifact_path,
-    )
+    return _persistence_runtime_adapter().build_analysis_index_payload(
+        globals(), analysis_id, prompt_package, response,
+        reanalysis_attempt_id, analysis_started_at, generated_at, artifact_path)
 
 
 def post_analysis_index(
@@ -750,20 +752,8 @@ def post_analysis_index(
     alert_store_url: str,
     timeout: int = 10,
 ) -> dict[str, Any]:
-    return _analysis_index_persistence().post(
-        payload,
-        alert_store_url,
-        timeout=timeout,
-        max_response_bytes=ANALYSIS_INDEX_MAX_RESPONSE_BYTES,
-        read_bounded_json=read_bounded_json,
-        submission_error=AnalysisIndexSubmissionError,
-        environment=os.environ,
-        evaluation_mode_env=CONTROLLED_EVALUATION_MODE_ENV,
-        evaluation_token_env=CONTROLLED_EVALUATION_TOKEN_ENV,
-        evaluation_token_header=CONTROLLED_EVALUATION_TOKEN_HEADER,
-        evaluation_token_pattern=CONTROLLED_EVALUATION_TOKEN_RE,
-        fallback_evaluation_token=_CONTROLLED_EVALUATION_TOKEN,
-    )
+    return _persistence_runtime_adapter().post_analysis_index(
+        globals(), payload, alert_store_url, timeout)
 
 
 def post_controlled_analysis_index(
@@ -773,24 +763,13 @@ def post_controlled_analysis_index(
     attempts: int = CONTROLLED_RESULT_SUBMISSION_ATTEMPTS,
 ) -> dict[str, Any]:
     """Retry one immutable controlled result while its exact lease is live."""
-    return _analysis_index_persistence().post_with_retry(
-        payload,
-        alert_store_url,
-        post_result=post_analysis_index,
-        submission_error=AnalysisIndexSubmissionError,
-        attempts=attempts,
-    )
+    return _persistence_runtime_adapter().post_controlled_analysis_index(
+        globals(), payload, alert_store_url, attempts)
 
 
 def queue_analysis_index(payload: dict[str, Any], queue_dir: Path = DEFAULT_ANALYSIS_INDEX_QUEUE_DIR) -> Path:
-    return _analysis_index_persistence().queue(
-        payload,
-        queue_dir,
-        safe_filename=safe_filename,
-        load_json=load_json,
-        canonical_digest=canonical_payload_digest,
-        atomic_write_private_json=atomic_write_private_json,
-    )
+    return _persistence_runtime_adapter().queue_analysis_index(
+        globals(), payload, queue_dir)
 
 
 def stage_memory_writeback_task(
@@ -810,19 +789,14 @@ def stage_memory_writeback_task(
     pending_dir: Path = DEFAULT_MEMORY_WRITEBACK_PENDING_DIR,
 ) -> Path | None:
     """Durably stage eligible memory intent before the authoritative commit."""
-    return _memory_journal_persistence().stage(
-        analysis_id=analysis_id, response_digest=response_digest,
+    return _persistence_runtime_adapter().stage_memory_writeback_task(
+        globals(), analysis_id=analysis_id, response_digest=response_digest,
         agent_role=agent_role, role_memory_file=role_memory_file,
         shared_memory_file=shared_memory_file, source_artifact=source_artifact,
         primary_candidates=primary_candidates, primary_allowed=primary_allowed,
         primary_reason=primary_reason, reviewer_candidates=reviewer_candidates,
         reviewer_allowed=reviewer_allowed, reviewer_reason=reviewer_reason,
-        pending_dir=pending_dir, schema=MEMORY_WRITEBACK_TASK_SCHEMA,
-        max_bytes=MAX_MEMORY_WRITEBACK_TASK_BYTES,
-        normalize_candidates=normalize_memory_candidates,
-        canonical_digest=canonical_payload_digest, safe_filename=safe_filename,
-        load_json=load_json, atomic_write_private_json=atomic_write_private_json,
-    )
+        pending_dir=pending_dir)
 
 
 def mark_memory_writeback_committed(
@@ -833,12 +807,10 @@ def mark_memory_writeback_committed(
     committed_dir: Path = DEFAULT_MEMORY_WRITEBACK_COMMITTED_DIR,
 ) -> Path | None:
     """Move a staged task across the commit boundary atomically."""
-    return _memory_journal_persistence().mark_committed(
-        analysis_id, expected_response_digest=expected_response_digest,
-        pending_dir=pending_dir, committed_dir=committed_dir,
-        max_bytes=MAX_MEMORY_WRITEBACK_TASK_BYTES, safe_filename=safe_filename,
-        load_json=load_json, canonical_digest=canonical_payload_digest,
-    )
+    return _persistence_runtime_adapter().mark_memory_writeback_committed(
+        globals(), analysis_id,
+        expected_response_digest=expected_response_digest,
+        pending_dir=pending_dir, committed_dir=committed_dir)
 
 
 def process_committed_memory_writeback(
@@ -847,12 +819,8 @@ def process_committed_memory_writeback(
     receipt_dir: Path = DEFAULT_MEMORY_WRITEBACK_RECEIPT_DIR,
 ) -> tuple[dict[str, Any], Path | None]:
     """Replay one post-commit task; successful lanes are analysis-idempotent."""
-    return _memory_journal_persistence().process_committed(
-        task_path, receipt_dir=receipt_dir, schema=MEMORY_WRITEBACK_TASK_SCHEMA,
-        max_bytes=MAX_MEMORY_WRITEBACK_TASK_BYTES, safe_filename=safe_filename,
-        load_json=load_json, canonical_digest=canonical_payload_digest,
-        persist=persist_postcommit_memory_writeback,
-    )
+    return _persistence_runtime_adapter().process_committed_memory_writeback(
+        globals(), task_path, receipt_dir=receipt_dir)
 
 
 def resume_committed_memory_writebacks(
@@ -861,10 +829,9 @@ def resume_committed_memory_writebacks(
     receipt_dir: Path = DEFAULT_MEMORY_WRITEBACK_RECEIPT_DIR,
     limit: int = 100,
 ) -> tuple[int, int]:
-    return _memory_journal_persistence().resume(
-        committed_dir=committed_dir, receipt_dir=receipt_dir, limit=limit,
-        process=process_committed_memory_writeback,
-    )
+    return _persistence_runtime_adapter().resume_committed_memory_writebacks(
+        globals(), committed_dir=committed_dir,
+        receipt_dir=receipt_dir, limit=limit)
 
 
 def discard_pending_memory_writeback(
@@ -872,9 +839,8 @@ def discard_pending_memory_writeback(
     *,
     pending_dir: Path = DEFAULT_MEMORY_WRITEBACK_PENDING_DIR,
 ) -> None:
-    _memory_journal_persistence().discard(
-        analysis_id, pending_dir=pending_dir, safe_filename=safe_filename,
-    )
+    _persistence_runtime_adapter().discard_pending_memory_writeback(
+        globals(), analysis_id, pending_dir=pending_dir)
 
 
 def quarantine_analysis_index(
@@ -885,14 +851,8 @@ def quarantine_analysis_index(
     quarantine_dir: Path = DEFAULT_ANALYSIS_INDEX_QUARANTINE_DIR,
 ) -> Path:
     """Atomically remove one deterministic rejection from the ordered spool."""
-    return _analysis_index_persistence().quarantine(
-        path,
-        payload,
-        error,
-        quarantine_dir=quarantine_dir,
-        atomic_write_json=atomic_write_json,
-        now=project_now,
-    )
+    return _persistence_runtime_adapter().quarantine_analysis_index(
+        globals(), path, payload, error, quarantine_dir=quarantine_dir)
 
 
 def flush_analysis_index_queue(
@@ -905,25 +865,12 @@ def flush_analysis_index_queue(
     limit: int = 100,
     memory_writeback_enabled: bool = True,
 ) -> tuple[int, int, int]:
-    return _analysis_index_persistence().flush(
-        alert_store_url,
-        queue_dir=queue_dir,
-        quarantine_dir=quarantine_dir,
-        memory_pending_dir=memory_pending_dir,
+    return _persistence_runtime_adapter().flush_analysis_index_queue(
+        globals(), alert_store_url, queue_dir=queue_dir,
+        quarantine_dir=quarantine_dir, memory_pending_dir=memory_pending_dir,
         memory_committed_dir=memory_committed_dir,
-        memory_receipt_dir=memory_receipt_dir,
-        limit=limit,
-        memory_writeback_enabled=memory_writeback_enabled,
-        submission_error=AnalysisIndexSubmissionError,
-        load_json=load_json,
-        post_result=post_analysis_index,
-        canonical_digest=canonical_payload_digest,
-        mark_memory_committed=mark_memory_writeback_committed,
-        process_committed_memory=process_committed_memory_writeback,
-        resume_committed_memory=resume_committed_memory_writebacks,
-        quarantine_result=quarantine_analysis_index,
-        discard_pending_memory=discard_pending_memory_writeback,
-    )
+        memory_receipt_dir=memory_receipt_dir, limit=limit,
+        memory_writeback_enabled=memory_writeback_enabled)
 
 
 def build_llm_log_record(
@@ -1260,12 +1207,6 @@ def _reporting_run_log_dependencies():
     )
 
 
-def _analysis_index_persistence():
-    _provider_routing()
-    from onion_sentinel.analysis.persistence import analysis_index
-    return analysis_index
-
-
 def _primary_execution():
     _provider_routing()
     from onion_sentinel.analysis import primary_execution
@@ -1283,12 +1224,6 @@ def _primary_execution_dependencies():
         warning=lambda message: print(message, file=sys.stderr),
         route_error=InvestigationQueryError,
     )
-
-
-def _memory_journal_persistence():
-    _provider_routing()
-    from onion_sentinel.analysis.persistence import memory_journal
-    return memory_journal
 
 
 def _conclusion_verdict():
@@ -4977,10 +4912,9 @@ def memory_writeback_plan(
     eligibility_reason: str,
 ) -> dict[str, Any]:
     """Describe a commit-gated memory operation without changing memory."""
-    return _memory_journal_persistence().plan(
-        candidates, allowed=allowed, eligibility_reason=eligibility_reason,
-        normalize_candidates=normalize_memory_candidates,
-    )
+    return _persistence_runtime_adapter().memory_writeback_plan(
+        globals(), candidates, allowed=allowed,
+        eligibility_reason=eligibility_reason)
 
 
 def persist_postcommit_memory_writeback(
@@ -5005,18 +4939,14 @@ def persist_postcommit_memory_writeback(
     analysis or cause the model job to be retried.
     """
 
-    return _memory_journal_persistence().persist_postcommit(
-        analysis_id=analysis_id, agent_role=agent_role,
+    return _persistence_runtime_adapter().persist_postcommit_memory_writeback(
+        globals(), analysis_id=analysis_id, agent_role=agent_role,
         role_memory_file=role_memory_file, shared_memory_file=shared_memory_file,
         source_artifact=source_artifact, primary_candidates=primary_candidates,
         primary_allowed=primary_allowed, primary_reason=primary_reason,
         reviewer_candidates=reviewer_candidates,
         reviewer_allowed=reviewer_allowed, reviewer_reason=reviewer_reason,
-        receipt_dir=receipt_dir, normalize_candidates=normalize_memory_candidates,
-        canonical_digest=canonical_payload_digest,
-        persist_candidates=persist_memory_candidates, safe_filename=safe_filename,
-        atomic_write_private_json=atomic_write_private_json, now=project_now,
-    )
+        receipt_dir=receipt_dir)
 
 
 def apply_review_required_gate(
