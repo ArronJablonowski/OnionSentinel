@@ -16,6 +16,7 @@ ANALYST_STATE_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "analys
 ANALYST_STATE_ROUTES = REPO_ROOT / "n8n" / "alert_store" / "routes" / "analyst_state_routes.js"
 DURABLE_JOB_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "durable_job_service.js"
 DURABLE_JOB_ROUTES = REPO_ROOT / "n8n" / "alert_store" / "routes" / "durable_job_routes.js"
+PCAP_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "pcap_service.js"
 
 
 class AlertStoreResilienceTest(unittest.TestCase):
@@ -32,6 +33,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.analyst_state_routes = ANALYST_STATE_ROUTES.read_text(encoding="utf-8")
         cls.durable_job_service = DURABLE_JOB_SERVICE.read_text(encoding="utf-8")
         cls.durable_job_routes = DURABLE_JOB_ROUTES.read_text(encoding="utf-8")
+        cls.pcap_service = PCAP_SERVICE.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
         self.assertIn("require('./lib/provider_scheduler')", self.code)
@@ -182,9 +184,9 @@ class AlertStoreResilienceTest(unittest.TestCase):
         )
 
     def test_pcap_mutations_use_the_sqlite_gate(self) -> None:
-        self.assertIn("withSqliteWriteGate(() => createPcapRequest(payload))", self.code)
-        self.assertIn("withSqliteWriteGate(() => claimPcapRequest(payload))", self.code)
-        self.assertIn("withSqliteWriteGate(() => completePcapRequest(payload))", self.code)
+        self.assertIn("return gated(() => createRequest(payload))", self.pcap_service)
+        self.assertIn("return gated(() => claimRequest(payload))", self.pcap_service)
+        self.assertIn("await gated(() => completeRequest(payload))", self.pcap_service)
 
     def test_ai_job_reconciliation_is_bounded_and_transactional(self) -> None:
         self.assertIn("path: '/jobs/reconcile-completed'", self.durable_job_routes)
@@ -274,8 +276,9 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("AI_ANALYSIS_WAKE_PATH", self.code)
         self.assertIn("PCAP_ANALYSIS_WAKE_PATH", self.code)
         self.assertIn("void signalAiWorkers('enrichment-completed')", self.code)
-        self.assertIn("void signalWorker(pcapAnalysisWakePath, 'pcap-transfer-completed')", self.code)
-        self.assertIn("void signalAiWorkers('pcap-analysis-completed')", self.code)
+        self.assertIn("signalPcapWorker: (reason) => signalWorker(pcapAnalysisWakePath, reason)", self.code)
+        self.assertIn("void signalPcapWorker('pcap-transfer-completed')", self.pcap_service)
+        self.assertIn("void signalAiWorkers('pcap-analysis-completed')", self.pcap_service)
 
 
 if __name__ == "__main__":

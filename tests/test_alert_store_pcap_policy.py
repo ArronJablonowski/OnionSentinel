@@ -7,6 +7,7 @@ import unittest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ALERT_STORE = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
 HEALTH_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "health_service.js"
+PCAP_ROUTES = REPO_ROOT / "n8n" / "alert_store" / "routes" / "pcap_routes.js"
 SOC_ANALYSIS_POLICY = REPO_ROOT / "n8n" / "alert_store" / "lib" / "soc_analysis_policy.js"
 COMPOSE = REPO_ROOT / "n8n" / "docker-compose.yml"
 ENV_EXAMPLE = REPO_ROOT / "n8n" / ".env.example"
@@ -76,10 +77,11 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
 
     def test_pcap_broker_prioritizes_newer_higher_severity_work_and_supports_reviewed_requeue(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
+        routes = PCAP_ROUTES.read_text(encoding="utf-8")
         self.assertIn("LEFT JOIN alert_group_summary AS g ON g.group_id = p.group_id", code)
         self.assertIn("WHEN 'critical' THEN 4", code)
         self.assertIn("async function requeuePcapRequests(payload)", code)
-        self.assertIn("parsedUrl.pathname === '/pcap/requeue'", code)
+        self.assertIn("post('/pcap/requeue', 'requeue')", routes)
 
     def test_pcap_requests_reject_work_outside_configured_capture_retention(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
@@ -98,9 +100,10 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
 
     def test_pcap_parser_state_is_durable_and_reported_by_worker(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
+        routes = PCAP_ROUTES.read_text(encoding="utf-8")
         worker = (REPO_ROOT / "n8n" / "bin" / "process-pcap-evidence.py").read_text(encoding="utf-8")
         self.assertIn("analysis_status", code)
-        self.assertIn("parsedUrl.pathname === '/pcap/analysis-status'", code)
+        self.assertIn("post('/pcap/analysis-status', 'analysisStatus')", routes)
         self.assertIn("report_analysis_status", worker)
         self.assertIn('"processing"', worker)
         self.assertIn('"completed"', worker)
@@ -146,9 +149,10 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
 
     def test_large_transfer_progress_renews_claim_lease(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
+        routes = PCAP_ROUTES.read_text(encoding="utf-8")
         self.assertIn("ensureColumn('pcap_requests', 'transfer_progress_at', 'TEXT')", code)
         self.assertIn("COALESCE(transfer_progress_at, claimed_at, updated_at, created_at)", code)
-        self.assertIn("parsedUrl.pathname === '/pcap/progress'", code)
+        self.assertIn("post('/pcap/progress', 'progress')", routes)
         workflow = json.loads(PCAP_WORKFLOW.read_text(encoding="utf-8"))
         progress_webhook = next(node for node in workflow["nodes"] if node["name"] == "PCAP Progress Webhook")
         self.assertEqual(progress_webhook["parameters"]["path"], "pcap/progress")
@@ -161,6 +165,7 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
 
     def test_pcap_transfer_retries_are_durable_bounded_and_stage_aware(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
+        routes = PCAP_ROUTES.read_text(encoding="utf-8")
         for column in (
             "transfer_attempt_count",
             "transfer_retry_count",
@@ -171,7 +176,7 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
             self.assertIn(f"ensureColumn('pcap_requests', '{column}'", code)
         self.assertIn("PCAP_TRANSFER_MAX_ATTEMPTS", code)
         self.assertIn("async function retryPcapRequest(payload)", code)
-        self.assertIn("parsedUrl.pathname === '/pcap/retry'", code)
+        self.assertIn("post('/pcap/retry', 'retry')", routes)
         self.assertIn("retry_scheduled: !exhausted", code)
         self.assertIn("p.next_attempt_at IS NULL", code)
 

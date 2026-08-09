@@ -39,6 +39,8 @@ const {createAnalysisRequestService} = require('./services/analysis_request_serv
 const {createAnalysisRequestRoutes} = require('./routes/analysis_request_routes');
 const {createAnalysisResultService} = require('./services/analysis_result_service');
 const {createAnalysisResultRoutes} = require('./routes/analysis_result_routes');
+const {createPcapService} = require('./services/pcap_service');
+const {createPcapRoutes} = require('./routes/pcap_routes');
 const {
   loadAuthorizedActivityPolicy,
   matchAuthorizedActivity,
@@ -11820,6 +11822,25 @@ modularRoutes.registerAll(createAnalysisResultRoutes({
   readJsonBody,
   sendJson,
 }));
+const pcapService = createPcapService({
+  withWriteGate: withSqliteWriteGate,
+  withTransaction: withImmediateTransaction,
+  createRequest: createPcapRequest,
+  listRequests: listPcapRequests,
+  claimRequest: claimPcapRequest,
+  completeRequest: completePcapRequest,
+  updateTransferProgress: updatePcapTransferProgress,
+  retryRequest: retryPcapRequest,
+  completeAnalysis: completePcapAnalysis,
+  requeueRequests: requeuePcapRequests,
+  signalPcapWorker: (reason) => signalWorker(pcapAnalysisWakePath, reason),
+  signalAiWorkers,
+});
+modularRoutes.registerAll(createPcapRoutes({
+  service: pcapService,
+  readJsonBody,
+  sendJson,
+}));
 
 function controlledEvaluationRequestAuthorized(request) {
   if (!controlledEvaluationMode) return true;
@@ -11942,72 +11963,6 @@ async function handleRequest(request, response) {
           payload.indicator,
         ),
       );
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/pcap/request') {
-      // Queues a bounded PCAP evidence request. This endpoint never shells out
-      // or contacts Security Onion; relay-side fulfillment will use its own
-      // forced-command SSH path with additional Security Onion validation.
-      const payload = await readJsonBody(request);
-      const result = await withSqliteWriteGate(() => createPcapRequest(payload));
-      sendJson(response, 200, result);
-      return;
-    }
-    if (request.method === 'GET' && parsedUrl.pathname === '/pcap/requests') {
-      // Intended for relay polling and operator diagnostics.
-      const result = await listPcapRequests(parsedUrl.searchParams);
-      sendJson(response, 200, result);
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/pcap/claim') {
-      // Relay claims a pending request before contacting Security Onion.
-      const payload = await readJsonBody(request);
-      const result = await withSqliteWriteGate(() => claimPcapRequest(payload));
-      sendJson(response, 200, result);
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/pcap/complete') {
-      // Relay reports fulfillment metadata only. Packet artifacts stay on the
-      // controlled runtime path and are never committed to the DR repo.
-      const payload = await readJsonBody(request);
-      const result = await withSqliteWriteGate(() => completePcapRequest(payload));
-      if (result.wake_pcap_analysis) void signalWorker(pcapAnalysisWakePath, 'pcap-transfer-completed');
-      delete result.wake_pcap_analysis;
-      sendJson(response, 200, result);
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/pcap/progress') {
-      // A fresh progress heartbeat renews the relay claim lease while large,
-      // resumable transfers are actively moving through the SSD spool.
-      const payload = await readJsonBody(request);
-      const result = await withSqliteWriteGate(() => updatePcapTransferProgress(payload));
-      sendJson(response, 200, result);
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/pcap/retry') {
-      // A retry preserves transfer-stage checkpoints and relay/Mac artifacts.
-      // The bounded server-side attempt cap prevents permanent queue loops.
-      const payload = await readJsonBody(request);
-      const result = await withSqliteWriteGate(() => retryPcapRequest(payload));
-      sendJson(response, 200, result);
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/pcap/analysis-status') {
-      const payload = await readJsonBody(request);
-      const result = await withSqliteWriteGate(() => withImmediateTransaction(
-        () => completePcapAnalysis(payload),
-      ));
-      if (result.wake_ai_analysis) void signalAiWorkers('pcap-analysis-completed');
-      delete result.wake_ai_analysis;
-      sendJson(response, 200, result);
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/pcap/requeue') {
-      // Internal operator recovery endpoint. The relay cannot call this route;
-      // it is used only after a reviewed broker or selector repair.
-      const payload = await readJsonBody(request);
-      const result = await withSqliteWriteGate(() => requeuePcapRequests(payload));
-      sendJson(response, 200, result);
       return;
     }
     if (request.method === 'POST' && request.url === '/rescore') {
