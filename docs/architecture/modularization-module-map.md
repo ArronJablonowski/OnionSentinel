@@ -2297,6 +2297,10 @@ semantic deduplication, and authorization enforcement live under
 `onion_sentinel.analysis.query.round_admission`. Runtime authority remains in
 injected ports; the package returns an immutable admission result and cannot
 execute a query, call a model, access the Relay, or widen repair scope.
+Backend-specific canonicalization of observables, UTC windows, OSQuery SQL,
+derived-evidence filters, and enrichment indicators now lives under
+`onion_sentinel.analysis.query.semantic_identity`. Query labels and prose do
+not affect the digest used by round-admission deduplication.
 Bounded observable promotion lives under
 `onion_sentinel.analysis.query.observables`. The module validates exact
 Security Onion response/query digests and PCAP/Zeek query/result/reference

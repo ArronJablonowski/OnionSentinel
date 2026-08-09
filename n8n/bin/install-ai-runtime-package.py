@@ -61,6 +61,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.query.round_admission",
     "onion_sentinel.analysis.query.round_result",
     "onion_sentinel.analysis.query.security_onion",
+    "onion_sentinel.analysis.query.semantic_identity",
     "onion_sentinel.analysis.query.state",
     "onion_sentinel.analysis.query.stopping",
     "onion_sentinel.analysis.query.synthesis",

@@ -1848,6 +1848,18 @@ def _query_request():
     return request
 
 
+def _query_semantic_identity():
+    _provider_routing()
+    from onion_sentinel.analysis.query import semantic_identity
+    return semantic_identity
+
+
+def _query_semantic_identity_dependencies():
+    return _query_semantic_identity().Dependencies(
+        normalize_live_query=normalize_live_osquery_query,
+    )
+
+
 def _query_state():
     _provider_routing()
     from onion_sentinel.analysis.query import state
@@ -4817,76 +4829,9 @@ def investigation_backend_available(
 
 def investigation_request_semantic_digest(request: dict[str, Any]) -> str:
     """Identify an equivalent execution independently of model labels/purpose."""
-    parameters = json.loads(
-        json.dumps(request.get("parameters") or {}, sort_keys=True, default=str)
+    return _query_semantic_identity().digest(
+        request, _query_semantic_identity_dependencies(),
     )
-    backend = request.get("backend")
-    if backend in {"elastic", "oql"} and isinstance(parameters, dict):
-        observables = parameters.get("observables")
-        if isinstance(observables, dict):
-            for kind in ("ips", "domains", "hosts", "users"):
-                values = observables.get(kind)
-                if not isinstance(values, list):
-                    continue
-                normalized_values: list[str] = []
-                for raw in values:
-                    text = str(raw or "").strip().rstrip(".")
-                    if kind == "ips":
-                        import ipaddress
-
-                        try:
-                            text = str(ipaddress.ip_address(text))
-                        except ValueError:
-                            pass
-                    elif kind == "domains":
-                        text = text.lower()
-                    if text:
-                        normalized_values.append(text)
-                observables[kind] = sorted(set(normalized_values))
-        window = parameters.get("window")
-        if isinstance(window, dict):
-            for boundary in ("start", "end"):
-                text = str(window.get(boundary) or "").strip()
-                if text.endswith("Z"):
-                    text = text[:-1] + "+00:00"
-                try:
-                    parsed = dt.datetime.fromisoformat(text)
-                    if parsed.tzinfo is not None:
-                        window[boundary] = parsed.astimezone(
-                            dt.timezone.utc
-                        ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-                except ValueError:
-                    pass
-    elif backend == "osquery" and isinstance(parameters, dict):
-        normalized_query = normalize_live_osquery_query(parameters.get("query"))
-        parts = re.split(r"('(?:''|[^'])*')", normalized_query)
-        parameters["query"] = "".join(
-            part if index % 2 else " ".join(part.lower().split())
-            for index, part in enumerate(parts)
-        )
-    elif backend == "pcap_zeek" and isinstance(parameters, dict):
-        if isinstance(parameters.get("indicator"), str):
-            parameters["indicator"] = parameters["indicator"].casefold()
-        filters = parameters.get("filters")
-        if isinstance(filters, dict):
-            parameters["filters"] = {
-                key: value.casefold() if isinstance(value, str) else value
-                for key, value in filters.items()
-            }
-    elif backend == "enrichment" and isinstance(parameters, dict):
-        parameters["indicator_type"] = str(parameters.get("indicator_type") or "").lower()
-        parameters["indicator"] = str(parameters.get("indicator") or "").strip().rstrip(".").lower()
-    canonical = {
-        "backend": backend,
-        "parameters": parameters,
-    }
-    return hashlib.sha256(
-        json.dumps(
-            canonical,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
 
 
 def recover_repair_observables_from_trusted_catalog(
