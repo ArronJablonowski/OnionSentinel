@@ -1,7 +1,7 @@
 """Provider-neutral governed investigation query contracts."""
 
 from . import (
-    audit, coordinator, derived, deterministic_planning, endpoint, engine, enrichment, event_tuple, finalization, live_endpoint, observables, outcomes, planning_retry,
+    audit, coordinator, derived, deterministic_planning, endpoint, engine, enrichment, event_tuple, finalization, live_endpoint, live_workflow, observables, outcomes, planning_retry,
     primitives, prompt_admission,
     prompt_budget, prompt_compaction, prompt_errors, prompt_facts, prompt_provenance, repair,
     repair_catalog, repair_stage, request, round_admission, round_result,
@@ -9,7 +9,7 @@ from . import (
 )
 
 __all__ = [
-    "coordinator", "derived", "deterministic_planning", "endpoint", "engine", "enrichment", "event_tuple", "finalization", "live_endpoint", "observables", "outcomes",
+    "coordinator", "derived", "deterministic_planning", "endpoint", "engine", "enrichment", "event_tuple", "finalization", "live_endpoint", "live_workflow", "observables", "outcomes",
     "planning_retry", "primitives", "round_admission", "round_result",
     "audit", "prompt_admission", "prompt_budget", "prompt_compaction", "prompt_errors",
     "prompt_facts", "prompt_provenance", "repair", "repair_catalog", "repair_stage", "request",

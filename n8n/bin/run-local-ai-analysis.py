@@ -2150,6 +2150,38 @@ def _query_live_endpoint_dependencies():
     )
 
 
+def _query_live_workflow():
+    _provider_routing()
+    from onion_sentinel.analysis.query import live_workflow
+    return live_workflow
+
+
+def _query_live_workflow_policy():
+    return _query_live_workflow().Policy(
+        schema=LIVE_OSQUERY_SCHEMA,
+        supported_roles=frozenset({"soc-analyst", "incident-responder"}),
+    )
+
+
+def _query_live_workflow_dependencies():
+    return _query_live_workflow().Dependencies(
+        capability_descriptor=live_osquery_capability_descriptor,
+        collect=lambda case_id, requests, config: collect_live_osquery(
+            case_id=case_id,
+            requests=requests,
+            config=config,
+            persist=True,
+        ),
+        now=project_now,
+        canonical_model_route=canonical_model_route,
+        analyze_model_route=analyze_model_route,
+        collection_errors=(
+            LiveOsqueryClientError, LiveOsqueryContractError, OSError,
+        ),
+        client_error=LiveOsqueryClientError,
+    )
+
+
 def _query_derived_policy():
     module = _query_derived()
     return module.Policy(
@@ -7561,7 +7593,7 @@ def prepare_live_osquery_context(
     agent_role: str,
     config_path: Path = DEFAULT_LIVE_OSQUERY_CONFIG_FILE,
 ) -> dict[str, Any] | None:
-    """Expose a model-safe capability descriptor without exposing transport secrets."""
+    """Load deployment config and delegate model-safe capability projection."""
     if agent_role not in {"soc-analyst", "incident-responder"}:
         return None
     config_path = config_path.expanduser()
@@ -7573,47 +7605,18 @@ def prepare_live_osquery_context(
             "allowed_target_aliases": [],
             "allowed_agent_roles": ["incident-responder"],
         }
-    allowed_roles = config.get("allowed_agent_roles")
-    if not isinstance(allowed_roles, list):
-        allowed_roles = ["incident-responder"]
-    if agent_role not in allowed_roles:
-        config = {
-            **config,
-            "enabled": False,
-            "allowed_target_aliases": [],
-        }
-    descriptor = live_osquery_capability_descriptor(config)
-    prompt_package["live_osquery_capability"] = descriptor
-    capability = prompt_package.get("investigation_query_capability")
-    if isinstance(capability, dict):
-        if descriptor.get("enabled") is True:
-            capability["enabled"] = True
-        backends = capability.get("backends")
-        if isinstance(backends, dict):
-            backends["osquery"] = {
-                "enabled": bool(descriptor.get("enabled")),
-                "target_aliases": list(descriptor.get("target_aliases") or []),
-                "allowed_tables": list(descriptor.get("allowed_tables") or []),
-                "target_platform": descriptor.get("target_platform") or "",
-                "osquery_version": descriptor.get("osquery_version") or "",
-                "table_schemas": dict(descriptor.get("table_schemas") or {}),
-                "max_queries": descriptor.get("max_queries"),
-                "max_rows_per_query": descriptor.get("max_rows_per_query"),
-                "restrictions": list(descriptor.get("restrictions") or []),
-            }
-    return config
+    return _query_live_workflow().prepare_capability(
+        prompt_package,
+        agent_role,
+        config,
+        policy=_query_live_workflow_policy(),
+        dependencies=_query_live_workflow_dependencies(),
+    )
 
 
 def live_osquery_case_id(prompt_package: dict[str, Any]) -> str:
-    """Derive a non-sensitive stable case token for cross-node audit correlation."""
-    analyst_state = prompt_package.get("analyst_state")
-    alert = prompt_package.get("alert")
-    raw = ""
-    if isinstance(analyst_state, dict):
-        raw = str(analyst_state.get("group_id") or "")
-    if not raw and isinstance(alert, dict):
-        raw = str(alert.get("alert_id") or alert.get("rule_name") or "")
-    return "ir-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+    """Compatibility delegate for the stable endpoint case token."""
+    return _query_live_workflow().case_id(prompt_package)
 
 
 def apply_live_osquery_follow_up(
@@ -7623,59 +7626,16 @@ def apply_live_osquery_follow_up(
     settings: dict[str, Any],
     config: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Execute at most one validated live-host batch, then rerun the same model.
-
-    The model proposes SELECT queries against opaque endpoint aliases. The
-    collector owns validation, transport, target resolution, and provenance.
-    A collection failure is supplied to the final reasoning pass as an explicit
-    evidence gap instead of silently discarding the Incident Response run.
-    """
-    requests = primary_response.pop("live_osquery_requests", [])
-    if not requests:
-        return primary_response
-    case_id = live_osquery_case_id(prompt_package)
-    collection_error = ""
-    try:
-        if not config or not config.get("enabled"):
-            raise LiveOsqueryClientError("live-host OSQuery is not enabled for this deployment")
-        evidence = collect_live_osquery(
-            case_id=case_id,
-            requests=requests,
-            config=config,
-            persist=True,
-        )
-    except (LiveOsqueryClientError, LiveOsqueryContractError, OSError) as exc:
-        collection_error = str(exc)[:1000]
-        evidence = {
-            "schema": LIVE_OSQUERY_SCHEMA,
-            "case_id": case_id,
-            "generated_at": project_now(),
-            "complete": False,
-            "read_only": True,
-            "results": [],
-            "collection_error": collection_error,
-        }
-    prompt_package["live_osquery_evidence"] = evidence
-    prompt_package["live_osquery_follow_up"] = {
-        "final_pass": True,
-        "instruction": (
-            "Use the collected endpoint evidence and return the final report. "
-            "Do not request another live OSQuery batch."
-        ),
-    }
-    route = canonical_model_route(
-        (settings.get("agent_models") or {}).get("incident-responder")
+    """Compatibility delegate for the single bounded endpoint follow-up."""
+    return _query_live_workflow().follow_up(
+        prompt_package,
+        primary_response,
+        args,
+        settings,
+        config,
+        policy=_query_live_workflow_policy(),
+        dependencies=_query_live_workflow_dependencies(),
     )
-    final_response = analyze_model_route(route, prompt_package, args, settings)
-    repeated = final_response.pop("live_osquery_requests", [])
-    final_response["_live_osquery_follow_up"] = {
-        "requested": len(requests) if isinstance(requests, list) else 0,
-        "collected": len(evidence.get("results") or []),
-        "complete": bool(evidence.get("complete")),
-        "collection_error": collection_error,
-        "repeated_requests_ignored": len(repeated) if isinstance(repeated, list) else 0,
-    }
-    return final_response
 
 
 def validate_response(

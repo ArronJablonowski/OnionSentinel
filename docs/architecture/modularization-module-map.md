@@ -191,6 +191,11 @@ line ranges below remain historical navigation aids for the extraction ledger.
   custody now live in `analysis.query.live_endpoint`. The query boundary never
   renders reports or exposes the underlying authorized observable in a support
   binding.
+- Role-scoped capability advertisement, non-sensitive case-token derivation,
+  and the single bounded collect-then-reason endpoint pass now live in
+  `analysis.query.live_workflow`. Deployment config discovery, collector
+  transport, and model invocation remain injected composition-root ports;
+  collector failure is retained as an explicit final-pass evidence gap.
 - Bounded public live-OSQuery audit and row-preview projection now live in
   `analysis.reporting.live_osquery`. This reporting boundary cannot authorize
   a target, dispatch a query, or mutate the private evidence accumulator.

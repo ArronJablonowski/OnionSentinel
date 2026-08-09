@@ -42,6 +42,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.query.event_tuple",
     "onion_sentinel.analysis.query.finalization",
     "onion_sentinel.analysis.query.live_endpoint",
+    "onion_sentinel.analysis.query.live_workflow",
     "onion_sentinel.analysis.query.observables",
     "onion_sentinel.analysis.query.outcomes",
     "onion_sentinel.analysis.query.planning_retry",
