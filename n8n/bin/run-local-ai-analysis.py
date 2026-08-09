@@ -995,42 +995,7 @@ def load_system_prompt(path: Path) -> str:
 
 def default_ai_settings() -> dict[str, Any]:
     """Return safe local-first AI routing defaults."""
-    default_model = os.environ.get("SOC_AI_MODEL") or FALLBACK_OLLAMA_MODEL
-    return {
-        "mode": "ollama",
-        "ollama_model": default_model,
-        "enabled_ollama_models": [default_model],
-        "ollama_url": os.environ.get("OLLAMA_URL") or DEFAULT_OLLAMA_URL,
-        "cloud_provider": "codex-cli",
-        "cloud_model": "gpt-5.5",
-        "cloud_command": "",
-        "codex_cli_path": "codex",
-        "codex_cli_model": "gpt-5.5",
-        "codex_cli_reasoning_effort": "medium",
-        "codex_cli_models": [
-            {"model": model, "reasoning_effort": "medium", "enabled": False}
-            for model in CODEX_CLI_MODEL_CATALOG
-        ],
-        "gpt_cli_enabled": False,
-        "hermes_agent_enabled": False,
-        "hermes_agent_path": "hermes",
-        "hermes_agent_model": "gpt-5.5",
-        "hermes_agent_reasoning_effort": "medium",
-        "openclaw_enabled": False,
-        "openclaw_path": "openclaw",
-        "openclaw_model": "ollama/gemma4:26b-mlx",
-        "openclaw_reasoning_effort": "medium",
-        "hybrid_policy": "cloud_for_critical_high_or_recommended",
-        "agent_models": {
-            role: f"ollama:{default_model}" for role in CYBER_SECURITY_AGENT_ROLES
-        },
-        "agent_second_opinion_models": {
-            role: "" for role in CYBER_SECURITY_AGENT_ROLES
-        },
-        "agent_adjudicator_models": {
-            role: "" for role in CYBER_SECURITY_AGENT_ROLES
-        },
-    }
+    return _provider_settings_runtime_adapter().default_ai_settings(globals())
 
 
 def _provider_routing():
@@ -1082,61 +1047,10 @@ def _provider_registry():
     return registry
 
 
-def _provider_settings():
+def _provider_settings_runtime_adapter():
     _provider_routing()
-    from onion_sentinel.analysis.providers import settings
-    return settings
-
-
-def _provider_settings_policy():
-    return _provider_settings().Policy(
-        codex_catalog=tuple(CODEX_CLI_MODEL_CATALOG),
-        reasoning_efforts=frozenset(CODEX_CLI_REASONING_EFFORTS),
-        harness_model_pattern=CLI_HARNESS_MODEL_PATTERN,
-        openclaw_ollama_prefix=OPENCLAW_OLLAMA_PROVIDER_PREFIX,
-        hermes_effort=HERMES_AGENT_REASONING_EFFORT,
-        fallback_ollama_model=FALLBACK_OLLAMA_MODEL,
-    )
-
-
-def _provider_settings_dependencies():
-    module = _provider_settings()
-    return module.Dependencies(
-        boolean_setting=boolean_setting,
-        normalized_model_roster=normalized_model_roster,
-        openclaw_uses_ollama=openclaw_model_uses_ollama_runtime,
-        enabled_routes=enabled_agent_model_routes,
-        normalize_primary=normalize_agent_models,
-        normalize_reviewer=normalize_agent_second_opinion_models,
-        normalize_adjudicator=normalize_agent_adjudicator_models,
-        error_type=RuntimeArtifactError,
-    )
-
-
-def _provider_settings_merge_policy():
-    return _provider_settings().MergePolicy(
-        protected_keys=frozenset({
-            "enabled_ollama_models", "codex_cli_models", "gpt_cli_enabled",
-            "hermes_agent_enabled", "openclaw_enabled", "agent_models",
-            "agent_second_opinion_models", "agent_adjudicator_models",
-        }),
-        hybrid_policies=frozenset({
-            "cloud_for_critical_high_or_recommended",
-            "cloud_when_recommended_only",
-        }),
-        default_hybrid_policy="cloud_for_critical_high_or_recommended",
-        fallback_ollama_model=FALLBACK_OLLAMA_MODEL,
-        default_ollama_url=DEFAULT_OLLAMA_URL,
-    )
-
-
-def _provider_settings_merge_dependencies():
-    module = _provider_settings()
-    return module.MergeDependencies(
-        normalize_codex=normalize_codex_cli_settings,
-        normalize_harnesses=normalize_cli_harness_settings,
-        apply_roster=apply_model_roster,
-    )
+    from onion_sentinel.analysis.providers import runtime_adapter
+    return runtime_adapter
 
 
 def _reporting_incident():
@@ -2568,12 +2482,8 @@ def normalize_agent_models(value: Any, routes: list[str]) -> dict[str, str]:
     enabled route is intentionally used as a predictable fail-safe so roster
     maintenance cannot leave an agent without an analysis backend.
     """
-    source = value if isinstance(value, dict) else {}
-    fallback = routes[0] if routes else ""
-    return {
-        role: route if (route := canonical_model_route(source.get(role), routes)) in routes else fallback
-        for role in CYBER_SECURITY_AGENT_ROLES
-    }
+    return _provider_settings_runtime_adapter().normalize_agent_models(
+        globals(), value, routes)
 
 
 def normalize_agent_second_opinion_models(
@@ -2582,16 +2492,8 @@ def normalize_agent_second_opinion_models(
     primary_assignments: dict[str, str],
 ) -> dict[str, str]:
     """Keep optional secondary routes enabled, distinct, and fail-closed."""
-    source = value if isinstance(value, dict) else {}
-    return {
-        role: route
-        if (
-            (route := canonical_model_route(source.get(role), routes)) in routes
-            and route != primary_assignments.get(role)
-        )
-        else ""
-        for role in CYBER_SECURITY_AGENT_ROLES
-    }
+    return _provider_settings_runtime_adapter().normalize_agent_second_opinion_models(
+        globals(), value, routes, primary_assignments)
 
 
 def normalize_agent_adjudicator_models(
@@ -2602,45 +2504,27 @@ def normalize_agent_adjudicator_models(
     settings: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Keep adjudicators optional, enabled, and independent of both positions."""
-    source = value if isinstance(value, dict) else {}
-    assignments: dict[str, str] = {}
-    for role in CYBER_SECURITY_AGENT_ROLES:
-        route = canonical_model_route(source.get(role), routes)
-        route_identity = model_route_identity(route, settings)
-        excluded = {
-            model_route_identity(primary_assignments.get(role), settings),
-            model_route_identity(reviewer_assignments.get(role), settings),
-        }
-        assignments[role] = (
-            route
-            if route in routes and route_identity and route_identity not in excluded
-            else ""
-        )
-    return assignments
+    return _provider_settings_runtime_adapter().normalize_agent_adjudicator_models(
+        globals(), value, routes, primary_assignments,
+        reviewer_assignments, settings)
 
 
 def apply_model_roster(settings: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
     """Migrate legacy single-model settings and derive the compatibility mode."""
-    return _provider_settings().apply_roster(
-        settings, raw, policy=_provider_settings_policy(),
-        dependencies=_provider_settings_dependencies(),
-    )
+    return _provider_settings_runtime_adapter().apply_model_roster(
+        globals(), settings, raw)
 
 
 def normalize_codex_cli_settings(settings: dict[str, Any], raw: dict[str, Any]) -> None:
     """Normalize the fixed Codex adapter without accepting shell fragments."""
-    _provider_settings().normalize_codex(
-        settings, raw, policy=_provider_settings_policy(),
-        dependencies=_provider_settings_dependencies(),
-    )
+    _provider_settings_runtime_adapter().normalize_codex_cli_settings(
+        globals(), settings, raw)
 
 
 def _normalize_harness_executable(value: Any, basename: str) -> str:
     """Validate an exact executable path without accepting flags or shell text."""
-    label = "Hermes Agent" if basename == "hermes" else "OpenClaw"
-    return _provider_settings().normalize_harness_executable(
-        value, basename, label, RuntimeArtifactError,
-    )
+    return _provider_settings_runtime_adapter().normalize_harness_executable(
+        globals(), value, basename)
 
 
 def normalize_cli_harness_settings(
@@ -2648,49 +2532,19 @@ def normalize_cli_harness_settings(
     raw: dict[str, Any],
 ) -> None:
     """Normalize the two optional, independently enabled agent harnesses."""
-    _provider_settings().normalize_harnesses(
-        settings, raw, policy=_provider_settings_policy(),
-        dependencies=_provider_settings_dependencies(),
-    )
+    _provider_settings_runtime_adapter().normalize_cli_harness_settings(
+        globals(), settings, raw)
 
 
 def load_ai_settings(path: Path) -> dict[str, Any]:
     """Load model routing settings written by the SOC Settings page."""
-    settings = default_ai_settings()
-    if not path.exists():
-        return settings
-    try:
-        data = json.loads(read_bytes_bounded(path, DEFAULT_MAX_SETTINGS_BYTES).decode("utf-8", errors="strict"))
-    except (RuntimeArtifactError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeArtifactError(f"invalid AI settings in {path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise RuntimeArtifactError(f"AI settings root must be an object: {path}")
-    return _provider_settings().merge(
-        settings, data, policy=_provider_settings_merge_policy(),
-        dependencies=_provider_settings_merge_dependencies(),
-    )
+    return _provider_settings_runtime_adapter().load_ai_settings(globals(), path)
 
 
 def resolve_codex_cli(settings: dict[str, Any]) -> str:
     """Resolve only the operator-approved Codex executable."""
-    configured = str(settings.get("codex_cli_path") or "codex").strip()
-    if Path(configured).is_absolute():
-        candidates = [Path(configured).expanduser()]
-    else:
-        discovered = shutil.which("codex")
-        candidates = []
-        if discovered:
-            candidates.append(Path(discovered))
-        candidates.extend([
-            Path.home() / ".local" / "bin" / "codex",
-            Path("/opt/homebrew/bin/codex"),
-            Path("/usr/local/bin/codex"),
-        ])
-    for candidate in candidates:
-        if candidate.name == "codex" and candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
-    checked = ", ".join(str(candidate) for candidate in candidates)
-    raise SystemExit(f"Codex CLI executable is unavailable; checked: {checked}")
+    return _provider_settings_runtime_adapter().resolve_codex_cli(
+        globals(), settings)
 
 
 def resolve_cli_harness(
@@ -2701,63 +2555,15 @@ def resolve_cli_harness(
     label: str,
 ) -> str:
     """Resolve only the operator-approved exact third-party executable."""
-    configured = _normalize_harness_executable(
-        settings.get(setting_key) or basename,
-        basename,
-    )
-    if Path(configured).is_absolute():
-        candidates = [Path(configured).expanduser()]
-    else:
-        candidates: list[Path] = []
-        if discovered := shutil.which(basename):
-            candidates.append(Path(discovered))
-        candidates.extend([
-            Path.home() / ".local" / "bin" / basename,
-            Path("/opt/homebrew/bin") / basename,
-            Path("/usr/local/bin") / basename,
-        ])
-    for candidate in candidates:
-        if (
-            candidate.name == basename
-            and candidate.is_file()
-            and os.access(candidate, os.X_OK)
-        ):
-            return str(candidate)
-    checked = ", ".join(str(candidate) for candidate in candidates)
-    raise SystemExit(f"{label} executable is unavailable; checked: {checked}")
+    return _provider_settings_runtime_adapter().resolve_cli_harness(
+        globals(), settings, setting_key=setting_key,
+        basename=basename, label=label)
 
 
 def effective_ai_settings(args: argparse.Namespace) -> dict[str, Any]:
     """Merge settings file, environment defaults, and explicit CLI overrides."""
-    settings = load_ai_settings(args.ai_settings_file)
-    if args.analysis_mode:
-        settings["mode"] = args.analysis_mode
-        settings["gpt_cli_enabled"] = args.analysis_mode in {"cloud", "hybrid"}
-        if args.analysis_mode in {"ollama", "hybrid"} and not settings.get("enabled_ollama_models"):
-            settings["enabled_ollama_models"] = [settings.get("ollama_model") or FALLBACK_OLLAMA_MODEL]
-    if args.model:
-        settings["ollama_model"] = args.model
-        settings["enabled_ollama_models"] = [args.model]
-        settings["agent_models"]["soc-analyst"] = f"ollama:{args.model}"
-    if args.ollama_url:
-        settings["ollama_url"] = args.ollama_url
-    settings["agent_models"] = normalize_agent_models(
-        settings.get("agent_models"),
-        enabled_agent_model_routes(settings),
-    )
-    settings["agent_second_opinion_models"] = normalize_agent_second_opinion_models(
-        settings.get("agent_second_opinion_models"),
-        enabled_agent_model_routes(settings),
-        settings["agent_models"],
-    )
-    settings["agent_adjudicator_models"] = normalize_agent_adjudicator_models(
-        settings.get("agent_adjudicator_models"),
-        enabled_agent_model_routes(settings),
-        settings["agent_models"],
-        settings["agent_second_opinion_models"],
-        settings,
-    )
-    return settings
+    return _provider_settings_runtime_adapter().effective_ai_settings(
+        globals(), args)
 
 
 def extract_json_object(text: str) -> dict[str, Any]:

@@ -95,6 +95,13 @@ line ranges below remain historical navigation aids for the extraction ledger.
   metadata, external-harness route handling, and reviewer model identity now
   live in `onion_sentinel.analysis.providers.routing`. The legacy runner keeps
   thin symbol delegates for dynamic-import compatibility.
+- Default settings, protected saved-settings merge, fixed Codex catalog and
+  reasoning admission, Hermes/OpenClaw executable validation and resolution,
+  per-role primary/reviewer/adjudicator normalization, and explicit CLI
+  override binding now live in the 325-line
+  `analysis.providers.runtime_adapter`. It resolves compatibility callables at
+  invocation time and never reads provider credential stores or accepts shell
+  fragments; the runner retains only lazy signature-compatible delegates.
 - The bounded Ollama HTTP request, task selection, host-wide inference lock,
   best-effort unload, ordered enabled-model failover, and observed-model
   mismatch guard now live in `onion_sentinel.analysis.providers.ollama`.
