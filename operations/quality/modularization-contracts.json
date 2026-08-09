@@ -93,6 +93,17 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_legacy_reconciliation.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_legacy_reconciliation.py",
+      "required_symbols": [
+        "pending_ai_job_ids",
+        "orphaned_pending_ai_job_ids",
+        "reconcilable_completed_ai_job_ids",
+        "reconcilable_ai_job_ids"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_javascript_compat.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_javascript_compat.py",

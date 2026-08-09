@@ -72,6 +72,12 @@ from scheduler_artifact_repository import (
     latest_prompt_mtimes as artifact_prompt_mtimes,
     reusable_prompt_for_alert as artifact_reusable_prompt,
 )
+from scheduler_legacy_reconciliation import (
+    orphaned_pending_ai_job_ids as legacy_orphaned_job_ids,
+    pending_ai_job_ids as legacy_pending_job_ids,
+    reconcilable_ai_job_ids as legacy_reconcilable_job_ids,
+    reconcilable_completed_ai_job_ids as legacy_completed_job_ids,
+)
 from scheduler_controlled_runtime import (
     ControlledRuntimePolicy,
     ControlledRuntimeSources,
@@ -996,91 +1002,18 @@ def completed_analysis_group_ids(
 
 
 def orphaned_pending_ai_job_ids(conn: sqlite3.Connection) -> set[str]:
-    """Return pending AI queue keys that no longer map to an alert group.
-
-    Stable group identities can be replaced when legacy rows are normalized or
-    grouping policy changes. Those old durable intents are not actionable, but
-    leaving them pending makes queue health report a worker stall forever.
-    """
-    tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    if "durable_jobs" not in tables:
-        return set()
-    pending_ids = {
-        str(row[0] or "").strip()
-        for row in conn.execute(
-            "SELECT dedupe_key FROM durable_jobs WHERE job_type = 'ai_analysis' AND status = 'pending'"
-        ).fetchall()
-        if str(row[0] or "").strip()
-    }
-    if not pending_ids:
-        return set()
-    # alert_group_summary is the authoritative set of currently actionable
-    # groups. Raw alert rows can retain superseded identities after a recovery
-    # or grouping-policy migration, which otherwise leaves queue intents that
-    # no scheduler selection can ever satisfy.
-    active_ids = {
-        str(row[0] or "").strip()
-        for row in conn.execute("SELECT group_id FROM alert_group_summary").fetchall()
-        if str(row[0] or "").strip()
-    }
-    tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    if "alert_group_alias" in tables:
-        for legacy_id, stable_id in conn.execute(
-            "SELECT legacy_group_id, stable_group_id FROM alert_group_alias"
-        ).fetchall():
-            # Summaries retain the legacy dashboard identifier while durable
-            # AI jobs use the V2 stable identity. Follow the alias in that
-            # direction so both forms remain actionable.
-            if str(legacy_id or "").strip() in active_ids:
-                active_ids.add(str(stable_id or "").strip())
-    return pending_ids - active_ids
+    """Compatibility delegate for orphaned legacy AI queue intent."""
+    return legacy_orphaned_job_ids(conn)
 
 
 def pending_ai_job_ids(conn: sqlite3.Connection) -> set[str]:
     """Return coalesced durable AI intents that still require a model run."""
-    tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    if "durable_jobs" not in tables:
-        return set()
-    return {
-        str(row[0] or "").strip()
-        for row in conn.execute(
-            "SELECT dedupe_key FROM durable_jobs WHERE job_type = 'ai_analysis' AND status = 'pending'"
-        ).fetchall()
-        if str(row[0] or "").strip()
-    }
+    return legacy_pending_job_ids(conn)
 
 
 def reconcilable_completed_ai_job_ids(conn: sqlite3.Connection, group_ids: set[str]) -> set[str]:
-    """Keep artifact reconciliation from erasing newly queued evidence.
-
-    A pending job is artifact-reconcilable only when a worker previously began
-    processing it. Fresh alert, enrichment, and PCAP intents deliberately have
-    no processing start and must reach the scheduler even when an older report
-    artifact exists for the same duplicate group.
-    """
-    if not group_ids:
-        return set()
-    tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    if "durable_jobs" not in tables:
-        return set()
-    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(durable_jobs)").fetchall()}
-    if "processing_started_at" not in columns or "rerun_requested" not in columns:
-        return group_ids
-    placeholders = ", ".join("?" for _ in group_ids)
-    return {
-        str(row[0] or "").strip()
-        for row in conn.execute(
-            f"""
-            SELECT dedupe_key FROM durable_jobs
-            WHERE job_type = 'ai_analysis' AND status = 'pending'
-              AND COALESCE(rerun_requested, 0) = 0
-              AND processing_started_at IS NOT NULL
-              AND dedupe_key IN ({placeholders})
-            """,
-            sorted(group_ids),
-        ).fetchall()
-        if str(row[0] or "").strip()
-    }
+    """Compatibility delegate for artifact-complete legacy AI jobs."""
+    return legacy_completed_job_ids(conn, group_ids)
 
 
 def reconcilable_ai_job_ids(
@@ -1091,14 +1024,13 @@ def reconcilable_ai_job_ids(
     prompt_dir: Path,
 ) -> set[str]:
     """Combine artifact-complete and obsolete durable AI queue intents."""
-    completed = completed_analysis_group_ids(
+    return legacy_reconcilable_job_ids(
         conn,
         analyzed_ids,
         analysis_dir,
         pcap_analysis_dir,
         prompt_dir,
     )
-    return reconcilable_completed_ai_job_ids(conn, completed) | orphaned_pending_ai_job_ids(conn)
 
 
 def indexed_scheduler_available(conn: sqlite3.Connection) -> bool:

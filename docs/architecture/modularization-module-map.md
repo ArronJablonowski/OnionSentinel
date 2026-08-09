@@ -343,6 +343,15 @@ only while it remains newer than matching parsed PCAP evidence. The scheduler
 facade retains compatibility delegates while indexed deployments remain
 independent of this upgrade-window repository.
 
+`scheduler_legacy_reconciliation.py` owns the pre-indexed durable-job cleanup
+projection. It enumerates pending AI intent, preserves active legacy and V2
+alias identities, identifies only truly orphaned queue keys, and permits
+artifact completion reconciliation only for a previously started job without
+fresh evidence or an explicit rerun latch. Older durable-job schemas retain
+their historical compatibility behavior. The combined projection depends on
+the artifact repository but remains read-only; alert-store owns every status
+mutation.
+
 `scheduler_claim.py` owns compare-and-set processing acquisition,
 server-authoritative job/alert/group replacement, controlled claim identity,
 IR reanalysis-attempt binding, contention projection, and automatic-threshold
