@@ -2161,6 +2161,14 @@ stops consumers. Runtime backup/restore, secret scanning, release identity, and
 readiness must include the new trees. A failed package validation leaves the
 old tree and services untouched.
 
+Controlled evaluation runtime admission lives under
+`onion_sentinel.evaluation.runtime_isolation`. It validates the exact mode and
+ephemeral token, alternate loopback alert-store origin, canonical owner-only
+runtime tree and frozen files, pinned private temp directory, isolated incident
+evidence route, and explicitly disabled live OSQuery configuration. The runner
+retains only the compatibility return tuple and process-local temp-directory
+binding.
+
 Independent-review package construction, text/repetition policy, and
 fail-closed response validation live under `onion_sentinel.analysis.review`.
 The same package owns bounded shadow-adjudication package and validation

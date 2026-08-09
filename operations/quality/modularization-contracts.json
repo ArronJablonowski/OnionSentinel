@@ -3071,6 +3071,7 @@
         "onion_sentinel.analysis.reporting.incident",
         "onion_sentinel.analysis.reporting.markdown",
         "onion_sentinel.analysis.reporting.publication",
+        "onion_sentinel.evaluation.runtime_isolation",
         "onion_sentinel.composition",
         "onion_sentinel.pipeline",
         "onion_sentinel.contracts.errors",
