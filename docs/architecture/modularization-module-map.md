@@ -725,6 +725,15 @@ identity patterns, verdict domains, query classes, hard failures, and rubric
 weights. The evaluator API and CLI import these values rather than maintaining
 independent policy copies.
 
+`operations/cohort_evaluation_private_input.py` owns owner, mode, file-type,
+symlink, size, UTF-8, JSON-root, and exact-source-digest checks for offline
+evaluation inputs. It performs no grading or cohort interpretation.
+
+`operations/cohort_evaluation_result_loader.py` composes the canonical export
+and member policies for one role, then loads and normalizes the sealed export
+through injected private-I/O and execution-proof ports. The CLI no longer
+constructs the nested result policy inline.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

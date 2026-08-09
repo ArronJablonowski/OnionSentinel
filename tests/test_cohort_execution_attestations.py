@@ -27,6 +27,7 @@ import cohort_evaluation_execution_admission  # noqa: E402
 import cohort_evaluation_execution_proof  # noqa: E402
 import cohort_evaluation_result_member  # noqa: E402
 import cohort_evaluation_result_export  # noqa: E402
+import cohort_evaluation_result_loader  # noqa: E402
 import cohort_evaluation_scoring  # noqa: E402
 import cohort_evaluation_workflow  # noqa: E402
 import cohort_evaluation_markdown  # noqa: E402
@@ -152,8 +153,12 @@ class CohortExecutionAttestationBoundaryTests(unittest.TestCase):
         evaluator = load_cohort_evaluator()
 
         self.assertIs(
-            evaluator.normalize_result_export,
+            cohort_evaluation_result_loader.normalize_result_export,
             cohort_evaluation_result_export.normalize_result_export,
+        )
+        self.assertIs(
+            evaluator.normalize_result_file,
+            cohort_evaluation_result_loader.load_result_export,
         )
 
     def test_offline_evaluator_uses_extracted_scoring_services(self):

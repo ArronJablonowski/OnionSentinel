@@ -241,6 +241,26 @@
       ]
     },
     {
+      "path": "operations/cohort_evaluation_private_input.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_evaluation_private_input.py",
+      "required_symbols": [
+        "PrivateInputPolicy",
+        "file_sha256",
+        "private_regular_file",
+        "load_private_json"
+      ]
+    },
+    {
+      "path": "operations/cohort_evaluation_result_loader.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_evaluation_result_loader.py",
+      "required_symbols": [
+        "ResultLoaderPolicy",
+        "load_result_export"
+      ]
+    },
+    {
       "path": "operations/trace_evaluation_skills.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/trace_evaluation_skills.py",

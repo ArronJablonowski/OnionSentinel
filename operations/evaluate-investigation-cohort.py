@@ -32,9 +32,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
-import os
 import re
-import stat
 import statistics
 import sys
 from collections import Counter
@@ -89,14 +87,7 @@ from cohort_evaluation_execution_proof import (
     ExecutionProofPolicy,
     validate_execution_proof as admit_execution_proof,
 )
-from cohort_evaluation_result_member import (
-    ResultMemberPolicy,
-    normalize_export_member,
-)
-from cohort_evaluation_result_export import (
-    ResultExportPolicy,
-    normalize_result_export,
-)
+from cohort_evaluation_result_member import normalize_export_member
 from cohort_evaluation_scoring import (
     ScoringPolicy,
     case_evaluation as evaluate_case_score,
@@ -136,6 +127,15 @@ from cohort_evaluation_result_policy import (
 from cohort_execution_result import (
     expected_task_kind as derive_expected_task_kind,
     prior_analysis_ids as collect_prior_analysis_ids,
+)
+from cohort_evaluation_private_input import (
+    PrivateInputPolicy,
+    file_sha256 as hash_file,
+    load_private_json as read_private_json,
+)
+from cohort_evaluation_result_loader import (
+    ResultLoaderPolicy,
+    load_result_export as normalize_result_file,
 )
 from cohort_evaluation_contracts import (
     ADJUDICATION_SCHEMA,
@@ -228,11 +228,7 @@ def _bounded_model_call_proof_valid(harness: Mapping[str, Any]) -> bool:
 
 
 def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return hash_file(path)
 
 
 def _validate_embedded_digest(document: Mapping[str, Any], field: str) -> None:
@@ -247,35 +243,15 @@ def _validate_embedded_digest(document: Mapping[str, Any], field: str) -> None:
         raise CohortEvaluationError(f"{field} does not match the document")
 
 
-def _private_regular_file(path: Path, label: str) -> Path:
-    target = path.expanduser()
-    if target.is_symlink() or not target.is_file():
-        raise CohortEvaluationError(f"{label} is not a regular file: {target}")
-    metadata = target.stat()
-    if metadata.st_uid != os.geteuid():
-        raise CohortEvaluationError(f"{label} is not owned by the current user")
-    mode = stat.S_IMODE(metadata.st_mode)
-    if mode & 0o077:
-        raise CohortEvaluationError(
-            f"{label} must be owner-only (0600); current mode is {mode:04o}"
-        )
-    if metadata.st_size > MAX_INPUT_BYTES:
-        raise CohortEvaluationError(f"{label} exceeds the bounded input size")
-    return target.resolve()
+def _private_input_policy() -> PrivateInputPolicy:
+    return PrivateInputPolicy(
+        maximum_bytes=MAX_INPUT_BYTES,
+        error=CohortEvaluationError,
+    )
 
 
 def load_private_json(path: Path, label: str) -> tuple[dict[str, Any], str]:
-    target = _private_regular_file(path, label)
-    try:
-        raw = target.read_bytes()
-        document = json.loads(raw.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise CohortEvaluationError(
-            f"could not read {label}: {type(exc).__name__}"
-        ) from exc
-    if not isinstance(document, dict):
-        raise CohortEvaluationError(f"{label} root must be an object")
-    return document, hashlib.sha256(raw).hexdigest()
+    return read_private_json(path, label, _private_input_policy())
 
 
 def _adjudication_policy() -> AdjudicationPolicy:
@@ -542,34 +518,29 @@ def load_result_export(
     role: str,
     expected_count: int,
 ) -> tuple[dict[str, Any], str]:
-    label = f"{ROLE_LABELS[role]} result export"
-    document, source_file_sha256 = load_private_json(path, label)
-    normalized = normalize_result_export(
-        document=document,
+    return normalize_result_file(
+        path,
         role=role,
         expected_count=expected_count,
-        label=label,
-        policy=ResultExportPolicy(
+        policy=ResultLoaderPolicy(
+            role_labels=ROLE_LABELS,
             result_schema=RESULT_SCHEMA,
             manifest_schema=MANIFEST_SCHEMA,
             digest_pattern=SHA256_RE,
+            stable_group_id_pattern=STABLE_GROUP_ID_RE,
+            verdict_fields=VERDICT_FIELDS,
             hash_value=sha256_value,
+            load_private_json=load_private_json,
             validate_embedded_digest=_validate_embedded_digest,
             safe_content_policy=_safe_export_content_policy,
             execution_contract=_execution_contract,
-            member_policy=ResultMemberPolicy(
-                stable_group_id_pattern=STABLE_GROUP_ID_RE,
-                verdict_fields=VERDICT_FIELDS,
-                stable_group_key=_stable_group_key,
-                hash_value=sha256_value,
-                validate_execution_proof=_validate_execution_proof,
-                observed_labels=_observed_labels,
-                query_audit_summary=_query_audit_summary,
-            ),
+            stable_group_key=_stable_group_key,
+            validate_execution_proof=_validate_execution_proof,
+            observed_labels=_observed_labels,
+            query_audit_summary=_query_audit_summary,
+            error=CohortEvaluationError,
         ),
-        error=CohortEvaluationError,
     )
-    return normalized, source_file_sha256
 
 
 def _scoring_policy() -> ScoringPolicy:

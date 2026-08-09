@@ -27,6 +27,8 @@ import cohort_evaluation_query_audit  # noqa: E402
 import cohort_evaluation_execution_contract  # noqa: E402
 import cohort_evaluation_execution_proof  # noqa: E402
 import cohort_evaluation_contracts  # noqa: E402
+import cohort_evaluation_private_input  # noqa: E402
+import cohort_evaluation_result_loader  # noqa: E402
 import cohort_evaluation_result_policy  # noqa: E402
 import cohort_execution_result  # noqa: E402
 
@@ -84,6 +86,20 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         self.assertIs(
             evaluator.QUERY_CLASSES,
             cohort_evaluation_contracts.QUERY_CLASSES,
+        )
+
+    def test_evaluator_uses_extracted_private_input_and_result_loader(self) -> None:
+        self.assertIs(
+            evaluator.hash_file,
+            cohort_evaluation_private_input.file_sha256,
+        )
+        self.assertIs(
+            evaluator.read_private_json,
+            cohort_evaluation_private_input.load_private_json,
+        )
+        self.assertIs(
+            evaluator.normalize_result_file,
+            cohort_evaluation_result_loader.load_result_export,
         )
 
     def setUp(self) -> None:
