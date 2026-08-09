@@ -310,6 +310,17 @@
       ]
     },
     {
+      "path": "operations/cohort_preflight.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_preflight.py",
+      "required_symbols": [
+        "RepresentativeBindingPolicy",
+        "MemberPreflightSources",
+        "validate_representative_binding",
+        "validate_member_preflight"
+      ]
+    },
+    {
       "path": "operations/trace_evaluation_skills.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/trace_evaluation_skills.py",

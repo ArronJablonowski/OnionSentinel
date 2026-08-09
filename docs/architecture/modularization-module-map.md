@@ -763,6 +763,12 @@ bounded response parsing and hashing, scalar result projection, reviewer-route
 projection, and query-audit projection. Database schema enforcement and
 canonical response hashing are injected by the cohort runner.
 
+`operations/cohort_preflight.py` owns frozen representative identity,
+immutable detection evidence, stable-group-key compatibility, and exact SOC or
+Incident Responder pre-run-state validation. Database lookups and active-work
+queries remain injected by the cohort runner so the policy stays deterministic
+and independently testable.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

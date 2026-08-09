@@ -126,6 +126,12 @@ from cohort_analysis_metadata import (
     AnalysisMetadataPolicy,
     load_analysis_metadata,
 )
+from cohort_preflight import (
+    MemberPreflightSources,
+    RepresentativeBindingPolicy,
+    validate_member_preflight as run_member_preflight,
+    validate_representative_binding as prove_representative_binding,
+)
 
 
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -1560,136 +1566,21 @@ def _validate_representative_binding(
     member: Mapping[str, Any],
     current_representative_alert_id: str,
 ) -> dict[str, Any]:
-    """Prove the frozen and current representatives remain one exact group."""
-
-    dashboard_id = str(member["dashboard_group_id"])
-    stable_id = str(member["stable_group_id"])
-    stable_group_key = _member_stable_group_key(member)
-    frozen_alert_id = str(member["representative_alert_id"])
-    if not REPRESENTATIVE_ALERT_ID_RE.fullmatch(frozen_alert_id):
-        raise CohortError(
-            f"frozen representative alert ID is invalid for dashboard "
-            f"group {dashboard_id}"
-        )
-    if not REPRESENTATIVE_ALERT_ID_RE.fullmatch(
-        current_representative_alert_id
-    ):
-        raise CohortError(
-            f"current representative alert ID is invalid for dashboard "
-            f"group {dashboard_id}"
-        )
-    frozen_alert = _alert_representative_identity(
+    return prove_representative_binding(
         connection,
-        frozen_alert_id,
-    )
-    if frozen_alert is None:
-        raise CohortError(
-            f"frozen representative alert is missing for dashboard group "
-            f"{dashboard_id}"
-        )
-    frozen_alert_stable = str(
-        frozen_alert.get("stable_group_id") or ""
-    )
-    if frozen_alert_stable != stable_id:
-        raise CohortError(
-            f"frozen representative alert stable identity drift for "
-            f"dashboard group {dashboard_id}"
-        )
-
-    detection = member.get("detection")
-    if not isinstance(detection, dict):
-        raise CohortError(
-            f"frozen representative detection is missing for dashboard "
-            f"group {dashboard_id}"
-        )
-    missing_fields = [
-        field
-        for field in FROZEN_REPRESENTATIVE_IMMUTABLE_FIELDS
-        if field not in detection
-    ]
-    if missing_fields:
-        raise CohortError(
-            f"frozen representative detection is missing immutable fields "
-            f"for dashboard group {dashboard_id}: "
-            + ", ".join(missing_fields)
-        )
-    drifted_fields = [
-        field
-        for field in FROZEN_REPRESENTATIVE_IMMUTABLE_FIELDS
-        if frozen_alert.get(field) != detection.get(field)
-    ]
-    if drifted_fields:
-        raise CohortError(
-            f"frozen representative immutable evidence drift for dashboard "
-            f"group {dashboard_id}: "
-            + ", ".join(drifted_fields)
-        )
-
-    current_alert = _alert_representative_identity(
-        connection,
+        member,
         current_representative_alert_id,
-    )
-    if current_alert is None:
-        raise CohortError(
-            f"current representative alert is missing for dashboard group "
-            f"{dashboard_id}"
-        )
-    current_alert_stable = str(
-        current_alert.get("stable_group_id") or ""
-    )
-    if current_alert_stable != stable_id:
-        raise CohortError(
-            f"current representative alert stable identity drift for "
-            f"dashboard group {dashboard_id}"
-        )
-    frozen_group_key = validate_stable_group_key(
-        frozen_alert.get("stable_group_key"),
-        (
-            "frozen representative alert stable_group_key for dashboard "
-            f"group {dashboard_id}"
+        alert_identity=_alert_representative_identity,
+        member_stable_group_key=_member_stable_group_key,
+        policy=RepresentativeBindingPolicy(
+            error=CohortError,
+            representative_alert_id_pattern=REPRESENTATIVE_ALERT_ID_RE,
+            immutable_fields=FROZEN_REPRESENTATIVE_IMMUTABLE_FIELDS,
+            binding_schema=REPRESENTATIVE_BINDING_SCHEMA,
+            validate_stable_group_key=validate_stable_group_key,
+            sha256_value=sha256_value,
         ),
     )
-    current_group_key = validate_stable_group_key(
-        current_alert.get("stable_group_key"),
-        (
-            "current representative alert stable_group_key for dashboard "
-            f"group {dashboard_id}"
-        ),
-    )
-    if frozen_group_key != stable_group_key:
-        raise CohortError(
-            f"frozen representative alert stable group key drift for "
-            f"dashboard group {dashboard_id}"
-        )
-    if frozen_group_key != current_group_key:
-        raise CohortError(
-            f"representative alert stable group key drift for dashboard "
-            f"group {dashboard_id}"
-        )
-
-    immutable_projection = {
-        field: frozen_alert.get(field)
-        for field in FROZEN_REPRESENTATIVE_IMMUTABLE_FIELDS
-    }
-    return {
-        "schema": REPRESENTATIVE_BINDING_SCHEMA,
-        "representative_drifted": (
-            current_representative_alert_id != frozen_alert_id
-        ),
-        "stable_group_id": stable_id,
-        "stable_group_key": stable_group_key,
-        "frozen_representative_alert_id": frozen_alert_id,
-        "current_representative_alert_id": (
-            current_representative_alert_id
-        ),
-        "immutable_fields": list(
-            FROZEN_REPRESENTATIVE_IMMUTABLE_FIELDS
-        ),
-        "frozen_immutable_evidence_sha256": sha256_value(
-            immutable_projection
-        ),
-        "stable_group_key_compatible": True,
-    }
 
 
 def _case_for_stable(
@@ -1709,74 +1600,23 @@ def validate_member_preflight(
     connection: sqlite3.Connection,
     member: Mapping[str, Any],
 ) -> dict[str, Any]:
-    aliases = load_aliases(connection)
-    dashboard_id = str(member["dashboard_group_id"])
-    stable_id = str(member["stable_group_id"])
-    identity = _current_summary_identity(connection, dashboard_id, aliases)
-    if identity is None:
-        raise CohortError(f"frozen dashboard group disappeared: {dashboard_id}")
-    current_stable_id, current_representative_alert_id = identity
-    if current_stable_id != stable_id:
-        raise CohortError(
-            f"frozen stable identity drift for dashboard group {dashboard_id}"
-        )
-    representative_binding = _validate_representative_binding(
+    return run_member_preflight(
         connection,
         member,
-        current_representative_alert_id,
+        MemberPreflightSources(
+            error=CohortError,
+            active_agent_states=frozenset(ACTIVE_AGENT_STATES),
+            load_aliases=load_aliases,
+            current_summary_identity=_current_summary_identity,
+            validate_representative_binding=_validate_representative_binding,
+            soc_pre_state=_soc_pre_state,
+            frozen_analysis_ids=_frozen_analysis_ids,
+            analysis_ids_for_group=_analysis_ids_for_group,
+            case_for_stable=_case_for_stable,
+            active_jobs=_active_jobs,
+            active_reanalysis=_active_reanalysis,
+        ),
     )
-    if str((member.get("dispatch") or {}).get("kind") or "") == "analyze":
-        current_soc_state = _soc_pre_state(
-            connection,
-            stable_id,
-            aliases,
-        )
-        if current_soc_state != (member.get("pre_state") or {}):
-            raise CohortError(
-                f"SOC Analyst pre-state changed for stable group {stable_id}"
-            )
-        return representative_binding
-    frozen_incident_analysis_ids = _frozen_analysis_ids(
-        member,
-        agent_role="incident-responder",
-        pre_state_field="incident_analysis_ids",
-    )
-    current_incident_analysis_ids = set(
-        _analysis_ids_for_group(
-            connection,
-            stable_id,
-            agent_role="incident-responder",
-        )
-    )
-    if current_incident_analysis_ids != frozen_incident_analysis_ids:
-        raise CohortError(
-            f"Incident Responder analysis pre-state changed for stable "
-            f"group {stable_id}"
-        )
-    pre_case = (member.get("pre_state") or {}).get("incident_case")
-    current_case = _case_for_stable(connection, stable_id, aliases)
-    if current_case != pre_case:
-        raise CohortError(
-            f"incident case pre-state changed for stable group {stable_id}"
-        )
-    if current_case and str(current_case.get("agent_status") or "") in ACTIVE_AGENT_STATES:
-        raise CohortError(
-            f"incident case {current_case.get('case_id')} became active"
-        )
-    if _active_jobs(connection, stable_id, aliases):
-        raise CohortError(
-            f"stable group {stable_id} has a pending/processing job"
-        )
-    if _active_reanalysis(
-        connection,
-        stable_id,
-        str((current_case or {}).get("case_id") or ""),
-        aliases,
-    ):
-        raise CohortError(
-            f"stable group {stable_id} has a queued/running reanalysis"
-        )
-    return representative_binding
 
 
 def validate_frozen_cohort(
