@@ -23,9 +23,20 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC and SPEC.loader
 evaluator = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(evaluator)
+import cohort_evaluation_query_audit  # noqa: E402
 
 
 class InvestigationCohortEvaluationTests(unittest.TestCase):
+    def test_evaluator_uses_extracted_query_audit_services(self) -> None:
+        self.assertIs(
+            evaluator.evaluate_query_audit_binding,
+            cohort_evaluation_query_audit.query_audit_execution_binding,
+        )
+        self.assertIs(
+            evaluator.summarize_query_audit,
+            cohort_evaluation_query_audit.query_audit_summary,
+        )
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(
             prefix="onion-sentinel-investigation-evaluation-"

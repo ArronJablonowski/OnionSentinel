@@ -127,6 +127,11 @@ from cohort_evaluation_private_output import (
     write_private_bytes as write_report_bytes,
     write_private_json as write_report_json,
 )
+from cohort_evaluation_query_audit import (
+    QueryAuditPolicy,
+    query_audit_execution_binding as evaluate_query_audit_binding,
+    query_audit_summary as summarize_query_audit,
+)
 
 
 RESULT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v4"
@@ -479,207 +484,24 @@ def _observed_labels(analysis: Mapping[str, Any]) -> dict[str, Any]:
     return output
 
 
-def _query_audit_summary(analysis: Mapping[str, Any]) -> dict[str, Any]:
-    query_audit = analysis.get("query_audit")
-    if not isinstance(query_audit, dict):
-        query_audit = {}
-    section_count = 0
-    query_count = 0
-    explicit_non_read_only = 0
-    partial_sections = 0
-    incomplete_sections = 0
-    for audit in query_audit.values():
-        if not isinstance(audit, dict):
-            continue
-        section_count += 1
-        if audit.get("read_only") is False:
-            explicit_non_read_only += 1
-        if audit.get("partial") is True:
-            partial_sections += 1
-        if audit.get("complete") is False:
-            incomplete_sections += 1
-        queries = audit.get("queries")
-        if isinstance(queries, list):
-            query_count += len(queries)
-            for query in queries:
-                if isinstance(query, dict) and query.get("partial") is True:
-                    partial_sections += 1
-    return {
-        "audit_section_count": section_count,
-        "query_count": query_count,
-        "explicit_non_read_only_count": explicit_non_read_only,
-        "partial_or_incomplete_count": partial_sections + incomplete_sections,
-        "read_only_verified": (
-            section_count > 0 and explicit_non_read_only == 0
+def _query_audit_policy() -> QueryAuditPolicy:
+    return QueryAuditPolicy(
+        successful_statuses=frozenset(
+            {"ok", "complete", "completed", "success", "succeeded"}
         ),
-    }
+        sha256_pattern=SHA256_RE,
+        sha256_value=sha256_value,
+    )
+
+
+def _query_audit_summary(analysis: Mapping[str, Any]) -> dict[str, Any]:
+    return summarize_query_audit(analysis)
 
 
 def _query_audit_execution_binding(
     analysis: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Recompute the export's collector-owned query-provenance binding."""
-
-    query_audit = (
-        analysis.get("query_audit")
-        if isinstance(analysis.get("query_audit"), dict)
-        else {}
-    )
-    section_count = 0
-    queried_section_count = 0
-    query_count = 0
-    read_only_queried_section_count = 0
-    for section in query_audit.values():
-        if not isinstance(section, dict):
-            continue
-        section_count += 1
-        queries = (
-            section.get("queries")
-            if isinstance(section.get("queries"), list)
-            else []
-        )
-        query_count += len(queries)
-        if queries:
-            queried_section_count += 1
-            if section.get("read_only") is True:
-                read_only_queried_section_count += 1
-    security_onion = query_audit.get("_incident_query_audit")
-    security_onion = (
-        security_onion if isinstance(security_onion, dict) else {}
-    )
-    security_onion_queries = (
-        security_onion.get("queries")
-        if isinstance(security_onion.get("queries"), list)
-        else []
-    )
-    dynamic = query_audit.get("_investigation_query_audit")
-    dynamic = dynamic if isinstance(dynamic, dict) else {}
-    dynamic_queries = (
-        dynamic.get("queries")
-        if isinstance(dynamic.get("queries"), list)
-        else []
-    )
-    successful_statuses = {
-        "ok",
-        "complete",
-        "completed",
-        "success",
-        "succeeded",
-    }
-    raw_dynamic_tool_bindings = (
-        dynamic.get("tool_call_bindings")
-        if isinstance(dynamic.get("tool_call_bindings"), list)
-        else []
-    )
-    invalid_dynamic_tool_bindings = 0
-    duplicate_dynamic_tool_bindings = 0
-    seen_call_ids: set[str] = set()
-    dynamic_tool_bindings: list[dict[str, Any]] = []
-    for binding in raw_dynamic_tool_bindings:
-        if not isinstance(binding, dict):
-            invalid_dynamic_tool_bindings += 1
-            continue
-        status = str(binding.get("status") or "").strip().lower()
-        status = status.replace("_", "-")
-        try:
-            round_number = int(binding.get("round_number"))
-        except (TypeError, ValueError, OverflowError):
-            round_number = -1
-        call_id = str(binding.get("call_id") or "")
-        query_id = str(binding.get("query_id") or "")
-        backend = str(binding.get("backend") or "")
-        request_digest = str(binding.get("request_digest") or "")
-        result_digest = str(binding.get("result_digest") or "")
-        binding_is_valid = (
-            round_number >= 1
-            and bool(query_id)
-            and bool(backend)
-            and bool(status)
-            and call_id == f"round-{round_number}-{query_id}"[:128]
-            and SHA256_RE.fullmatch(request_digest) is not None
-            and SHA256_RE.fullmatch(result_digest) is not None
-            and isinstance(binding.get("read_only"), bool)
-        )
-        if not binding_is_valid:
-            invalid_dynamic_tool_bindings += 1
-            continue
-        if call_id in seen_call_ids:
-            duplicate_dynamic_tool_bindings += 1
-            continue
-        seen_call_ids.add(call_id)
-        if (
-            status not in successful_statuses
-            or binding.get("read_only") is not True
-        ):
-            continue
-        dynamic_tool_bindings.append(
-            {
-                "call_id": call_id,
-                "round_number": round_number,
-                "query_id": query_id,
-                "backend": backend,
-                "status": status,
-                "request_digest": request_digest,
-                "result_digest": result_digest,
-                "read_only": True,
-            }
-        )
-    dynamic_tool_bindings.sort(
-        key=lambda item: (
-            int(item["round_number"]),
-            str(item["call_id"]),
-        )
-    )
-    try:
-        successful_read_only_queries = int(
-            dynamic.get("successful_read_only_queries")
-        )
-    except (TypeError, ValueError, OverflowError):
-        successful_read_only_queries = -1
-    return {
-        "query_audit_sha256": sha256_value(query_audit),
-        "section_count": section_count,
-        "queried_section_count": queried_section_count,
-        "query_count": query_count,
-        "read_only_queried_section_count": (
-            read_only_queried_section_count
-        ),
-        "read_only_verified": (
-            queried_section_count > 0
-            and read_only_queried_section_count == queried_section_count
-        ),
-        "security_onion_query_count": len(security_onion_queries),
-        "security_onion_read_only": (
-            security_onion.get("read_only") is True
-        ),
-        "dynamic_query_count": len(dynamic_queries),
-        "dynamic_tool_call_binding_count": len(
-            raw_dynamic_tool_bindings
-        ),
-        "dynamic_invalid_tool_call_binding_count": (
-            invalid_dynamic_tool_bindings
-        ),
-        "dynamic_duplicate_tool_call_binding_count": (
-            duplicate_dynamic_tool_bindings
-        ),
-        "dynamic_read_only": dynamic.get("read_only") is True,
-        "dynamic_complete": dynamic.get("complete") is True,
-        "dynamic_all_tool_call_bindings_read_only": (
-            dynamic.get("all_tool_call_bindings_read_only") is True
-        ),
-        "dynamic_evaluation_requirement_satisfied": (
-            dynamic.get("evaluation_requirement_satisfied") is True
-        ),
-        "dynamic_successful_read_only_queries": (
-            successful_read_only_queries
-        ),
-        "dynamic_successful_read_only_tool_bindings": (
-            dynamic_tool_bindings
-        ),
-        "dynamic_successful_read_only_tool_bindings_sha256": (
-            sha256_value(dynamic_tool_bindings)
-        ),
-    }
+    return evaluate_query_audit_binding(analysis, _query_audit_policy())
 
 
 def _parse_timestamp(value: Any, label: str) -> dt.datetime:

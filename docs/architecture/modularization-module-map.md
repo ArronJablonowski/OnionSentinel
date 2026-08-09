@@ -697,6 +697,12 @@ output. It rejects symlink replacement and unbounded JSON, creates private
 parents, fsyncs files and directories, and exposes no grading or rendering
 policy.
 
+`operations/cohort_evaluation_query_audit.py` owns content-free query-audit
+summary and execution-binding proof. It normalizes unique bounded dynamic tool
+bindings, validates call/round/query identity and request/result digests, counts
+Security Onion and dynamic queries, and recomputes the canonical binding digest
+without accepting query text or result content.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental
