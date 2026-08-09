@@ -102,6 +102,7 @@ from cohort_execution_trace import (
     TraceExecutionPolicy,
     evaluate_trace_execution,
 )
+from cohort_execution_render import ExecutionProofView, render_execution_proof
 
 
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -2769,11 +2770,6 @@ def _harness_execution_proof(
             f"harness trace for {analysis_id} is not exactly one run"
         )
     trace = trace_runs[0]
-    integrity = (
-        trace.get("integrity")
-        if isinstance(trace.get("integrity"), dict)
-        else {}
-    )
     routes = (
         (trace.get("models") or {}).get("route_consistency")
         if isinstance(trace.get("models"), dict)
@@ -2794,11 +2790,6 @@ def _harness_execution_proof(
     model_call_contract = (
         models.get("model_call_contract")
         if isinstance(models.get("model_call_contract"), dict)
-        else {}
-    )
-    terminal = (
-        trace.get("terminal_execution_summary")
-        if isinstance(trace.get("terminal_execution_summary"), dict)
         else {}
     )
     skill_attestation = (
@@ -2846,7 +2837,6 @@ def _harness_execution_proof(
     )
     failures.extend(trace_execution.failures)
     integrity = trace_execution.integrity
-    terminal = trace_execution.terminal
     model_execution = evaluate_model_execution(
         trace,
         models,
@@ -2860,26 +2850,6 @@ def _harness_execution_proof(
         ),
     )
     failures.extend(model_execution.failures)
-    model_call_count = model_execution.model_call_count
-    successful_model_call_count = model_execution.successful_model_call_count
-    model_purpose_count = model_execution.model_purpose_count
-    terminally_successful_model_purpose_count = (
-        model_execution.terminally_successful_model_purpose_count
-    )
-    incomplete_model_purpose_count = model_execution.incomplete_model_purpose_count
-    exact_reviewer_repair_count = model_execution.exact_reviewer_repair_count
-    exact_adjudication_repair_count = (
-        model_execution.exact_adjudication_repair_count
-    )
-    superseded_validation_failure_count = (
-        model_execution.superseded_validation_failure_count
-    )
-    unexpected_unsuccessful_model_call_count = (
-        model_execution.unexpected_unsuccessful_model_call_count
-    )
-    malformed_model_purpose_sequence_count = (
-        model_execution.malformed_model_purpose_sequence_count
-    )
     query_audit_binding = _query_audit_execution_binding(analysis)
     tool_execution = evaluate_tool_execution(
         trace,
@@ -2890,105 +2860,32 @@ def _harness_execution_proof(
         sha256_value=sha256_value,
     )
     failures.extend(tool_execution.failures)
-    tool_call_count = tool_execution.tool_call_count
-    successful_tool_call_count = tool_execution.successful_tool_call_count
-    read_only_tool_call_count = tool_execution.read_only_tool_call_count
-    trace_bindings = tool_execution.trace_bindings
-    trace_binding_digest = tool_execution.trace_binding_digest
-    canonical_response_sha256 = (
-        trace_execution.canonical_response_sha256
-    )
-    submitted_response_sha256 = (
-        trace_execution.submitted_response_sha256
-    )
 
     if failures:
         raise CohortError(
             f"execution gate failed for {analysis_id}: "
             + ", ".join(sorted(set(failures)))
         )
-    proof = {
-        "status": "passed",
-        "fresh_analysis": True,
-        "dispatch_accepted_once": True,
-        "analysis_id": analysis_id,
-        "analysis_generated_at": str(analysis.get("generated_at") or ""),
-        "release_id": str(contract.get("expected_release_id") or ""),
-        "harness": {
-            "run_id": analysis_id,
-            "trace_id": str(trace.get("trace_id") or ""),
-            "stable_group_id": str(trace.get("correlation_id") or ""),
-            "representative_alert_id": str(trace.get("alert_id") or ""),
-            "status": "succeeded",
-            "stage": "complete",
-            "role": role,
-            "task_kind": str(trace.get("task_kind") or ""),
-            "policy_mode": str(trace.get("policy_mode") or ""),
-            "assigned_route": str(trace.get("assigned_route") or ""),
-            "assigned_reviewer_route": str(
-                trace.get("assigned_reviewer_route") or ""
+    return render_execution_proof(
+        ExecutionProofView(
+            analysis_id=analysis_id,
+            analysis_generated_at=str(analysis.get("generated_at") or ""),
+            release_id=str(contract.get("expected_release_id") or ""),
+            role=role,
+            trace=trace,
+            integrity=integrity,
+            skill_selection=skill_selection_summary,
+            model_execution=model_execution,
+            tool_execution=tool_execution,
+            submitted_response_sha256=(
+                trace_execution.submitted_response_sha256
             ),
-            "started_at": str(trace.get("started_at") or ""),
-            "completed_at": str(trace.get("completed_at") or ""),
-            "chain_valid": True,
-            "chain_head_sha256": str(integrity.get("head_sha256") or ""),
-            "ledger_manifest_bound": True,
-            "ledger_manifest_schema": str(
-                integrity.get("ledger_manifest_schema") or ""
+            response_canonical_sha256=(
+                trace_execution.canonical_response_sha256
             ),
-            "skill_selection_attestation_validated": True,
-            "skill_selection_attestation": skill_selection_summary,
-            "model_call_count": int(
-                (trace.get("counts") or {}).get("model_calls") or 0
-            ),
-            "successful_model_call_count": successful_model_call_count,
-            "successful_primary_model_call_count": int(
-                models.get("successful_primary_call_count") or 0
-            ),
-            "model_purpose_count": model_purpose_count,
-            "terminally_successful_model_purpose_count": (
-                terminally_successful_model_purpose_count
-            ),
-            "incomplete_model_purpose_count": (
-                incomplete_model_purpose_count
-            ),
-            "exact_reviewer_repair_count": (
-                exact_reviewer_repair_count
-            ),
-            "exact_adjudication_repair_count": (
-                exact_adjudication_repair_count
-            ),
-            "superseded_validation_failure_count": (
-                superseded_validation_failure_count
-            ),
-            "unexpected_unsuccessful_model_call_count": (
-                unexpected_unsuccessful_model_call_count
-            ),
-            "malformed_model_purpose_sequence_count": (
-                malformed_model_purpose_sequence_count
-            ),
-            "model_call_contract": model_execution.model_call_contract,
-            "reviewer_completion": model_execution.reviewer_completion,
-            "route_authorization_failure_count": 0,
-            "route_identity_mismatch_count": 0,
-            "tool_call_count": tool_call_count,
-            "successful_tool_call_count": successful_tool_call_count,
-            "read_only_tool_call_count": read_only_tool_call_count,
-            "read_only_violation_count": 0,
-            "successful_read_only_tool_call_bindings": (
-                trace_bindings
-            ),
-            "successful_read_only_tool_call_bindings_sha256": (
-                trace_binding_digest
-            ),
-            "query_audit": query_audit_binding,
-            "memory_frozen": True,
-            "submitted_response_sha256": submitted_response_sha256,
-            "response_canonical_sha256": canonical_response_sha256,
-        },
-    }
-    proof["proof_sha256"] = sha256_value(proof)
-    return proof
+        ),
+        sha256_value,
+    )
 
 
 def export_cohort(

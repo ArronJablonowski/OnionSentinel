@@ -580,6 +580,11 @@ terminal-ledger integrity, response commit digests, and dispatch-to-completion
 timestamp ordering. It returns validated terminal evidence without performing
 database access or rendering the final cohort proof.
 
+`operations/cohort_execution_render.py` owns the canonical public execution
+proof shape and its terminal SHA-256 seal. It accepts only already-validated
+skill, model, tool, trace, and response evidence and performs no database,
+filesystem, trace-evaluator, or policy work.
+
 `prompt_incident_evidence_projection.py` owns the model-facing, in-memory
 projection of already-validated incident evidence. It applies deterministic
 prefix limits to Elastic hits and OSQuery rows, records source and retained

@@ -125,6 +125,15 @@
       ]
     },
     {
+      "path": "operations/cohort_execution_render.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_execution_render.py",
+      "required_symbols": [
+        "ExecutionProofView",
+        "render_execution_proof"
+      ]
+    },
+    {
       "path": "n8n/bin/run-local-ai-analysis.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/run-local-ai-analysis.py",
