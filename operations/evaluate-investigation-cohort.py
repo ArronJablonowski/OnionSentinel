@@ -86,6 +86,10 @@ from cohort_evaluation_job_proof import (
     expected_dispatch_id as derive_expected_dispatch_id,
     validate_durable_job_proof,
 )
+from cohort_evaluation_harness_gate import (
+    HarnessGatePolicy,
+    validate_harness_gate,
+)
 
 
 RESULT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v4"
@@ -983,143 +987,19 @@ def _validate_execution_proof(
         raise CohortEvaluationError(
             f"{label} collector query-audit binding does not match"
         )
-    dynamic_bindings = query_audit_binding[
-        "dynamic_successful_read_only_tool_bindings"
-    ]
-    trace_bindings = harness.get(
-        "successful_read_only_tool_call_bindings"
+    validate_harness_gate(
+        harness=harness,
+        query_audit=query_audit_binding,
+        role=role,
+        canonical_response_sha256=canonical_response_sha256,
+        label=label,
+        policy=HarnessGatePolicy(
+            sha256_pattern=SHA256_RE,
+            hash_value=sha256_value,
+            bounded_model_call_proof_valid=_bounded_model_call_proof_valid,
+        ),
+        error=CohortEvaluationError,
     )
-    trace_binding_digest = str(
-        harness.get(
-            "successful_read_only_tool_call_bindings_sha256"
-        )
-        or ""
-    )
-    if (
-        harness.get("chain_valid") is not True
-        or harness.get("ledger_manifest_bound") is not True
-        or harness.get("memory_frozen") is not True
-        or not _bounded_model_call_proof_valid(harness)
-        or int(harness.get("successful_primary_model_call_count") or 0) < 1
-        or int(
-            (harness.get("reviewer_completion") or {}).get(
-                "model_call_count"
-            )
-            or 0
-        ) < 1
-        or int(harness.get("model_purpose_count") or 0) < 1
-        or int(
-            harness.get("terminally_successful_model_purpose_count")
-            or 0
-        )
-        != int(harness.get("model_purpose_count") or 0)
-        or int(harness.get("incomplete_model_purpose_count") or 0)
-        != 0
-        or int(harness.get("successful_model_call_count") or 0)
-        != int(harness.get("model_purpose_count") or 0)
-        or int(harness.get("model_call_count") or 0)
-        != (
-            int(harness.get("successful_model_call_count") or 0)
-            + int(
-                harness.get("superseded_validation_failure_count")
-                or 0
-            )
-        )
-        or int(harness.get("exact_reviewer_repair_count") or 0)
-        != int(
-            harness.get("superseded_validation_failure_count") or 0
-        )
-        or int(harness.get("exact_reviewer_repair_count") or 0)
-        not in {0, 1}
-        or int(
-            harness.get("unexpected_unsuccessful_model_call_count")
-            or 0
-        )
-        != 0
-        or int(
-            harness.get("malformed_model_purpose_sequence_count")
-            or 0
-        )
-        != 0
-        or int(harness.get("route_authorization_failure_count") or 0)
-        or int(harness.get("route_identity_mismatch_count") or 0)
-        or int(harness.get("tool_call_count") or 0) < 1
-        or int(harness.get("successful_tool_call_count") or 0) < 1
-        or int(harness.get("read_only_tool_call_count") or 0)
-        != int(harness.get("tool_call_count") or 0)
-        or int(harness.get("read_only_violation_count") or 0)
-        or not isinstance(trace_bindings, list)
-        or trace_bindings != dynamic_bindings
-        or len(dynamic_bindings)
-        != int(harness.get("successful_tool_call_count") or 0)
-        or trace_binding_digest != sha256_value(dynamic_bindings)
-        or (
-            int(query_audit_binding["queried_section_count"]) > 0
-            and query_audit_binding["read_only_verified"] is not True
-        )
-        or query_audit_binding["dynamic_read_only"] is not True
-        or query_audit_binding[
-            "dynamic_all_tool_call_bindings_read_only"
-        ]
-        is not True
-        or query_audit_binding[
-            "dynamic_evaluation_requirement_satisfied"
-        ]
-        is not True
-        or int(
-            query_audit_binding[
-                "dynamic_successful_read_only_queries"
-            ]
-        )
-        < 1
-        or int(query_audit_binding["dynamic_query_count"]) < 1
-        or int(
-            query_audit_binding[
-                "dynamic_tool_call_binding_count"
-            ]
-        )
-        < 1
-        or int(
-            query_audit_binding[
-                "dynamic_invalid_tool_call_binding_count"
-            ]
-        )
-        != 0
-        or int(
-            query_audit_binding[
-                "dynamic_duplicate_tool_call_binding_count"
-            ]
-        )
-        != 0
-        or int(
-            query_audit_binding[
-                "dynamic_successful_read_only_queries"
-            ]
-        )
-        != len(dynamic_bindings)
-        or (
-            role == "incident-responder"
-            and (
-                int(
-                    query_audit_binding["security_onion_query_count"]
-                )
-                < 1
-                or query_audit_binding["security_onion_read_only"]
-                is not True
-            )
-        )
-        or not SHA256_RE.fullmatch(
-            str(harness.get("submitted_response_sha256") or "")
-        )
-        or str(harness.get("response_canonical_sha256") or "")
-        != canonical_response_sha256
-        or not SHA256_RE.fullmatch(
-            str(harness.get("chain_head_sha256") or "")
-        )
-    ):
-        raise CohortEvaluationError(
-            f"{label} harness trace/route/read-only/freeze gate failed"
-        )
     harness_started = _parse_timestamp(
         harness.get("started_at"),
         f"{label} harness started_at",

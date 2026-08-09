@@ -106,6 +106,15 @@
       ]
     },
     {
+      "path": "operations/cohort_evaluation_harness_gate.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_evaluation_harness_gate.py",
+      "required_symbols": [
+        "HarnessGatePolicy",
+        "validate_harness_gate"
+      ]
+    },
+    {
       "path": "operations/cohort_execution_models.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_execution_models.py",

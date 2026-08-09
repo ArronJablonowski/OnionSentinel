@@ -570,6 +570,12 @@ dispatch-to-analysis completion window used by offline grading. Regexes,
 canonical hashing, stable-key validation, timestamp parsing, and error type are
 injected so the module remains independent of storage, network, and CLI code.
 
+`operations/cohort_evaluation_harness_gate.py` owns offline grading invariants
+for model-call accounting, repair bounds, route failures, tool-ledger equality,
+dynamic read-only query evidence, Incident Responder Security Onion coverage,
+and response/chain digests. It receives canonical hashing and model-call proof
+validation as ports and performs no trace, database, or network access.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

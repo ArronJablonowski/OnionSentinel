@@ -22,6 +22,7 @@ import cohort_execution_render  # noqa: E402
 import cohort_execution_result  # noqa: E402
 import cohort_export  # noqa: E402
 import cohort_evaluation_job_proof  # noqa: E402
+import cohort_evaluation_harness_gate  # noqa: E402
 
 
 def load_legacy_cohort():
@@ -101,6 +102,14 @@ class CohortExecutionAttestationBoundaryTests(unittest.TestCase):
         self.assertIs(
             evaluator.validate_durable_job_proof,
             cohort_evaluation_job_proof.validate_durable_job_proof,
+        )
+
+    def test_offline_evaluator_uses_extracted_harness_gate(self):
+        evaluator = load_cohort_evaluator()
+
+        self.assertIs(
+            evaluator.validate_harness_gate,
+            cohort_evaluation_harness_gate.validate_harness_gate,
         )
 
     def test_skill_projection_rejects_extra_identity_fields(self):
