@@ -54,6 +54,11 @@ from prompt_builder_cli import (
     PromptBuilderCliSources,
     parse_prompt_builder_args,
 )
+from prompt_investigation_query_context import (
+    QueryContextPolicy,
+    QueryContextSources,
+    build_investigation_query_context,
+)
 import investigation_query_contract as INVESTIGATION_CONTRACT
 
 
@@ -2257,479 +2262,53 @@ def investigation_query_context(
     actor_role: str,
     pcap_available: bool,
 ) -> tuple[dict, dict]:
-    """Build the model capability and the hidden broker authorization context.
-
-    The visible capability explains what can be requested.  The local context
-    contains the immutable Elastic anchor plus the exact observable/time
-    envelope the broker may authorize; ``model_safe_copy`` strips that local
-    object before every provider call.
-    """
-    alert = parse_alert_json(str(sqlite_value(selected, "alert_json") or ""))
-    index_name = str(alert.get("elastic_index") or "").strip()
-    document_id = str(alert.get("elastic_id") or "").strip()
-    if not index_name or not document_id:
-        candidate_index, separator, candidate_id = str(
-            sqlite_value(selected, "alert_id") or ""
-        ).rpartition(":")
-        if separator:
-            index_name = index_name or candidate_index
-            document_id = document_id or candidate_id
-    anchor = (
-        {"index": index_name, "id": document_id}
-        if ALERT_INDEX_RE.fullmatch(index_name)
-        and SAFE_ELASTIC_ID_RE.fullmatch(document_id)
-        else None
+    """Compatibility delegate for broker query-context projection."""
+    return build_investigation_query_context(
+        investigation_query_context_policy(),
+        investigation_query_context_sources(),
+        selected,
+        group_rows,
+        group_id,
+        actor_role,
+        pcap_available,
     )
 
-    permitted: dict[str, list[str]] = {
-        "ips": [],
-        "domains": [],
-        "hosts": [],
-        "users": [],
-    }
-    permitted_event_tuples: list[dict] = []
 
-    def add(kind: str, value: object) -> None:
-        if isinstance(value, list):
-            for item in value[:16]:
-                add(kind, item)
-            return
-        text = str(value or "").strip().rstrip(".")
-        if not text or text in permitted[kind] or len(permitted[kind]) >= 16:
-            return
-        if kind == "ips":
-            try:
-                ipaddress.ip_address(text)
-            except ValueError:
-                return
-        elif kind == "domains":
-            if not SAFE_PIVOT_DOMAIN_RE.fullmatch(text):
-                return
-        elif not SAFE_PIVOT_ATOM_RE.fullmatch(text):
-            return
-        permitted[kind].append(text)
-
-    times: list[dt.datetime] = []
-    for row_value in group_rows[:5000]:
-        row_alert = parse_alert_json(
-            str(sqlite_value(row_value, "alert_json") or "")
-        )
-        raw_event = parse_json_object(
-            str(sqlite_value(row_value, "raw_event_json") or "")
-        )
-        original_event = raw_event.get("event_data")
-        observable_documents = [row_alert]
-        if isinstance(original_event, dict):
-            # Sigma detections retain the source event under event_data. It is
-            # trusted, anchor-bound local evidence and often carries the only
-            # exact host, user, and source IP available for a safe follow-up.
-            observable_documents.append(original_event)
-        add("ips", sqlite_value(row_value, "source_ip"))
-        add("ips", sqlite_value(row_value, "destination_ip"))
-        for document in observable_documents:
-            for path in (
-                "source.ip",
-                "source.address",
-                "destination.ip",
-                "client.ip",
-                "server.ip",
-                "host.ip",
-                "dns.resolved_ip",
-                "related.ip",
-            ):
-                add("ips", _nested_alert_value(document, path))
-            for path in (
-                "dns.question.name",
-                "dns.query.name",
-                "url.domain",
-                "tls.server.name",
-                "ssl.server_name",
-                "http.virtual_host",
-                "quic.server_name",
-                "source.domain",
-                "destination.domain",
-                "client.domain",
-                "server.domain",
-            ):
-                add("domains", _nested_alert_value(document, path))
-            for path in (
-                "host.hostname",
-                "host.name",
-                "host.id",
-                "agent.id",
-                "agent.name",
-                "related.hosts",
-            ):
-                add("hosts", _nested_alert_value(document, path))
-            for path in (
-                "user.name",
-                "source.user.name",
-                "destination.user.name",
-                "client.user.name",
-                "user.id",
-                "related.user",
-            ):
-                add("users", _nested_alert_value(document, path))
-        tuple_value: dict[str, object] = {}
-        tuple_candidates = {
-            "source_ip": (
-                sqlite_value(row_value, "source_ip")
-                or _nested_alert_value(row_alert, "source.ip")
-            ),
-            "destination_ip": (
-                sqlite_value(row_value, "destination_ip")
-                or _nested_alert_value(row_alert, "destination.ip")
-            ),
-            "source_port": (
-                sqlite_value(row_value, "source_port")
-                or _nested_alert_value(row_alert, "source.port")
-            ),
-            "destination_port": (
-                sqlite_value(row_value, "destination_port")
-                or _nested_alert_value(row_alert, "destination.port")
-            ),
-            "transport": (
-                sqlite_value(row_value, "transport_protocol")
-                or _nested_alert_value(row_alert, "network.transport")
-            ),
-            "protocol": (
-                sqlite_value(row_value, "network_protocol")
-                or _nested_alert_value(row_alert, "network.protocol")
-            ),
-            "community_id": _nested_alert_value(
-                row_alert,
-                "network.community_id",
-            ),
-            "rule_id": (
-                sqlite_value(row_value, "rule_id")
-                or _nested_alert_value(row_alert, "rule.id")
-                or (
-                    _nested_alert_value(row_alert, "rule.uuid")
-                    if INVESTIGATION_QUERY_V2
-                    else None
-                )
-                or row_alert.get("signature_id")
-                or _nested_alert_value(
-                    row_alert,
-                    "suricata.eve.alert.signature_id",
-                )
-            ),
-        }
-        for field, raw_value in tuple_candidates.items():
-            if raw_value in (None, ""):
-                continue
-            if field in {"source_ip", "destination_ip"}:
-                try:
-                    tuple_value[field] = str(ipaddress.ip_address(str(raw_value)))
-                except ValueError:
-                    continue
-            elif field in {"source_port", "destination_port"}:
-                try:
-                    port = int(raw_value)
-                except (TypeError, ValueError):
-                    continue
-                if 0 <= port <= 65535:
-                    tuple_value[field] = port
-            elif field in {"transport", "protocol"}:
-                text = str(raw_value).strip().lower()
-                if INVESTIGATION_EVENT_TUPLE_ATOM_RE.fullmatch(text):
-                    tuple_value[field] = text
-            elif field == "community_id":
-                text = str(raw_value).strip()
-                if re.fullmatch(r"[A-Za-z0-9_:+/=-]{1,256}", text):
-                    tuple_value[field] = text
-            else:
-                text = str(raw_value).strip()
-                if INVESTIGATION_EVENT_TUPLE_ATOM_RE.fullmatch(text):
-                    tuple_value[field] = text
-        dataset = str(
-            _nested_alert_value(row_alert, "event.dataset")
-            or (
-                _nested_alert_value(original_event, "event.dataset")
-                if isinstance(original_event, dict)
-                else ""
-            )
-            or ""
-        ).strip().lower()
-        # Some Security Onion exporter paths retain the backing index but omit
-        # event.dataset from the compact alert JSON.  Preserve the sensor's
-        # native role meaning in that case: Suricata source/destination can be
-        # the matching packet direction, while Zeek source/destination are
-        # connection originator/responder fields.
-        row_index_name = str(
-            row_alert.get("elastic_index")
-            or (
-                str(sqlite_value(row_value, "alert_id") or "").rpartition(":")[0]
-            )
-            or ""
-        ).strip().lower()
-        if dataset == "suricata.alert" or "suricata.alerts" in row_index_name:
-            role_semantics = "packet_direction"
-        elif dataset.startswith("zeek.") or "logs-zeek" in row_index_name:
-            role_semantics = "zeek_originator_responder"
-        else:
-            role_semantics = "event_native"
-        if tuple_value and not any(
-            item["event_tuple"] == tuple_value
-            and item["role_semantics"] == role_semantics
-            for item in permitted_event_tuples
-        ) and len(permitted_event_tuples) < 32:
-            tuple_digest = hashlib.sha256(
-                json.dumps(
-                    tuple_value,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ).encode("utf-8")
-            ).hexdigest()[:20]
-            permitted_event_tuples.append({
-                "event_tuple": tuple_value,
-                "role_semantics": role_semantics,
-                "source": "trusted_context",
-                "evidence_ref": f"context:event-tuple:{tuple_digest}",
-            })
-        for column in ("timestamp", "first_seen", "last_seen"):
-            parsed = parse_project_datetime(sqlite_value(row_value, column))
-            if parsed is not None:
-                times.append(parsed.astimezone(dt.timezone.utc))
-
-    selected_time = (
-        parse_project_datetime(sqlite_value(selected, "timestamp"))
-        or parse_project_datetime(sqlite_value(selected, "last_seen"))
-        or parse_project_datetime(sqlite_value(selected, "first_seen"))
+def investigation_query_context_policy() -> QueryContextPolicy:
+    return QueryContextPolicy(
+        query_contract=INVESTIGATION_QUERY_CONTRACT,
+        query_v2=INVESTIGATION_QUERY_V2,
+        query_packs=tuple(INVESTIGATION_QUERY_PACKS),
+        pack_descriptions=INVESTIGATION_QUERY_PACK_DESCRIPTIONS,
+        security_onion_purposes=INVESTIGATION_SECURITY_ONION_PURPOSES,
+        derived_operations=INVESTIGATION_DERIVED_OPERATIONS,
+        derived_filters=INVESTIGATION_DERIVED_FILTERS,
+        contract_packs=INVESTIGATION_CONTRACT_PACKS,
+        event_tuple_paths=EVENT_TUPLE_PATHS,
+        pack_role_mode=PACK_ROLE_MODE,
+        allowed_actor_roles=frozenset(
+            INVESTIGATION_CONTRACT.ALLOWED_ACTOR_ROLES
+        ),
+        event_tuple_atom_pattern=INVESTIGATION_EVENT_TUPLE_ATOM_RE,
+        alert_index_pattern=ALERT_INDEX_RE,
+        elastic_id_pattern=SAFE_ELASTIC_ID_RE,
+        pivot_atom_pattern=SAFE_PIVOT_ATOM_RE,
+        pivot_domain_pattern=SAFE_PIVOT_DOMAIN_RE,
+        max_rounds=INVESTIGATION_QUERY_MAX_ROUNDS,
+        max_queries_total=INVESTIGATION_QUERY_MAX_TOTAL,
+        max_queries_per_round=INVESTIGATION_QUERY_MAX_PER_ROUND,
     )
-    if selected_time is None:
-        selected_time = max(times) if times else dt.datetime.now(dt.timezone.utc)
-    selected_time = selected_time.astimezone(dt.timezone.utc)
-    # A recurring duplicate group can span months. Authorization is centered
-    # on this alert rather than the whole group, while each brokered query is
-    # independently capped to a 24-hour window.
-    start = selected_time - dt.timedelta(hours=24)
-    end = selected_time + dt.timedelta(hours=24)
-    iso = lambda value: value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    case_seed = str(group_id or sqlite_value(selected, "alert_id") or "")
-    case_id = "investigation-" + hashlib.sha256(
-        case_seed.encode("utf-8")
-    ).hexdigest()[:32]
-    normalized_actor_role = str(actor_role or "").strip().lower().replace("-", "_")
-    if normalized_actor_role not in INVESTIGATION_CONTRACT.ALLOWED_ACTOR_ROLES:
-        raise ValueError(
-            f"unsupported investigation-query actor role: {actor_role or 'empty'}"
-        )
-    security_query_enabled = bool(anchor) and any(permitted.values())
-    local_context = {
-        "context_id": "context-" + hashlib.sha256(
-            f"{case_seed}:{normalized_actor_role}".encode("utf-8")
-        ).hexdigest()[:32],
-        "case_id": case_id,
-        "group_id": str(group_id or ""),
-        "actor_role": normalized_actor_role,
-        "anchor": anchor,
-        **(
-            {"anchor_time": iso(selected_time)}
-            if INVESTIGATION_QUERY_V2
-            else {}
-        ),
-        "time_envelope": {"start": iso(start), "end": iso(end)},
-        "permitted_observables": permitted,
-        "discovered_observables": [],
-        "permitted_event_tuples": [
-            (
-                item
-                if INVESTIGATION_QUERY_V2
-                else {
-                    "event_tuple": item["event_tuple"],
-                    "source": item["source"],
-                    "evidence_ref": item["evidence_ref"],
-                }
-            )
-            for item in permitted_event_tuples
-        ],
-    }
-    capability = {
-        "query_contract": INVESTIGATION_QUERY_CONTRACT,
-        "enabled": security_query_enabled or bool(pcap_available),
-        "request_schema": {
-            "common_fields": ["query_id", "backend", "purpose", "parameters"],
-            "parameters_by_backend": {
-                "elastic": [
-                    "pack", "window", "observables", "event_tuple", "size",
-                    "aggregation",
-                ],
-                "oql": [
-                    "pack", "window", "observables", "event_tuple", "size",
-                    "aggregation",
-                ],
-                "pcap_zeek": [
-                    "operation", "filters", "indicator", "limit",
-                ],
-                "osquery": ["target_alias", "query"],
-                "enrichment": ["indicator_type", "indicator"],
-            },
-            "rule": (
-                "Choose exactly one backend and include only that backend's "
-                "listed parameter fields. Never merge parameter shapes."
-            ),
-        },
-        "backends": {
-            "elastic": {
-                "enabled": security_query_enabled,
-                "packs": list(INVESTIGATION_QUERY_PACKS),
-                "pack_descriptions": dict(INVESTIGATION_QUERY_PACK_DESCRIPTIONS),
-                "purposes": list(INVESTIGATION_SECURITY_ONION_PURPOSES),
-                "aggregations": [
-                    "events",
-                    "count",
-                    "timeline",
-                    *(["anchor_nearest"] if INVESTIGATION_QUERY_V2 else []),
-                ],
-                "aggregation_semantics": {
-                    "events": "bounded newest-first sample with an exact total hit count",
-                    "count": "exact full-window count; returns no event bodies",
-                    "timeline": "bounded chronological sample with an exact total hit count",
-                    **(
-                        {
-                            "anchor_nearest": (
-                                "bounded events ranked nearest the trusted "
-                                "alert timestamp"
-                            )
-                        }
-                        if INVESTIGATION_QUERY_V2
-                        else {}
-                    ),
-                },
-                "max_window_hours": 24,
-                "max_events": 100,
-                "max_queries_per_round": 4,
-                "max_observables_per_query": 8,
-                "max_distinct_observables_per_batch": 24,
-                "event_tuple_fields_by_pack": {
-                    pack: [
-                        field
-                        for field, paths in EVENT_TUPLE_PATHS.items()
-                        if set(paths).intersection(
-                            INVESTIGATION_CONTRACT_PACKS[pack]["fields"]
-                        )
-                    ]
-                    for pack in INVESTIGATION_QUERY_PACKS
-                },
-                **(
-                    {"role_mode_by_pack": dict(PACK_ROLE_MODE)}
-                    if INVESTIGATION_QUERY_V2
-                    else {}
-                ),
-            },
-            "oql": {
-                "enabled": security_query_enabled,
-                "packs": list(INVESTIGATION_QUERY_PACKS),
-                "pack_descriptions": dict(INVESTIGATION_QUERY_PACK_DESCRIPTIONS),
-                "purposes": list(INVESTIGATION_SECURITY_ONION_PURPOSES),
-                "aggregations": ["events", "count", "timeline"],
-                "aggregation_semantics": {
-                    "events": "bounded newest-first sample with an exact total hit count",
-                    "count": "exact full-window count; returns no event bodies",
-                    "timeline": "bounded chronological sample with an exact total hit count",
-                },
-                "max_window_hours": 24,
-                "max_events": 100,
-                "max_queries_per_round": 4,
-                "max_observables_per_query": 8,
-                "max_distinct_observables_per_batch": 24,
-                "event_tuple_fields_by_pack": {
-                    pack: [
-                        field
-                        for field, paths in EVENT_TUPLE_PATHS.items()
-                        if set(paths).intersection(
-                            INVESTIGATION_CONTRACT_PACKS[pack]["fields"]
-                        )
-                    ]
-                    for pack in INVESTIGATION_QUERY_PACKS
-                },
-                **(
-                    {"role_mode_by_pack": dict(PACK_ROLE_MODE)}
-                    if INVESTIGATION_QUERY_V2
-                    else {}
-                ),
-            },
-            "pcap_zeek": {
-                "enabled": bool(pcap_available),
-                "operations": list(INVESTIGATION_DERIVED_OPERATIONS),
-                "typed_filters": INVESTIGATION_DERIVED_FILTERS,
-                "derived_evidence_only": True,
-                "source_semantics": (
-                    "Each result truthfully lists the derived Zeek/TShark views "
-                    "considered; this is not a raw-capture query."
-                ),
-                "max_queries_per_round": 4,
-            },
-            "osquery": {
-                "enabled": False,
-                "target_aliases": [],
-                "allowed_tables": [],
-            },
-            "enrichment": {
-                "enabled": False,
-                "indicator_types": ["ip", "domain", "url", "hash", "cve"],
-                "cache_first": True,
-                "orchestrator": "n8n",
-                "max_queries_per_round": 4,
-                "restrictions": [
-                    "exact authorized or provenance-bound discovered indicators only",
-                    "public indicators only",
-                    "cache-only lookup before n8n provider orchestration",
-                    "provider selection and rate limits are enforced by alert-store",
-                ],
-            },
-        },
-        "budgets": {
-            "max_rounds": INVESTIGATION_QUERY_MAX_ROUNDS,
-            "max_queries_total": INVESTIGATION_QUERY_MAX_TOTAL,
-            "max_queries_per_round": INVESTIGATION_QUERY_MAX_PER_ROUND,
-        },
-        "permitted_observables": permitted,
-        "permitted_event_tuples": (
-            [
-                {
-                    "event_tuple": item["event_tuple"],
-                    "role_semantics": item["role_semantics"],
-                }
-                for item in permitted_event_tuples
-            ]
-            if INVESTIGATION_QUERY_V2
-            else [item["event_tuple"] for item in permitted_event_tuples]
-        ),
-        **(
-            {"anchor_time": local_context["anchor_time"]}
-            if INVESTIGATION_QUERY_V2
-            else {}
-        ),
-        "time_envelope": local_context["time_envelope"],
-        "restrictions": [
-            "structured read-only broker requests only",
-            "exact supplied or evidence-discovered observables only",
-            (
-                "optional event_tuple values must be copied from one advertised "
-                "trusted tuple; packet direction is never projected onto Zeek "
-                "originator/responder roles, and cross-sensor tuples require "
-                "network.community_id"
-                if INVESTIGATION_QUERY_V2
-                else
-                "optional event_tuple values must be copied from one advertised "
-                "trusted tuple; supplied fields are ANDed and preserve "
-                "source/destination roles"
-            ),
-            *(
-                [
-                    "rule_id is matched exactly against either ECS rule.id or rule.uuid",
-                    "zero rows means no matching document for only the exact authorized filters and time window; bounded samples are not proof of complete absence",
-                ]
-                if INVESTIGATION_QUERY_V2
-                else []
-            ),
-            "no shell, arbitrary Query DSL, parser arguments, paths, scripts, or raw packet payloads",
-            "every executed query and result carries broker-owned provenance",
-        ],
-    }
-    return capability, local_context
+
+
+def investigation_query_context_sources() -> QueryContextSources:
+    return QueryContextSources(
+        parse_alert=parse_alert_json,
+        parse_json_object=parse_json_object,
+        row_value=sqlite_value,
+        nested_value=_nested_alert_value,
+        parse_datetime=parse_project_datetime,
+        now_utc=lambda: dt.datetime.now(dt.timezone.utc),
+    )
 
 
 def exact_detection_group_rows(

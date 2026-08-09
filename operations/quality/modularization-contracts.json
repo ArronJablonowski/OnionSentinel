@@ -38,6 +38,16 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_investigation_query_context.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_investigation_query_context.py",
+      "required_symbols": [
+        "QueryContextPolicy",
+        "QueryContextSources",
+        "build_investigation_query_context"
+      ]
+    },
+    {
       "path": "n8n/bin/auto-run-ai-analysis.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/auto-run-ai-analysis.py",

@@ -30,6 +30,7 @@ HARDENED_BUILDER = "build-ai-investigation-prompt.py"
 HARDENED_BUILDER_DEPENDENCIES = (
     "prompt_builder_cli.py",
     "prompt_incident_evidence_projection.py",
+    "prompt_investigation_query_context.py",
 )
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_RUNTIME_FILE_BYTES = 2 * 1024 * 1024

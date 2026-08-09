@@ -522,6 +522,13 @@ and memory paths. The legacy `parse_args()` constructs defaults and callbacks
 at call time, preserving operator overrides while removing parser policy from
 the evidence and package assembly module.
 
+`prompt_investigation_query_context.py` owns the split trust projection for
+investigation pivots. It derives exact anchor-bound observables, typed event
+tuples and sensor role semantics, a selected-alert-centered time envelope, the
+hidden broker authorization context, and the separate model-visible backend
+capabilities and budgets. Query-contract version policy and legacy parsing
+helpers remain injected by the builder facade, preserving v1/v2 runtime parity.
+
 ## Portal Runtime
 
 Current owner: `onion-sentinel-dashboard/report_portal.py` (14,366 lines).
