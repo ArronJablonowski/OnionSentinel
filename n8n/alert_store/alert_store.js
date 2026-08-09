@@ -38,6 +38,7 @@ const {createPcapTransferRepository} = require('./repositories/pcap_transfer_rep
 const {createHealthService} = require('./services/health_service');
 const {createAiAnalysisAcceptance} = require('./services/ai_analysis_acceptance');
 const {createControlledJobTransition} = require('./services/controlled_job_transition');
+const {createControlledResultAdmission} = require('./services/controlled_result_admission');
 const {createIncidentAnalysisCompletion} = require('./services/incident_analysis_completion');
 const {createIncidentReanalysisBindingService} = require('./services/incident_reanalysis_binding');
 const {createHealthRoutes} = require('./routes/health_routes');
@@ -3591,277 +3592,15 @@ function applyControlledJobTransition(admission, transition) {
 }
 
 function controlledEvaluationClaimDigest(identity) {
-  const canonical = Object.fromEntries(
-    Object.keys(identity).sort().map((key) => [key, identity[key]]),
-  );
-  return crypto
-    .createHash('sha256')
-    .update(JSON.stringify(canonical), 'utf8')
-    .digest('hex');
+  return controlledResultAdmissionAuthority.claimDigest(identity);
 }
 
 async function controlledEvaluationResultAdmission(payload) {
-  if (!controlledEvaluationMode) return null;
-  const identity = payload?.controlled_job;
-  const expectedFields = [
-    'job_id',
-    'job_type',
-    'lease_token',
-    'cohort_id',
-    'dispatch_id',
-    'representative_alert_id',
-    'stable_group_id',
-    'stable_group_key',
-    'agent_role',
-    'reanalysis_attempt_id',
-    'release_id',
-    'expected_assigned_route',
-    'expected_reviewer_route',
-    'reviewer_required',
-  ];
-  if (
-    !identity
-    || typeof identity !== 'object'
-    || Array.isArray(identity)
-    || Object.keys(identity).sort().join('\0')
-      !== [...expectedFields].sort().join('\0')
-  ) {
-    throw incidentIdentityConflict(
-      'controlled evaluation result identity is incomplete',
-    );
-  }
-  const jobId = Number(identity.job_id);
-  const jobType = safeString(identity.job_type, 64);
-  const leaseToken = safeString(identity.lease_token, 128);
-  const cohortId = safeString(identity.cohort_id, 64);
-  const dispatchId = safeString(identity.dispatch_id, 64);
-  const representativeAlertId = safeString(
-    identity.representative_alert_id,
-    256,
-  );
-  const stableGroupId = safeString(identity.stable_group_id, 64);
-  const stableGroupKey = identity.stable_group_key;
-  const agentRole = safeString(identity.agent_role, 64).toLowerCase();
-  const reanalysisAttemptId = safeString(
-    identity.reanalysis_attempt_id,
-    80,
-  ).toLowerCase();
-  const releaseId = safeString(identity.release_id, 40).toLowerCase();
-  const expectedAssignedRoute = safeString(
-    identity.expected_assigned_route,
-    256,
-  );
-  const expectedReviewerRoute = safeString(
-    identity.expected_reviewer_route,
-    256,
-  );
-  const analysisId = safeString(payload?.analysis_id, 128).toLowerCase();
-  const claimDigest = controlledEvaluationClaimDigest(identity);
-  const expectedRole = {
-    ai_analysis: 'soc-analyst',
-    incident_response_analysis: 'incident-responder',
-  }[jobType];
-  if (
-    typeof identity.job_id !== 'number'
-    || !Number.isSafeInteger(jobId)
-    || jobId < 1
-    || typeof identity.job_type !== 'string'
-    || identity.job_type !== jobType
-    || typeof identity.lease_token !== 'string'
-    || identity.lease_token !== leaseToken
-    || typeof identity.cohort_id !== 'string'
-    || identity.cohort_id !== cohortId
-    || typeof identity.dispatch_id !== 'string'
-    || identity.dispatch_id !== dispatchId
-    || typeof identity.representative_alert_id !== 'string'
-    || identity.representative_alert_id !== representativeAlertId
-    || typeof identity.stable_group_id !== 'string'
-    || identity.stable_group_id !== stableGroupId
-    || typeof identity.agent_role !== 'string'
-    || identity.agent_role !== agentRole
-    || typeof identity.reanalysis_attempt_id !== 'string'
-    || identity.reanalysis_attempt_id !== reanalysisAttemptId
-    || typeof identity.release_id !== 'string'
-    || identity.release_id !== releaseId
-    || typeof identity.expected_assigned_route !== 'string'
-    || identity.expected_assigned_route !== expectedAssignedRoute
-    || typeof identity.expected_reviewer_route !== 'string'
-    || identity.expected_reviewer_route !== expectedReviewerRoute
-    || !controlledRoutePattern.test(expectedAssignedRoute)
-    || !controlledRoutePattern.test(expectedReviewerRoute)
-    || controlledRouteModelIdentity(expectedAssignedRoute)
-      === controlledRouteModelIdentity(expectedReviewerRoute)
-    || identity.reviewer_required !== true
-    || typeof payload?.analysis_id !== 'string'
-    || payload.analysis_id !== analysisId
-    || !/^[a-z0-9_-]{8,128}$/.test(analysisId)
-    || !expectedRole
-    || agentRole !== expectedRole
-    || !cohortIdPattern.test(cohortId)
-    || !dispatchIdPattern.test(dispatchId)
-    || !representativeAlertIdPattern.test(representativeAlertId)
-    || !stableGroupIdPattern.test(stableGroupId)
-    || !validPinnedStableGroupKey(stableGroupKey)
-    || !releaseIdPattern.test(releaseId)
-    || releaseId !== runtimeReleaseIdValue
-    || (
-      jobType === 'ai_analysis'
-      && reanalysisAttemptId
-    )
-    || (
-      jobType === 'incident_response_analysis'
-      && !/^ira-[a-f0-9]{40}$/.test(reanalysisAttemptId)
-    )
-    || safeString(payload?.alert_id, 1024) !== representativeAlertId
-    || safeString(payload?.agent_role, 64).toLowerCase() !== agentRole
-    || safeString(payload?.reanalysis_attempt_id, 80).toLowerCase()
-      !== reanalysisAttemptId
-    || payload?.response?._analysis_evaluation_memory_frozen !== true
-    || payload?.response?._analysis_controlled_claim_sha256 !== claimDigest
-    || payload?.response?._analysis_model_route !== expectedAssignedRoute
-    || payload?.response?._second_opinion?.status !== 'completed'
-    || payload?.response?._second_opinion?.model_route
-      !== expectedReviewerRoute
-    || payload?.response?._second_opinion?.response?._analysis_model_route
-      !== expectedReviewerRoute
-  ) {
-    throw incidentIdentityConflict(
-      'controlled evaluation result identity is invalid',
-    );
-  }
-  const key = controlledEvaluationLeaseKey(jobType, stableGroupId);
-  const current = await get(
-    `SELECT id, status, lease_token, lease_expires_at, rerun_requested,
-            payload_json
-     FROM durable_jobs WHERE job_type = ? AND dedupe_key = ?`,
-    [jobType, stableGroupId],
-  );
-  const currentPayload = incidentReanalysisJobPayload(current);
-  if (
-    Number(current?.id || 0) !== jobId
-    || Number(current?.rerun_requested || 0) !== 0
-    || currentPayload.cohort_id !== cohortId
-    || currentPayload.dispatch_id !== dispatchId
-    || currentPayload.release_id !== releaseId
-    || currentPayload.expected_assigned_route !== expectedAssignedRoute
-    || currentPayload.expected_reviewer_route !== expectedReviewerRoute
-    || currentPayload.reviewer_required !== true
-    || currentPayload.alert_id !== representativeAlertId
-    || currentPayload.representative_alert_id !== representativeAlertId
-    || currentPayload.group_id !== stableGroupId
-    || currentPayload.stable_group_id !== stableGroupId
-    || currentPayload.stable_group_key !== stableGroupKey
-    || currentPayload.agent_role !== agentRole
-  ) {
-    throw incidentIdentityConflict(
-      'controlled evaluation durable job changed before result commit',
-    );
-  }
-  const acceptedReplay = await get(
-    `SELECT group_id, alert_id, agent_role, response_json
-     FROM ai_analysis_runs WHERE analysis_id = ?`,
-    [analysisId],
-  );
-  if (acceptedReplay) {
-    const acceptedResponse = parseJsonObject(
-      acceptedReplay.response_json,
-    );
-    if (
-      acceptedReplay.group_id !== stableGroupId
-      || acceptedReplay.alert_id !== representativeAlertId
-      || acceptedReplay.agent_role !== agentRole
-      || acceptedResponse._analysis_controlled_claim_sha256 !== claimDigest
-      || canonicalJsonText(acceptedResponse)
-        !== canonicalJsonText(payload?.response || {})
-    ) {
-      throw incidentIdentityConflict(
-        'controlled evaluation committed result replay changed',
-      );
-    }
-    const terminal = (
-      current.status === 'completed'
-      && !current.lease_token
-      && !current.lease_expires_at
-    );
-    const needsCompletion = (
-      current.status === 'processing'
-      && current.lease_token === leaseToken
-    );
-    if (!terminal && !needsCompletion) {
-      throw incidentIdentityConflict(
-        'controlled evaluation result replay does not match its durable job',
-      );
-    }
-    return {
-      key,
-      analysisId,
-      idempotentReplay: true,
-      completeRequired: needsCompletion,
-      jobType,
-      stableGroupId,
-      leaseToken,
-    };
-  }
-  if (
-    current?.status !== 'processing'
-    || current?.lease_token !== leaseToken
-  ) {
-    throw incidentIdentityConflict(
-      'controlled evaluation result does not own its durable lease',
-    );
-  }
-  const currentAlert = await get(
-    `SELECT stable_group_id, stable_group_key
-     FROM alerts WHERE alert_id = ? LIMIT 1`,
-    [representativeAlertId],
-  );
-  if (
-    currentAlert?.stable_group_id !== stableGroupId
-    || currentAlert?.stable_group_key !== stableGroupKey
-  ) {
-    throw incidentIdentityConflict(
-      'controlled evaluation representative alert changed before result commit',
-    );
-  }
-  if (jobType === 'incident_response_analysis') {
-    const expectedAttemptId = `ira-${crypto
-      .createHash('sha256')
-      .update(leaseToken, 'utf8')
-      .digest('hex')
-      .slice(0, 40)}`;
-    const attempt = await get(
-      `SELECT attempt_id, run_id, case_id, group_id, status
-       FROM incident_reanalysis_attempts WHERE attempt_id = ?`,
-      [reanalysisAttemptId],
-    );
-    if (
-      reanalysisAttemptId !== expectedAttemptId
-      || attempt?.status !== 'running'
-      || attempt?.group_id !== stableGroupId
-      || attempt?.run_id !== currentPayload.reanalysis_run_id
-      || attempt?.case_id !== currentPayload.case_id
-    ) {
-      throw incidentIdentityConflict(
-        'controlled evaluation incident attempt does not own the lease',
-      );
-    }
-  }
-  return {
-    key,
-    analysisId,
-    idempotentReplay: false,
-    completeRequired: true,
-    jobType,
-    stableGroupId,
-    leaseToken,
-  };
+  return controlledResultAdmissionAuthority.admit(payload);
 }
 
 function applyControlledEvaluationResultAdmission(admission) {
-  if (!controlledEvaluationMode || !admission) return;
-  // A controlled result is terminal in the same transaction. The in-memory
-  // lease is diagnostic state only and is retired after that commit.
-  controlledEvaluationLeases.delete(admission.key);
+  return controlledResultAdmissionAuthority.apply(admission);
 }
 
 async function transitionDurableJobStatus(
@@ -8222,6 +7961,27 @@ const controlledJobTransitionAuthority = createControlledJobTransition({
   incidentReanalysisAttemptId,
 });
 const controlledEvaluationLeases = controlledJobTransitionAuthority.leases;
+const controlledResultAdmissionAuthority = createControlledResultAdmission({
+  controlledEvaluationMode,
+  safeString,
+  identityConflict: incidentIdentityConflict,
+  claimLeaseKey: controlledEvaluationLeaseKey,
+  get,
+  incidentReanalysisJobPayload,
+  parseJsonObject,
+  canonicalJsonText,
+  controlledRoutePattern,
+  controlledRouteModelIdentity,
+  cohortIdPattern,
+  dispatchIdPattern,
+  representativeAlertIdPattern,
+  stableGroupIdPattern,
+  validPinnedStableGroupKey,
+  releaseIdPattern,
+  runtimeReleaseId: runtimeReleaseIdValue,
+  incidentReanalysisAttemptId,
+  retireLease: controlledJobTransitionAuthority.retireLease,
+});
 
 async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppression, campaign = null) {
   if (!inserted) return {status: 'skipped_duplicate'};
