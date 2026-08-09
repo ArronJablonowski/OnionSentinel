@@ -51,6 +51,17 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_execution.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_execution.py",
+      "required_symbols": [
+        "SchedulerExecutionRequest",
+        "SchedulerExecutionResult",
+        "SchedulerExecutionSources",
+        "execute_scheduler_analysis"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_job_reporting.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_job_reporting.py",

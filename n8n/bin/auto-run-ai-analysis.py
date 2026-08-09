@@ -55,6 +55,11 @@ from scheduler_claim import (
     SchedulerClaimSources,
     acquire_scheduler_claim,
 )
+from scheduler_execution import (
+    SchedulerExecutionRequest,
+    SchedulerExecutionSources,
+    execute_scheduler_analysis,
+)
 from scheduler_job_reporting import (
     ClaimedAiLease,
     ControlledClaimRejected,
@@ -3462,6 +3467,18 @@ def scheduler_claim_sources() -> SchedulerClaimSources:
     )
 
 
+def scheduler_execution_sources() -> SchedulerExecutionSources:
+    """Bind evidence, prompt, lease-renewal, and runner services."""
+    return SchedulerExecutionSources(
+        report_status=report_ai_job_status,
+        validate_controlled_route=controlled_job_route_contract,
+        collect_incident_evidence=collect_incident_evidence,
+        build_prompt=build_prompt,
+        reusable_prompt=reusable_prompt_for_alert,
+        run_analysis=run_analysis,
+    )
+
+
 def main() -> int:
     args = parse_args()
     startup_sources = scheduler_startup_sources()
@@ -3577,7 +3594,6 @@ def main() -> int:
             processing_lease_token = ""
             reanalysis_attempt_id = ""
             controlled_exact_lease_owned = False
-            controlled_result_identity: dict[str, object] | None = None
             try:
                 controlled_identity_requested = (
                     controlled_evaluation_dir is not None
@@ -3618,88 +3634,24 @@ def main() -> int:
                 reanalysis_attempt_id = claim.reanalysis_attempt_id
                 if claim.disposition == "retired":
                     continue
-                def renew_processing_lease() -> None:
-                    renewed = report_ai_job_status(
-                        args.alert_store_url,
-                        selected_group_id,
-                        "processing",
-                        lease_token=processing_lease_token,
+                execution = execute_scheduler_analysis(
+                    scheduler_execution_sources(),
+                    SchedulerExecutionRequest(
+                        args=args,
+                        selected=selected,
+                        job_payload=job_payload,
+                        alert_id=alert_id,
+                        group_id=selected_group_id,
                         job_type=durable_job_type,
-                    )
-                    if renewed != processing_lease_token:
-                        raise RuntimeError("durable AI processing lease could not be renewed")
-
-                incident_evidence_path = None
-                if durable_job_type == "incident_response_analysis":
-                    if controlled_identity_requested:
-                        # Re-read through the runner's strict settings loader
-                        # immediately before the first Relay request. This
-                        # closes the claim-to-collection settings drift window.
-                        controlled_job_route_contract(args, job_payload)
-                    incident_evidence_path = collect_incident_evidence(
-                        alert_id,
-                        args,
-                        progress_callback=renew_processing_lease if processing_recorded else None,
-                    )
-                # Indexed work always builds a fresh bounded package at claim
-                # time. This guarantees manual reruns and newly coalesced alert,
-                # enrichment, PCAP, note, and memory evidence cannot reuse an
-                # obsolete prompt artifact.
-                prompt_path = (
-                    build_prompt(
-                        alert_id,
-                        args,
-                        job_payload,
-                        incident_evidence_path=incident_evidence_path,
-                    )
-                    if indexed_mode
-                    else reusable_prompt_for_alert(args.prompt_dir, selected, args.pcap_analysis_dir)
-                    or build_prompt(alert_id, args)
+                        indexed_mode=indexed_mode,
+                        controlled=controlled_identity_requested,
+                        processing_transition=processing_transition,
+                        processing_recorded=processing_recorded,
+                        lease_token=processing_lease_token,
+                        reanalysis_attempt_id=reanalysis_attempt_id,
+                    ),
                 )
-                assigned_agent_role = str(
-                    job_payload.get("agent_role") or "soc-analyst"
-                )
-                if controlled_identity_requested:
-                    controlled_result_identity = {
-                        "job_id": int(
-                            getattr(processing_transition, "job_id", 0) or 0
-                        ),
-                        "job_type": durable_job_type,
-                        "lease_token": processing_lease_token,
-                        "cohort_id": str(
-                            job_payload.get("cohort_id") or ""
-                        ),
-                        "dispatch_id": str(
-                            job_payload.get("dispatch_id") or ""
-                        ),
-                        "representative_alert_id": alert_id,
-                        "stable_group_id": selected_group_id,
-                        "stable_group_key": str(
-                            job_payload.get("stable_group_key") or ""
-                        ),
-                        "agent_role": assigned_agent_role,
-                        "reanalysis_attempt_id": reanalysis_attempt_id,
-                        "release_id": str(
-                            job_payload.get("release_id") or ""
-                        ),
-                        "expected_assigned_route": str(
-                            job_payload.get("expected_assigned_route") or ""
-                        ),
-                        "expected_reviewer_route": str(
-                            job_payload.get("expected_reviewer_route") or ""
-                        ),
-                        "reviewer_required": (
-                            job_payload.get("reviewer_required") is True
-                        ),
-                    }
-                proc = run_analysis(
-                    prompt_path,
-                    args,
-                    progress_callback=renew_processing_lease if processing_recorded else None,
-                    reanalysis_attempt_id=reanalysis_attempt_id,
-                    agent_role=assigned_agent_role,
-                    controlled_result_identity=controlled_result_identity,
-                )
+                proc = execution.process
                 if proc.stdout:
                     print(proc.stdout, end="")
                 if proc.returncode != 0:

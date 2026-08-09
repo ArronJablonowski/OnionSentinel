@@ -267,6 +267,14 @@ retirement. Its mutable claim receipt is populated immediately after a server
 transition so any later validation error still exposes only the exact owned
 lease to the outer retry/release handler.
 
+`scheduler_execution.py` owns processing-lease renewal, controlled-route
+revalidation before Relay evidence collection, Incident Response evidence
+collection, fresh indexed versus reusable legacy prompt selection, assigned
+agent-role projection, controlled result identity, and runner dispatch. Its
+explicit request and source bundles keep evidence and inference effects
+testable while the launchd wrapper binds mutable runtime collaborators at call
+time for compatibility.
+
 `scheduler_job_reporting.py` owns the bounded `/jobs/status` mutation contract,
 terminal status projection, exact controlled-claim validation, indeterminate-
 request retry policy, rolling-deployment 404 behavior, conflict rejection, and
