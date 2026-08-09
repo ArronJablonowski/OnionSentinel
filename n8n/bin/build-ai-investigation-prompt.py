@@ -70,6 +70,7 @@ from prompt_alert_projection import (
 from prompt_alert_group import (
     AlertGroupRowsRequest,
     AlertGroupSources,
+    build_execution_lineage,
     build_grouped_alert_context,
     fetch_alert_group_rows,
 )
@@ -113,6 +114,7 @@ from prompt_investigation_query_context import (
 from prompt_detection_context import (
     DetectionContextRequest,
     DetectionContextSources,
+    extract_asset_observables_and_events,
     prepare_detection_context,
     select_exact_detection_group_rows,
 )
@@ -135,14 +137,14 @@ from prompt_package_compactor import (
     compact_package_to_budget as compact_prompt_package,
 )
 from prompt_package_view_model import (
-    PromptPackageView,
-    assemble_prompt_package,
+    PreparedPromptPackageView,
+    assemble_prepared_prompt_package,
 )
 from prompt_response_contract import (
     PromptContractRequest,
     build_prompt_contract,
 )
-from prompt_role_task import build_agent_task
+from prompt_role_task import build_agent_task, build_model_policy
 import investigation_query_contract as INVESTIGATION_CONTRACT
 
 
@@ -180,7 +182,6 @@ DEFAULT_SOC_ANALYST_MEMORY_FILE = DEFAULT_AGENT_MEMORY_DIR / "soc-analyst-memory
 DEFAULT_SHARED_AGENT_MEMORY_FILE = DEFAULT_AGENT_MEMORY_DIR / "shared-agent-memory.md"
 DEFAULT_SYSTEM_PROMPT = "You are a careful SOC analyst assisting with Security Onion alerts."
 TEST_PREFIXES = ("phase%", "config-%", "internal-test-%", "sqlite-%", "policy-%", "codex-%")
-ESCALATE_LEVELS = {"critical", "high"}
 DEFAULT_MAX_PACKAGE_BYTES = max(256 * 1024, int(os.environ.get("SOC_AI_MAX_PROMPT_PACKAGE_BYTES", str(4 * 1024 * 1024))))
 MAX_ARTIFACT_JSON_BYTES = max(64 * 1024, int(os.environ.get("SOC_AI_MAX_ARTIFACT_JSON_BYTES", str(2 * 1024 * 1024))))
 MAX_INCIDENT_EVIDENCE_BYTES = 8 * 1024 * 1024
@@ -502,17 +503,12 @@ def execution_lineage(
     *,
     blind_reanalysis: bool,
 ) -> dict[str, Any]:
-    """Return collector-owned identifiers used by the durable harness trace."""
-
-    stable_group_id = str(
-        sqlite_value(selected, "stable_group_id") or ""
-    ).strip().lower()
-    if not stable_group_id:
-        stable_group_id = alert_group_id(alert_group_key(selected))
-    return {
-        "group_id": stable_group_id,
-        "manual_reanalysis": bool(blind_reanalysis),
-    }
+    """Compatibility delegate for stable harness execution identity."""
+    return build_execution_lineage(
+        _alert_group_sources(),
+        selected,
+        blind_reanalysis=blind_reanalysis,
+    )
 
 
 def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -530,6 +526,7 @@ def _alert_group_sources() -> AlertGroupSources:
         test_filter_sql=test_filter_sql,
         safe_int=safe_int,
         alert_group_key=alert_group_key,
+        alert_group_id=alert_group_id,
     )
 
 
@@ -856,42 +853,12 @@ def _nested_alert_value(alert: dict, dotted_path: str) -> object:
 
 
 def asset_observables_and_events(group_rows: list[sqlite3.Row]) -> tuple[list[dict], list[dict]]:
-    """Extract only explicit endpoint identifiers; never recursively promote sensor fields."""
-    observables: list[dict] = []
-    events: list[dict] = []
-    for item in group_rows[:5000]:
-        alert = parse_alert_json(str(sqlite_value(item, "alert_json") or ""))
-        explicit_values = [
-            ("ip", sqlite_value(item, "source_ip"), "source"),
-            ("ip", sqlite_value(item, "destination_ip"), "destination"),
-            ("ip", _nested_alert_value(alert, "client.ip"), "client"),
-            ("ip", _nested_alert_value(alert, "server.ip"), "server"),
-            ("ip", _nested_alert_value(alert, "host.ip"), "host"),
-            ("mac", _nested_alert_value(alert, "source.mac"), "source"),
-            ("mac", _nested_alert_value(alert, "destination.mac"), "destination"),
-            ("mac", _nested_alert_value(alert, "client.mac"), "client"),
-            ("mac", _nested_alert_value(alert, "server.mac"), "server"),
-            ("hostname", _nested_alert_value(alert, "source.domain"), "source"),
-            ("hostname", _nested_alert_value(alert, "destination.domain"), "destination"),
-            ("hostname", _nested_alert_value(alert, "client.domain"), "client"),
-            ("hostname", _nested_alert_value(alert, "server.domain"), "server"),
-            ("hostname", _nested_alert_value(alert, "host.hostname"), "host"),
-            ("hostname", _nested_alert_value(alert, "host.name"), "host"),
-        ]
-        observables.extend(
-            {"type": observable_type, "value": value, "role": role}
-            for observable_type, value, role in explicit_values
-            if value not in (None, "")
-        )
-        events.append(
-            {
-                "source_ip": sqlite_value(item, "source_ip"),
-                "destination_ip": sqlite_value(item, "destination_ip"),
-                "destination_port": sqlite_value(item, "destination_port"),
-                "protocol": sqlite_value(item, "transport_protocol"),
-            }
-        )
-    return observables, events
+    """Compatibility delegate for explicit endpoint evidence extraction."""
+    return extract_asset_observables_and_events(
+        _detection_context_sources(),
+        group_rows,
+        MAX_DETECTION_GROUP_ROWS,
+    )
 
 
 def investigation_query_context(
@@ -964,13 +931,8 @@ def exact_detection_group_rows(
 
 
 def model_policy(level: str | None) -> dict:
-    normalized = str(level or "").lower()
-    return {
-        "default_model_path": "local_llm",
-        "hosted_second_opinion_allowed": normalized in ESCALATE_LEVELS,
-        "hosted_second_opinion_rule": "Only use hosted GPT-class analysis for critical/high alerts or when local analysis requests escalation.",
-        "privacy_rule": "Do not send raw packet payloads, packet samples, local PCAP query results, credentials, tokens, or unnecessary internal notes to hosted models.",
-    }
+    """Compatibility delegate for hosted-review and prompt-privacy policy."""
+    return build_model_policy(level)
 
 
 def agent_task(agent_role: str, *, blind_reanalysis: bool = False) -> str:
@@ -993,13 +955,16 @@ def _detection_context_sources() -> DetectionContextSources:
         extract_group_packet_features=extract_group_packet_features,
         build_detection_validation=build_detection_validation,
         load_asset_inventory=load_asset_inventory,
-        asset_observables_and_events=asset_observables_and_events,
         resolve_asset_context=resolve_asset_context,
     )
 
 
-def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argparse.Namespace) -> dict:
-    snapshot = collect_core_evidence_snapshot(
+def _collect_core_snapshot(
+    conn: sqlite3.Connection,
+    selected: sqlite3.Row,
+    args: argparse.Namespace,
+):
+    return collect_core_evidence_snapshot(
         CoreEvidenceSnapshotSources(
             grouped_alert_context=grouped_alert_context,
             pcap_evidence_context=pcap_evidence_context,
@@ -1022,7 +987,14 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             correlation_min_score=args.correlation_min_score,
         ),
     )
-    detection_context = prepare_detection_context(
+
+
+def _collect_detection_context(
+    conn: sqlite3.Connection,
+    selected: sqlite3.Row,
+    args: argparse.Namespace,
+):
+    return prepare_detection_context(
         _detection_context_sources(),
         DetectionContextRequest(
             connection=conn,
@@ -1053,7 +1025,10 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             maximum_group_rows=MAX_DETECTION_GROUP_ROWS,
         ),
     )
-    admitted_evidence = prepare_prompt_evidence_admission(
+
+
+def _admit_evidence(selected, args, snapshot, detection_context):
+    return prepare_prompt_evidence_admission(
         PromptEvidenceAdmissionSources(
             investigation_query_context=investigation_query_context,
             build_agent_memory_context=build_agent_memory_context,
@@ -1087,7 +1062,10 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             maximum_incident_evidence_bytes=MAX_INCIDENT_EVIDENCE_BYTES,
         ),
     )
-    prompt_contract = build_prompt_contract(
+
+
+def _create_prompt_contract(args: argparse.Namespace) -> dict:
+    return build_prompt_contract(
         PromptContractRequest(
             agent_role=str(args.agent_role),
             blind_reanalysis=bool(args.blind_reanalysis),
@@ -1100,7 +1078,14 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             query_v2=INVESTIGATION_QUERY_V2,
         )
     )
-    history = collect_historical_evidence_snapshot(
+
+
+def _collect_history(
+    conn: sqlite3.Connection,
+    selected: sqlite3.Row,
+    args: argparse.Namespace,
+):
+    return collect_historical_evidence_snapshot(
         HistoricalEvidenceSnapshotSources(
             prior_analysis_context=prior_analysis_context,
             related_alerts=related_alerts,
@@ -1115,8 +1100,19 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             blind_reanalysis=bool(args.blind_reanalysis),
         ),
     )
-    return assemble_prompt_package(
-        PromptPackageView(
+
+
+def _assemble_package(
+    selected,
+    args,
+    snapshot,
+    detection_context,
+    admitted_evidence,
+    prompt_contract,
+    history,
+) -> dict:
+    return assemble_prepared_prompt_package(
+        PreparedPromptPackageView(
             agent_role=str(args.agent_role),
             blind_reanalysis=bool(args.blind_reanalysis),
             lineage=execution_lineage(
@@ -1134,31 +1130,34 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
                 "shared_memory_file": str(args.shared_memory_file),
             },
             prompt_contract=prompt_contract,
-            evidence_sections={
-                "alert": snapshot.alert,
-                "grouped_alert_context": snapshot.grouped_alert_context,
-                "public_enrichment": snapshot.public_enrichment,
-                "pcap_evidence": snapshot.pcap_evidence,
-                "investigation_query_capability": (
-                    admitted_evidence.investigation_capability
-                ),
-                "_local_investigation_query_context": (
-                    admitted_evidence.local_investigation_query_context
-                ),
-                "investigation_skills": detection_context.investigation_skills,
-                "detection_validation": detection_context.detection_validation,
-                "asset_context": detection_context.asset_context,
-                "authorization_evidence": snapshot.authorization_evidence,
-                "analyst_state": snapshot.analyst_state,
-                "prior_analyses": history.prior_analyses,
-                "related_alerts": history.related_alerts,
-                "correlated_alert_context": admitted_evidence.correlation_context,
-                "recent_notifications": history.recent_notifications,
-                "agent_memory": admitted_evidence.memory_context,
-                "latest_daily_rollup": snapshot.latest_daily_rollup,
-            },
-            incident_evidence=admitted_evidence.incident_evidence,
+            core_snapshot=snapshot,
+            detection_context=detection_context,
+            admitted_evidence=admitted_evidence,
+            history=history,
         )
+    )
+
+
+def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argparse.Namespace) -> dict:
+    """Run ordered collection, admission, contract, history, and assembly phases."""
+    snapshot = _collect_core_snapshot(conn, selected, args)
+    detection_context = _collect_detection_context(conn, selected, args)
+    admitted_evidence = _admit_evidence(
+        selected,
+        args,
+        snapshot,
+        detection_context,
+    )
+    prompt_contract = _create_prompt_contract(args)
+    history = _collect_history(conn, selected, args)
+    return _assemble_package(
+        selected,
+        args,
+        snapshot,
+        detection_context,
+        admitted_evidence,
+        prompt_contract,
+        history,
     )
 
 

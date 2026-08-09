@@ -63,6 +63,7 @@
       "required_symbols": [
         "AlertGroupRowsRequest",
         "AlertGroupSources",
+        "build_execution_lineage",
         "build_grouped_alert_context",
         "fetch_alert_group_rows"
       ]
@@ -107,6 +108,7 @@
         "DetectionContextRequest",
         "DetectionContextSources",
         "PreparedDetectionContext",
+        "extract_asset_observables_and_events",
         "prepare_detection_context",
         "select_exact_detection_group_rows"
       ]
@@ -172,7 +174,9 @@
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_package_view_model.py",
       "required_symbols": [
+        "PreparedPromptPackageView",
         "PromptPackageView",
+        "assemble_prepared_prompt_package",
         "assemble_prompt_package"
       ]
     },
@@ -193,7 +197,8 @@
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_role_task.py",
       "required_symbols": [
-        "build_agent_task"
+        "build_agent_task",
+        "build_model_policy"
       ]
     },
     {

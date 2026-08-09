@@ -12,7 +12,11 @@ BIN = ROOT / "n8n" / "bin"
 if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
 
-from prompt_role_task import DEFAULT_TASK, build_agent_task  # noqa: E402
+from prompt_role_task import (  # noqa: E402
+    DEFAULT_TASK,
+    build_agent_task,
+    build_model_policy,
+)
 
 
 class PromptRoleTaskTests(unittest.TestCase):
@@ -48,6 +52,19 @@ class PromptRoleTaskTests(unittest.TestCase):
     def test_unknown_and_soc_analyst_roles_use_the_stable_default(self):
         self.assertEqual(build_agent_task("soc-analyst"), DEFAULT_TASK)
         self.assertEqual(build_agent_task("unknown-role"), DEFAULT_TASK)
+
+    def test_model_policy_allows_hosted_review_only_for_high_and_critical(self):
+        for level in ("critical", "HIGH"):
+            with self.subTest(level=level):
+                self.assertIs(
+                    build_model_policy(level)["hosted_second_opinion_allowed"],
+                    True,
+                )
+        self.assertIs(
+            build_model_policy("medium")["hosted_second_opinion_allowed"],
+            False,
+        )
+        self.assertIn("raw packet payloads", build_model_policy(None)["privacy_rule"])
 
 
 if __name__ == "__main__":

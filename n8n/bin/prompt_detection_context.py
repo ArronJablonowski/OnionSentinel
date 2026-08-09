@@ -38,7 +38,6 @@ class DetectionContextSources:
     extract_group_packet_features: Callable[[list[Any], list], dict]
     build_detection_validation: Callable[[dict, dict, dict | None], dict]
     load_asset_inventory: Callable[[Path], dict]
-    asset_observables_and_events: Callable[[list[Any]], tuple[list, list]]
     resolve_asset_context: Callable[[dict, list, Any, list], dict]
 
 
@@ -166,6 +165,65 @@ def _skill_match_context(sources: DetectionContextSources, selected: Any) -> dic
     }
 
 
+def _nested_alert_value(alert: dict, dotted_path: str) -> Any:
+    current: Any = alert
+    for part in dotted_path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
+def _explicit_asset_values(sources: DetectionContextSources, item: Any, alert: dict):
+    value = sources.row_value
+    nested = _nested_alert_value
+    return [
+        ("ip", value(item, "source_ip"), "source"),
+        ("ip", value(item, "destination_ip"), "destination"),
+        ("ip", nested(alert, "client.ip"), "client"),
+        ("ip", nested(alert, "server.ip"), "server"),
+        ("ip", nested(alert, "host.ip"), "host"),
+        ("mac", nested(alert, "source.mac"), "source"),
+        ("mac", nested(alert, "destination.mac"), "destination"),
+        ("mac", nested(alert, "client.mac"), "client"),
+        ("mac", nested(alert, "server.mac"), "server"),
+        ("hostname", nested(alert, "source.domain"), "source"),
+        ("hostname", nested(alert, "destination.domain"), "destination"),
+        ("hostname", nested(alert, "client.domain"), "client"),
+        ("hostname", nested(alert, "server.domain"), "server"),
+        ("hostname", nested(alert, "host.hostname"), "host"),
+        ("hostname", nested(alert, "host.name"), "host"),
+    ]
+
+
+def extract_asset_observables_and_events(
+    sources: DetectionContextSources,
+    group_rows: list[Any],
+    maximum_group_rows: int,
+) -> tuple[list[dict], list[dict]]:
+    """Extract explicit endpoint identifiers without promoting sensor fields."""
+    observables: list[dict] = []
+    events: list[dict] = []
+    for item in group_rows[:maximum_group_rows]:
+        alert = sources.parse_alert_json(
+            str(sources.row_value(item, "alert_json") or "")
+        )
+        observables.extend(
+            {"type": kind, "value": value, "role": role}
+            for kind, value, role in _explicit_asset_values(sources, item, alert)
+            if value not in (None, "")
+        )
+        events.append(
+            {
+                "source_ip": sources.row_value(item, "source_ip"),
+                "destination_ip": sources.row_value(item, "destination_ip"),
+                "destination_port": sources.row_value(item, "destination_port"),
+                "protocol": sources.row_value(item, "transport_protocol"),
+            }
+        )
+    return observables, events
+
+
 def _load_rule_and_skills(
     sources: DetectionContextSources,
     request: DetectionContextRequest,
@@ -236,8 +294,10 @@ def _resolve_assets(
     exact_rows: list[Any],
 ) -> dict:
     asset_inventory = sources.load_asset_inventory(request.asset_inventory_path)
-    asset_observables, network_events = sources.asset_observables_and_events(
-        exact_rows
+    asset_observables, network_events = extract_asset_observables_and_events(
+        sources,
+        exact_rows,
+        request.maximum_group_rows,
     )
     return sources.resolve_asset_context(
         asset_inventory,

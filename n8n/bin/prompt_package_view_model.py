@@ -21,6 +21,23 @@ class PromptPackageView:
     incident_evidence: dict | None
 
 
+@dataclass(frozen=True)
+class PreparedPromptPackageView:
+    """Prepared subsystem outputs ready for final evidence-section mapping."""
+
+    agent_role: str
+    blind_reanalysis: bool
+    lineage: Mapping[str, Any]
+    generated_at: str
+    analysis_policy: Mapping[str, Any]
+    runtime_files: Mapping[str, str]
+    prompt_contract: Mapping[str, Any]
+    core_snapshot: Any
+    detection_context: Any
+    admitted_evidence: Any
+    history: Any
+
+
 BLIND_EXCLUDED_CONTEXT = (
     "prior AI analyses",
     "prior model-authored correlation hypotheses",
@@ -63,3 +80,48 @@ def assemble_prompt_package(view: PromptPackageView) -> dict:
         raise RuntimeError(MISSING_INCIDENT_EVIDENCE_ERROR)
     package["incident_response_evidence"] = view.incident_evidence
     return package
+
+
+def _prepared_evidence_sections(prepared: PreparedPromptPackageView) -> dict:
+    snapshot = prepared.core_snapshot
+    detection = prepared.detection_context
+    admitted = prepared.admitted_evidence
+    history = prepared.history
+    return {
+        "alert": snapshot.alert,
+        "grouped_alert_context": snapshot.grouped_alert_context,
+        "public_enrichment": snapshot.public_enrichment,
+        "pcap_evidence": snapshot.pcap_evidence,
+        "investigation_query_capability": admitted.investigation_capability,
+        "_local_investigation_query_context": (
+            admitted.local_investigation_query_context
+        ),
+        "investigation_skills": detection.investigation_skills,
+        "detection_validation": detection.detection_validation,
+        "asset_context": detection.asset_context,
+        "authorization_evidence": snapshot.authorization_evidence,
+        "analyst_state": snapshot.analyst_state,
+        "prior_analyses": history.prior_analyses,
+        "related_alerts": history.related_alerts,
+        "correlated_alert_context": admitted.correlation_context,
+        "recent_notifications": history.recent_notifications,
+        "agent_memory": admitted.memory_context,
+        "latest_daily_rollup": snapshot.latest_daily_rollup,
+    }
+
+
+def assemble_prepared_prompt_package(prepared: PreparedPromptPackageView) -> dict:
+    """Map prepared subsystem outputs and apply final package invariants."""
+    return assemble_prompt_package(
+        PromptPackageView(
+            agent_role=prepared.agent_role,
+            blind_reanalysis=prepared.blind_reanalysis,
+            lineage=prepared.lineage,
+            generated_at=prepared.generated_at,
+            analysis_policy=prepared.analysis_policy,
+            runtime_files=prepared.runtime_files,
+            prompt_contract=prepared.prompt_contract,
+            evidence_sections=_prepared_evidence_sections(prepared),
+            incident_evidence=prepared.admitted_evidence.incident_evidence,
+        )
+    )

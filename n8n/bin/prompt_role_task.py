@@ -32,6 +32,18 @@ DEFAULT_TASK = (
     "next investigative steps, tuning actions, and whether an independent second-model "
     "opinion is warranted."
 )
+ESCALATE_LEVELS = frozenset({"critical", "high"})
+
+
+def build_model_policy(level: str | None) -> dict:
+    """Return the stable hosted-review and prompt-privacy policy."""
+    normalized = str(level or "").lower()
+    return {
+        "default_model_path": "local_llm",
+        "hosted_second_opinion_allowed": normalized in ESCALATE_LEVELS,
+        "hosted_second_opinion_rule": "Only use hosted GPT-class analysis for critical/high alerts or when local analysis requests escalation.",
+        "privacy_rule": "Do not send raw packet payloads, packet samples, local PCAP query results, credentials, tokens, or unnecessary internal notes to hosted models.",
+    }
 
 
 def _incident_responder_task(blind_reanalysis: bool) -> str:

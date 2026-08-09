@@ -18,6 +18,7 @@ from prompt_detection_context import (  # noqa: E402
     DetectionContextRequest,
     DetectionContextSources,
     VALIDATION_EXTRA_COLUMNS,
+    extract_asset_observables_and_events,
     prepare_detection_context,
     select_exact_detection_group_rows,
 )
@@ -64,9 +65,6 @@ def sources(**changes) -> DetectionContextSources:
         "extract_group_packet_features": mock.Mock(return_value={"packets": 1}),
         "build_detection_validation": mock.Mock(return_value={"intent": "match"}),
         "load_asset_inventory": mock.Mock(return_value={"assets": 1}),
-        "asset_observables_and_events": mock.Mock(
-            return_value=([{"type": "ip"}], [{"flow": 1}])
-        ),
         "resolve_asset_context": mock.Mock(return_value={"matched": ["asset-1"]}),
     }
     values.update(changes)
@@ -111,9 +109,16 @@ class PromptDetectionContextTests(unittest.TestCase):
         self.assertNotIn("truncated", packet_features)
         dependencies.resolve_asset_context.assert_called_once_with(
             {"assets": 1},
-            [{"type": "ip"}],
+            [],
             "2026-08-08T12:00:00Z",
-            [{"flow": 1}],
+            [
+                {
+                    "source_ip": None,
+                    "destination_ip": None,
+                    "destination_port": None,
+                    "protocol": None,
+                }
+            ],
         )
         self.assertEqual(prepared.exact_validation_rows, [{"candidate": 1}])
         self.assertEqual(prepared.investigation_skills, {"selected": ["tls"]})
@@ -200,6 +205,57 @@ class PromptDetectionContextTests(unittest.TestCase):
         self.assertEqual(
             scope["identity"],
             {"sid": "900001", "revision": 3, "rule_sha256": digest},
+        )
+
+    def test_asset_evidence_uses_explicit_endpoint_fields_and_respects_bound(self):
+        dependencies = sources(
+            parse_alert_json=lambda raw: json.loads(raw),
+        )
+        rows = [
+            {
+                "alert_json": json.dumps(
+                    {
+                        "client": {"ip": "192.0.2.30"},
+                        "host": {"hostname": "endpoint.example"},
+                        "observer": {
+                            "hostname": "must-not-promote.example",
+                            "ip": "203.0.113.99",
+                        },
+                    }
+                ),
+                "source_ip": "192.0.2.10",
+                "destination_ip": "198.51.100.20",
+                "destination_port": 443,
+                "transport_protocol": "tcp",
+            },
+            {
+                "alert_json": "{}",
+                "source_ip": "outside-bound",
+            },
+        ]
+
+        observables, events = extract_asset_observables_and_events(
+            dependencies,
+            rows,
+            1,
+        )
+
+        values = {(item["type"], item["value"], item["role"]) for item in observables}
+        self.assertIn(("ip", "192.0.2.10", "source"), values)
+        self.assertIn(("ip", "192.0.2.30", "client"), values)
+        self.assertIn(("hostname", "endpoint.example", "host"), values)
+        self.assertNotIn(("hostname", "must-not-promote.example", "observer"), values)
+        self.assertNotIn(("ip", "203.0.113.99", "observer"), values)
+        self.assertEqual(
+            events,
+            [
+                {
+                    "source_ip": "192.0.2.10",
+                    "destination_ip": "198.51.100.20",
+                    "destination_port": 443,
+                    "protocol": "tcp",
+                }
+            ],
         )
 
 

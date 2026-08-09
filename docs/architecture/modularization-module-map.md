@@ -581,14 +581,17 @@ legacy identity columns without scanning alerts in Python. It enforces
 admitted filter statuses, test-alert policy, caller row limits, schema/query
 fail-soft behavior, and a separate timeline sample bound. Schema inspection,
 query execution, row access, integer normalization, test filtering, and group
-key derivation remain injected by the builder facade.
+key derivation remain injected by the builder facade. The module also derives
+stable durable-harness lineage from collector group identity and marks manual
+blind reanalysis without accepting model-authored identifiers.
 
 `prompt_detection_context.py` owns ordered preparation of the exact detection
 group, deterministic investigation-skill selection, rule/playbook predicate
 validation, bounded packet features, and time-aware asset resolution. Exact
 rows are bound to the selected deployed rule's SID, revision, and rule digest;
 rows with conflicting collector identities are excluded before packet feature
-extraction. The
+extraction. Asset candidates are derived only from explicit endpoint fields;
+sensor/observer identity is never recursively promoted into endpoint evidence. The
 legacy builder composition root injects every database, parser, registry, and
 resolver operation; the module opens no database and reads no runtime file on
 its own. Exact-group selection failures stop playbook and asset processing, and
@@ -666,10 +669,13 @@ operator-confirmed context, while SIEM engineering, CTI, and threat-hunting
 roles receive distinct bounded objectives without changing the evidence
 contract. Every specialist objective distinguishes supplied evidence from
 proposed work and prohibits claims of unrecorded query or response execution.
+The same module owns the stable hosted-review eligibility and prompt-privacy
+policy applied to every role.
 
 `prompt_package_view_model.py` owns final model-facing package assembly. It
-merges already-prepared lineage, policy, runtime-file references, response
-contract, and bounded evidence sections, declares the exact context excluded
+maps prepared core, detection, admitted, and historical subsystem results into
+their exact evidence sections; merges lineage, policy, runtime-file references,
+and the response contract; declares the exact context excluded
 from blind reanalysis, keeps incident evidence out of SOC Analyst packages,
 and fails closed when an Incident Responder package lacks validated restricted
 Security Onion evidence. Collection, validation, projection, and persistence

@@ -913,7 +913,8 @@ class IncidentEvidenceContractTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("assemble_prompt_package(", builder)
+        self.assertIn("assemble_prepared_prompt_package(", builder)
+        self.assertIn("assemble_prompt_package(", assembler)
         self.assertIn("requires validated restricted Security Onion evidence", assembler)
         self.assertNotIn(
             '"security_onion_response": {"complete": False, "partial": True, "results": []}',

@@ -18,6 +18,7 @@ from prompt_alert_group import (  # noqa: E402
     AlertGroupRowsRequest,
     AlertGroupSources,
     BASE_GROUP_COLUMNS,
+    build_execution_lineage,
     build_grouped_alert_context,
     fetch_alert_group_rows,
 )
@@ -60,6 +61,7 @@ def sources(columns=None, query=None, test_filter=None) -> AlertGroupSources:
         or mock.Mock(return_value=("alert_id NOT LIKE ?", ["test-%"])),
         safe_int=safe_int,
         alert_group_key=lambda row: f"key:{row['alert_id']}",
+        alert_group_id=lambda key: f"digest:{key}",
     )
 
 
@@ -199,6 +201,29 @@ class PromptAlertGroupTests(unittest.TestCase):
         )
         self.assertEqual(context["timeline_sample"][0]["seen_count"], 1)
         self.assertEqual(context["timeline_sample_limit"], 2)
+
+    def test_execution_lineage_prefers_stable_identity_and_hashes_legacy_group(self):
+        dependencies = sources()
+
+        stable = build_execution_lineage(
+            dependencies,
+            selected(stable_group_id="  ABCDEF123  "),
+            blind_reanalysis=True,
+        )
+        legacy = build_execution_lineage(
+            dependencies,
+            selected(stable_group_id=""),
+            blind_reanalysis=False,
+        )
+
+        self.assertEqual(
+            stable,
+            {"group_id": "abcdef123", "manual_reanalysis": True},
+        )
+        self.assertEqual(
+            legacy,
+            {"group_id": "digest:key:alert-1", "manual_reanalysis": False},
+        )
 
 
 if __name__ == "__main__":

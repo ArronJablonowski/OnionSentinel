@@ -42,6 +42,7 @@ class AlertGroupSources:
     test_filter_sql: Callable[[str], tuple[str, list[Any]]]
     safe_int: Callable[[Any], int]
     alert_group_key: Callable[[Any], str]
+    alert_group_id: Callable[[str], str]
 
 
 @dataclass(frozen=True)
@@ -195,4 +196,22 @@ def build_grouped_alert_context(
             "Use total_observations and raw_alert_rows to judge urgency, recurrence, and tuning. "
             "A high count may indicate active behavior, noisy expected software, or a rule that needs suppression/drop/tuning."
         ),
+    }
+
+
+def build_execution_lineage(
+    sources: AlertGroupSources,
+    selected: Any,
+    *,
+    blind_reanalysis: bool,
+) -> dict[str, Any]:
+    """Return stable collector-owned identity for the durable harness trace."""
+    stable_group_id = str(
+        sources.row_value(selected, "stable_group_id") or ""
+    ).strip().lower()
+    if not stable_group_id:
+        stable_group_id = sources.alert_group_id(sources.alert_group_key(selected))
+    return {
+        "group_id": stable_group_id,
+        "manual_reanalysis": bool(blind_reanalysis),
     }
