@@ -20,6 +20,9 @@ INCIDENT_PAGE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_incident_response_pa
 SHELL_PAGE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_shell_page.py"
 PORTAL_PATH = DASHBOARD_DIR / "report_portal.py"
 ALERT_STORE_PATH = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
+ANALYSIS_REQUEST_ROUTES_PATH = (
+    REPO_ROOT / "n8n" / "alert_store" / "routes" / "analysis_request_routes.js"
+)
 AI_RUNNER_PATH = REPO_ROOT / "n8n" / "bin" / "run-local-ai-analysis.py"
 ANALYSIS_INDEX_PATH = (
     REPO_ROOT
@@ -1037,6 +1040,7 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
 
     def test_alert_store_uses_a_distinct_agent_job_and_analysis_role(self) -> None:
         source = ALERT_STORE_PATH.read_text(encoding="utf-8")
+        routes = ANALYSIS_REQUEST_ROUTES_PATH.read_text(encoding="utf-8")
 
         self.assertIn("CREATE TABLE IF NOT EXISTS incident_response_cases", source)
         self.assertIn("CREATE TABLE IF NOT EXISTS incident_response_events", source)
@@ -1044,10 +1048,11 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn("durableJobs.enqueue('incident_response_analysis'", source)
         self.assertIn("agent_role: 'incident-responder'", source)
         self.assertIn("manualReanalysis: false", source)
-        self.assertIn("parsedUrl.pathname === '/incidents/escalate'", source)
+        self.assertIn("'/incidents/escalate'", routes)
 
     def test_case_bound_reanalysis_has_durable_run_progress_contract(self) -> None:
         source = ALERT_STORE_PATH.read_text(encoding="utf-8")
+        routes = ANALYSIS_REQUEST_ROUTES_PATH.read_text(encoding="utf-8")
         index_source = ANALYSIS_INDEX_PATH.read_text(encoding="utf-8")
 
         self.assertIn("CREATE TABLE IF NOT EXISTS incident_reanalysis_runs", source)
@@ -1082,8 +1087,8 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
             "incidentAnalysisProvider(executedModelPath, provider)",
             source,
         )
-        self.assertIn("parsedUrl.pathname === '/incidents/reanalyze'", source)
-        self.assertIn("parsedUrl.pathname === '/incidents/reanalyze-all'", source)
+        self.assertIn("'/incidents/reanalyze'", routes)
+        self.assertIn("'/incidents/reanalyze-all'", routes)
 
     def test_portal_does_not_forward_client_supplied_release_id(self) -> None:
         captured: list[tuple[str, dict]] = []

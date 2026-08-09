@@ -35,6 +35,8 @@ const {createAnalystStateService} = require('./services/analyst_state_service');
 const {createAnalystStateRoutes} = require('./routes/analyst_state_routes');
 const {createDurableJobService} = require('./services/durable_job_service');
 const {createDurableJobRoutes} = require('./routes/durable_job_routes');
+const {createAnalysisRequestService} = require('./services/analysis_request_service');
+const {createAnalysisRequestRoutes} = require('./routes/analysis_request_routes');
 const {
   loadAuthorizedActivityPolicy,
   matchAuthorizedActivity,
@@ -11784,6 +11786,22 @@ modularRoutes.registerAll(createDurableJobRoutes({
   readJsonBody,
   sendJson,
 }));
+const analysisRequestService = createAnalysisRequestService({
+  controlledEvaluationMode: () => controlledEvaluationMode,
+  identityConflict: incidentIdentityConflict,
+  withWriteGate: withSqliteWriteGate,
+  withTransaction: withImmediateTransaction,
+  requestAiReanalysis,
+  requestIncidentEscalation,
+  requestIncidentReanalysis,
+  retireControlledEvaluation,
+  signalAiWorkers,
+});
+modularRoutes.registerAll(createAnalysisRequestRoutes({
+  service: analysisRequestService,
+  readJsonBody,
+  sendJson,
+}));
 
 function controlledEvaluationRequestAuthorized(request) {
   if (!controlledEvaluationMode) return true;
@@ -11957,70 +11975,6 @@ async function handleRequest(request, response) {
         ...result,
         submission_sha256: payload.__body_sha256,
       });
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/ai/request') {
-      // The dashboard records intent only. The worker builds a fresh bounded
-      // prompt at execution time so every rerun sees current alerts, public
-      // enrichment, parsed PCAP evidence, notes, memory, and prior analyses.
-      const payload = await readJsonBody(request);
-      if (controlledEvaluationMode && !payload?.cohort_id) {
-        throw incidentIdentityConflict(
-          'controlled evaluation requires a frozen cohort dispatch identity',
-        );
-      }
-      const result = await withSqliteWriteGate(() => withImmediateTransaction(
-        () => requestAiReanalysis(payload),
-      ));
-      void signalAiWorkers('manual-ai-reanalysis');
-      sendJson(response, 202, result);
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/incidents/escalate') {
-      // Escalation is an idempotent case transition plus a distinct agent job.
-      // It never overwrites or masquerades as the SOC Analyst's prior result.
-      const payload = await readJsonBody(request);
-      const result = await withSqliteWriteGate(() => withImmediateTransaction(
-        () => requestIncidentEscalation(payload),
-      ));
-      void signalAiWorkers('incident-response-escalation');
-      sendJson(response, 202, result);
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/incidents/reanalyze') {
-      const payload = await readJsonBody(request);
-      if (controlledEvaluationMode && !payload?.cohort_id) {
-        throw incidentIdentityConflict(
-          'controlled evaluation requires a frozen cohort dispatch identity',
-        );
-      }
-      const result = await withSqliteWriteGate(() => withImmediateTransaction(
-        () => requestIncidentReanalysis(payload, payload?.case_id),
-      ));
-      void signalAiWorkers('incident-response-case-reanalysis');
-      sendJson(response, 202, result);
-      return;
-    }
-    if (
-      request.method === 'POST'
-      && parsedUrl.pathname === '/controlled-evaluations/retire'
-    ) {
-      const payload = await readJsonBody(request);
-      const result = await withSqliteWriteGate(
-        () => withImmediateTransaction(
-          () => retireControlledEvaluation(payload),
-        ),
-      );
-      sendJson(response, 200, result);
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/incidents/reanalyze-all') {
-      const payload = await readJsonBody(request);
-      const result = await withSqliteWriteGate(() => withImmediateTransaction(
-        () => requestIncidentReanalysis(payload),
-      ));
-      void signalAiWorkers('incident-response-bulk-reanalysis');
-      sendJson(response, 202, result);
       return;
     }
     if (request.method === 'POST' && parsedUrl.pathname === '/pcap/request') {
