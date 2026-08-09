@@ -865,6 +865,18 @@
       ]
     },
     {
+      "path": "n8n/bin/local_ai_evidence_compat.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/local_ai_evidence_compat.py",
+      "required_symbols": [
+        "attach_evidence_reference_contract",
+        "model_safe_copy",
+        "result_bound_query_reference",
+        "reviewer_observable_catalog",
+        "synchronize_hosted_investigation_contract"
+      ]
+    },
+    {
       "path": "n8n/bin/local_ai_evaluation_routing_compat.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/local_ai_evaluation_routing_compat.py",

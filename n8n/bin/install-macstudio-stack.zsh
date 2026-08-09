@@ -612,6 +612,7 @@ cp "$REPO_DIR/n8n/bin/local_ai_pipeline_adapters.py" "$STACK_DIR/bin/local_ai_pi
 cp "$REPO_DIR/n8n/bin/local_ai_compatibility_facade.py" "$STACK_DIR/bin/local_ai_compatibility_facade.py"
 cp "$REPO_DIR/n8n/bin/local_ai_conclusion_review_dependency_compat.py" "$STACK_DIR/bin/local_ai_conclusion_review_dependency_compat.py"
 cp "$REPO_DIR/n8n/bin/local_ai_dependency_compat.py" "$STACK_DIR/bin/local_ai_dependency_compat.py"
+cp "$REPO_DIR/n8n/bin/local_ai_evidence_compat.py" "$STACK_DIR/bin/local_ai_evidence_compat.py"
 cp "$REPO_DIR/n8n/bin/local_ai_evaluation_routing_compat.py" "$STACK_DIR/bin/local_ai_evaluation_routing_compat.py"
 cp "$REPO_DIR/n8n/bin/local_ai_query_dependency_compat.py" "$STACK_DIR/bin/local_ai_query_dependency_compat.py"
 cp "$REPO_DIR/n8n/bin/local_ai_runtime_compat.py" "$STACK_DIR/bin/local_ai_runtime_compat.py"

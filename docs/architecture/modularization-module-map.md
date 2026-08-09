@@ -118,6 +118,10 @@ line ranges below remain historical navigation aids for the extraction ledger.
   route/identity delegates, model-roster normalization, runtime attestation,
   phase publication, settings loading, and provider-output parsing facades. The
   actual isolation, routing, identity, and provider policy remains package-owned.
+- `n8n/bin/local_ai_evidence_compat.py` owns hosted-evidence projection,
+  immutable evidence-reference, and reviewer-catalog compatibility delegates.
+  It binds only package-owned evidence/review behavior and carries no collector,
+  query-execution, or transport implementation.
 - Concrete Markdown rendering and atomic output-publication binding now live
   in `local_ai_pipeline_adapters.write_outputs`; the runner transaction port
   delegates directly and no longer retains `render_markdown` or
