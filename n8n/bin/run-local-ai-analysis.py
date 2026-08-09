@@ -2562,14 +2562,6 @@ def apply_evaluation_memory_freeze(
     return allowed, reason
 
 
-def codex_cli_route(model: str, effort: str) -> str:
-    return _provider_routing().codex_cli_route(model, effort)
-
-
-def cli_harness_route(provider: str, model: str, effort: str) -> str:
-    return _provider_routing().cli_harness_route(provider, model, effort)
-
-
 def parse_cli_harness_route(
     route: str,
     provider: str,
@@ -2607,21 +2599,6 @@ def model_route_is_hosted(route: str, settings: dict[str, Any]) -> bool:
         # redaction therefore never depends on the model provider prefix.
         return True
     return False
-
-
-def normalized_codex_cli_models(
-    value: Any,
-    *,
-    legacy_model: str,
-    legacy_effort: str,
-    legacy_enabled: bool,
-) -> list[dict[str, Any]]:
-    """Return validated settings for the fixed Codex CLI model catalog."""
-    return _provider_settings().codex_models(
-        value, legacy_model=legacy_model, legacy_effort=legacy_effort,
-        legacy_enabled=legacy_enabled, policy=_provider_settings_policy(),
-        dependencies=_provider_settings_dependencies(),
-    )
 
 
 def enabled_agent_model_routes(settings: dict[str, Any]) -> list[str]:
@@ -4760,18 +4737,6 @@ def summarize_cli_harness_failure(
     )
 
 
-def _filtered_hermes_auth_store(
-    raw: dict[str, Any],
-    *,
-    require_credentials: bool = True,
-) -> dict[str, Any]:
-    return _hermes_provider().filtered_auth_store(
-        raw,
-        error_type=RuntimeArtifactError,
-        require_credentials=require_credentials,
-    )
-
-
 def _load_bounded_regular_json(
     path: Path,
     *,
@@ -4868,10 +4833,6 @@ def hermes_agent_chat(
         lock_exclusive=fcntl.LOCK_EX,
         lock_unlock=fcntl.LOCK_UN,
     )
-
-
-def _openclaw_output_text(envelope: dict[str, Any]) -> str:
-    return _openclaw_provider().output_text(envelope)
 
 
 def _verified_openclaw_observation(
