@@ -557,6 +557,17 @@ with exact fresh analysis identities, case and reanalysis state, second-opinion
 metadata, bounded polling, and digest-sealed monitor snapshots through injected
 read-only data and time ports.
 
+`operations/cohort_execution_skills.py` owns strict skill-selection
+attestation validation and its bounded public projection. It enforces exact
+skill identity fields, registry and content digests, selection limits,
+mandatory readiness, and advisory-only execution without loading a registry.
+
+`operations/cohort_execution_models.py` owns model-call and reviewer execution
+evidence. It validates canonical model-call facts, bounded repair sequences,
+terminally successful purposes, required independent review, supplemental
+review limits, and reviewer decision completeness while producing the exact
+public proof projections consumed by cohort export.
+
 `prompt_incident_evidence_projection.py` owns the model-facing, in-memory
 projection of already-validated incident evidence. It applies deterministic
 prefix limits to Elastic hits and OSQuery rows, records source and retained

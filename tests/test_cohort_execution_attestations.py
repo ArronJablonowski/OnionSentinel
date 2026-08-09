@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Boundary tests for extracted cohort execution attestations."""
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+import re
+import sys
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+OPERATIONS = ROOT / "operations"
+if str(OPERATIONS) not in sys.path:
+    sys.path.insert(0, str(OPERATIONS))
+
+import cohort_execution_models  # noqa: E402
+import cohort_execution_skills  # noqa: E402
+
+
+def load_legacy_cohort():
+    path = OPERATIONS / "run-incident-harness-cohort.py"
+    spec = importlib.util.spec_from_file_location("cohort_attestation_test", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load cohort runner")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class CohortExecutionAttestationBoundaryTests(unittest.TestCase):
+    def test_legacy_runner_uses_extracted_attestation_services(self):
+        legacy = load_legacy_cohort()
+
+        self.assertIs(
+            legacy.evaluate_model_execution,
+            cohort_execution_models.evaluate_model_execution,
+        )
+        self.assertIs(
+            legacy.validate_skill_attestation,
+            cohort_execution_skills.validate_skill_attestation,
+        )
+
+    def test_skill_projection_rejects_extra_identity_fields(self):
+        policy = cohort_execution_skills.SkillAttestationPolicy(
+            skill_id_pattern=re.compile(r"[a-z-]+"),
+            sha256_pattern=re.compile(r"[a-f0-9]{64}"),
+            maximum_selected=4,
+        )
+        attestation = {
+            "present": True,
+            "legacy": False,
+            "valid": True,
+            "available": True,
+            "job_digest_bound": True,
+            "mandatory_ready": True,
+            "error_count": 0,
+            "errors": [],
+            "registry_version": 1,
+            "registry_sha256": "a" * 64,
+            "selected": [
+                {
+                    "id": "zeek-review",
+                    "version": 1,
+                    "skill_sha256": "b" * 64,
+                    "unbound": "not-allowed",
+                }
+            ],
+            "selected_count": 1,
+            "truncated": False,
+            "advisory_mode": "advisory_only",
+        }
+
+        summary, valid = cohort_execution_skills.validate_skill_attestation(
+            attestation, policy
+        )
+
+        self.assertFalse(valid)
+        self.assertEqual(summary["selected"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()

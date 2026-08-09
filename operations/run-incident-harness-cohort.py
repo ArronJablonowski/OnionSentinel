@@ -88,6 +88,14 @@ from cohort_monitor_workflow import (
     monitor_cohort_once as run_monitor_cohort_once,
     monitor_member as observe_monitor_member,
 )
+from cohort_execution_models import (
+    ModelExecutionPolicy,
+    evaluate_model_execution,
+)
+from cohort_execution_skills import (
+    SkillAttestationPolicy,
+    validate_skill_attestation,
+)
 
 
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -2792,72 +2800,18 @@ def _harness_execution_proof(
         if isinstance(trace.get("skill_selection_attestation"), dict)
         else {}
     )
-    selected_skills = skill_attestation.get("selected")
-    selected_skills = selected_skills if isinstance(selected_skills, list) else []
-    skill_summary_selected: list[dict[str, Any]] = []
-    skill_identity_valid = len(selected_skills) <= (
-        MAX_ATTESTED_INVESTIGATION_SKILLS
-    )
-    for selected_skill in selected_skills:
-        if not isinstance(selected_skill, dict):
-            skill_identity_valid = False
-            continue
-        skill_id = str(selected_skill.get("id") or "")
-        version = selected_skill.get("version")
-        skill_sha256 = str(selected_skill.get("skill_sha256") or "")
-        if (
-            set(selected_skill) != {"id", "version", "skill_sha256"}
-            or not SKILL_ID_RE.fullmatch(skill_id)
-            or not isinstance(version, int)
-            or isinstance(version, bool)
-            or version < 1
-            or not SHA256_RE.fullmatch(skill_sha256)
-        ):
-            skill_identity_valid = False
-            continue
-        skill_summary_selected.append(
-            {
-                "id": skill_id,
-                "version": version,
-                "skill_sha256": skill_sha256,
-            }
+    skill_selection_summary, skill_attestation_valid = (
+        validate_skill_attestation(
+            skill_attestation,
+            SkillAttestationPolicy(
+                skill_id_pattern=SKILL_ID_RE,
+                sha256_pattern=SHA256_RE,
+                maximum_selected=MAX_ATTESTED_INVESTIGATION_SKILLS,
+            ),
         )
-    registry_version = skill_attestation.get("registry_version")
-    registry_sha256 = str(skill_attestation.get("registry_sha256") or "")
-    selected_count = skill_attestation.get("selected_count")
-    truncated = skill_attestation.get("truncated")
-    advisory_mode = str(skill_attestation.get("advisory_mode") or "")
-    skill_attestation_valid = (
-        skill_attestation.get("present") is True
-        and skill_attestation.get("legacy") is False
-        and skill_attestation.get("valid") is True
-        and skill_attestation.get("available") is True
-        and skill_attestation.get("job_digest_bound") is True
-        and skill_attestation.get("mandatory_ready") is True
-        and skill_attestation.get("error_count") == 0
-        and skill_attestation.get("errors") == []
-        and isinstance(registry_version, int)
-        and not isinstance(registry_version, bool)
-        and registry_version > 0
-        and SHA256_RE.fullmatch(registry_sha256) is not None
-        and skill_identity_valid
-        and len(skill_summary_selected) == len(selected_skills)
-        and isinstance(selected_count, int)
-        and not isinstance(selected_count, bool)
-        and selected_count == len(skill_summary_selected)
-        and isinstance(truncated, bool)
-        and advisory_mode == "advisory_only"
     )
     if not skill_attestation_valid:
         failures.append("harness-skill-selection-attestation-invalid")
-    skill_selection_summary = {
-        "registry_version": registry_version,
-        "registry_sha256": registry_sha256,
-        "selected": skill_summary_selected,
-        "selected_count": selected_count,
-        "truncated": truncated,
-        "advisory_mode": advisory_mode,
-    }
     if str(trace.get("run_id") or "") != analysis_id:
         failures.append("harness-run-analysis-binding-failed")
     if str(trace.get("status") or "") != "succeeded":
@@ -2897,144 +2851,39 @@ def _harness_execution_proof(
         failures.append("harness-terminal-ledger-unbound")
     if int(models.get("successful_primary_call_count") or 0) < 1:
         failures.append("harness-primary-model-call-missing")
-    model_call_count = int(
-        (trace.get("counts") or {}).get("model_calls") or 0
+    model_execution = evaluate_model_execution(
+        trace,
+        models,
+        reviewer,
+        model_call_contract,
+        reviewer_required=contract.get("reviewer_required") is True,
+        policy=ModelExecutionPolicy(
+            contract_schema=MODEL_CALL_CONTRACT_SCHEMA,
+            maximum_model_calls=MAX_RUNTIME_MODEL_CALLS,
+            sha256_value=sha256_value,
+        ),
     )
-    successful_model_call_count = int(
-        models.get("successful_call_count") or 0
+    failures.extend(model_execution.failures)
+    model_call_count = model_execution.model_call_count
+    successful_model_call_count = model_execution.successful_model_call_count
+    model_purpose_count = model_execution.model_purpose_count
+    terminally_successful_model_purpose_count = (
+        model_execution.terminally_successful_model_purpose_count
     )
-    model_purpose_count = int(models.get("purpose_count") or 0)
-    terminally_successful_model_purpose_count = int(
-        models.get("terminally_successful_purpose_count") or 0
+    incomplete_model_purpose_count = model_execution.incomplete_model_purpose_count
+    exact_reviewer_repair_count = model_execution.exact_reviewer_repair_count
+    exact_adjudication_repair_count = (
+        model_execution.exact_adjudication_repair_count
     )
-    incomplete_model_purpose_count = int(
-        models.get("incomplete_purpose_count") or 0
+    superseded_validation_failure_count = (
+        model_execution.superseded_validation_failure_count
     )
-    exact_reviewer_repair_count = int(
-        models.get("exact_reviewer_repair_count") or 0
+    unexpected_unsuccessful_model_call_count = (
+        model_execution.unexpected_unsuccessful_model_call_count
     )
-    exact_adjudication_repair_count = int(
-        models.get("exact_adjudication_repair_count") or 0
+    malformed_model_purpose_sequence_count = (
+        model_execution.malformed_model_purpose_sequence_count
     )
-    superseded_validation_failure_count = int(
-        models.get("superseded_validation_failure_count") or 0
-    )
-    unexpected_unsuccessful_model_call_count = int(
-        models.get("unexpected_unsuccessful_call_count") or 0
-    )
-    malformed_model_purpose_sequence_count = int(
-        models.get("malformed_purpose_sequence_count") or 0
-    )
-    reviewer_model_call_count = int(
-        reviewer.get("model_call_count") or 0
-    )
-    reviewer_completed_model_call_count = int(
-        reviewer.get("completed_model_call_count") or 0
-    )
-    reviewer_supplemental_model_call_count = int(
-        reviewer.get("supplemental_model_call_count") or 0
-    )
-    reviewer_supplemental_completed_model_call_count = int(
-        reviewer.get("supplemental_completed_model_call_count") or 0
-    )
-    reviewer_primary_decision_count = int(
-        reviewer.get("primary_decision_count") or 0
-    )
-    reviewer_decision_count = int(
-        reviewer.get("reviewer_decision_count") or 0
-    )
-    if (
-        contract.get("reviewer_required") is True
-        and reviewer_model_call_count < 1
-    ):
-        failures.append("harness-required-reviewer-call-missing")
-    if reviewer_model_call_count > 0 and (
-        reviewer_completed_model_call_count
-        != 1 + reviewer_supplemental_model_call_count
-        or reviewer_primary_decision_count != 1
-        or reviewer_decision_count != 1
-        or reviewer.get("has_primary_decision") is not True
-        or reviewer.get("has_reviewer_decision") is not True
-        or reviewer.get("decision_comparable") is not True
-        or reviewer.get("missing_reviewer_decision") is not False
-        or reviewer_model_call_count
-        != (
-            1
-            + exact_reviewer_repair_count
-            + reviewer_supplemental_model_call_count
-        )
-        or reviewer_supplemental_model_call_count not in {0, 1}
-        or reviewer_supplemental_completed_model_call_count
-        != reviewer_supplemental_model_call_count
-        or reviewer.get("completion_contract_required") is not True
-        or reviewer.get("completion_contract_satisfied") is not True
-        or reviewer.get("completion_contract_failure_reasons") != []
-    ):
-        failures.append("harness-reviewer-completion-incomplete")
-    elif reviewer_model_call_count == 0 and (
-        reviewer_completed_model_call_count != 0
-        or reviewer_decision_count != 0
-        or reviewer.get("has_reviewer_decision") is not False
-        or reviewer.get("missing_reviewer_decision") is not False
-        or reviewer.get("completion_contract_required") is not False
-        or reviewer.get("completion_contract_satisfied") is not True
-        or reviewer.get("completion_contract_failure_reasons") != []
-    ):
-        failures.append("harness-reviewer-completion-incomplete")
-    model_call_facts = model_call_contract.get("facts")
-    if (
-        model_call_contract.get("schema") != MODEL_CALL_CONTRACT_SCHEMA
-        or model_call_contract.get("valid") is not True
-        or int(model_call_contract.get("model_call_count") or 0)
-        != model_call_count
-        or int(
-            model_call_contract.get("canonical_model_call_count") or 0
-        )
-        != model_call_count
-        or int(
-            model_call_contract.get("noncanonical_model_call_count") or 0
-        )
-        != 0
-        or int(
-            model_call_contract.get("primary_initial_call_count") or 0
-        )
-        != 1
-        or int(model_call_contract.get("violation_count") or 0) != 0
-        or model_call_contract.get("violations") != []
-        or model_call_contract.get("global_reasons") != []
-        or not isinstance(model_call_facts, list)
-        or len(model_call_facts) != model_call_count
-        or len(model_call_facts) > MAX_RUNTIME_MODEL_CALLS
-        or str(model_call_contract.get("facts_sha256") or "")
-        != sha256_value(model_call_facts)
-        or int(
-            model_call_contract.get("reviewer_model_call_count") or 0
-        )
-        != reviewer_model_call_count
-    ):
-        failures.append("harness-model-call-contract-noncanonical")
-    if (
-        model_purpose_count < 1
-        or terminally_successful_model_purpose_count
-        != model_purpose_count
-        or incomplete_model_purpose_count != 0
-        or successful_model_call_count != model_purpose_count
-        or model_call_count
-        != (
-            successful_model_call_count
-            + superseded_validation_failure_count
-        )
-        or (
-            exact_reviewer_repair_count
-            + exact_adjudication_repair_count
-        )
-        != superseded_validation_failure_count
-        or exact_reviewer_repair_count not in {0, 1}
-        or exact_adjudication_repair_count not in {0, 1}
-        or unexpected_unsuccessful_model_call_count != 0
-        or malformed_model_purpose_sequence_count != 0
-    ):
-        failures.append("harness-model-purpose-incomplete")
     for field in (
         "authorization_failure_count",
         "authorization_denied_event_count",
@@ -3249,95 +3098,8 @@ def _harness_execution_proof(
             "malformed_model_purpose_sequence_count": (
                 malformed_model_purpose_sequence_count
             ),
-            "model_call_contract": {
-                "schema": str(model_call_contract.get("schema") or ""),
-                "valid": model_call_contract.get("valid") is True,
-                "model_call_count": int(
-                    model_call_contract.get("model_call_count") or 0
-                ),
-                "canonical_model_call_count": int(
-                    model_call_contract.get("canonical_model_call_count")
-                    or 0
-                ),
-                "noncanonical_model_call_count": int(
-                    model_call_contract.get("noncanonical_model_call_count")
-                    or 0
-                ),
-                "primary_initial_call_count": int(
-                    model_call_contract.get("primary_initial_call_count")
-                    or 0
-                ),
-                "query_planning_call_count": int(
-                    model_call_contract.get("query_planning_call_count")
-                    or 0
-                ),
-                "query_planning_repair_call_count": int(
-                    model_call_contract.get(
-                        "query_planning_repair_call_count"
-                    )
-                    or 0
-                ),
-                "primary_followup_call_count": int(
-                    model_call_contract.get("primary_followup_call_count")
-                    or 0
-                ),
-                "reviewer_model_call_count": int(
-                    model_call_contract.get("reviewer_model_call_count")
-                    or 0
-                ),
-                "adjudicator_model_call_count": int(
-                    model_call_contract.get("adjudicator_model_call_count")
-                    or 0
-                ),
-                "facts": list(model_call_facts or []),
-                "facts_sha256": str(
-                    model_call_contract.get("facts_sha256") or ""
-                ),
-                "violation_count": int(
-                    model_call_contract.get("violation_count") or 0
-                ),
-                "violations": list(
-                    model_call_contract.get("violations") or []
-                ),
-                "global_reasons": list(
-                    model_call_contract.get("global_reasons") or []
-                ),
-            },
-            "reviewer_completion": {
-                "model_call_count": reviewer_model_call_count,
-                "completed_model_call_count": (
-                    reviewer_completed_model_call_count
-                ),
-                "supplemental_model_call_count": (
-                    reviewer_supplemental_model_call_count
-                ),
-                "supplemental_completed_model_call_count": (
-                    reviewer_supplemental_completed_model_call_count
-                ),
-                "primary_decision_count": reviewer_primary_decision_count,
-                "reviewer_decision_count": reviewer_decision_count,
-                "has_primary_decision": (
-                    reviewer.get("has_primary_decision") is True
-                ),
-                "has_reviewer_decision": (
-                    reviewer.get("has_reviewer_decision") is True
-                ),
-                "decision_comparable": (
-                    reviewer.get("decision_comparable") is True
-                ),
-                "missing_reviewer_decision": (
-                    reviewer.get("missing_reviewer_decision") is True
-                ),
-                "completion_contract_required": (
-                    reviewer.get("completion_contract_required") is True
-                ),
-                "completion_contract_satisfied": (
-                    reviewer.get("completion_contract_satisfied") is True
-                ),
-                "completion_contract_failure_reasons": list(
-                    reviewer.get("completion_contract_failure_reasons") or []
-                ),
-            },
+            "model_call_contract": model_execution.model_call_contract,
+            "reviewer_completion": model_execution.reviewer_completion,
             "route_authorization_failure_count": 0,
             "route_identity_mismatch_count": 0,
             "tool_call_count": tool_call_count,
