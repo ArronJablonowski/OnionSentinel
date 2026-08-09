@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 
-BackendCheck = Callable[[dict[str, Any], dict[str, Any] | None], bool]
+BackendCheck = Callable[[dict[str, Any], Optional[dict[str, Any]]], bool]
 
 
 def _advertised_descriptor(

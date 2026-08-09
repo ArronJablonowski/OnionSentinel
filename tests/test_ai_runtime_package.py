@@ -135,6 +135,30 @@ class AiRuntimePackageTests(unittest.TestCase):
                 [],
             )
 
+    def test_atomic_installer_validates_with_production_system_python(self) -> None:
+        production_python = Path("/usr/bin/python3")
+        if not production_python.is_file():
+            self.skipTest("production system Python is unavailable")
+        with tempfile.TemporaryDirectory() as temp_name:
+            destination = Path(temp_name) / "onion_sentinel"
+            completed = subprocess.run(
+                [
+                    str(production_python),
+                    str(INSTALLER),
+                    "--source",
+                    str(N8N_ROOT / "onion_sentinel"),
+                    "--destination",
+                    str(destination),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue((destination / "__init__.py").is_file())
+            self.assertEqual(list(destination.rglob("__pycache__")), [])
+
     def test_invalid_source_leaves_existing_runtime_untouched(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             root = Path(temp_name)
@@ -158,6 +182,27 @@ class AiRuntimePackageTests(unittest.TestCase):
             source.mkdir(parents=True)
             destination.mkdir(parents=True)
             (source / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+            marker = destination / "release.txt"
+            marker.write_text("known-good", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "import validation failed"):
+                self.installer.install_package(source, destination)
+
+            self.assertEqual(marker.read_text(encoding="utf-8"), "known-good")
+            self.assertEqual(list((root / "runtime").glob(".*package*")), [])
+
+    def test_unlisted_staged_module_import_failure_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            source = root / "source" / "onion_sentinel"
+            destination = root / "runtime" / "onion_sentinel"
+            source.mkdir(parents=True)
+            destination.mkdir(parents=True)
+            (source / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+            (source / "unlisted.py").write_text(
+                "raise RuntimeError('unlisted import failed')\n",
+                encoding="utf-8",
+            )
             marker = destination / "release.txt"
             marker.write_text("known-good", encoding="utf-8")
 

@@ -137,6 +137,20 @@ def validate_source(source: Path) -> Path:
     return resolved
 
 
+def staged_module_names(package: Path) -> tuple[str, ...]:
+    """Return every importable module in the complete staged package tree."""
+    discovered: list[str] = []
+    for path in sorted(package.rglob("*.py")):
+        relative = path.relative_to(package)
+        parts = list(relative.parts)
+        if parts[-1] == "__init__.py":
+            parts.pop()
+        else:
+            parts[-1] = path.stem
+        discovered.append(".".join((package.name, *parts)))
+    return tuple(dict.fromkeys((*REQUIRED_MODULES, *discovered)))
+
+
 def validate_staged_package(package: Path) -> None:
     if not compileall.compile_dir(str(package), quiet=1, force=True):
         raise RuntimeError("AI runtime package compilation failed")
@@ -150,7 +164,7 @@ def validate_staged_package(package: Path) -> None:
     try:
         sys.path.insert(0, parent)
         importlib.invalidate_caches()
-        for module_name in REQUIRED_MODULES:
+        for module_name in staged_module_names(package):
             importlib.import_module(module_name)
     except Exception as exc:
         raise RuntimeError(

@@ -8,31 +8,31 @@ from pathlib import Path
 import re
 import shlex
 import threading
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Optional
 
 
 MetricValues = tuple[
-    float | None,
-    float | None,
-    float | None,
-    float | None,
-    float | None,
-    float | None,
-    float | None,
+    Optional[float],
+    Optional[float],
+    Optional[float],
+    Optional[float],
+    Optional[float],
+    Optional[float],
+    Optional[float],
 ]
 Sample = tuple[
-    float | None,
-    float | None,
-    float | None,
-    float | None,
-    float | None,
-    float | None,
-    float | None,
+    Optional[float],
+    Optional[float],
+    Optional[float],
+    Optional[float],
+    Optional[float],
+    Optional[float],
+    Optional[float],
     str,
 ]
 RunCommand = Callable[..., Any]
 ReadMactop = Callable[..., Sample]
-ReadGpu = Callable[..., tuple[float | None, str]]
+ReadGpu = Callable[..., tuple[Optional[float], str]]
 
 
 @dataclass(frozen=True)
