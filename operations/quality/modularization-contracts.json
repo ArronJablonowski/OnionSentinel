@@ -172,6 +172,24 @@
       ]
     },
     {
+      "path": "operations/cohort_evaluation_markdown.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_evaluation_markdown.py",
+      "required_symbols": [
+        "markdown_cell",
+        "render_markdown"
+      ]
+    },
+    {
+      "path": "operations/cohort_evaluation_private_output.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_evaluation_private_output.py",
+      "required_symbols": [
+        "write_private_bytes",
+        "write_private_json"
+      ]
+    },
+    {
       "path": "operations/cohort_execution_models.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_execution_models.py",

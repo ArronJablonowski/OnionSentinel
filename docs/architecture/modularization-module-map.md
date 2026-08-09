@@ -608,6 +608,16 @@ both roles through injected scoring ports, and assembles the sealed report data.
 Filesystem access, private output, Markdown rendering, and CLI behavior remain
 outside this module.
 
+`operations/cohort_evaluation_markdown.py` owns bounded, secret-free Markdown
+presentation of sealed cohort evaluation data. It separates header, role
+summary, criterion, case, finding-code, and cross-role sections so report layout
+can evolve without changing grading logic.
+
+`operations/cohort_evaluation_private_output.py` owns atomic owner-only report
+output. It rejects symlink replacement and unbounded JSON, creates private
+parents, fsyncs files and directories, and exposes no grading or rendering
+policy.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

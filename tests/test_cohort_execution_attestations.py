@@ -28,6 +28,8 @@ import cohort_evaluation_result_member  # noqa: E402
 import cohort_evaluation_result_export  # noqa: E402
 import cohort_evaluation_scoring  # noqa: E402
 import cohort_evaluation_workflow  # noqa: E402
+import cohort_evaluation_markdown  # noqa: E402
+import cohort_evaluation_private_output  # noqa: E402
 
 
 def load_legacy_cohort():
@@ -179,6 +181,22 @@ class CohortExecutionAttestationBoundaryTests(unittest.TestCase):
         self.assertIs(
             evaluator.assemble_report,
             cohort_evaluation_workflow.assemble_report,
+        )
+
+    def test_offline_evaluator_uses_extracted_report_services(self):
+        evaluator = load_cohort_evaluator()
+
+        self.assertIs(
+            evaluator.render_report_markdown,
+            cohort_evaluation_markdown.render_markdown,
+        )
+        self.assertIs(
+            evaluator.write_report_bytes,
+            cohort_evaluation_private_output.write_private_bytes,
+        )
+        self.assertIs(
+            evaluator.write_report_json,
+            cohort_evaluation_private_output.write_private_json,
         )
 
     def test_skill_projection_rejects_extra_identity_fields(self):

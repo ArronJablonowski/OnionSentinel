@@ -37,7 +37,6 @@ import re
 import stat
 import statistics
 import sys
-import tempfile
 from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -122,6 +121,11 @@ from cohort_evaluation_workflow import (
     result_source,
     validate_paired_results,
     validate_request,
+)
+from cohort_evaluation_markdown import render_markdown as render_report_markdown
+from cohort_evaluation_private_output import (
+    write_private_bytes as write_report_bytes,
+    write_private_json as write_report_json,
 )
 
 
@@ -1140,49 +1144,15 @@ def evaluate_cohorts(
     )
 
 
-def _ensure_private_parent(path: Path) -> Path:
-    target = path.expanduser()
-    parent = target.parent.resolve()
-    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if parent.is_symlink() or not parent.is_dir():
-        raise CohortEvaluationError(
-            f"output parent is not a real directory: {parent}"
-        )
-    os.chmod(parent, 0o700)
-    return parent / target.name
-
-
 def write_private_bytes(
     path: Path,
     payload: bytes,
     *,
     replace: bool = False,
 ) -> None:
-    target = _ensure_private_parent(path)
-    if target.is_symlink():
-        raise CohortEvaluationError(f"refusing to replace symlink: {target}")
-    if target.exists() and not replace:
-        raise CohortEvaluationError(f"refusing to overwrite output: {target}")
-    file_descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    write_report_bytes(
+        path, payload, replace=replace, error=CohortEvaluationError
     )
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(file_descriptor, 0o600)
-        with os.fdopen(file_descriptor, "wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-        os.chmod(target, 0o600)
-        directory_fd = os.open(target.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
 
 
 def write_private_json(
@@ -1191,179 +1161,22 @@ def write_private_json(
     *,
     replace: bool = False,
 ) -> None:
-    payload = json.dumps(document, indent=2, sort_keys=True).encode("utf-8")
-    if len(payload) > MAX_JSON_REPORT_BYTES:
-        raise CohortEvaluationError("rendered JSON report exceeds the size bound")
-    write_private_bytes(path, payload + b"\n", replace=replace)
-
-
-def _markdown_cell(value: object, maximum: int = 160) -> str:
-    text = str(value if value is not None else "")
-    text = " ".join(text.split())[:maximum]
-    return text.replace("|", "\\|").replace("<", "&lt;").replace(">", "&gt;")
+    write_report_json(
+        path,
+        document,
+        maximum_bytes=MAX_JSON_REPORT_BYTES,
+        replace=replace,
+        error=CohortEvaluationError,
+    )
 
 
 def render_markdown(report: Mapping[str, Any]) -> str:
-    contract = report["execution_contract"]
-    lines = [
-        "# Onion Sentinel investigation cohort evaluation",
-        "",
-        f"- Experiment: `{_markdown_cell(report['experiment_id'])}`",
-        f"- Cases per role: {int(report['expected_count'])}",
-        "- Dual-role execution gate: passed "
-        f"({int(report['dual_role_execution_gate']['analysis_count'])} "
-        "fresh shadow-harness analyses)",
-        f"- Generated: `{_markdown_cell(report['generated_at'])}`",
-        "- Evaluation profile: `"
-        f"{_markdown_cell(contract.get('evaluation_profile') or 'generic')}`",
-        "- Primary route: `"
-        f"{_markdown_cell(contract['expected_assigned_route'])}`",
-        "- Required reviewer route: `"
-        f"{_markdown_cell(contract['expected_reviewer_route'])}`",
-        f"- Report digest: `{_markdown_cell(report['report_sha256'])}`",
-        "",
-        "This report contains verdict labels, rubric scores, digests, and "
-        "machine-readable finding codes only. It contains no raw alerts, "
-        "evidence, prompts, queries, query results, credentials, or model responses.",
-        "",
-        "## Role summary",
-        "",
-        "| Role | Complete | Pass | Review | Fail | Effective mean | "
-        "Exact verdicts | Hard-fail cases | Shadow gate |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---|",
-    ]
-    for role, role_report in report["roles"].items():
-        aggregate = role_report["aggregate"]
-        classifications = aggregate["classification_counts"]
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    _markdown_cell(ROLE_LABELS.get(role, role)),
-                    f"{aggregate['completed_count']}/{aggregate['expected_count']}",
-                    str(classifications["pass"]),
-                    str(classifications["needs_review"]),
-                    str(classifications["fail"]),
-                    f"{aggregate['score']['effective_mean']:.2f}",
-                    f"{aggregate['exact_verdict_count']}/{aggregate['expected_count']}",
-                    str(aggregate["hard_failure_case_count"]),
-                    "PASS"
-                    if aggregate["shadow_acceptance_gate"]["passed"]
-                    else "NOT MET",
-                ]
-            )
-            + " |"
-        )
-
-    for role, role_report in report["roles"].items():
-        aggregate = role_report["aggregate"]
-        lines.extend(
-            [
-                "",
-                f"## {ROLE_LABELS.get(role, role)}",
-                "",
-                "### Criterion averages",
-                "",
-                "| Criterion | Mean | Maximum | Full-score cases |",
-                "|---|---:|---:|---:|",
-            ]
-        )
-        for criterion, details in aggregate["criteria"].items():
-            lines.append(
-                f"| `{criterion}` | {details['mean']:.2f} | "
-                f"{details['maximum']} | {details['full_score_count']} |"
-            )
-        lines.extend(
-            [
-                "",
-                "### Per-case comparison",
-                "",
-                "| Rank | Stable group | Result | Score | Grade | Exact | "
-                "Mismatched labels | Hard failures | Improvement codes |",
-                "|---:|---|---|---:|---|---|---|---|---|",
-            ]
-        )
-        for item in role_report["cases"]:
-            lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        str(item["rank"]),
-                        f"`{_markdown_cell(item['stable_group_id'])}`",
-                        _markdown_cell(item["result_state"]),
-                        f"{float(item['effective_score']):.2f}",
-                        _markdown_cell(item["classification"]),
-                        "yes" if item["exact_verdict_match"] else "no",
-                        _markdown_cell(
-                            ", ".join(item["mismatched_labels"]) or "none"
-                        ),
-                        _markdown_cell(
-                            ", ".join(item["hard_failures"]) or "none"
-                        ),
-                        _markdown_cell(
-                            ", ".join(item["improvement_codes"]) or "none"
-                        ),
-                    ]
-                )
-                + " |"
-            )
-        lines.extend(
-            [
-                "",
-                "### Aggregate finding codes",
-                "",
-                "- Failure modes: "
-                + _markdown_cell(
-                    ", ".join(
-                        f"{key}={value}"
-                        for key, value in aggregate[
-                            "failure_mode_counts"
-                        ].items()
-                    )
-                    or "none"
-                ),
-                "- Recommended improvements: "
-                + _markdown_cell(
-                    ", ".join(
-                        f"{key}={value}"
-                        for key, value in aggregate[
-                            "improvement_code_counts"
-                        ].items()
-                    )
-                    or "none"
-                ),
-                "- Scope note: "
-                + aggregate["shadow_acceptance_gate"]["scope_warning"],
-            ]
-        )
-
-    cross_role = report.get("cross_role")
-    if isinstance(cross_role, dict):
-        lines.extend(
-            [
-                "",
-                "## Cross-role comparison",
-                "",
-                f"Agent verdicts differed on "
-                f"{cross_role['agent_verdict_disagreement_case_count']} of "
-                f"{cross_role['common_case_count']} common cases.",
-                "",
-                "| Stable group | IR score | SOC score | IR-SOC | Agent label disagreements |",
-                "|---|---:|---:|---:|---|",
-            ]
-        )
-        for item in cross_role["cases"]:
-            lines.append(
-                f"| `{_markdown_cell(item['stable_group_id'])}` | "
-                f"{float(item['incident_responder_score']):.2f} | "
-                f"{float(item['soc_analyst_score']):.2f} | "
-                f"{float(item['incident_minus_soc_score']):.2f} | "
-                f"{_markdown_cell(', '.join(item['agent_verdict_disagreements']) or 'none')} |"
-            )
-    rendered = "\n".join(lines).rstrip() + "\n"
-    if len(rendered.encode("utf-8")) > MAX_MARKDOWN_BYTES:
-        raise CohortEvaluationError("rendered Markdown exceeds the size bound")
-    return rendered
+    return render_report_markdown(
+        report,
+        role_labels=ROLE_LABELS,
+        maximum_bytes=MAX_MARKDOWN_BYTES,
+        error=CohortEvaluationError,
+    )
 
 
 def _parse_result_argument(value: str) -> tuple[str, Path]:
