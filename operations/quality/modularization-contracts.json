@@ -283,6 +283,15 @@
       ]
     },
     {
+      "path": "operations/cohort_query_audit_projection.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_query_audit_projection.py",
+      "required_symbols": [
+        "AUDIT_KEYS",
+        "project_query_audit"
+      ]
+    },
+    {
       "path": "operations/trace_evaluation_skills.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/trace_evaluation_skills.py",

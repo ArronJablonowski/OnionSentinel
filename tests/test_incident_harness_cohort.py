@@ -32,9 +32,44 @@ EVALUATOR_SPEC = importlib.util.spec_from_file_location(
 assert EVALUATOR_SPEC and EVALUATOR_SPEC.loader
 cohort_evaluator = importlib.util.module_from_spec(EVALUATOR_SPEC)
 EVALUATOR_SPEC.loader.exec_module(cohort_evaluator)
+import cohort_evaluation_query_audit  # noqa: E402
+import cohort_query_audit_projection  # noqa: E402
 
 
 class IncidentHarnessCohortTests(unittest.TestCase):
+    def test_runner_uses_canonical_query_audit_services(self) -> None:
+        self.assertIs(
+            cohort.project_query_audit,
+            cohort_query_audit_projection.project_query_audit,
+        )
+        self.assertIs(
+            cohort.normalize_query_audit_binding,
+            cohort_evaluation_query_audit.query_audit_execution_binding,
+        )
+
+    def test_query_audit_projection_excludes_query_and_result_content(self) -> None:
+        projected = cohort._bounded_query_audit_metadata(
+            {
+                "_incident_query_audit": {
+                    "read_only": True,
+                    "queries": [
+                        {
+                            "query_id": "alert-context",
+                            "status": "completed",
+                            "query": "secret query text",
+                            "rows": [{"secret": "result"}],
+                            "request_digest": "a" * 64,
+                            "result_digest": "b" * 64,
+                        }
+                    ],
+                }
+            }
+        )
+        query = projected["_incident_query_audit"]["queries"][0]
+        self.assertEqual(query["query_id"], "alert-context")
+        self.assertNotIn("query", query)
+        self.assertNotIn("rows", query)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(
             prefix="onion-sentinel-cohort-"

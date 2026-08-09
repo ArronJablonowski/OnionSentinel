@@ -746,6 +746,12 @@ admission policies, scoring policy, API ports, and bounded report adapters. The
 parsing, API invocation, output selection, summary printing, and exit status;
 its compatibility facade delegates the prior import surface to this service.
 
+`operations/cohort_query_audit_projection.py` owns the collector-side bounded
+projection of query-audit sections, trusted round queries, result metadata, and
+tool bindings. It explicitly allowlists scalar provenance fields and excludes
+query text and result rows. The cohort runner delegates execution-binding proof
+to the canonical `cohort_evaluation_query_audit.py` implementation.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental
