@@ -539,6 +539,12 @@ are enforced before artifacts enter prompt assembly. The builder retains its
 legacy helper names as compatibility delegates and supplies environment-derived
 limits and fallback text explicitly.
 
+`prompt_builder_policy.py` owns environment-derived runtime paths and byte
+limits plus immutable query-contract, pack, derived-operation, filter, regex,
+and evidence-bound policy. This separates deployment configuration and query
+capabilities from prompt orchestration while preserving the builder's imported
+constant surface for existing callers and characterization tests.
+
 `prompt_investigation_query_context.py` owns the split trust projection for
 investigation pivots. It derives exact anchor-bound observables, typed event
 tuples and sensor role semantics, a selected-alert-centered time envelope, the

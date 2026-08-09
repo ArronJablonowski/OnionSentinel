@@ -20,11 +20,17 @@ def load_contract() -> dict:
 
 def top_level_symbols(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    return {
-        node.name
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-    }
+    symbols: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            symbols.add(node.name)
+        elif isinstance(node, ast.Assign):
+            symbols.update(
+                target.id for target in node.targets if isinstance(target, ast.Name)
+            )
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            symbols.add(node.target.id)
+    return symbols
 
 
 def top_level_function(path: Path, name: str) -> ast.FunctionDef:

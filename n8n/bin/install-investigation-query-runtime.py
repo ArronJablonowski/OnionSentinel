@@ -35,6 +35,7 @@ HARDENED_BUILDER_DEPENDENCIES = (
     "prompt_authorization_context.py",
     "prompt_builder_cli.py",
     "prompt_builder_io.py",
+    "prompt_builder_policy.py",
     "prompt_correlation_context.py",
     "prompt_correlation_facts.py",
     "prompt_detection_context.py",
@@ -130,6 +131,33 @@ def _imports_contract_authority(path: Path, required: set[str]) -> bool:
     return False
 
 
+def _imports_module_alias(
+    tree: ast.Module,
+    module: str,
+    alias: str,
+) -> bool:
+    for node in tree.body:
+        if not isinstance(node, ast.Import):
+            continue
+        for imported in node.names:
+            if imported.name == module and imported.asname == alias:
+                return True
+    return False
+
+
+def _imports_from_symbol(
+    tree: ast.Module,
+    module: str,
+    symbol: str,
+) -> bool:
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom) or node.module != module:
+            continue
+        if any(imported.name == symbol for imported in node.names):
+            return True
+    return False
+
+
 def validate_versioned_runtime(directory: Path, expected_contract: str) -> None:
     contract_path = directory / "investigation_query_contract.py"
     collector_path = directory / "collect-investigation-pivots.py"
@@ -152,16 +180,18 @@ def validate_versioned_runtime(directory: Path, expected_contract: str) -> None:
 
 def validate_hardened_builder(path: Path) -> None:
     tree = _module_tree(path)
-    imports_module = any(
-        isinstance(node, ast.Import)
-        and any(
-            alias.name == "investigation_query_contract"
-            and alias.asname == "INVESTIGATION_CONTRACT"
-            for alias in node.names
-        )
-        for node in tree.body
+    imports_policy_contract = _imports_from_symbol(
+        tree,
+        "prompt_builder_policy",
+        "INVESTIGATION_CONTRACT",
     )
-    if not imports_module:
+    policy_tree = _module_tree(path.parent / "prompt_builder_policy.py")
+    policy_imports_module = _imports_module_alias(
+        policy_tree,
+        "investigation_query_contract",
+        "INVESTIGATION_CONTRACT",
+    )
+    if not imports_policy_contract or not policy_imports_module:
         raise QueryRuntimeInstallError(
             "hardened prompt builder does not import the adjacent contract authority"
         )

@@ -119,6 +119,21 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_builder_policy.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_builder_policy.py",
+      "required_symbols": [
+        "DEFAULT_DB",
+        "DEFAULT_MAX_PACKAGE_BYTES",
+        "EVENT_TUPLE_PATHS",
+        "INVESTIGATION_DERIVED_FILTERS",
+        "INVESTIGATION_QUERY_CONTRACT",
+        "INVESTIGATION_QUERY_PACKS",
+        "MAX_DETECTION_GROUP_ROWS",
+        "TEST_PREFIXES"
+      ]
+    },
+    {
       "path": "n8n/bin/prompt_correlation_context.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_correlation_context.py",
