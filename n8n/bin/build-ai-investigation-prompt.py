@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import hashlib
 import os
 import re
 import sqlite3
@@ -88,6 +87,15 @@ from prompt_alert_queries import (
     AlertSelectionRequest,
     related_alert_context,
     select_prompt_alert,
+)
+from prompt_alert_store import (
+    build_test_alert_filter,
+    derive_alert_group_key,
+    query_row,
+    query_rows,
+    read_table_columns,
+    sqlite_row_value,
+    stable_alert_group_id,
 )
 from prompt_pcap_evidence import (
     PcapEvidenceRequest,
@@ -409,20 +417,18 @@ def safe_filename(value: str) -> str:
 
 
 def rows(conn: sqlite3.Connection, sql: str, params: Iterable[object] = ()) -> list[sqlite3.Row]:
-    return conn.execute(sql, tuple(params)).fetchall()
+    """Compatibility delegate for read-only multi-row queries."""
+    return query_rows(conn, sql, params)
 
 
 def row(conn: sqlite3.Connection, sql: str, params: Iterable[object] = ()) -> sqlite3.Row | None:
-    return conn.execute(sql, tuple(params)).fetchone()
+    """Compatibility delegate for read-only single-row queries."""
+    return query_row(conn, sql, params)
 
 
 def test_filter_sql(prefix: str = "alert_id") -> tuple[str, list[object]]:
-    clauses = []
-    params: list[object] = []
-    for pattern in TEST_PREFIXES:
-        clauses.append(f"{prefix} NOT LIKE ?")
-        params.append(pattern)
-    return " AND ".join(clauses), params
+    """Compatibility delegate for the test-alert exclusion predicate."""
+    return build_test_alert_filter(TEST_PREFIXES, prefix)
 
 
 def parse_alert_json(value: str | None) -> dict:
@@ -460,27 +466,18 @@ def load_system_prompt(path: Path) -> str:
 
 
 def sqlite_value(row_value: sqlite3.Row, key: str, default: object = None) -> object:
-    return row_value[key] if key in row_value.keys() else default
+    """Compatibility delegate for legacy-safe SQLite row access."""
+    return sqlite_row_value(row_value, key, default)
 
 
 def alert_group_key(row_value: sqlite3.Row) -> str:
     """Return the same duplicate-group key used by the dashboard and AI scheduler."""
-    suppression_key = str(sqlite_value(row_value, "suppression_key") or "").strip()
-    if suppression_key:
-        return suppression_key
-    return "|".join(
-        [
-            str(sqlite_value(row_value, "triage_level") or "unscored"),
-            str(sqlite_value(row_value, "rule_name") or "unknown-rule"),
-            str(sqlite_value(row_value, "source_ip") or "unknown-source"),
-            str(sqlite_value(row_value, "destination_ip") or "unknown-destination"),
-            str(sqlite_value(row_value, "filter_status") or "accepted"),
-        ]
-    )
+    return derive_alert_group_key(row_value)
 
 
 def alert_group_id(group_key: str) -> str:
-    return hashlib.sha1(str(group_key or "").encode("utf-8")).hexdigest()[:12]
+    """Compatibility delegate for stable alert-group identity."""
+    return stable_alert_group_id(group_key)
 
 
 def execution_lineage(
@@ -497,10 +494,8 @@ def execution_lineage(
 
 
 def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    try:
-        return {str(item["name"]) for item in rows(conn, f"PRAGMA table_info({table})")}
-    except sqlite3.Error:
-        return set()
+    """Compatibility delegate for fail-soft SQLite schema inspection."""
+    return read_table_columns(conn, table)
 
 
 def _alert_group_sources() -> AlertGroupSources:

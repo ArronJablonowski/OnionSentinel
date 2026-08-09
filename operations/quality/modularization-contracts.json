@@ -68,6 +68,20 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_alert_store.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_alert_store.py",
+      "required_symbols": [
+        "build_test_alert_filter",
+        "derive_alert_group_key",
+        "query_row",
+        "query_rows",
+        "read_table_columns",
+        "sqlite_row_value",
+        "stable_alert_group_id"
+      ]
+    },
+    {
       "path": "n8n/bin/prompt_alert_group.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_alert_group.py",

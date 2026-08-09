@@ -602,6 +602,13 @@ limited in SQL and pivots only on the selected rule and explicit source or
 destination endpoints. Query execution, filtering, row access, and time remain
 injected by the builder facade.
 
+`prompt_alert_store.py` owns the builder's small read-only SQLite adapter,
+legacy-safe row access, parameterized test-alert exclusion predicate, fail-soft
+table inspection, and stable duplicate-group key and digest derivation. The
+builder keeps the original helper surface as compatibility delegates so the
+domain modules remain independently injectable and existing runtime imports do
+not change.
+
 `prompt_detection_context.py` owns ordered preparation of the exact detection
 group, deterministic investigation-skill selection, rule/playbook predicate
 validation, bounded packet features, and time-aware asset resolution. Exact
