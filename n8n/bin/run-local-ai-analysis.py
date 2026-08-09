@@ -1631,6 +1631,25 @@ def _analysis_index_persistence():
     return analysis_index
 
 
+def _primary_execution():
+    _provider_routing()
+    from onion_sentinel.analysis import primary_execution
+    return primary_execution
+
+
+def _primary_execution_dependencies():
+    module = _primary_execution()
+    return module.Dependencies(
+        attach_evidence_contract=attach_evidence_reference_contract,
+        canonical_route=canonical_model_route,
+        notify_phase=notify_analysis_phase,
+        analyze_route=analyze_model_route,
+        monotonic=time.monotonic,
+        warning=lambda message: print(message, file=sys.stderr),
+        route_error=InvestigationQueryError,
+    )
+
+
 def _memory_journal_persistence():
     _provider_routing()
     from onion_sentinel.analysis.persistence import memory_journal
@@ -6309,85 +6328,21 @@ def analyze_with_config(
     changing its model, cost, privacy boundary, or analytical behavior.
     """
     settings = settings or effective_ai_settings(args)
-    if (
-        isinstance(prompt_package.get("response_schema"), dict)
-        or isinstance(prompt_package.get("alert"), dict)
-        or isinstance(prompt_package.get("incident_response_evidence"), dict)
-    ):
-        attach_evidence_reference_contract(prompt_package)
-    if agent_role not in CYBER_SECURITY_AGENT_ROLES:
-        raise SystemExit(f"Unknown cyber-security agent role: {agent_role}")
-    route = canonical_model_route((settings.get("agent_models") or {}).get(agent_role))
-    if not route:
-        raise SystemExit(f"Agent {agent_role} has no enabled analysis model assignment")
-    notify_analysis_phase(phase_callback, "primary_analysis", route)
     evaluation_harness_run = bool(
         harness_runtime is not None
         and boolean_setting(os.environ.get(EVALUATION_FREEZE_MEMORY_ENV))
     )
-
-    def observe_harness(call: Callable[[], Any]) -> Any:
-        if harness_runtime is None:
-            return None
-        try:
-            return call()
-        except Exception as exc:
-            if harness_runtime.policy.mode == "enforce" or evaluation_harness_run:
-                raise
-            print(
-                "warning: Onion Sentinel harness shadow model observation "
-                f"failed: {type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-            return None
-
-    observe_harness(
-        lambda: harness_runtime.preflight_model_call(
-            call_id="primary-initial",
-            input_value=prompt_package,
-            requested_route=route,
-            purpose="initial primary analysis",
-        )
-        if harness_runtime is not None
-        else None
+    module = _primary_execution()
+    primary = module.execute(
+        prompt_package, args, settings, agent_role,
+        phase_callback=phase_callback,
+        harness_runtime=harness_runtime,
+        policy=module.Policy(
+            agent_roles=frozenset(CYBER_SECURITY_AGENT_ROLES),
+            evaluation_harness_run=evaluation_harness_run,
+        ),
+        dependencies=_primary_execution_dependencies(),
     )
-    model_started = time.monotonic()
-    try:
-        primary = analyze_model_route(route, prompt_package, args, settings)
-    except (Exception, SystemExit) as exc:
-        observe_harness(
-            lambda: harness_runtime.model_call(
-                call_id="primary-initial",
-                purpose="initial primary analysis",
-                requested_route=route,
-                response={},
-                input_value=prompt_package,
-                duration_seconds=time.monotonic() - model_started,
-                status=f"failed:{type(exc).__name__}",
-            )
-            if harness_runtime is not None
-            else None
-        )
-        raise
-    observe_harness(
-        lambda: harness_runtime.model_call(
-            call_id="primary-initial",
-            purpose="initial primary analysis",
-            requested_route=route,
-            response=primary,
-            input_value=prompt_package,
-            duration_seconds=time.monotonic() - model_started,
-        )
-        if harness_runtime is not None
-        else None
-    )
-    if evaluation_harness_run and str(
-        primary.get("_analysis_model_route") or ""
-    ).strip() != route:
-        raise InvestigationQueryError(
-            "controlled harness evaluation initial response did not preserve "
-            "the assigned model route"
-        )
     return apply_investigation_query_loop(
         prompt_package,
         primary,

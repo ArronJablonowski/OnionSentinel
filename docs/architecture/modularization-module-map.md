@@ -2216,6 +2216,12 @@ reviewer route, a one-repair-bounded attempt history, a recordable validated
 response, and an attestation bound to the current case and evidence hash before
 the result may cross the persistence boundary.
 
+Assigned-route initial model execution and harness observation now live under
+`onion_sentinel.analysis.primary_execution`. It attaches the evidence contract,
+rejects missing or unknown agent assignments, records both successful and
+failed model calls, preserves shadow-versus-enforce observation behavior, and
+verifies the observed route during controlled evaluation.
+
 Independent-review package construction, text/repetition policy, and
 fail-closed response validation live under `onion_sentinel.analysis.review`.
 The same package owns bounded shadow-adjudication package and validation
