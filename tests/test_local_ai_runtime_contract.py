@@ -6,6 +6,7 @@ import importlib.util
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,7 @@ if str(BIN) not in sys.path:
 
 import local_ai_runtime_contract as contract  # noqa: E402
 import local_ai_analysis_contract as analysis_contract  # noqa: E402
+import local_ai_runtime_compat as runtime_compat  # noqa: E402
 
 
 def load_runner():
@@ -67,6 +69,16 @@ class LocalAiRuntimeContractTests(unittest.TestCase):
                     getattr(self.runner, name),
                     getattr(analysis_contract, name),
                 )
+
+    def test_extracted_runtime_delegates_preserve_runner_patch_seams(self) -> None:
+        self.assertIs(self.runner.atomic_write_json.__globals__, vars(self.runner))
+        self.assertIsNot(self.runner.atomic_write_json, runtime_compat.atomic_write_json)
+        runtime_io = mock.Mock()
+        with mock.patch.object(self.runner, "_runtime_io", return_value=runtime_io):
+            self.runner.atomic_write_json(Path("unused.json"), {"ok": True})
+        runtime_io.atomic_write_json.assert_called_once_with(
+            Path("unused.json"), {"ok": True}
+        )
 
 
 if __name__ == "__main__":

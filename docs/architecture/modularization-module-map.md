@@ -97,6 +97,11 @@ line ranges below remain historical navigation aids for the extraction ledger.
   policy tables re-exported by the runner namespace. It is direct-copied
   beside the runner and depends only on the runtime and investigation-query
   contracts, keeping both contract modules below the size-warning threshold.
+- `n8n/bin/local_ai_runtime_compat.py` owns legacy runtime I/O, analysis-index,
+  memory-journal, system-resource, prompt-loading, and settings delegates. The
+  bounded `local_ai_compatibility_facade.py` installer rebinds extracted
+  function globals to the runner namespace so existing monkeypatch and pinned
+  compatibility seams remain exact without duplicating implementation.
 - Concrete Markdown rendering and atomic output-publication binding now live
   in `local_ai_pipeline_adapters.write_outputs`; the runner transaction port
   delegates directly and no longer retains `render_markdown` or

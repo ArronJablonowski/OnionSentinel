@@ -833,6 +833,26 @@
       ]
     },
     {
+      "path": "n8n/bin/local_ai_compatibility_facade.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/local_ai_compatibility_facade.py",
+      "required_symbols": [
+        "install_facade_functions"
+      ]
+    },
+    {
+      "path": "n8n/bin/local_ai_runtime_compat.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/local_ai_runtime_compat.py",
+      "required_symbols": [
+        "analysis_index_payload",
+        "atomic_write_json",
+        "default_ai_settings",
+        "flush_analysis_index_queue",
+        "load_json"
+      ]
+    },
+    {
       "path": "n8n/bin/local_ai_pipeline_adapters.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/local_ai_pipeline_adapters.py",
