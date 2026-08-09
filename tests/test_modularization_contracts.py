@@ -120,7 +120,7 @@ class ModularizationCompatibilityContractTests(unittest.TestCase):
         )
         self.assertNotIn("run-local-ai-analysis", package_sources)
 
-    def test_ai_runner_query_entry_point_is_a_bounded_coordinator_delegate(self) -> None:
+    def test_ai_runner_query_entry_point_is_a_bounded_runtime_delegate(self) -> None:
         runner_path = ROOT / "n8n/bin/run-local-ai-analysis.py"
         function = top_level_function(
             runner_path,
@@ -137,7 +137,7 @@ class ModularizationCompatibilityContractTests(unittest.TestCase):
             and isinstance(node.func, ast.Attribute)
             and isinstance(node.func.value, ast.Name)
         }
-        self.assertIn("coordinator.run", calls)
+        self.assertIn("runtime_adapter.run", calls)
 
     def test_node_entry_point_matches_package_and_production_installer(self) -> None:
         installer = INSTALLER_PATH.read_text(encoding="utf-8")

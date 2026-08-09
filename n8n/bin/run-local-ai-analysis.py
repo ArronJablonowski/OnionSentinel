@@ -4416,281 +4416,39 @@ def deterministic_incident_pivot_requests(
     )
 
 
-class _QueryCoordinatorRuntime:
-    def __init__(
-        self,
-        *,
-        coordinator: Any,
-        prompt_package: dict[str, Any],
-        args: argparse.Namespace,
-        settings: dict[str, Any],
-        route: str,
-        harness_runtime: OnionSentinelHarnessRun | None,
-        model_executor: Callable[..., Any],
-        query_executor: Callable[..., Any],
-        configured_query_executor: bool,
-        live_osquery_config: dict[str, Any] | None,
-        enrichment_config: dict[str, Any] | None,
-        security_onion_config_path: Path,
-        investigation_pivot_dir: Path,
-        model_input_builder: Callable[[dict[str, Any], int], Any] | None,
-        model_call_independent_review: bool,
-        evaluation_required: bool,
-        maximum_prompt_bytes: int,
-        hosted_route: bool,
-    ) -> None:
-        self.coordinator = coordinator
-        self.prompt_package = prompt_package
-        self.args = args
-        self.settings = settings
-        self.route = route
-        self.harness_runtime = harness_runtime
-        self.model_executor = model_executor
-        self.query_executor = query_executor
-        self.configured_query_executor = configured_query_executor
-        self.live_osquery_config = live_osquery_config
-        self.enrichment_config = enrichment_config
-        self.security_onion_config_path = security_onion_config_path
-        self.investigation_pivot_dir = investigation_pivot_dir
-        self.model_input_builder = model_input_builder
-        self.model_call_independent_review = model_call_independent_review
-        self.evaluation_required = evaluation_required
-        self.maximum_prompt_bytes = maximum_prompt_bytes
-        self.hosted_route = hosted_route
-
-    def observe(self, call: Callable[[], Any]) -> Any:
-        if self.harness_runtime is None:
-            return None
-        try:
-            return call()
-        except Exception as exc:
-            if (
-                self.harness_runtime.policy.mode == "enforce"
-                or self.evaluation_required
-            ):
-                raise
-            print(
-                "warning: Onion Sentinel harness shadow query observation "
-                f"failed: {type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-            return None
-
-    def planning_phase(self, note: str) -> None:
-        self.observe(
-            lambda: self.harness_runtime.phase(
-                "investigation_query_planning", self.route, note
-            ) if self.harness_runtime is not None else None
-        )
-
-    def planning_preflight(self, package: dict[str, Any]) -> None:
-        self.observe(
-            lambda: self.harness_runtime.preflight_model_call(
-                call_id="primary-query-planning-retry-1",
-                input_value=package,
-                requested_route=self.route,
-                purpose="evaluation query-planning retry 1 of 1",
-            ) if self.harness_runtime is not None else None
-        )
-
-    def planning_record(
-        self, response: dict[str, Any], duration: float, status: str,
-    ) -> None:
-        kwargs = {"status": status} if status else {}
-        self.observe(
-            lambda: self.harness_runtime.model_call(
-                call_id="primary-query-planning-retry-1",
-                purpose="evaluation query-planning retry 1 of 1",
-                requested_route=self.route,
-                response=response,
-                input_value=self.prompt_package,
-                duration_seconds=duration,
-                **kwargs,
-            ) if self.harness_runtime is not None else None
-        )
-
-    def authorize(
-        self, round_number: int, request: dict[str, Any],
-    ) -> Any:
-        decision = self.observe(
-            lambda: self.harness_runtime.authorize_tool(
-                round_number=round_number,
-                query_id=request["query_id"],
-                backend=request["backend"],
-                approved=(
-                    request["backend"] == "osquery"
-                    and live_osquery_harness_operator_approved(
-                        self.live_osquery_config,
-                        request["parameters"].get("target_alias"),
-                    )
-                ),
-            ) if self.harness_runtime is not None else None
-        )
-        return self.coordinator.round_admission.resolve_authorization(
-            runtime_present=self.harness_runtime is not None,
-            approval_gated=query_backend_is_approval_gated(request["backend"]),
-            policy_mode=(
-                self.harness_runtime.policy.mode
-                if self.harness_runtime is not None else "off"
-            ),
-            decision=decision,
-            decision_effective=policy_decision_is_effective,
-            fallback_capability=query_backend_capability(request["backend"]),
-        )
-
-    def backend_available(self, backend: str) -> bool:
-        return investigation_backend_available(
-            self.prompt_package,
-            backend,
-            live_osquery_config=self.live_osquery_config,
-        )
-
-    def query_execute(
-        self, round_number: int, requests: list[dict[str, Any]],
-    ) -> Any:
-        self.observe(
-            lambda: self.harness_runtime.preflight_query_batch(
-                round_number=round_number, request_count=len(requests)
-            ) if self.harness_runtime is not None else None
-        )
-        self.observe(
-            lambda: self.harness_runtime.phase(
-                "investigation_query_execution", self.route,
-                f"round {round_number}; {len(requests)} admitted request(s)",
-            ) if self.harness_runtime is not None else None
-        )
-        kwargs = {
-            "round_number": round_number,
-            "live_osquery_config": self.live_osquery_config,
-        }
-        if self.configured_query_executor:
-            kwargs.update({
-                "security_onion_config_path": self.security_onion_config_path,
-                "investigation_pivot_dir": self.investigation_pivot_dir,
-            })
-        if self.enrichment_config is not None:
-            kwargs["enrichment_config"] = self.enrichment_config
-        return self.query_executor(self.prompt_package, requests, **kwargs)
-
-    def observe_round(self, result: dict[str, Any]) -> None:
-        self.observe(
-            lambda: self.harness_runtime.query_round(result)
-            if self.harness_runtime is not None else None
-        )
-
-    def admit_prompt(
-        self, package: dict[str, Any], rounds: list[dict[str, Any]],
-    ) -> None:
-        _admit_investigation_query_prompt(
-            package,
-            rounds,
-            maximum_prompt_bytes=self.maximum_prompt_bytes,
-            hosted=self.hosted_route,
-        )
-
-    def build_model_input(self, package: dict[str, Any], number: int) -> Any:
-        return (
-            self.model_input_builder(package, number)
-            if self.model_input_builder is not None else package
-        )
-
-    def synthesis_preflight(
-        self, call_id: str, model_input: Any, purpose: str,
-    ) -> None:
-        self.observe(
-            lambda: self.harness_runtime.preflight_model_call(
-                call_id=call_id,
-                input_value=model_input,
-                requested_route=self.route,
-                purpose=purpose,
-                independent_review=self.model_call_independent_review,
-            ) if self.harness_runtime is not None else None
-        )
-
-    def synthesis_record(
-        self, call_id: str, purpose: str, response: Any, model_input: Any,
-        duration: float, status: str,
-    ) -> None:
-        kwargs = {"status": status} if status else {}
-        self.observe(
-            lambda: self.harness_runtime.model_call(
-                call_id=call_id,
-                purpose=purpose,
-                requested_route=self.route,
-                response=response,
-                input_value=model_input,
-                duration_seconds=duration,
-                independent_review=self.model_call_independent_review,
-                **kwargs,
-            ) if self.harness_runtime is not None else None
-        )
-
-    def model_safe_copy(self, value: Any, hosted: bool) -> Any:
-        return model_safe_copy(value, hosted=hosted)
-
-    def planning_execute(self, package: dict[str, Any]) -> Any:
-        return self.model_executor(self.route, package, self.args, self.settings)
-
-    def valid_query_id(self, value: str) -> bool:
-        return bool(INVESTIGATION_QUERY_ID_RE.fullmatch(value))
-
-    def synthesis_catalogue(self, value: Any) -> None:
-        self.observe(
-            lambda: self.harness_runtime.catalogue_prompt_evidence(value)
-            if self.harness_runtime is not None else None
-        )
-
-    def synthesis_execute(self, model_input: Any) -> Any:
-        return self.model_executor(
-            self.route, model_input, self.args, self.settings
-        )
-
-    def synthesis_phase(self, note: str) -> None:
-        self.observe(
-            lambda: self.harness_runtime.phase(
-                "evidence_synthesis", self.route, note
-            ) if self.harness_runtime is not None else None
-        )
-
-    def ports(self) -> Any:
-        return self.coordinator.Ports(
-            pop_requests=pop_investigation_query_requests,
-            deterministic_requests=deterministic_incident_pivot_requests,
-            model_safe_copy=self.model_safe_copy,
-            planning_execute=self.planning_execute,
-            planning_phase=self.planning_phase,
-            planning_preflight=self.planning_preflight,
-            planning_record=self.planning_record,
-            normalize_request=normalize_investigation_query_request,
-            validate_repair=validate_investigation_query_repair_scope,
-            backend_available=self.backend_available,
-            semantic_digest=investigation_request_semantic_digest,
-            authorize=self.authorize,
-            repair_scope=investigation_query_repair_scope,
-            query_text=_query_text,
-            valid_query_id=self.valid_query_id,
-            query_execute=self.query_execute,
-            repair_failures=investigation_query_repair_failures,
-            now=project_now,
-            observe_round=self.observe_round,
-            validate_observables=_validated_discovered_observables,
-            canonical_digest=investigation_query_canonical_digest,
-            error_digest=canonical_payload_digest,
-            repair_prompt_entry=investigation_query_repair_prompt_entry,
-            request_from_scope=investigation_query_request_from_repair_scope,
-            admit_prompt=self.admit_prompt,
-            build_model_input=self.build_model_input,
-            synthesis_catalogue=self.synthesis_catalogue,
-            synthesis_preflight=self.synthesis_preflight,
-            synthesis_execute=self.synthesis_execute,
-            synthesis_record=self.synthesis_record,
-            synthesis_phase=self.synthesis_phase,
-            outcome_summary=investigation_query_outcome_summary,
-            round_audit=_investigation_round_audit,
-            binding_summary=investigation_query_binding_summary,
-            append_gaps=_append_investigation_evidence_gaps,
-            monotonic=time.monotonic,
-        )
+def _query_runtime_dependencies(module: Any) -> Any:
+    return module.Dependencies(
+        pop_requests=pop_investigation_query_requests,
+        deterministic_requests=deterministic_incident_pivot_requests,
+        model_safe_copy=model_safe_copy,
+        normalize_request=normalize_investigation_query_request,
+        validate_repair=validate_investigation_query_repair_scope,
+        backend_available=investigation_backend_available,
+        semantic_digest=investigation_request_semantic_digest,
+        harness_operator_approved=live_osquery_harness_operator_approved,
+        backend_is_approval_gated=query_backend_is_approval_gated,
+        decision_is_effective=policy_decision_is_effective,
+        backend_capability=query_backend_capability,
+        repair_scope=investigation_query_repair_scope,
+        query_text=_query_text,
+        valid_query_id=lambda value: bool(
+            INVESTIGATION_QUERY_ID_RE.fullmatch(value)
+        ),
+        repair_failures=investigation_query_repair_failures,
+        now=project_now,
+        validate_observables=_validated_discovered_observables,
+        canonical_digest=investigation_query_canonical_digest,
+        error_digest=canonical_payload_digest,
+        repair_prompt_entry=investigation_query_repair_prompt_entry,
+        request_from_scope=investigation_query_request_from_repair_scope,
+        admit_prompt=_admit_investigation_query_prompt,
+        outcome_summary=investigation_query_outcome_summary,
+        round_audit=_investigation_round_audit,
+        binding_summary=investigation_query_binding_summary,
+        append_gaps=_append_investigation_evidence_gaps,
+        monotonic=time.monotonic,
+        warn=lambda message: print(f"warning: {message}", file=sys.stderr),
+    )
 
 
 def apply_investigation_query_loop(
@@ -4718,7 +4476,7 @@ def apply_investigation_query_loop(
     query_round_offset: int = 0,
 ) -> dict[str, Any]:
     """Compose runtime ports for the package-owned query coordinator."""
-    from onion_sentinel.analysis.query import coordinator
+    from onion_sentinel.analysis.query import runtime_adapter
 
     model_executor = model_executor or analyze_model_route
     configured_query_executor = query_executor is None
@@ -4742,12 +4500,11 @@ def apply_investigation_query_loop(
         maximum_prompt_bytes = min(
             maximum_prompt_bytes, CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES
         )
-    runtime = _QueryCoordinatorRuntime(
-        coordinator=coordinator,
+    invocation = runtime_adapter.Invocation(
         prompt_package=prompt_package,
+        primary_response=primary_response,
         args=args,
         settings=settings,
-        route=route,
         harness_runtime=harness_runtime,
         model_executor=model_executor,
         query_executor=query_executor,
@@ -4757,27 +4514,20 @@ def apply_investigation_query_loop(
         security_onion_config_path=security_onion_config_path,
         investigation_pivot_dir=investigation_pivot_dir,
         model_input_builder=model_input_builder,
-        model_call_independent_review=model_call_independent_review,
-        evaluation_required=evaluation_required,
-        maximum_prompt_bytes=maximum_prompt_bytes,
-        hosted_route=hosted_route,
     )
-    return coordinator.run(
-        prompt_package,
-        primary_response,
-        policy=coordinator.Policy(
+    return runtime_adapter.run(
+        invocation,
+        runtime_adapter.Policy(
             route=route,
-            state_policy=_query_state().Policy(
-                maximum_rounds=MAX_INVESTIGATION_QUERY_ROUNDS,
-                maximum_queries=MAX_INVESTIGATION_QUERIES_TOTAL,
-                maximum_queries_per_round=MAX_INVESTIGATION_QUERIES_PER_ROUND,
-            ),
-            rounds_override=max_rounds_override,
-            queries_override=max_queries_total_override,
             evaluation_required=evaluation_required,
-            include_deterministic_requests=include_deterministic_requests,
             maximum_prompt_bytes=maximum_prompt_bytes,
             hosted_route=hosted_route,
+            maximum_rounds=MAX_INVESTIGATION_QUERY_ROUNDS,
+            maximum_queries=MAX_INVESTIGATION_QUERIES_TOTAL,
+            maximum_queries_per_round=MAX_INVESTIGATION_QUERIES_PER_ROUND,
+            rounds_override=max_rounds_override,
+            queries_override=max_queries_total_override,
+            include_deterministic_requests=include_deterministic_requests,
             query_round_offset=query_round_offset,
             model_call_id_prefix=model_call_id_prefix,
             model_call_purpose_prefix=model_call_purpose_prefix,
@@ -4788,7 +4538,7 @@ def apply_investigation_query_loop(
             max_prompt_evidence_bytes=MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES,
             max_prompt_evidence_rows=MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS,
         ),
-        ports=runtime.ports(),
+        _query_runtime_dependencies(runtime_adapter),
         error_type=InvestigationQueryError,
     )
 

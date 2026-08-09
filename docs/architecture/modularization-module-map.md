@@ -75,6 +75,11 @@ line ranges below remain historical navigation aids for the extraction ledger.
   callables to package ports. It contains no investigation or persistence
   policy. `run-local-ai-analysis.py::main` is limited to stage composition,
   state handoff, terminal error classification, and the compatibility CLI.
+- `analysis.query.runtime_adapter` owns the concrete per-invocation binding of
+  provider, governed-query, harness-observation, prompt-admission, and audit
+  ports to the package query coordinator. The legacy query entry point now
+  resolves limits and routes, constructs immutable invocation/policy records,
+  and delegates without retaining a second runtime implementation.
 - Model roster normalization, exact route construction/parsing, assigned/live
   metadata, external-harness route handling, and reviewer model identity now
   live in `onion_sentinel.analysis.providers.routing`. The legacy runner keeps
