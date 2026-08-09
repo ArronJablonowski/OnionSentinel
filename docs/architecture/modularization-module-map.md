@@ -146,6 +146,13 @@ line ranges below remain historical navigation aids for the extraction ledger.
   `onion_sentinel.analysis.reporting.incident`. Deterministic top-level SOC/IR
   Markdown composition now lives in `analysis.reporting.markdown`; the legacy
   runner retains only symbol-compatible delegates.
+- Concrete operational run-log resource projection, copy-on-write live phase
+  records, atomic phase publication, best-effort phase notification, immutable
+  Security Onion/appliance/live-OSQuery audit binding, disabled-by-default live
+  OSQuery capability preparation, and incident-list formatting now live in the
+  143-line `analysis.reporting.runtime_adapter`. All policy and I/O ports are
+  resolved from live runner bindings; telemetry remains supplemental and live
+  endpoint access remains role-gated and read-only.
 - Side-effect-free output metadata/path planning and owner-private,
   path-confined atomic JSON/Markdown publication now live in
   `analysis.reporting.publication`. A failed pair publication removes only

@@ -899,36 +899,13 @@ def build_llm_log_record(
     runtime_observation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compatibility delegate for the pure operational run-log projection."""
-    module = _reporting_run_log()
-    resources = module.Resources(
-        gpu_celsius=resource_monitor.max_gpu_celsius,
-        gpu_percent=resource_monitor.max_gpu_percent,
-        cpu_celsius=resource_monitor.max_cpu_celsius,
-        soc_celsius=resource_monitor.max_soc_celsius,
-        memory_percent=resource_monitor.max_memory_percent,
-        power_watts=resource_monitor.max_power_watts,
-        cpu_percent=resource_monitor.max_cpu_percent,
-        note=resource_monitor.note,
-    )
-    return module.build(
-        module.Inputs(
-            run_id=run_id,
-            status=status,
-            started_at=started_at,
-            finished_at=finished_at,
-            runtime_seconds=runtime_seconds,
-            prompt_path=prompt_path,
-            prompt_package=prompt_package,
-            settings=settings,
-            response=response,
-            json_path=json_path,
-            markdown_path=md_path,
-            resources=resources,
-            error=error,
-            runtime_observation=runtime_observation,
-        ),
-        policy=module.Policy(),
-        dependencies=_reporting_run_log_dependencies(),
+    return _reporting_runtime_adapter().build_log_record(
+        globals(), run_id=run_id, status=status, started_at=started_at,
+        finished_at=finished_at, runtime_seconds=runtime_seconds,
+        prompt_path=prompt_path, prompt_package=prompt_package,
+        settings=settings, response=response, json_path=json_path,
+        markdown_path=md_path, resource_monitor=resource_monitor,
+        error=error, runtime_observation=runtime_observation,
     )
 
 
@@ -1084,6 +1061,12 @@ def _reporting_run_log():
     _provider_routing()
     from onion_sentinel.analysis.reporting import run_log
     return run_log
+
+
+def _reporting_runtime_adapter():
+    _provider_routing()
+    from onion_sentinel.analysis.reporting import runtime_adapter
+    return runtime_adapter
 
 
 def _reporting_run_log_dependencies():
@@ -2326,26 +2309,10 @@ def current_analysis_phase_record(
     trigger_reason: str = "",
 ) -> dict[str, Any]:
     """Return live-only execution metadata without changing primary log fields."""
-    updated = dict(current_record)
-    updated["active_phase"] = phase
-    updated["active_phase_started_at"] = project_now()
-    updated["second_opinion_trigger"] = trigger_reason
-    if model_route:
-        canonical, model, model_path, provider = model_route_metadata(settings, model_route)
-        updated.update({
-            "active_model": model,
-            "active_model_path": model_path,
-            "active_model_route": canonical,
-            "active_provider": provider,
-        })
-    else:
-        updated.update({
-            "active_model": "",
-            "active_model_path": "",
-            "active_model_route": "",
-            "active_provider": "",
-        })
-    return updated
+    return _reporting_runtime_adapter().phase_record(
+        globals(), current_record, settings, phase=phase,
+        model_route=model_route, trigger_reason=trigger_reason,
+    )
 
 
 def publish_current_analysis_phase(
@@ -2358,16 +2325,11 @@ def publish_current_analysis_phase(
     active_record_path: Path | None = None,
 ) -> dict[str, Any]:
     """Atomically publish one transient phase for this analysis run."""
-    updated = current_analysis_phase_record(
-        current_record,
-        settings,
-        phase=phase,
-        model_route=model_route,
-        trigger_reason=trigger_reason,
+    return _reporting_runtime_adapter().publish_phase(
+        globals(), current_record, settings, phase=phase,
+        model_route=model_route, trigger_reason=trigger_reason,
+        active_record_path=active_record_path,
     )
-    target = active_record_path or active_analysis_record_path(updated.get("log_id"))
-    atomic_write_json(target, updated)
-    return updated
 
 
 def notify_analysis_phase(
@@ -2377,12 +2339,9 @@ def notify_analysis_phase(
     trigger_reason: str = "",
 ) -> None:
     """Publish optional live status without allowing telemetry to fail analysis."""
-    if callback is None:
-        return
-    try:
-        callback(phase, model_route, trigger_reason)
-    except Exception:
-        return
+    _reporting_runtime_adapter().notify_phase(
+        callback, phase, model_route, trigger_reason
+    )
 
 
 def normalize_agent_models(value: Any, routes: list[str]) -> dict[str, str]:
@@ -4776,29 +4735,20 @@ def reconcile_incident_response_report(
 
 def incident_query_audit(prompt_package: dict[str, Any]) -> dict[str, Any]:
     """Compatibility delegate for immutable Security Onion query provenance."""
-    return _reporting_evidence_audits().security_onion(
-        prompt_package,
-        policy=_reporting_evidence_audit_policy(),
-        dependencies=_reporting_evidence_audit_dependencies(),
-    )
+    return _reporting_runtime_adapter().security_onion_audit(
+        globals(), prompt_package)
 
 
 def incident_osquery_audit(prompt_package: dict[str, Any]) -> dict[str, Any]:
     """Compatibility delegate for trusted appliance OSQuery provenance."""
-    return _reporting_evidence_audits().appliance_osquery(
-        prompt_package,
-        policy=_reporting_evidence_audit_policy(),
-        dependencies=_reporting_evidence_audit_dependencies(),
-    )
+    return _reporting_runtime_adapter().appliance_osquery_audit(
+        globals(), prompt_package)
 
 
 def incident_live_osquery_audit(prompt_package: dict[str, Any]) -> dict[str, Any]:
     """Compatibility delegate for bounded endpoint audit projection."""
-    return _reporting_live_osquery().audit(
-        prompt_package,
-        policy=_reporting_live_osquery_policy(),
-        dependencies=_reporting_live_osquery_dependencies(),
-    )
+    return _reporting_runtime_adapter().live_osquery_audit(
+        globals(), prompt_package)
 
 
 def prepare_live_osquery_context(
@@ -4807,29 +4757,15 @@ def prepare_live_osquery_context(
     config_path: Path = DEFAULT_LIVE_OSQUERY_CONFIG_FILE,
 ) -> dict[str, Any] | None:
     """Load deployment config and delegate model-safe capability projection."""
-    if agent_role not in {"soc-analyst", "incident-responder"}:
-        return None
-    config_path = config_path.expanduser()
-    if config_path.is_file():
-        config = load_live_osquery_config(config_path)
-    else:
-        config = {
-            "enabled": False,
-            "allowed_target_aliases": [],
-            "allowed_agent_roles": ["incident-responder"],
-        }
-    return _query_live_workflow().prepare_capability(
-        prompt_package,
-        agent_role,
-        config,
-        policy=_query_live_workflow_policy(),
-        dependencies=_query_live_workflow_dependencies(),
+    return _reporting_runtime_adapter().prepare_live_osquery(
+        globals(), prompt_package, agent_role, config_path
     )
 
 
 def live_osquery_case_id(prompt_package: dict[str, Any]) -> str:
     """Compatibility delegate for the stable endpoint case token."""
-    return _query_live_workflow().case_id(prompt_package)
+    return _reporting_runtime_adapter().live_osquery_case_id(
+        globals(), prompt_package)
 
 
 def validate_response(
@@ -4851,7 +4787,7 @@ def validate_response(
 
 
 def markdown_list(items: list[str]) -> str:
-    return _reporting_incident().markdown_list(items)
+    return _reporting_runtime_adapter().markdown_list(globals(), items)
 
 
 def main() -> int:
