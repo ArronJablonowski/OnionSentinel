@@ -49,6 +49,8 @@ import cohort_second_opinion_state  # noqa: E402
 import cohort_runner_contracts  # noqa: E402
 import cohort_dispatch_adapters  # noqa: E402
 import cohort_monitor_adapters  # noqa: E402
+import cohort_artifact_adapters  # noqa: E402
+import cohort_manifest_adapters  # noqa: E402
 
 
 class IncidentHarnessCohortTests(unittest.TestCase):
@@ -203,6 +205,34 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         self.assertIs(
             cohort._reanalysis_monitor_case,
             cohort_monitor_adapters.reanalysis_monitor_case,
+        )
+
+    def test_runner_uses_extracted_artifact_adapters(self) -> None:
+        self.assertIs(
+            cohort.alert_store_response_sha256,
+            cohort_artifact_adapters.alert_store_response_sha256,
+        )
+        self.assertIs(
+            cohort.write_private_json,
+            cohort_artifact_adapters.write_private_json,
+        )
+        self.assertIs(
+            cohort._digest_bound,
+            cohort_artifact_adapters.digest_bound,
+        )
+
+    def test_runner_uses_extracted_manifest_adapters(self) -> None:
+        self.assertIs(
+            cohort.load_private_manifest,
+            cohort_manifest_adapters.load_private_manifest,
+        )
+        self.assertIs(
+            cohort.validate_release_id,
+            cohort_manifest_adapters.validate_release_id,
+        )
+        self.assertIs(
+            cohort.deterministic_dispatch_id,
+            cohort_manifest_adapters.deterministic_dispatch_id,
         )
 
     def test_query_audit_projection_excludes_query_and_result_content(self) -> None:

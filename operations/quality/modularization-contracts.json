@@ -125,6 +125,41 @@
       ]
     },
     {
+      "path": "operations/cohort_artifact_adapters.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_artifact_adapters.py",
+      "required_symbols": [
+        "alert_store_receipt_policy",
+        "alert_store_response_sha256",
+        "digest_artifact_policy",
+        "digest_bound",
+        "validate_digest",
+        "write_private_json"
+      ]
+    },
+    {
+      "path": "operations/cohort_manifest_adapters.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_manifest_adapters.py",
+      "required_symbols": [
+        "manifest_contract_policy",
+        "private_input_policy",
+        "load_private_manifest",
+        "load_private_source_rows",
+        "validate_cohort_identity",
+        "validate_agent_role",
+        "validate_model_route",
+        "validate_release_id",
+        "validate_stable_group_key",
+        "member_stable_group_key",
+        "execution_contract",
+        "ordered_identity_projection",
+        "frozen_plan_digest",
+        "dispatch_identity_policy",
+        "deterministic_dispatch_id"
+      ]
+    },
+    {
       "path": "operations/run-incident-harness-cohort.py",
       "deployment": "repository-only",
       "runtime_path": "operations/run-incident-harness-cohort.py",

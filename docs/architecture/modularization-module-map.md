@@ -833,6 +833,14 @@ functions are injected through a narrow ports object.
 composition and the bounded read-only projection for one exact reanalysis run
 case. Timestamp parsing is injected through a narrow ports object.
 
+`operations/cohort_artifact_adapters.py` owns fixed alert-store receipt,
+canonicalization, digest-binding, digest-validation, and owner-only JSON write
+policies over the lower-level artifact IO module.
+
+`operations/cohort_manifest_adapters.py` owns fixed manifest validation,
+private-input admission, execution-contract, ordered-identity, frozen-plan, and
+deterministic dispatch-identity policy composition.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

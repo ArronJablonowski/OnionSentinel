@@ -108,25 +108,12 @@ from cohort_preflight import (
     validate_member_preflight as run_member_preflight,
     validate_representative_binding as prove_representative_binding,
 )
-from cohort_dispatch_identity import (
-    DispatchIdentityPolicy,
-    deterministic_dispatch_id as derive_dispatch_id,
-)
+from cohort_dispatch_identity import deterministic_dispatch_id as derive_dispatch_id
 from cohort_manifest_contract import (
-    ManifestContractPolicy,
-    execution_contract as build_execution_contract,
     frozen_plan_digest as calculate_frozen_plan_digest,
-    member_stable_group_key as resolve_member_stable_group_key,
-    ordered_identity_projection as project_ordered_identity,
-    validate_agent_role as validate_manifest_agent_role,
-    validate_cohort_identity as validate_manifest_identity,
     validate_manifest_document,
-    validate_model_route as validate_manifest_model_route,
-    validate_release_id as validate_manifest_release_id,
-    validate_stable_group_key as validate_manifest_stable_group_key,
 )
 from cohort_private_input import (
-    CohortPrivateInputPolicy,
     load_private_manifest as read_private_manifest,
     load_private_source_rows as read_private_source_rows,
 )
@@ -136,11 +123,7 @@ from cohort_runner_cli import (
     main as run_cli,
 )
 from cohort_artifact_io import (
-    AlertStoreReceiptPolicy,
-    DigestArtifactPolicy,
     alert_store_response_sha256 as verify_alert_store_response_sha256,
-    digest_bound as bind_artifact_digest,
-    validate_digest as validate_artifact_digest,
     write_private_json as persist_private_json,
 )
 from cohort_storage_core import (
@@ -224,7 +207,7 @@ from cohort_runner_contracts import (
     AmbiguousDispatchError,
     CohortError,
     canonical_bytes,
-    constant_time_equal,
+    constant_time_equal as _constant_time_equal,
     sha256_value,
     utc_now,
 )
@@ -246,200 +229,32 @@ from cohort_monitor_adapters import (
     reanalysis_monitor_case as _reanalysis_monitor_case,
     validate_completed_analysis_job_window as validate_adapter_analysis_window,
 )
+from cohort_artifact_adapters import (
+    alert_store_response_sha256,
+    digest_artifact_policy as _digest_artifact_policy,
+    digest_bound as _digest_bound,
+    validate_digest as _validate_digest,
+    write_private_json,
+)
+from cohort_manifest_adapters import (
+    deterministic_dispatch_id,
+    execution_contract,
+    frozen_plan_digest as _frozen_plan_digest,
+    load_private_manifest,
+    load_private_source_rows,
+    manifest_contract_policy as _manifest_contract_policy,
+    member_stable_group_key as _member_stable_group_key,
+    ordered_identity_projection,
+    private_input_policy as _private_input_policy,
+    validate_agent_role,
+    validate_cohort_identity,
+    validate_model_route,
+    validate_release_id,
+    validate_stable_group_key,
+)
 
 
 TRACE_EVALUATOR_PATH = Path(__file__).with_name("evaluate-harness-traces.py")
-
-
-def alert_store_response_sha256(raw_response: str) -> str:
-    """Reproduce alert-store's JavaScript canonical response digest exactly.
-
-    Python's JSON serializer cannot be used for this receipt comparison:
-    ECMAScript differs in number formatting and orders object keys by UTF-16
-    code units. Execute a fixed, input-only Node program so the observer proves
-    the same byte representation that alert-store hashed at commit time.
-    """
-
-    return verify_alert_store_response_sha256(
-        raw_response,
-        AlertStoreReceiptPolicy(
-            error=CohortError,
-            maximum_response_bytes=MAX_STORED_RESPONSE_BYTES,
-            sha256_pattern=SHA256_RE,
-            canonical_sha256_javascript=ALERT_STORE_CANONICAL_SHA256_JS,
-            node_candidates=(
-            Path("/opt/homebrew/bin/node"),
-            Path("/usr/local/bin/node"),
-            Path("/usr/bin/node"),
-            ),
-        ),
-    )
-
-
-def _digest_artifact_policy() -> DigestArtifactPolicy:
-    return DigestArtifactPolicy(
-        error=CohortError,
-        sha256_pattern=SHA256_RE,
-        sha256_value=sha256_value,
-        constant_time_equal=_constant_time_equal,
-    )
-
-
-def _digest_bound(document: Mapping[str, Any], field: str) -> dict[str, Any]:
-    return bind_artifact_digest(document, field, _digest_artifact_policy())
-
-
-def _validate_digest(document: Mapping[str, Any], field: str) -> None:
-    validate_artifact_digest(document, field, _digest_artifact_policy())
-
-
-def _constant_time_equal(left: str, right: str) -> bool:
-    return constant_time_equal(left, right)
-
-
-def write_private_json(
-    path: Path,
-    document: Mapping[str, Any],
-    *,
-    digest_field: str,
-    replace: bool = True,
-) -> dict[str, Any]:
-    """Atomically write a digest-bound JSON document with mode 0600."""
-
-    return persist_private_json(
-        path,
-        document,
-        digest_field=digest_field,
-        policy=_digest_artifact_policy(),
-        replace=replace,
-    )
-
-
-def _manifest_contract_policy() -> ManifestContractPolicy:
-    return ManifestContractPolicy(
-        error=CohortError,
-        schema=SCHEMA,
-        cohort_id_pattern=COHORT_ID_RE,
-        safe_route_pattern=SAFE_ROUTE_RE,
-        controlled_route_pattern=CONTROLLED_ROUTE_RE,
-        release_id_pattern=RELEASE_ID_RE,
-        sha256_pattern=SHA256_RE,
-        agent_roles=frozenset(AGENT_ROLES),
-        maximum_stable_group_key_bytes=MAX_STABLE_GROUP_KEY_BYTES,
-        controlled_evaluation_profile=CONTROLLED_EVALUATION_PROFILE,
-        profile_assigned_route=PROFILE_ASSIGNED_ROUTE,
-        profile_reviewer_route=PROFILE_REVIEWER_ROUTE,
-        sha256_value=sha256_value,
-        constant_time_equal=_constant_time_equal,
-    )
-
-
-def _private_input_policy() -> CohortPrivateInputPolicy:
-    policy = _manifest_contract_policy()
-    return CohortPrivateInputPolicy(
-        error=CohortError,
-        maximum_manifest_bytes=MAX_MANIFEST_BYTES,
-        maximum_source_rows_bytes=MAX_SOURCE_ROWS_BYTES,
-        maximum_cohort_size=MAX_COHORT_SIZE,
-        validate_manifest_document=lambda document: validate_manifest_document(
-            document, policy
-        ),
-    )
-
-
-def load_private_manifest(path: Path) -> dict[str, Any]:
-    return read_private_manifest(path, _private_input_policy())
-
-
-def load_private_source_rows(path: Path) -> tuple[list[dict[str, Any]], str]:
-    return read_private_source_rows(path, _private_input_policy())
-
-
-def validate_cohort_identity(cohort_id: str, reason: str) -> tuple[str, str]:
-    return validate_manifest_identity(
-        cohort_id, reason, _manifest_contract_policy()
-    )
-
-
-def validate_agent_role(value: str) -> str:
-    return validate_manifest_agent_role(value, _manifest_contract_policy())
-
-
-def validate_model_route(value: str, label: str, *, allow_empty: bool = False) -> str:
-    return validate_manifest_model_route(
-        value,
-        label,
-        _manifest_contract_policy(),
-        allow_empty=allow_empty,
-    )
-
-
-def validate_release_id(value: Any, label: str = "expected release ID") -> str:
-    return validate_manifest_release_id(
-        value, _manifest_contract_policy(), label
-    )
-
-
-def validate_stable_group_key(value: Any, label: str) -> str:
-    return validate_manifest_stable_group_key(
-        value, label, _manifest_contract_policy()
-    )
-
-
-def _member_stable_group_key(member: Mapping[str, Any]) -> str:
-    return resolve_member_stable_group_key(
-        member, _manifest_contract_policy()
-    )
-
-
-def execution_contract(
-    *,
-    expected_release_id: str,
-    expected_assigned_route: str,
-    expected_reviewer_route: str = "codex-cli:gpt-5.6-sol:xhigh",
-    evaluation_profile: str = "",
-) -> dict[str, Any]:
-    return build_execution_contract(
-        expected_release_id=expected_release_id,
-        expected_assigned_route=expected_assigned_route,
-        expected_reviewer_route=expected_reviewer_route,
-        evaluation_profile=evaluation_profile,
-        policy=_manifest_contract_policy(),
-    )
-
-
-def ordered_identity_projection(
-    members: Iterable[Mapping[str, Any]],
-) -> list[dict[str, Any]]:
-    return project_ordered_identity(members, _manifest_contract_policy())
-
-
-def _frozen_plan_digest(manifest: Mapping[str, Any]) -> str:
-    return calculate_frozen_plan_digest(
-        manifest, _manifest_contract_policy()
-    )
-
-
-def deterministic_dispatch_id(
-    manifest: Mapping[str, Any],
-    member: Mapping[str, Any],
-) -> str:
-    return derive_dispatch_id(
-        manifest,
-        member,
-        DispatchIdentityPolicy(
-            error=CohortError,
-            cohort_id_pattern=COHORT_ID_RE,
-            sha256_pattern=SHA256_RE,
-            dashboard_group_id_pattern=DASHBOARD_GROUP_ID_RE,
-            stable_group_id_pattern=STABLE_GROUP_ID_RE,
-            representative_alert_id_pattern=REPRESENTATIVE_ALERT_ID_RE,
-            dispatch_id_schema=DISPATCH_ID_SCHEMA,
-            member_stable_group_key=_member_stable_group_key,
-            sha256_value=sha256_value,
-            constant_time_equal=_constant_time_equal,
-        ),
-    )
 
 
 def _parse_timestamp(value: Any, label: str) -> dt.datetime:
