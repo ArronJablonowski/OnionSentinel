@@ -2306,18 +2306,6 @@ class AiModelRoutingTests(unittest.TestCase):
                 settings,
             )
 
-    def test_openclaw_rejects_foreign_provider_with_expected_namespaced_model(
-        self,
-    ) -> None:
-        with self.assertRaisesRegex(SystemExit, "different provider/model"):
-            self.runner._verified_openclaw_observation(
-                {
-                    "provider": "openai",
-                    "model": "ollama/gemma4:26b-mlx",
-                },
-                "ollama/gemma4:26b-mlx",
-            )
-
     def test_openclaw_hosted_route_fails_before_executable_resolution(self) -> None:
         args = type(
             "Args",

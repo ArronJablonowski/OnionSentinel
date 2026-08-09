@@ -651,20 +651,6 @@ def _system_resource_dependencies():
     )
 
 
-def parse_mactop_sample(
-    output: str,
-) -> tuple[
-    float | None,
-    float | None,
-    float | None,
-    float | None,
-    float | None,
-    float | None,
-    float | None,
-]:
-    return _system_resources().parse_mactop_sample(output)
-
-
 def read_mactop_system_sample(
     *,
     cancel_event: threading.Event | None = None,
@@ -1594,12 +1580,6 @@ def _query_semantic_identity_dependencies():
     return _query_semantic_identity().Dependencies(
         normalize_live_query=normalize_live_osquery_query,
     )
-
-
-def _query_state():
-    _provider_routing()
-    from onion_sentinel.analysis.query import state
-    return state
 
 
 def _query_repair():
@@ -4695,13 +4675,6 @@ def hermes_agent_chat(
         lock_exclusive=fcntl.LOCK_EX,
         lock_unlock=fcntl.LOCK_UN,
     )
-
-
-def _verified_openclaw_observation(
-    envelope: dict[str, Any],
-    expected_model: str,
-) -> tuple[str, str]:
-    return _openclaw_provider().verified_observation(envelope, expected_model)
 
 
 def _openclaw_infer_unlocked(

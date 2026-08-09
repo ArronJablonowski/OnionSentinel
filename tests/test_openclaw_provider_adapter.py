@@ -161,6 +161,16 @@ class OpenClawProviderAdapterTests(unittest.TestCase):
                     )
                 )
 
+    def test_observation_rejects_foreign_provider_for_expected_model(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "different provider/model"):
+            openclaw.verified_observation(
+                {
+                    "provider": "openai",
+                    "model": "ollama/gemma4:26b-mlx",
+                },
+                "ollama/gemma4:26b-mlx",
+            )
+
     def test_locked_chat_always_unloads_after_failure(self) -> None:
         events: list[object] = []
         with tempfile.TemporaryDirectory() as name:
