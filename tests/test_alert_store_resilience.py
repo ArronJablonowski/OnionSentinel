@@ -12,6 +12,8 @@ HTTP_DISPATCH = REPO_ROOT / "n8n" / "alert_store" / "lib" / "http_dispatch.js"
 HTTP_JSON_CLIENT = REPO_ROOT / "n8n" / "alert_store" / "lib" / "http_json_client.js"
 ENRICHMENT_CACHE = REPO_ROOT / "n8n" / "alert_store" / "lib" / "enrichment_cache.js"
 HEALTH_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "health_service.js"
+ANALYST_STATE_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "analyst_state_service.js"
+ANALYST_STATE_ROUTES = REPO_ROOT / "n8n" / "alert_store" / "routes" / "analyst_state_routes.js"
 
 
 class AlertStoreResilienceTest(unittest.TestCase):
@@ -24,6 +26,8 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.http_json_client = HTTP_JSON_CLIENT.read_text(encoding="utf-8")
         cls.enrichment_cache = ENRICHMENT_CACHE.read_text(encoding="utf-8")
         cls.health_service = HEALTH_SERVICE.read_text(encoding="utf-8")
+        cls.analyst_state_service = ANALYST_STATE_SERVICE.read_text(encoding="utf-8")
+        cls.analyst_state_routes = ANALYST_STATE_ROUTES.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
         self.assertIn("require('./lib/provider_scheduler')", self.code)
@@ -91,7 +95,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
 
     def test_analyst_state_is_owned_by_alert_store(self) -> None:
         self.assertIn("CREATE TABLE IF NOT EXISTS analyst_alert_group_state", self.code)
-        self.assertIn("parsedUrl.pathname === '/analyst-status'", self.code)
+        self.assertIn("path: '/analyst-status'", self.analyst_state_routes)
         self.assertIn("withSqliteWriteGate(async () =>", self.code)
 
     def test_analyst_adjudication_is_append_only_and_guards_terminal_actions(self) -> None:
@@ -120,8 +124,8 @@ class AlertStoreResilienceTest(unittest.TestCase):
             "outcome_override conflicts with explicit verdict factors",
             self.code,
         )
-        self.assertIn("parsedUrl.pathname === '/adjudications'", self.code)
-        self.assertIn("parsedUrl.pathname === '/incidents/status'", self.code)
+        self.assertIn("path: '/adjudications'", self.analyst_state_routes)
+        self.assertIn("path: '/incidents/status'", self.analyst_state_routes)
         self.assertIn("disputed_pending_human", self.code)
         self.assertIn("review_completed_not_authorized", self.code)
         self.assertIn(
@@ -168,9 +172,9 @@ class AlertStoreResilienceTest(unittest.TestCase):
             self.code,
         )
         self.assertIn(
-            "withSqliteWriteGate(() => withImmediateTransaction(\n"
-            "        () => recordAnalystAdjudication(payload)",
-            self.code,
+            "recordAdjudication: (payload) => transactionalWrite(\n"
+            "      () => recordAnalystAdjudication(payload)",
+            self.analyst_state_service,
         )
 
     def test_pcap_mutations_use_the_sqlite_gate(self) -> None:

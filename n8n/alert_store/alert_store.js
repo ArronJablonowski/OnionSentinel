@@ -31,6 +31,8 @@ const {createInventoryRoutes} = require('./routes/inventory_routes');
 const {createHealthRepository} = require('./repositories/health_repository');
 const {createHealthService} = require('./services/health_service');
 const {createHealthRoutes} = require('./routes/health_routes');
+const {createAnalystStateService} = require('./services/analyst_state_service');
+const {createAnalystStateRoutes} = require('./routes/analyst_state_routes');
 const {
   loadAuthorizedActivityPolicy,
   matchAuthorizedActivity,
@@ -11750,6 +11752,20 @@ const healthService = createHealthService({
   }),
 });
 modularRoutes.registerAll(createHealthRoutes({service: healthService, sendJson}));
+const analystStateService = createAnalystStateService({
+  analystStatusSnapshot,
+  updateAnalystStatus,
+  analystAdjudicationSnapshot,
+  recordAnalystAdjudication,
+  updateIncidentCaseStatus,
+  withWriteGate: withSqliteWriteGate,
+  withTransaction: withImmediateTransaction,
+});
+modularRoutes.registerAll(createAnalystStateRoutes({
+  service: analystStateService,
+  readJsonBody,
+  sendJson,
+}));
 
 function controlledEvaluationRequestAuthorized(request) {
   if (!controlledEvaluationMode) return true;
@@ -11809,35 +11825,6 @@ async function handleRequest(request, response) {
       return;
     }
     if (await modularRoutes.dispatch({request, response, parsedUrl})) return;
-    if (request.method === 'GET' && parsedUrl.pathname === '/analyst-status') {
-      sendJson(response, 200, await analystStatusSnapshot());
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/analyst-status') {
-      const payload = await readJsonBody(request);
-      sendJson(response, 200, await updateAnalystStatus(payload));
-      return;
-    }
-    if (request.method === 'GET' && parsedUrl.pathname === '/adjudications') {
-      sendJson(response, 200, await analystAdjudicationSnapshot(parsedUrl.searchParams));
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/adjudications') {
-      const payload = await readJsonBody(request);
-      const result = await withSqliteWriteGate(() => withImmediateTransaction(
-        () => recordAnalystAdjudication(payload),
-      ));
-      sendJson(response, 201, result);
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/incidents/status') {
-      const payload = await readJsonBody(request);
-      const result = await withSqliteWriteGate(() => withImmediateTransaction(
-        () => updateIncidentCaseStatus(payload),
-      ));
-      sendJson(response, 200, result);
-      return;
-    }
     if (request.method === 'POST' && request.url === '/alert') {
       // Main ingestion endpoint called by the n8n workflow.
       const startedAt = Date.now();
