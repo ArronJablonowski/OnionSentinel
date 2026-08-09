@@ -1554,6 +1554,37 @@ def _provider_registry():
     return registry
 
 
+def _provider_settings():
+    _provider_routing()
+    from onion_sentinel.analysis.providers import settings
+    return settings
+
+
+def _provider_settings_policy():
+    return _provider_settings().Policy(
+        codex_catalog=tuple(CODEX_CLI_MODEL_CATALOG),
+        reasoning_efforts=frozenset(CODEX_CLI_REASONING_EFFORTS),
+        harness_model_pattern=CLI_HARNESS_MODEL_PATTERN,
+        openclaw_ollama_prefix=OPENCLAW_OLLAMA_PROVIDER_PREFIX,
+        hermes_effort=HERMES_AGENT_REASONING_EFFORT,
+        fallback_ollama_model=FALLBACK_OLLAMA_MODEL,
+    )
+
+
+def _provider_settings_dependencies():
+    module = _provider_settings()
+    return module.Dependencies(
+        boolean_setting=boolean_setting,
+        normalized_model_roster=normalized_model_roster,
+        openclaw_uses_ollama=openclaw_model_uses_ollama_runtime,
+        enabled_routes=enabled_agent_model_routes,
+        normalize_primary=normalize_agent_models,
+        normalize_reviewer=normalize_agent_second_opinion_models,
+        normalize_adjudicator=normalize_agent_adjudicator_models,
+        error_type=RuntimeArtifactError,
+    )
+
+
 def _reporting_incident():
     _provider_routing()
     from onion_sentinel.analysis.reporting import incident
@@ -2894,42 +2925,11 @@ def normalized_codex_cli_models(
     legacy_enabled: bool,
 ) -> list[dict[str, Any]]:
     """Return validated settings for the fixed Codex CLI model catalog."""
-    raw_entries = value if isinstance(value, list) else [
-        {
-            "model": legacy_model,
-            "reasoning_effort": legacy_effort,
-            "enabled": legacy_enabled,
-        }
-    ]
-    if len(raw_entries) > len(CODEX_CLI_MODEL_CATALOG):
-        raise RuntimeArtifactError("Codex CLI model roster contains too many entries")
-    configured: dict[str, dict[str, Any]] = {}
-    for raw in raw_entries:
-        if not isinstance(raw, dict):
-            raise RuntimeArtifactError("Codex CLI model roster entries must be objects")
-        model = str(raw.get("model") or "").strip()
-        effort = str(raw.get("reasoning_effort") or "medium").strip().lower()
-        if model not in CODEX_CLI_MODEL_CATALOG:
-            raise RuntimeArtifactError("Codex CLI model is not in the supported catalog")
-        if effort not in CODEX_CLI_REASONING_EFFORTS:
-            raise RuntimeArtifactError(
-                "Codex CLI reasoning effort must be low, medium, high, or xhigh"
-            )
-        if model in configured:
-            raise RuntimeArtifactError("Codex CLI model roster contains a duplicate model")
-        configured[model] = {
-            "model": model,
-            "reasoning_effort": effort,
-            "enabled": boolean_setting(raw.get("enabled")),
-        }
-    return [
-        configured.get(model, {
-            "model": model,
-            "reasoning_effort": "medium",
-            "enabled": False,
-        })
-        for model in CODEX_CLI_MODEL_CATALOG
-    ]
+    return _provider_settings().codex_models(
+        value, legacy_model=legacy_model, legacy_effort=legacy_effort,
+        legacy_enabled=legacy_enabled, policy=_provider_settings_policy(),
+        dependencies=_provider_settings_dependencies(),
+    )
 
 
 def enabled_agent_model_routes(settings: dict[str, Any]) -> list[str]:
@@ -3099,147 +3099,26 @@ def normalize_agent_adjudicator_models(
 
 def apply_model_roster(settings: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
     """Migrate legacy single-model settings and derive the compatibility mode."""
-    legacy_mode = str(raw.get("mode") or settings.get("mode") or "ollama").strip().lower()
-    if legacy_mode not in {"ollama", "cloud", "hybrid"}:
-        legacy_mode = "ollama"
-    if "enabled_ollama_models" in raw:
-        enabled_models = normalized_model_roster(raw.get("enabled_ollama_models"))
-    else:
-        legacy_model = str(raw.get("ollama_model") or settings.get("ollama_model") or FALLBACK_OLLAMA_MODEL).strip()
-        enabled_models = [] if legacy_mode == "cloud" else normalized_model_roster([legacy_model])
-    codex_enabled = any(
-        isinstance(entry, dict) and entry.get("enabled") is True
-        for entry in settings.get("codex_cli_models", [])
+    return _provider_settings().apply_roster(
+        settings, raw, policy=_provider_settings_policy(),
+        dependencies=_provider_settings_dependencies(),
     )
-    hermes_enabled = boolean_setting(settings.get("hermes_agent_enabled"))
-    openclaw_enabled = boolean_setting(settings.get("openclaw_enabled"))
-    if not enabled_models and not codex_enabled and not hermes_enabled and not openclaw_enabled:
-        raise RuntimeArtifactError("AI settings must enable at least one analysis model route")
-    openclaw_ollama = (
-        openclaw_enabled
-        and openclaw_model_uses_ollama_runtime(
-            str(settings.get("openclaw_model") or "")
-        )
-    )
-    local_enabled = bool(enabled_models) or openclaw_ollama
-    hosted_enabled = (
-        codex_enabled
-        or hermes_enabled
-        or (openclaw_enabled and not openclaw_ollama)
-    )
-    settings["enabled_ollama_models"] = enabled_models
-    settings["gpt_cli_enabled"] = codex_enabled
-    settings["mode"] = (
-        "hybrid"
-        if local_enabled and hosted_enabled
-        else ("cloud" if hosted_enabled else "ollama")
-    )
-    if enabled_models:
-        settings["ollama_model"] = enabled_models[0]
-    settings["agent_models"] = normalize_agent_models(
-        raw.get("agent_models"),
-        enabled_agent_model_routes(settings),
-    )
-    settings["agent_second_opinion_models"] = normalize_agent_second_opinion_models(
-        raw.get("agent_second_opinion_models"),
-        enabled_agent_model_routes(settings),
-        settings["agent_models"],
-    )
-    settings["agent_adjudicator_models"] = normalize_agent_adjudicator_models(
-        raw.get("agent_adjudicator_models"),
-        enabled_agent_model_routes(settings),
-        settings["agent_models"],
-        settings["agent_second_opinion_models"],
-        settings,
-    )
-    return settings
 
 
 def normalize_codex_cli_settings(settings: dict[str, Any], raw: dict[str, Any]) -> None:
     """Normalize the fixed Codex adapter without accepting shell fragments."""
-    executable = str(raw.get("codex_cli_path") or settings.get("codex_cli_path") or "codex").strip()
-    model = str(
-        raw.get("codex_cli_model")
-        or raw.get("cloud_model")
-        or settings.get("codex_cli_model")
-        or "gpt-5.5"
-    ).strip()
-    effort = str(
-        raw.get("codex_cli_reasoning_effort")
-        or settings.get("codex_cli_reasoning_effort")
-        or "medium"
-    ).strip().lower()
-    for label, value, limit in (
-        ("Codex CLI path", executable, 1024),
-        ("Codex CLI model", model, 240),
-    ):
-        if not value or len(value) > limit or re.search(r"[\x00-\x1f\x7f]", value):
-            raise RuntimeArtifactError(f"{label} is invalid")
-    if Path(executable).is_absolute():
-        if (
-            Path(executable).name != "codex"
-            or not re.fullmatch(r"/[A-Za-z0-9._/+-]+", executable)
-        ):
-            raise RuntimeArtifactError("Codex CLI path must resolve from an executable named codex")
-    elif executable != "codex":
-        raise RuntimeArtifactError("Codex CLI path must be 'codex' or an absolute path ending in /codex")
-    if effort not in CODEX_CLI_REASONING_EFFORTS:
-        raise RuntimeArtifactError(
-            "Codex CLI reasoning effort must be low, medium, high, or xhigh"
-        )
-    legacy_mode = str(raw.get("mode") or settings.get("mode") or "ollama").strip().lower()
-    legacy_enabled = (
-        boolean_setting(raw.get("gpt_cli_enabled"))
-        if "gpt_cli_enabled" in raw
-        else legacy_mode in {"cloud", "hybrid"}
+    _provider_settings().normalize_codex(
+        settings, raw, policy=_provider_settings_policy(),
+        dependencies=_provider_settings_dependencies(),
     )
-    codex_models = normalized_codex_cli_models(
-        raw.get("codex_cli_models") if "codex_cli_models" in raw else None,
-        legacy_model=model,
-        legacy_effort=effort,
-        legacy_enabled=legacy_enabled,
-    )
-    selected = next(
-        (entry for entry in codex_models if entry["enabled"]),
-        codex_models[0] if codex_models else {
-            "model": model,
-            "reasoning_effort": effort,
-        },
-    )
-    model = selected["model"]
-    effort = selected["reasoning_effort"]
-    settings["codex_cli_path"] = executable
-    settings["codex_cli_model"] = model
-    settings["codex_cli_reasoning_effort"] = effort
-    settings["codex_cli_models"] = codex_models
-    # Compatibility fields remain readable during rolling deploys, but the
-    # legacy arbitrary command is never executed.
-    settings["cloud_provider"] = "codex-cli"
-    settings["cloud_model"] = model
-    settings["cloud_command"] = ""
 
 
 def _normalize_harness_executable(value: Any, basename: str) -> str:
     """Validate an exact executable path without accepting flags or shell text."""
-    executable = str(value or basename).strip()
     label = "Hermes Agent" if basename == "hermes" else "OpenClaw"
-    if (
-        not executable
-        or len(executable) > 1024
-        or re.search(r"[\x00-\x1f\x7f]", executable)
-    ):
-        raise RuntimeArtifactError(f"{label} executable path is invalid")
-    if Path(executable).is_absolute():
-        if (
-            Path(executable).name != basename
-            or not re.fullmatch(r"/[A-Za-z0-9._/+-]+", executable)
-        ):
-            raise RuntimeArtifactError(f"{label} path must end in /{basename}")
-    elif executable != basename:
-        raise RuntimeArtifactError(
-            f"{label} path must be '{basename}' or an absolute path ending in /{basename}"
-        )
-    return executable
+    return _provider_settings().normalize_harness_executable(
+        value, basename, label, RuntimeArtifactError,
+    )
 
 
 def normalize_cli_harness_settings(
@@ -3247,63 +3126,10 @@ def normalize_cli_harness_settings(
     raw: dict[str, Any],
 ) -> None:
     """Normalize the two optional, independently enabled agent harnesses."""
-    hermes_model = str(
-        raw.get("hermes_agent_model")
-        or settings.get("hermes_agent_model")
-        or "gpt-5.5"
-    ).strip()
-    hermes_effort = str(
-        raw.get("hermes_agent_reasoning_effort")
-        or settings.get("hermes_agent_reasoning_effort")
-        or "medium"
-    ).strip().lower()
-    openclaw_model = str(
-        raw.get("openclaw_model")
-        or settings.get("openclaw_model")
-        or "ollama/gemma4:26b-mlx"
-    ).strip()
-    openclaw_effort = str(
-        raw.get("openclaw_reasoning_effort")
-        or settings.get("openclaw_reasoning_effort")
-        or "medium"
-    ).strip().lower()
-    if hermes_model not in CODEX_CLI_MODEL_CATALOG:
-        raise RuntimeArtifactError(
-            "Hermes Agent model is not in the supported Codex model catalog"
-        )
-    if (
-        not CLI_HARNESS_MODEL_PATTERN.fullmatch(openclaw_model)
-        or not openclaw_model_uses_ollama_runtime(openclaw_model)
-        or len(openclaw_model) <= len(OPENCLAW_OLLAMA_PROVIDER_PREFIX)
-    ):
-        raise RuntimeArtifactError(
-            "OpenClaw currently supports explicit ollama/<model> routes only; "
-            "hosted OpenClaw credentials are not admitted into the isolated runtime"
-        )
-    if hermes_effort != HERMES_AGENT_REASONING_EFFORT:
-        raise RuntimeArtifactError(
-            "Hermes Agent one-shot runtime supports medium reasoning effort only"
-        )
-    if openclaw_effort not in CODEX_CLI_REASONING_EFFORTS:
-        raise RuntimeArtifactError(
-            "OpenClaw reasoning effort must be low, medium, high, or xhigh"
-        )
-    settings.update({
-        "hermes_agent_enabled": boolean_setting(raw.get("hermes_agent_enabled")),
-        "hermes_agent_path": _normalize_harness_executable(
-            raw.get("hermes_agent_path") or settings.get("hermes_agent_path"),
-            "hermes",
-        ),
-        "hermes_agent_model": hermes_model,
-        "hermes_agent_reasoning_effort": hermes_effort,
-        "openclaw_enabled": boolean_setting(raw.get("openclaw_enabled")),
-        "openclaw_path": _normalize_harness_executable(
-            raw.get("openclaw_path") or settings.get("openclaw_path"),
-            "openclaw",
-        ),
-        "openclaw_model": openclaw_model,
-        "openclaw_reasoning_effort": openclaw_effort,
-    })
+    _provider_settings().normalize_harnesses(
+        settings, raw, policy=_provider_settings_policy(),
+        dependencies=_provider_settings_dependencies(),
+    )
 
 
 def load_ai_settings(path: Path) -> dict[str, Any]:

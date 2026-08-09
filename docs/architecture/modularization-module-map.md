@@ -2222,6 +2222,12 @@ rejects missing or unknown agent assignments, records both successful and
 failed model calls, preserves shadow-versus-enforce observation behavior, and
 verifies the observed route during controlled evaluation.
 
+Codex CLI catalog validation, executable-path admission, Hermes/OpenClaw
+harness normalization, legacy roster migration, compatibility-mode derivation,
+and primary/reviewer/adjudicator assignment composition now live under
+`onion_sentinel.analysis.providers.settings`. Provider credentials and process
+execution remain outside this pure settings boundary.
+
 Independent-review package construction, text/repetition policy, and
 fail-closed response validation live under `onion_sentinel.analysis.review`.
 The same package owns bounded shadow-adjudication package and validation
