@@ -901,6 +901,18 @@
       ]
     },
     {
+      "path": "n8n/bin/local_ai_provider_compat.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/local_ai_provider_compat.py",
+      "required_symbols": [
+        "analyze_model_route",
+        "cloud_cli_chat",
+        "hermes_agent_chat",
+        "openclaw_infer_chat",
+        "prepare_codex_cli_transport"
+      ]
+    },
+    {
       "path": "n8n/bin/local_ai_query_dependency_compat.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/local_ai_query_dependency_compat.py",

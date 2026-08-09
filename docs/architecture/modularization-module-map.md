@@ -128,6 +128,10 @@ line ranges below remain historical navigation aids for the extraction ledger.
   bounded-loop composition delegates. Every path calls package-owned policy and
   runtime adapters; the module retains the mutable pivot-loader slot solely for
   exact test and pinned-runtime compatibility.
+- `n8n/bin/local_ai_provider_compat.py` owns legacy Ollama, Codex CLI, Hermes,
+  OpenClaw, and provider-route transport delegates. Bounded process execution,
+  credential isolation, schema construction, identity attestation, and route
+  selection remain implemented in the provider package modules.
 - Concrete Markdown rendering and atomic output-publication binding now live
   in `local_ai_pipeline_adapters.write_outputs`; the runner transaction port
   delegates directly and no longer retains `render_markdown` or
