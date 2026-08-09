@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Compatibility checks for the package-free local AI runtime contract."""
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+import sys
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+BIN = ROOT / "n8n" / "bin"
+if str(BIN) not in sys.path:
+    sys.path.insert(0, str(BIN))
+
+import local_ai_runtime_contract as contract  # noqa: E402
+
+
+def load_runner():
+    spec = importlib.util.spec_from_file_location(
+        "local_ai_contract_runner", BIN / "run-local-ai-analysis.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class LocalAiRuntimeContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.runner = load_runner()
+
+    def test_runner_reexports_exact_contract_values_and_error_types(self) -> None:
+        for name in (
+            "CONTROLLED_RESULT_ENVIRONMENT",
+            "DEFAULT_RESPONSE_VALUES",
+            "INVESTIGATION_QUERY_AGGREGATIONS",
+            "RuntimeArtifactError",
+            "AnalysisIndexSubmissionError",
+        ):
+            with self.subTest(name=name):
+                self.assertIs(getattr(self.runner, name), getattr(contract, name))
+
+    def test_private_mutable_runtime_slots_are_reexported(self) -> None:
+        self.assertTrue(
+            {"_CONTROLLED_EVALUATION_TOKEN", "_CONTROLLED_EVALUATION_TMPDIR"}
+            <= set(contract.__all__)
+        )
+        self.assertEqual(self.runner._CONTROLLED_EVALUATION_TOKEN, "")
+        self.assertIsNone(self.runner._CONTROLLED_EVALUATION_TMPDIR)
+
+
+if __name__ == "__main__":
+    unittest.main()

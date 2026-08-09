@@ -88,6 +88,10 @@ line ranges below remain historical navigation aids for the extraction ledger.
   callables to package ports. It contains no investigation or persistence
   policy. `run-local-ai-analysis.py::main` is limited to stage composition,
   state handoff, terminal error classification, and the compatibility CLI.
+- `n8n/bin/local_ai_runtime_contract.py` owns the package-free import-time
+  constants and classified error types re-exported by the runner namespace.
+  It is direct-copied beside the runner, contains no credentials, and preserves
+  pinned V1 import before the package tree is available.
 - Concrete Markdown rendering and atomic output-publication binding now live
   in `local_ai_pipeline_adapters.write_outputs`; the runner transaction port
   delegates directly and no longer retains `render_markdown` or

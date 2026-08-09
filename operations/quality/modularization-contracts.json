@@ -808,6 +808,18 @@
       ]
     },
     {
+      "path": "n8n/bin/local_ai_runtime_contract.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/local_ai_runtime_contract.py",
+      "required_symbols": [
+        "AnalysisIndexSubmissionError",
+        "CONTROLLED_RESULT_ENVIRONMENT",
+        "DEFAULT_RESPONSE_VALUES",
+        "INVESTIGATION_QUERY_AGGREGATIONS",
+        "RuntimeArtifactError"
+      ]
+    },
+    {
       "path": "n8n/bin/local_ai_pipeline_adapters.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/local_ai_pipeline_adapters.py",
