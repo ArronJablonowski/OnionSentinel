@@ -16,6 +16,9 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BIN_DIR = REPO_ROOT / "n8n" / "bin"
 RUNNER_PATH = BIN_DIR / "run-local-ai-analysis.py"
+LEGACY_PIPELINE_PATH = (
+    REPO_ROOT / "n8n/onion_sentinel/legacy_pipeline.py"
+)
 
 
 def load_runner():
@@ -564,17 +567,17 @@ class MemoryWritebackJournalTests(unittest.TestCase):
     def test_main_stages_before_submission_and_promotes_after_receipt(
         self,
     ) -> None:
-        source = RUNNER_PATH.read_text(encoding="utf-8")
-        main_source = source[source.index("def main()"):]
+        source = LEGACY_PIPELINE_PATH.read_text(encoding="utf-8")
+        execute_source = source[
+            source.index("def _execute("):source.index("def _finalize(")
+        ]
         transaction_source = (
             REPO_ROOT
             / "n8n/onion_sentinel/analysis/persistence/transaction.py"
         ).read_text(encoding="utf-8")
-        stage = main_source.index(
-            "staged_memory_task = stage_memory_writeback_task("
-        )
-        publication = main_source.index("transaction_module.publish(")
-        promotion = main_source.index("transaction_module.promote_memory(")
+        stage = execute_source.index("_stage_memory(")
+        publication = execute_source.index("_publish(")
+        promotion = execute_source.index("_finish_postcommit(")
 
         self.assertLess(stage, publication)
         self.assertLess(publication, promotion)
