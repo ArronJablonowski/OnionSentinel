@@ -26,13 +26,9 @@ import datetime as dt
 import hashlib
 import importlib.util
 import json
-import os
 import re
-import shutil
 import sqlite3
-import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -158,6 +154,14 @@ from cohort_runner_cli import (
     build_parser as build_cli_parser,
     main as run_cli,
 )
+from cohort_artifact_io import (
+    AlertStoreReceiptPolicy,
+    DigestArtifactPolicy,
+    alert_store_response_sha256 as verify_alert_store_response_sha256,
+    digest_bound as bind_artifact_digest,
+    validate_digest as validate_artifact_digest,
+    write_private_json as persist_private_json,
+)
 
 
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -271,73 +275,43 @@ def alert_store_response_sha256(raw_response: str) -> str:
     the same byte representation that alert-store hashed at commit time.
     """
 
-    encoded = raw_response.encode("utf-8")
-    if not encoded or len(encoded) > MAX_STORED_RESPONSE_BYTES:
-        raise CohortError("stored analysis response exceeds its safe bound")
-    node = shutil.which("node")
-    if not node:
-        for candidate in (
+    return verify_alert_store_response_sha256(
+        raw_response,
+        AlertStoreReceiptPolicy(
+            error=CohortError,
+            maximum_response_bytes=MAX_STORED_RESPONSE_BYTES,
+            sha256_pattern=SHA256_RE,
+            canonical_sha256_javascript=ALERT_STORE_CANONICAL_SHA256_JS,
+            node_candidates=(
             Path("/opt/homebrew/bin/node"),
             Path("/usr/local/bin/node"),
             Path("/usr/bin/node"),
-        ):
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                node = str(candidate)
-                break
-    if not node:
-        raise CohortError(
-            "Node.js is required to verify alert-store response receipts"
-        )
-    try:
-        completed = subprocess.run(
-            [node, "-e", ALERT_STORE_CANONICAL_SHA256_JS],
-            input=encoded,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise CohortError(
-            "could not canonicalize the stored analysis response"
-        ) from exc
-    digest = completed.stdout.decode("ascii", errors="ignore").strip()
-    if completed.returncode != 0 or not SHA256_RE.fullmatch(digest):
-        raise CohortError(
-            "alert-store response canonicalization failed closed"
-        )
-    return digest
+            ),
+        ),
+    )
+
+
+def _digest_artifact_policy() -> DigestArtifactPolicy:
+    return DigestArtifactPolicy(
+        error=CohortError,
+        sha256_pattern=SHA256_RE,
+        sha256_value=sha256_value,
+        constant_time_equal=_constant_time_equal,
+    )
 
 
 def _digest_bound(document: Mapping[str, Any], field: str) -> dict[str, Any]:
-    output = dict(document)
-    output.pop(field, None)
-    output[field] = sha256_value(output)
-    return output
+    return bind_artifact_digest(document, field, _digest_artifact_policy())
 
 
 def _validate_digest(document: Mapping[str, Any], field: str) -> None:
-    expected = str(document.get(field) or "")
-    unsigned = dict(document)
-    unsigned.pop(field, None)
-    if not re.fullmatch(r"[a-f0-9]{64}", expected):
-        raise CohortError(f"{field} is missing or malformed")
-    if not _constant_time_equal(expected, sha256_value(unsigned)):
-        raise CohortError(f"{field} does not match the document")
+    validate_artifact_digest(document, field, _digest_artifact_policy())
 
 
 def _constant_time_equal(left: str, right: str) -> bool:
     import hmac
 
     return hmac.compare_digest(left, right)
-
-
-def _ensure_private_parent(path: Path) -> None:
-    parent = path.expanduser().resolve().parent
-    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if parent.is_symlink() or not parent.is_dir():
-        raise CohortError(f"output parent is not a real directory: {parent}")
-    os.chmod(parent, 0o700)
 
 
 def write_private_json(
@@ -349,38 +323,13 @@ def write_private_json(
 ) -> dict[str, Any]:
     """Atomically write a digest-bound JSON document with mode 0600."""
 
-    target = path.expanduser()
-    _ensure_private_parent(target)
-    if target.is_symlink():
-        raise CohortError(f"refusing to replace symlink: {target}")
-    if target.exists() and not replace:
-        raise CohortError(f"refusing to overwrite existing file: {target}")
-    bound = _digest_bound(document, digest_field)
-    parent = target.resolve().parent
-    file_descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{target.name}.",
-        suffix=".tmp",
-        dir=parent,
+    return persist_private_json(
+        path,
+        document,
+        digest_field=digest_field,
+        policy=_digest_artifact_policy(),
+        replace=replace,
     )
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(file_descriptor, 0o600)
-        with os.fdopen(file_descriptor, "wb") as handle:
-            handle.write(json.dumps(bound, indent=2, sort_keys=True).encode("utf-8"))
-            handle.write(b"\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-        os.chmod(target, 0o600)
-        directory_fd = os.open(parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-    return bound
 
 
 def _manifest_contract_policy() -> ManifestContractPolicy:

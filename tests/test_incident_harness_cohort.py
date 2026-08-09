@@ -40,6 +40,7 @@ import cohort_preflight  # noqa: E402
 import cohort_dispatch_identity  # noqa: E402
 import cohort_manifest_contract  # noqa: E402
 import cohort_private_input  # noqa: E402
+import cohort_artifact_io  # noqa: E402
 
 
 class IncidentHarnessCohortTests(unittest.TestCase):
@@ -97,6 +98,16 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         self.assertIs(
             cohort.read_private_source_rows,
             cohort_private_input.load_private_source_rows,
+        )
+
+    def test_runner_uses_extracted_artifact_services(self) -> None:
+        self.assertIs(
+            cohort.verify_alert_store_response_sha256,
+            cohort_artifact_io.alert_store_response_sha256,
+        )
+        self.assertIs(
+            cohort.persist_private_json,
+            cohort_artifact_io.write_private_json,
         )
 
     def test_query_audit_projection_excludes_query_and_result_content(self) -> None:

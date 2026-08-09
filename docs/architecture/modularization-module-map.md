@@ -791,6 +791,11 @@ argument mapping, summary rendering, and exit-code policy. The composition root
 injects cohort operations and handled exception types, leaving the historical
 executable free of application logic.
 
+`operations/cohort_artifact_io.py` owns alert-store-compatible JavaScript
+response receipt hashing plus digest-bound, atomic, owner-only JSON artifact
+writes. Hash functions, digest patterns, bounds, and error types are injected;
+the composition service retains compatibility wrappers for existing callers.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

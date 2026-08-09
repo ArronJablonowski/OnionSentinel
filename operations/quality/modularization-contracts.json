@@ -3,6 +3,19 @@
   "baseline_release": "3eec576a59b51b74badcc042de2e3418fca9c867",
   "python_entry_points": [
     {
+      "path": "operations/cohort_artifact_io.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_artifact_io.py",
+      "required_symbols": [
+        "AlertStoreReceiptPolicy",
+        "DigestArtifactPolicy",
+        "alert_store_response_sha256",
+        "digest_bound",
+        "validate_digest",
+        "write_private_json"
+      ]
+    },
+    {
       "path": "operations/run-incident-harness-cohort.py",
       "deployment": "repository-only",
       "runtime_path": "operations/run-incident-harness-cohort.py",
