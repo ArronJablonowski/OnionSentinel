@@ -134,6 +134,18 @@
       ]
     },
     {
+      "path": "operations/cohort_execution_result.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_execution_result.py",
+      "required_symbols": [
+        "ResultExecutionPolicy",
+        "ResultExecutionContext",
+        "prior_analysis_ids",
+        "expected_task_kind",
+        "evaluate_result_execution"
+      ]
+    },
+    {
       "path": "n8n/bin/run-local-ai-analysis.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/run-local-ai-analysis.py",

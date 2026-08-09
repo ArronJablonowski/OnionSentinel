@@ -19,6 +19,7 @@ import cohort_execution_skills  # noqa: E402
 import cohort_execution_tools  # noqa: E402
 import cohort_execution_trace  # noqa: E402
 import cohort_execution_render  # noqa: E402
+import cohort_execution_result  # noqa: E402
 
 
 def load_legacy_cohort():
@@ -54,6 +55,14 @@ class CohortExecutionAttestationBoundaryTests(unittest.TestCase):
         self.assertIs(
             legacy.render_execution_proof,
             cohort_execution_render.render_execution_proof,
+        )
+        self.assertIs(
+            legacy.evaluate_result_execution,
+            cohort_execution_result.evaluate_result_execution,
+        )
+        self.assertIs(
+            legacy.collect_prior_analysis_ids,
+            cohort_execution_result.prior_analysis_ids,
         )
 
     def test_skill_projection_rejects_extra_identity_fields(self):

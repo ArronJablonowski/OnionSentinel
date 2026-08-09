@@ -585,6 +585,12 @@ proof shape and its terminal SHA-256 seal. It accepts only already-validated
 skill, model, tool, trace, and response evidence and performs no database,
 filesystem, trace-evaluator, or policy work.
 
+`operations/cohort_execution_result.py` owns fresh result admission before a
+harness trace may receive credit. It binds completed analysis identity and
+role, rejects frozen prior identities, proves exactly-once accepted dispatch
+and temporal freshness, and validates assigned primary/reviewer routes plus
+evaluation-memory freeze attestation.
+
 `prompt_incident_evidence_projection.py` owns the model-facing, in-memory
 projection of already-validated incident evidence. It applies deterministic
 prefix limits to Elastic hits and OSQuery rows, records source and retained

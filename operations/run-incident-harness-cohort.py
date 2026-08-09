@@ -103,6 +103,12 @@ from cohort_execution_trace import (
     evaluate_trace_execution,
 )
 from cohort_execution_render import ExecutionProofView, render_execution_proof
+from cohort_execution_result import (
+    ResultExecutionPolicy,
+    evaluate_result_execution,
+    expected_task_kind as resolve_expected_task_kind,
+    prior_analysis_ids as collect_prior_analysis_ids,
+)
 
 
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -2629,44 +2635,13 @@ def _load_trace_evaluator() -> Any:
 
 
 def _prior_analysis_ids(member: Mapping[str, Any]) -> set[str]:
-    pre_state = (
-        member.get("pre_state")
-        if isinstance(member.get("pre_state"), dict)
-        else {}
-    )
-    identities: set[str] = set()
-    for field in ("soc_analysis_ids", "incident_analysis_ids"):
-        values = pre_state.get(field)
-        if isinstance(values, list):
-            identities.update(str(item) for item in values if str(item))
-    for source in (
-        pre_state.get("latest_analysis"),
-        pre_state.get("incident_case"),
-    ):
-        if isinstance(source, dict):
-            identity = str(
-                source.get("analysis_id")
-                or source.get("latest_analysis_id")
-                or ""
-            )
-            if identity:
-                identities.add(identity)
-    return identities
+    """Compatibility adapter for frozen prior-analysis identities."""
+    return collect_prior_analysis_ids(member)
 
 
 def _expected_task_kind(role: str, dispatch_kind: str) -> str:
-    if role == "soc-analyst" and dispatch_kind == "analyze":
-        # The explicit dashboard /analyze endpoint marks the queued job as a
-        # manual reanalysis. The harness must preserve that lineage instead of
-        # presenting this controlled rerun as first-pass alert intake.
-        return "reanalysis"
-    if role == "incident-responder" and dispatch_kind == "reanalyze":
-        return "reanalysis"
-    if role == "incident-responder" and dispatch_kind == "escalate":
-        return "incident-response"
-    raise CohortError(
-        f"dispatch {dispatch_kind!r} is invalid for agent role {role!r}"
-    )
+    """Compatibility adapter for role/dispatch task-kind binding."""
+    return resolve_expected_task_kind(role, dispatch_kind, CohortError)
 
 
 def _harness_execution_proof(
@@ -2678,80 +2653,25 @@ def _harness_execution_proof(
 ) -> dict[str, Any]:
     """Fail closed unless one fresh result has one valid successful trace."""
 
-    role = str(manifest.get("agent_role") or "")
-    contract = manifest.get("execution_contract")
-    if not isinstance(contract, dict):
-        raise CohortError("manifest has no execution contract")
-    dispatch = (
-        member.get("dispatch")
-        if isinstance(member.get("dispatch"), dict)
-        else {}
+    result_execution = evaluate_result_execution(
+        manifest,
+        member,
+        monitor,
+        ResultExecutionPolicy(
+            cohort_error=CohortError,
+            parse_timestamp=_parse_timestamp,
+        ),
     )
-    analysis = (
-        monitor.get("analysis")
-        if isinstance(monitor.get("analysis"), dict)
-        else {}
-    )
-    analysis_result = (
-        analysis.get("result")
-        if isinstance(analysis.get("result"), dict)
-        else {}
-    )
-    analysis_id = str(monitor.get("analysis_id") or "")
-    failures: list[str] = []
-    if str(monitor.get("state") or "") != "completed":
-        failures.append("result-not-completed")
-    if not analysis_id or str(analysis.get("analysis_id") or "") != analysis_id:
-        failures.append("analysis-id-binding-failed")
-    if analysis_id in _prior_analysis_ids(member):
-        failures.append("analysis-id-is-not-fresh")
-    if str(analysis.get("agent_role") or "") != role:
-        failures.append("analysis-role-mismatch")
-    if dispatch.get("state") != "accepted" or int(
-        dispatch.get("attempt_count") or 0
-    ) != 1:
-        failures.append("dispatch-not-exactly-once")
-    try:
-        dispatch_started = _parse_timestamp(
-            dispatch.get("started_at"),
-            "dispatch started_at",
-        )
-        analysis_generated = _parse_timestamp(
-            analysis.get("generated_at"),
-            "analysis generated_at",
-        )
-        if analysis_generated < dispatch_started:
-            failures.append("analysis-predates-dispatch")
-    except CohortError:
-        failures.append("freshness-timestamp-invalid")
-        dispatch_started = None
-        analysis_generated = None
-
-    expected_route = str(contract.get("expected_assigned_route") or "")
-    expected_reviewer_route = str(
-        contract.get("expected_reviewer_route") or ""
-    )
-    if analysis_result.get("_analysis_evaluation_memory_frozen") is not True:
-        failures.append("analysis-memory-freeze-not-attested")
-    if str(analysis_result.get("_analysis_model_route") or "") != expected_route:
-        failures.append("analysis-route-mismatch")
-    second_opinion = (
-        analysis_result.get("_second_opinion")
-        if isinstance(analysis_result.get("_second_opinion"), dict)
-        else {}
-    )
-    reviewer_response = (
-        second_opinion.get("response")
-        if isinstance(second_opinion.get("response"), dict)
-        else {}
-    )
-    if contract.get("reviewer_required") is True and (
-        second_opinion.get("status") != "completed"
-        or second_opinion.get("model_route") != expected_reviewer_route
-        or reviewer_response.get("_analysis_model_route")
-        != expected_reviewer_route
-    ):
-        failures.append("analysis-reviewer-route-mismatch")
+    role = result_execution.role
+    contract = result_execution.contract
+    dispatch = result_execution.dispatch
+    analysis = result_execution.analysis
+    analysis_id = result_execution.analysis_id
+    expected_route = result_execution.expected_route
+    expected_reviewer_route = result_execution.expected_reviewer_route
+    dispatch_started = result_execution.dispatch_started
+    analysis_generated = result_execution.analysis_generated
+    failures = list(result_execution.failures)
 
     trace_evaluator = _load_trace_evaluator()
     try:
