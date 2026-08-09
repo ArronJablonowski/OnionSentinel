@@ -576,6 +576,17 @@ incident evidence. All query builders, file reads, validators, and projectors
 are injected by the legacy composition root; source memory and correlation data
 remain unchanged by blind filtering.
 
+`prompt_evidence_snapshot.py` owns ordered read-only evidence collection in two
+explicit stages. The core stage projects the daily rollup, grouped alert, PCAP,
+public enrichment, authorization, analyst state, correlation, and compact alert
+views before governed admission. The historical stage runs only after current
+evidence admission succeeds, loads prior analyses before related alerts and
+notifications, and skips the prior-model read entirely during blind reanalysis.
+It owns the bounded latest-rollup file read and notification-log projection;
+database connections, query execution, and all other projections remain
+injected by the legacy composition root. Any collector failure stops all later
+reads in that stage.
+
 `prompt_package_compactor.py` owns deterministic prompt admission reduction.
 It stabilizes declared serialized size, attempts lossless compact JSON first,
 then applies an ordered set of bounded historical, asset, enrichment, PCAP,

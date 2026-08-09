@@ -328,7 +328,6 @@ class PromptEvidenceHardeningTests(unittest.TestCase):
             analysis_dir=Path("/unused"),
         )
         replacements = {
-            "latest_rollup": {},
             "grouped_alert_context": {},
             "pcap_evidence_context": {"parsed_evidence": []},
             "public_enrichment_context": {},
@@ -357,7 +356,7 @@ class PromptEvidenceHardeningTests(unittest.TestCase):
             "model_policy": {},
             "load_system_prompt": "",
             "related_alerts": [],
-            "notification_context": [],
+            "rows": [],
             "prior_analysis_context": {},
         }
         with ExitStack() as stack:

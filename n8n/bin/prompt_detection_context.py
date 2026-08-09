@@ -11,6 +11,7 @@ from typing import Any, Callable
 class DetectionContextRequest:
     """Inputs and bounded runtime paths for deterministic preparation."""
 
+    connection: Any
     selected: Any
     include_tests: bool
     agent_role: str
@@ -79,6 +80,7 @@ def _load_rule_and_skills(
     request: DetectionContextRequest,
 ) -> tuple[list[Any], dict, dict]:
     validation_rows = sources.alert_group_rows(
+        request.connection,
         request.selected,
         include_tests=request.include_tests,
         extra_columns=VALIDATION_EXTRA_COLUMNS,

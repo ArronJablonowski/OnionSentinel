@@ -94,6 +94,21 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_evidence_snapshot.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_evidence_snapshot.py",
+      "required_symbols": [
+        "CoreEvidenceSnapshot",
+        "CoreEvidenceSnapshotRequest",
+        "CoreEvidenceSnapshotSources",
+        "HistoricalEvidenceSnapshot",
+        "HistoricalEvidenceSnapshotRequest",
+        "HistoricalEvidenceSnapshotSources",
+        "collect_core_evidence_snapshot",
+        "collect_historical_evidence_snapshot"
+      ]
+    },
+    {
       "path": "n8n/bin/prompt_investigation_query_context.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_investigation_query_context.py",

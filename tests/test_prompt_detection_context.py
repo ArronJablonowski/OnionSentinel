@@ -23,6 +23,7 @@ from prompt_detection_context import (  # noqa: E402
 
 def request(**changes) -> DetectionContextRequest:
     values = {
+        "connection": "connection",
         "selected": {
             "alert_json": '{"alert": true}',
             "raw_event_json": '{"event": true}',
@@ -79,6 +80,7 @@ class PromptDetectionContextTests(unittest.TestCase):
         prepared = prepare_detection_context(dependencies, request())
 
         dependencies.alert_group_rows.assert_called_once_with(
+            "connection",
             request().selected,
             include_tests=False,
             extra_columns=VALIDATION_EXTRA_COLUMNS,

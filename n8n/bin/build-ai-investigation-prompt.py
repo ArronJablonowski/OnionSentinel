@@ -89,6 +89,14 @@ from prompt_evidence_admission import (
     blind_model_authored_context,
     prepare_prompt_evidence_admission,
 )
+from prompt_evidence_snapshot import (
+    CoreEvidenceSnapshotRequest,
+    CoreEvidenceSnapshotSources,
+    HistoricalEvidenceSnapshotRequest,
+    HistoricalEvidenceSnapshotSources,
+    collect_core_evidence_snapshot,
+    collect_historical_evidence_snapshot,
+)
 from prompt_package_compactor import (
     PackageCompactionSources,
     compact_package_to_budget as compact_prompt_package,
@@ -634,16 +642,6 @@ def prior_analysis_context(
         if len(found) >= limit:
             break
     return found
-
-
-def latest_rollup(rollup_dir: Path, limit_bytes: int) -> dict:
-    files = sorted(rollup_dir.glob("*-soc-daily-rollup.md"))
-    if not files:
-        return {"path": None, "content": ""}
-    latest = files[-1]
-    with latest.open("rb") as handle:
-        data = handle.read(limit_bytes)
-    return {"path": str(latest), "content": data.decode("utf-8", errors="replace")}
 
 
 def compact_pcap_analysis(record: dict) -> dict:
@@ -1492,24 +1490,6 @@ def grouped_alert_context(conn: sqlite3.Connection, selected: sqlite3.Row, limit
     }
 
 
-def notification_context(conn: sqlite3.Connection, selected: sqlite3.Row) -> list[dict]:
-    found = rows(
-        conn,
-        """
-        SELECT channel, triage_level, rule_name, source_ip, destination_ip,
-               sent_count, last_sent
-        FROM notification_log
-        WHERE rule_name = ?
-           OR source_ip = ?
-           OR destination_ip = ?
-        ORDER BY last_sent DESC
-        LIMIT 10
-        """,
-        [selected["rule_name"], selected["source_ip"], selected["destination_ip"]],
-    )
-    return [dict(item) for item in found]
-
-
 def compact_alert(row_value: sqlite3.Row) -> dict:
     alert = parse_alert_json(row_value["alert_json"])
     triage = alert.get("triage") if isinstance(alert.get("triage"), dict) else {}
@@ -1831,44 +1811,55 @@ def agent_task(agent_role: str, *, blind_reanalysis: bool = False) -> str:
     )
 
 
-def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argparse.Namespace) -> dict:
-    rollup = latest_rollup(args.rollup_dir, args.rollup_bytes)
-    group_context = grouped_alert_context(conn, selected, args.related_limit, args.include_tests)
-    pcap_context = pcap_evidence_context(conn, selected, args.pcap_analysis_dir, args.pcap_analysis_limit)
-    enrichment_context = public_enrichment_context(conn, selected, args.related_limit, args.include_tests)
-    authorization_evidence = authorized_activity_context(conn, selected)
-    analyst_state = analyst_state_context(conn, selected)
-    correlation_context = correlated_alert_context(
-        conn,
-        selected,
-        args.correlation_limit,
-        args.correlation_min_score,
+def _detection_context_sources() -> DetectionContextSources:
+    return DetectionContextSources(
+        row_value=sqlite_value,
+        alert_group_rows=alert_group_rows,
+        parse_alert_json=parse_alert_json,
+        parse_json_object=parse_json_object,
+        extract_rule_context=extract_rule_context,
+        load_investigation_skills=load_investigation_skills,
+        resolve_investigation_skills=resolve_investigation_skills,
+        exact_detection_group_rows=exact_detection_group_rows,
+        load_detection_playbooks=load_detection_playbooks,
+        resolve_detection_playbook=resolve_detection_playbook,
+        marker_specs=marker_specs,
+        extract_group_packet_features=extract_group_packet_features,
+        build_detection_validation=build_detection_validation,
+        load_asset_inventory=load_asset_inventory,
+        asset_observables_and_events=asset_observables_and_events,
+        resolve_asset_context=resolve_asset_context,
     )
-    compact_selected = compact_alert(selected)
-    detection_context = prepare_detection_context(
-        DetectionContextSources(
-            row_value=sqlite_value,
-            alert_group_rows=lambda *positional, **keywords: alert_group_rows(
-                conn,
-                *positional,
-                **keywords,
-            ),
-            parse_alert_json=parse_alert_json,
-            parse_json_object=parse_json_object,
-            extract_rule_context=extract_rule_context,
-            load_investigation_skills=load_investigation_skills,
-            resolve_investigation_skills=resolve_investigation_skills,
-            exact_detection_group_rows=exact_detection_group_rows,
-            load_detection_playbooks=load_detection_playbooks,
-            resolve_detection_playbook=resolve_detection_playbook,
-            marker_specs=marker_specs,
-            extract_group_packet_features=extract_group_packet_features,
-            build_detection_validation=build_detection_validation,
-            load_asset_inventory=load_asset_inventory,
-            asset_observables_and_events=asset_observables_and_events,
-            resolve_asset_context=resolve_asset_context,
+
+
+def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argparse.Namespace) -> dict:
+    snapshot = collect_core_evidence_snapshot(
+        CoreEvidenceSnapshotSources(
+            grouped_alert_context=grouped_alert_context,
+            pcap_evidence_context=pcap_evidence_context,
+            public_enrichment_context=public_enrichment_context,
+            authorized_activity_context=authorized_activity_context,
+            analyst_state_context=analyst_state_context,
+            correlated_alert_context=correlated_alert_context,
+            compact_alert=compact_alert,
         ),
+        CoreEvidenceSnapshotRequest(
+            connection=conn,
+            selected=selected,
+            rollup_dir=args.rollup_dir,
+            rollup_bytes=args.rollup_bytes,
+            related_limit=args.related_limit,
+            include_tests=bool(args.include_tests),
+            pcap_analysis_dir=args.pcap_analysis_dir,
+            pcap_analysis_limit=args.pcap_analysis_limit,
+            correlation_limit=args.correlation_limit,
+            correlation_min_score=args.correlation_min_score,
+        ),
+    )
+    detection_context = prepare_detection_context(
+        _detection_context_sources(),
         DetectionContextRequest(
+            connection=conn,
             selected=selected,
             include_tests=bool(args.include_tests),
             agent_role=str(args.agent_role),
@@ -1911,17 +1902,17 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
         PromptEvidenceAdmissionRequest(
             selected=selected,
             agent_role=str(args.agent_role),
-            group_id=str(analyst_state.get("group_id") or ""),
+            group_id=str(snapshot.analyst_state.get("group_id") or ""),
             exact_validation_rows=detection_context.exact_validation_rows,
-            pcap_context=pcap_context,
-            enrichment_context=enrichment_context,
-            compact_alert=compact_selected,
-            grouped_alert_context=group_context,
+            pcap_context=snapshot.pcap_evidence,
+            enrichment_context=snapshot.public_enrichment,
+            compact_alert=snapshot.alert,
+            grouped_alert_context=snapshot.grouped_alert_context,
             detection_validation=detection_context.detection_validation,
             asset_context=detection_context.asset_context,
-            authorization_evidence=authorization_evidence,
-            analyst_state=analyst_state,
-            correlation_context=correlation_context,
+            authorization_evidence=snapshot.authorization_evidence,
+            analyst_state=snapshot.analyst_state,
+            correlation_context=snapshot.correlated_alert_context,
             role_memory_file=args.agent_memory_file,
             shared_memory_file=args.shared_memory_file,
             memory_bytes=args.memory_bytes,
@@ -1943,6 +1934,21 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             query_v2=INVESTIGATION_QUERY_V2,
         )
     )
+    history = collect_historical_evidence_snapshot(
+        HistoricalEvidenceSnapshotSources(
+            prior_analysis_context=prior_analysis_context,
+            related_alerts=related_alerts,
+            query_rows=rows,
+        ),
+        HistoricalEvidenceSnapshotRequest(
+            connection=conn,
+            selected=selected,
+            analysis_dir=args.analysis_dir,
+            related_limit=args.related_limit,
+            include_tests=bool(args.include_tests),
+            blind_reanalysis=bool(args.blind_reanalysis),
+        ),
+    )
     return assemble_prompt_package(
         PromptPackageView(
             agent_role=str(args.agent_role),
@@ -1963,10 +1969,10 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             },
             prompt_contract=prompt_contract,
             evidence_sections={
-                "alert": compact_selected,
-                "grouped_alert_context": group_context,
-                "public_enrichment": enrichment_context,
-                "pcap_evidence": pcap_context,
+                "alert": snapshot.alert,
+                "grouped_alert_context": snapshot.grouped_alert_context,
+                "public_enrichment": snapshot.public_enrichment,
+                "pcap_evidence": snapshot.pcap_evidence,
                 "investigation_query_capability": (
                     admitted_evidence.investigation_capability
                 ),
@@ -1976,23 +1982,14 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
                 "investigation_skills": detection_context.investigation_skills,
                 "detection_validation": detection_context.detection_validation,
                 "asset_context": detection_context.asset_context,
-                "authorization_evidence": authorization_evidence,
-                "analyst_state": analyst_state,
-                "prior_analyses": (
-                    []
-                    if args.blind_reanalysis
-                    else prior_analysis_context(conn, args.analysis_dir, selected)
-                ),
-                "related_alerts": related_alerts(
-                    conn,
-                    selected,
-                    args.related_limit,
-                    args.include_tests,
-                ),
+                "authorization_evidence": snapshot.authorization_evidence,
+                "analyst_state": snapshot.analyst_state,
+                "prior_analyses": history.prior_analyses,
+                "related_alerts": history.related_alerts,
                 "correlated_alert_context": admitted_evidence.correlation_context,
-                "recent_notifications": notification_context(conn, selected),
+                "recent_notifications": history.recent_notifications,
                 "agent_memory": admitted_evidence.memory_context,
-                "latest_daily_rollup": rollup,
+                "latest_daily_rollup": snapshot.latest_daily_rollup,
             },
             incident_evidence=admitted_evidence.incident_evidence,
         )
