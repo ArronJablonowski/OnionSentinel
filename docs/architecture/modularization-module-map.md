@@ -638,6 +638,12 @@ incident evidence. All query builders, file reads, validators, and projectors
 are injected by the legacy composition root; source memory and correlation data
 remain unchanged by blind filtering.
 
+`prompt_evidence_facade.py` owns the configured alert-store adapters that bind
+alert grouping, selection, prior analyses, PCAP, public enrichment,
+authorization, correlation, and compact alert projection to shared read-only
+SQLite, parsing, and policy utilities. The legacy builder re-exports these
+functions for compatibility but no longer owns their dependency assembly.
+
 `prompt_evidence_snapshot.py` owns ordered read-only evidence collection in two
 explicit stages. The core stage projects the daily rollup, grouped alert, PCAP,
 public enrichment, authorization, analyst state, correlation, and compact alert

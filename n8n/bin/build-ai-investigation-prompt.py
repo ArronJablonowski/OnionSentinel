@@ -12,7 +12,7 @@ import datetime as dt
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterable
 
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -94,7 +94,6 @@ from prompt_builder_policy import (
     INVESTIGATION_QUERY_PACKS,
     INVESTIGATION_QUERY_V2,
     INVESTIGATION_SECURITY_ONION_PURPOSES,
-    LEGACY_ARTIFACT_SCAN_LIMIT,
     MAX_ARTIFACT_JSON_BYTES,
     MAX_DETECTION_GROUP_ROWS,
     MAX_INCIDENT_EVIDENCE_BYTES,
@@ -105,68 +104,16 @@ from prompt_builder_policy import (
     SAFE_PIVOT_DOMAIN_RE,
     TEST_PREFIXES,
 )
-from prompt_authorization_context import (
-    AuthorizationContextSources,
-    authorized_activity_context as project_authorized_activity_context,
-    canonical_authorized_activity_entry as canonical_authorization_entry,
-)
-from prompt_alert_projection import (
-    AlertProjectionSources,
-    project_compact_alert,
-)
-from prompt_alert_group import (
-    AlertGroupRowsRequest,
-    AlertGroupSources,
-    build_analyst_state_context,
-    build_execution_lineage,
-    build_grouped_alert_context,
-    fetch_alert_group_rows,
-)
-from prompt_alert_queries import (
-    AlertQuerySources,
-    AlertSelectionRequest,
-    related_alert_context,
-    select_prompt_alert,
-)
 from prompt_alert_store import (
     build_test_alert_filter,
     derive_alert_group_key,
     query_row,
     query_rows,
-    read_table_columns,
     sqlite_row_value,
     stable_alert_group_id,
 )
-from prompt_pcap_evidence import (
-    PcapEvidenceRequest,
-    PcapEvidenceSources,
-    build_pcap_evidence_context,
-    compact_pcap_analysis as project_pcap_analysis,
-    pcap_request_context as project_pcap_request_context,
-)
-from prompt_public_enrichment import (
-    PublicEnrichmentRequest,
-    PublicEnrichmentSources,
-    build_public_enrichment_context,
-    compact_public_enrichment_record as project_public_enrichment_record,
-)
-from prompt_prior_analysis import (
-    PriorAnalysisRequest,
-    PriorAnalysisSources,
-    build_prior_analysis_context,
-)
-from prompt_correlation_context import (
-    CorrelationContextSources,
-    build_correlated_alert_context,
-)
 from prompt_correlation_facts import (
     COMMUNITY_ID_V1_RE,
-    CORRELATION_MAX_RAW_JSON_BYTES,
-    CorrelationFactSources,
-    correlation_observable_weight,
-    correlation_relationships,
-    correlation_row_facts,
-    correlation_time_bonus,
     parse_project_datetime,
 )
 from prompt_investigation_query_context import (
@@ -181,6 +128,24 @@ from prompt_detection_context import (
 )
 from prompt_evidence_admission import (
     blind_model_authored_context,
+)
+from prompt_evidence_facade import (
+    alert_group_rows,
+    analyst_state_context,
+    authorized_activity_context,
+    canonical_authorized_activity_entry,
+    compact_alert,
+    compact_pcap_analysis,
+    compact_public_enrichment_record,
+    correlated_alert_context,
+    execution_lineage,
+    grouped_alert_context,
+    pcap_evidence_context,
+    pcap_request_context,
+    prior_analysis_context,
+    public_enrichment_context,
+    related_alerts,
+    select_alert,
 )
 from prompt_package_compactor import (
     PackageCompactionSources,
@@ -336,290 +301,6 @@ def alert_group_key(row_value: sqlite3.Row) -> str:
 def alert_group_id(group_key: str) -> str:
     """Compatibility delegate for stable alert-group identity."""
     return stable_alert_group_id(group_key)
-
-
-def execution_lineage(
-    selected: Any,
-    *,
-    blind_reanalysis: bool,
-) -> dict[str, Any]:
-    """Compatibility delegate for stable harness execution identity."""
-    return build_execution_lineage(
-        _alert_group_sources(),
-        selected,
-        blind_reanalysis=blind_reanalysis,
-    )
-
-
-def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    """Compatibility delegate for fail-soft SQLite schema inspection."""
-    return read_table_columns(conn, table)
-
-
-def _alert_group_sources() -> AlertGroupSources:
-    return AlertGroupSources(
-        table_columns=table_columns,
-        row_value=sqlite_value,
-        query_row=row,
-        query_rows=rows,
-        test_filter_sql=test_filter_sql,
-        safe_int=safe_int,
-        alert_group_key=alert_group_key,
-        alert_group_id=alert_group_id,
-    )
-
-
-def alert_group_rows(
-    conn: sqlite3.Connection,
-    selected: sqlite3.Row,
-    *,
-    include_tests: bool,
-    extra_columns: Iterable[str] = (),
-    row_limit: int | None = None,
-) -> list[sqlite3.Row]:
-    """Compatibility delegate for indexed duplicate-group selection."""
-    return fetch_alert_group_rows(
-        _alert_group_sources(),
-        AlertGroupRowsRequest(
-            connection=conn,
-            selected=selected,
-            include_tests=include_tests,
-            maximum_group_rows=MAX_DETECTION_GROUP_ROWS,
-            extra_columns=tuple(extra_columns),
-            row_limit=row_limit,
-        ),
-    )
-
-
-def analyst_state_context(conn: sqlite3.Connection, selected: sqlite3.Row) -> dict:
-    """Compatibility delegate for the latest analyst group decision."""
-    return build_analyst_state_context(_alert_group_sources(), conn, selected)
-
-
-def prior_analysis_context(
-    conn: sqlite3.Connection,
-    analysis_dir: Path,
-    selected: sqlite3.Row,
-    limit: int = 3,
-) -> list[dict]:
-    """Compatibility delegate for indexed and legacy prior analyses."""
-    return build_prior_analysis_context(
-        PriorAnalysisSources(
-            row_value=sqlite_value,
-            query_rows=rows,
-            load_json_bounded=load_json_bounded,
-        ),
-        PriorAnalysisRequest(
-            connection=conn,
-            analysis_dir=analysis_dir,
-            selected=selected,
-            result_limit=limit,
-            legacy_scan_limit=LEGACY_ARTIFACT_SCAN_LIMIT,
-        ),
-    )
-
-
-def compact_pcap_analysis(record: dict) -> dict:
-    """Compatibility delegate for bounded PCAP artifact projection."""
-    return project_pcap_analysis(record)
-
-
-def compact_public_enrichment_record(record: dict) -> dict:
-    """Compatibility delegate for bounded provider evidence projection."""
-    return project_public_enrichment_record(record)
-
-
-def _public_enrichment_sources() -> PublicEnrichmentSources:
-    return PublicEnrichmentSources(
-        row_value=sqlite_value,
-        alert_group_rows=alert_group_rows,
-        parse_json_object=parse_json_object,
-    )
-
-
-def public_enrichment_context(conn: sqlite3.Connection, selected: sqlite3.Row, limit: int, include_tests: bool) -> dict:
-    """Compatibility delegate for duplicate-group public enrichment."""
-    return build_public_enrichment_context(
-        _public_enrichment_sources(),
-        PublicEnrichmentRequest(
-            connection=conn,
-            selected=selected,
-            record_limit=limit,
-            include_tests=include_tests,
-        ),
-    )
-
-
-def _pcap_evidence_sources() -> PcapEvidenceSources:
-    return PcapEvidenceSources(
-        row_value=sqlite_value,
-        query_rows=rows,
-        load_json_bounded=load_json_bounded,
-    )
-
-
-def pcap_request_context(conn: sqlite3.Connection, selected: sqlite3.Row) -> list[dict]:
-    """Compatibility delegate for exact and related PCAP requests."""
-    return project_pcap_request_context(_pcap_evidence_sources(), conn, selected)
-
-
-def pcap_evidence_context(conn: sqlite3.Connection, selected: sqlite3.Row, analysis_dir: Path, limit: int) -> dict:
-    """Compatibility delegate for bounded prompt-facing PCAP evidence."""
-    return build_pcap_evidence_context(
-        _pcap_evidence_sources(),
-        PcapEvidenceRequest(
-            connection=conn,
-            selected=selected,
-            analysis_dir=analysis_dir,
-            evidence_limit=limit,
-            legacy_scan_limit=LEGACY_ARTIFACT_SCAN_LIMIT,
-        ),
-    )
-
-
-def _alert_query_sources() -> AlertQuerySources:
-    return AlertQuerySources(
-        query_row=row,
-        query_rows=rows,
-        test_filter_sql=test_filter_sql,
-        row_value=sqlite_value,
-        now_local=lambda: dt.datetime.now().astimezone(),
-    )
-
-
-def select_alert(conn: sqlite3.Connection, args: argparse.Namespace) -> sqlite3.Row:
-    """Compatibility delegate for explicit or priority alert selection."""
-    return select_prompt_alert(
-        _alert_query_sources(),
-        AlertSelectionRequest(
-            connection=conn,
-            alert_id=str(args.alert_id or ""),
-            levels_csv=str(args.levels or ""),
-            hours=int(args.hours),
-            include_tests=bool(args.include_tests),
-        ),
-    )
-
-
-def related_alerts(conn: sqlite3.Connection, selected: sqlite3.Row, limit: int, include_tests: bool) -> list[dict]:
-    """Compatibility delegate for bounded related-alert history."""
-    return related_alert_context(
-        _alert_query_sources(),
-        conn,
-        selected,
-        limit,
-        include_tests,
-    )
-
-
-def _authorization_context_sources() -> AuthorizationContextSources:
-    return AuthorizationContextSources(
-        row_value=sqlite_value,
-        parse_alert_json=parse_alert_json,
-        parse_datetime=parse_project_datetime,
-        query_row=row,
-        query_rows=rows,
-    )
-
-
-def authorized_activity_context(
-    conn: sqlite3.Connection,
-    selected: sqlite3.Row,
-    limit: int = 500,
-) -> dict[str, Any] | None:
-    """Compatibility delegate for exact operator authorization evidence."""
-    return project_authorized_activity_context(
-        _authorization_context_sources(),
-        conn,
-        selected,
-        limit,
-    )
-
-
-def canonical_authorized_activity_entry(
-    selected: Any,
-    authorization: Any,
-    *,
-    policy_id: Any,
-) -> dict[str, Any] | None:
-    """Compatibility delegate for exact authorization tuple binding."""
-    return canonical_authorization_entry(
-        _authorization_context_sources(),
-        selected,
-        authorization,
-        policy_id=policy_id,
-    )
-
-
-def _correlation_row_facts(
-    row_value: sqlite3.Row | dict,
-) -> dict[str, Any]:
-    return correlation_row_facts(
-        CorrelationFactSources(
-            row_value=sqlite_value,
-            parse_json_object=parse_json_object,
-        ),
-        row_value,
-    )
-
-
-def _correlation_relationships(
-    selected_facts: dict[str, Any],
-    related_facts: dict[str, Any],
-) -> list[dict[str, Any]]:
-    return correlation_relationships(selected_facts, related_facts)
-
-def correlated_alert_context(
-    conn: sqlite3.Connection,
-    selected: sqlite3.Row,
-    limit: int,
-    min_score: int,
-) -> dict:
-    """Return bounded deterministic cross-alert context with provenance."""
-    return build_correlated_alert_context(
-        CorrelationContextSources(
-            rows=rows,
-            table_columns=table_columns,
-            row_value=sqlite_value,
-            observable_weight=correlation_observable_weight,
-            time_bonus=correlation_time_bonus,
-            row_facts=_correlation_row_facts,
-            relationships=_correlation_relationships,
-            safe_int=safe_int,
-            max_raw_json_bytes=CORRELATION_MAX_RAW_JSON_BYTES,
-        ),
-        conn,
-        selected,
-        limit,
-        min_score,
-    )
-
-
-def grouped_alert_context(conn: sqlite3.Connection, selected: sqlite3.Row, limit: int, include_tests: bool) -> dict:
-    """Compatibility delegate for bounded duplicate-group summary."""
-    return build_grouped_alert_context(
-        _alert_group_sources(),
-        AlertGroupRowsRequest(
-            connection=conn,
-            selected=selected,
-            include_tests=include_tests,
-            maximum_group_rows=MAX_DETECTION_GROUP_ROWS,
-        ),
-        limit,
-    )
-
-
-def compact_alert(row_value: sqlite3.Row) -> dict:
-    """Compatibility delegate for bounded alert and rule projection."""
-    return project_compact_alert(
-        AlertProjectionSources(
-            row_value=sqlite_value,
-            parse_alert_json=parse_alert_json,
-            parse_json_object=parse_json_object,
-            extract_rule_context=extract_rule_context,
-        ),
-        row_value,
-    )
 
 
 def _nested_alert_value(alert: dict, dotted_path: str) -> object:

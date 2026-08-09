@@ -182,6 +182,22 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_evidence_facade.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_evidence_facade.py",
+      "required_symbols": [
+        "authorized_activity_context",
+        "compact_alert",
+        "correlated_alert_context",
+        "execution_lineage",
+        "grouped_alert_context",
+        "pcap_evidence_context",
+        "prior_analysis_context",
+        "public_enrichment_context",
+        "select_alert"
+      ]
+    },
+    {
       "path": "n8n/bin/prompt_evidence_snapshot.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_evidence_snapshot.py",
