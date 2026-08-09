@@ -61,6 +61,11 @@ from cohort_dispatch_readback import (
     CohortDispatchReadbackSources,
     verify_dispatch_readback as prove_dispatch_readback,
 )
+from cohort_dispatch_workflow import (
+    CohortDispatchSources,
+    Poster,
+    queue_cohort as run_queue_cohort,
+)
 from cohort_http import (
     CohortHttpPolicy,
     HttpResult,
@@ -2035,7 +2040,26 @@ def _monitor_dispatch_job_binding(
     }
 
 
-Poster = Callable[[str, Mapping[str, Any]], HttpResult]
+def _cohort_dispatch_sources() -> CohortDispatchSources:
+    """Bind legacy queue patch points to the extracted dispatch workflow."""
+    return CohortDispatchSources(
+        cohort_error=CohortError,
+        ambiguous_dispatch_error=AmbiguousDispatchError,
+        load_private_manifest=load_private_manifest,
+        validate_loopback_base_url=validate_loopback_base_url,
+        load_evaluation_token=load_evaluation_token,
+        validate_frozen_cohort=validate_frozen_cohort,
+        deterministic_dispatch_id=deterministic_dispatch_id,
+        utc_now=utc_now,
+        write_private_json=write_private_json,
+        connect_read_only=connect_read_only,
+        validate_member_preflight=validate_member_preflight,
+        request_for_member=_request_for_member,
+        validate_success_response=_validate_success_response,
+        verify_dispatch_readback=_verify_dispatch_readback,
+        dashboard_post_json=dashboard_post_json,
+        sha256_value=sha256_value,
+    )
 
 
 def queue_cohort(
@@ -2048,143 +2072,16 @@ def queue_cohort(
     poster: Poster | None = None,
     evaluation_token_file: Path | None = None,
 ) -> dict[str, Any]:
-    manifest = load_private_manifest(manifest_path)
-    base_url = validate_loopback_base_url(base_url)
-    evaluation_token = (
-        load_evaluation_token(evaluation_token_file)
-        if evaluation_token_file is not None
-        else None
-    )
-    states = {
-        str((member.get("dispatch") or {}).get("state") or "")
-        for member in manifest["members"]
-    }
-    if states == {"accepted"}:
-        return manifest
-    if states != {"unattempted"}:
-        raise CohortError(
-            "cohort contains a prior, partial, rejected, dispatching, or "
-            "ambiguous dispatch; refusing to send another request"
-        )
-    validate_frozen_cohort(database_path, manifest)
-    dispatch_ids = [
-        deterministic_dispatch_id(manifest, member)
-        for member in manifest["members"]
-    ]
-    if len(dispatch_ids) != len(set(dispatch_ids)):
-        raise CohortError("cohort members derived duplicate dispatch IDs")
-    if dry_run:
-        return manifest
-    for member, dispatch_id in zip(manifest["members"], dispatch_ids):
-        member["dispatch"]["dispatch_id"] = dispatch_id
-
-    def do_post(url: str, payload: Mapping[str, Any]) -> HttpResult:
-        if poster is not None:
-            return poster(url, payload)
-        return dashboard_post_json(
-            url,
-            payload,
-            timeout=timeout,
-            evaluation_token=evaluation_token,
-        )
-
-    manifest["state"] = "queueing"
-    manifest["queue_started_at"] = utc_now()
-    manifest = write_private_json(
+    """Compatibility adapter for the extracted cohort queue state machine."""
+    return run_queue_cohort(
+        _cohort_dispatch_sources(),
+        database_path,
         manifest_path,
-        manifest,
-        digest_field="manifest_sha256",
-    )
-    for index, member in enumerate(manifest["members"]):
-        connection = connect_read_only(database_path)
-        try:
-            representative_binding = validate_member_preflight(
-                connection,
-                member,
-            )
-        finally:
-            connection.close()
-        url, payload = _request_for_member(base_url, manifest, member)
-        dispatch = member["dispatch"]
-        dispatch.update(
-            {
-                "state": "dispatching",
-                "attempt_count": 1,
-                "started_at": utc_now(),
-                "request_path": urllib.parse.urlsplit(url).path,
-                "request_sha256": sha256_value(payload),
-                "representative_binding": representative_binding,
-            }
-        )
-        manifest["members"][index] = member
-        manifest = write_private_json(
-            manifest_path,
-            manifest,
-            digest_field="manifest_sha256",
-        )
-        try:
-            result = do_post(url, payload)
-            accepted = _validate_success_response(manifest, member, result)
-            readback = _verify_dispatch_readback(
-                database_path,
-                manifest,
-                member,
-                accepted,
-            )
-        except AmbiguousDispatchError as exc:
-            dispatch.update(
-                {
-                    "state": "ambiguous",
-                    "finished_at": utc_now(),
-                    "error_type": type(exc).__name__,
-                    "error_digest": sha256_value(str(exc)),
-                }
-            )
-            manifest["state"] = "dispatch_ambiguous"
-            manifest["members"][index] = member
-            write_private_json(
-                manifest_path,
-                manifest,
-                digest_field="manifest_sha256",
-            )
-            raise
-        except CohortError as exc:
-            dispatch.update(
-                {
-                    "state": "rejected",
-                    "finished_at": utc_now(),
-                    "error_type": type(exc).__name__,
-                    "error_digest": sha256_value(str(exc)),
-                }
-            )
-            manifest["state"] = "dispatch_rejected"
-            manifest["members"][index] = member
-            write_private_json(
-                manifest_path,
-                manifest,
-                digest_field="manifest_sha256",
-            )
-            raise
-        dispatch.update(
-            {
-                "state": "accepted",
-                "finished_at": utc_now(),
-                "accepted": accepted,
-                "readback": readback,
-            }
-        )
-        manifest["members"][index] = member
-        manifest = write_private_json(
-            manifest_path,
-            manifest,
-            digest_field="manifest_sha256",
-        )
-    manifest["state"] = "queued"
-    manifest["queue_completed_at"] = utc_now()
-    return write_private_json(
-        manifest_path,
-        manifest,
-        digest_field="manifest_sha256",
+        base_url=base_url,
+        timeout=timeout,
+        dry_run=dry_run,
+        poster=poster,
+        evaluation_token_file=evaluation_token_file,
     )
 
 

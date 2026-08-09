@@ -46,6 +46,16 @@
       ]
     },
     {
+      "path": "operations/cohort_dispatch_workflow.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_dispatch_workflow.py",
+      "required_symbols": [
+        "CohortDispatchSources",
+        "Poster",
+        "queue_cohort"
+      ]
+    },
+    {
       "path": "n8n/bin/run-local-ai-analysis.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/run-local-ai-analysis.py",

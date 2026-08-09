@@ -534,6 +534,12 @@ HTTP acceptance identity to one active durable job, unchanged job payload,
 exact case/run row, representative alert, and zero premature analyses before
 the queue workflow may persist an accepted state.
 
+`operations/cohort_dispatch_workflow.py` owns idempotent cohort queue state
+transitions. It refuses partial/replayed cohorts, seals dispatch intent before
+network I/O, persists ambiguous and rejected outcomes without retrying, and
+marks acceptance only after the injected readback proof succeeds. The module
+has no concrete database, HTTP, or filesystem dependency.
+
 `prompt_incident_evidence_projection.py` owns the model-facing, in-memory
 projection of already-validated incident evidence. It applies deterministic
 prefix limits to Elastic hits and OSQuery rows, records source and retained
