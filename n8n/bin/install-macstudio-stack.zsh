@@ -81,6 +81,7 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/lib/route_registry.js" \
     "$ALERT_STORE_STAGE_DIR/lib/http_dispatch.js" \
     "$ALERT_STORE_STAGE_DIR/lib/scoring_policy.js" \
+    "$ALERT_STORE_STAGE_DIR/lib/indicator_extraction.js" \
     "$ALERT_STORE_STAGE_DIR/repositories/health_repository.js" \
     "$ALERT_STORE_STAGE_DIR/routes/inventory_routes.js" \
     "$ALERT_STORE_STAGE_DIR/routes/health_routes.js" \
