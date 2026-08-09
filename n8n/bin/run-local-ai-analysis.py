@@ -1791,6 +1791,29 @@ def _query_repair():
     return repair
 
 
+def _query_deterministic_planning():
+    _provider_routing()
+    from onion_sentinel.analysis.query import deterministic_planning
+    return deterministic_planning
+
+
+def _query_deterministic_planning_policy():
+    module = _query_deterministic_planning()
+    return module.Policy(pack_role_modes=dict(PACK_ROLE_MODE))
+
+
+def _query_deterministic_planning_dependencies():
+    module = _query_deterministic_planning()
+    return module.Dependencies(
+        is_incident_responder=_is_incident_responder_package,
+        canonical_digest=investigation_query_canonical_digest,
+        parse_utc=_query_utc,
+        utc_text=_query_utc_text,
+        pack_event_tuple_fields=pack_event_tuple_fields,
+        query_error=InvestigationQueryError,
+    )
+
+
 def _query_audit():
     _provider_routing()
     from onion_sentinel.analysis.query import audit
@@ -6293,332 +6316,13 @@ def investigation_query_repair_prompt_entry(
 def deterministic_incident_pivot_requests(
     prompt_package: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Compile a repeatable protocol-first pivot plan from trusted context.
-
-    This planner never consumes model-supplied observables or executable query
-    text. It uses the locally authorized event tuple and emits the same fixed
-    packs, window, and parameters for the same evidence package.
-    """
-    if not _is_incident_responder_package(prompt_package):
-        return []
-    capability = prompt_package.get("investigation_query_capability")
-    local = prompt_package.get("_local_investigation_query_context")
-    if not isinstance(capability, dict) or not capability.get("enabled"):
-        return []
-    if not isinstance(local, dict):
-        return []
-    tuples = local.get("permitted_event_tuples")
-    if not isinstance(tuples, list) or not tuples:
-        return []
-    alert = (
-        prompt_package.get("alert")
-        if isinstance(prompt_package.get("alert"), dict)
-        else {}
+    """Compile a repeatable protocol-first plan from trusted local context."""
+    module = _query_deterministic_planning()
+    return module.plan(
+        prompt_package,
+        policy=_query_deterministic_planning_policy(),
+        dependencies=_query_deterministic_planning_dependencies(),
     )
-    trusted_entries = [
-        item
-        for item in tuples
-        if isinstance(item, dict)
-        and isinstance(item.get("event_tuple"), dict)
-    ]
-    if not trusted_entries:
-        return []
-    raw_alert_subset = (
-        alert.get("raw_alert_subset")
-        if isinstance(alert.get("raw_alert_subset"), dict)
-        else {}
-    )
-    raw_source = (
-        raw_alert_subset.get("source")
-        if isinstance(raw_alert_subset.get("source"), dict)
-        else {}
-    )
-    raw_destination = (
-        raw_alert_subset.get("destination")
-        if isinstance(raw_alert_subset.get("destination"), dict)
-        else {}
-    )
-    raw_network = (
-        raw_alert_subset.get("network")
-        if isinstance(raw_alert_subset.get("network"), dict)
-        else {}
-    )
-    rule_context = (
-        alert.get("rule_context")
-        if isinstance(alert.get("rule_context"), dict)
-        else {}
-    )
-    anchor_tuple = {
-        key: value
-        for key, value in {
-            "source_ip": alert.get("source_ip") or raw_source.get("ip"),
-            "destination_ip": (
-                alert.get("destination_ip") or raw_destination.get("ip")
-            ),
-            "source_port": alert.get("source_port") or raw_source.get("port"),
-            "destination_port": (
-                alert.get("destination_port") or raw_destination.get("port")
-            ),
-            "transport": (
-                alert.get("transport_protocol") or raw_network.get("transport")
-            ),
-            "protocol": (
-                alert.get("network_protocol") or raw_network.get("protocol")
-            ),
-            "community_id": (
-                alert.get("community_id") or raw_network.get("community_id")
-            ),
-            "rule_id": (
-                alert.get("rule_id")
-                or rule_context.get("record_rule_id")
-                or rule_context.get("sid")
-            ),
-        }.items()
-        if value not in (None, "")
-    }
-
-    def trusted_entry_rank(entry: dict[str, Any]) -> tuple[int, int, str]:
-        candidate = entry["event_tuple"]
-        mismatches = sum(
-            1
-            for key, value in anchor_tuple.items()
-            if key in candidate
-            and str(candidate[key]).lower() != str(value).lower()
-        )
-        matches = sum(
-            1
-            for key, value in anchor_tuple.items()
-            if key in candidate
-            and str(candidate[key]).lower() == str(value).lower()
-        )
-        return (
-            mismatches,
-            -matches,
-            investigation_query_canonical_digest(entry),
-        )
-
-    trusted_entry = min(trusted_entries, key=trusted_entry_rank)
-    trusted_tuple = trusted_entry["event_tuple"]
-    deployed_rule = (
-        rule_context.get("deployed_rule")
-        if isinstance(rule_context.get("deployed_rule"), dict)
-        else {}
-    )
-    protocol = str(
-        deployed_rule.get("protocol")
-        or _nested_value(alert, "network.protocol")
-        or ""
-    ).strip().lower()
-    rule_name = str(alert.get("rule_name") or "").lower()
-    if protocol == "http":
-        packs = ("zeek_http", "zeek_files")
-    elif protocol in {"tls", "ssl"}:
-        packs = ("zeek_tls", "zeek_anomalies")
-    elif protocol == "dns":
-        packs = ("dns_activity", "zeek_tls")
-    elif protocol == "ssh":
-        packs = ("zeek_ssh", "system_auth")
-    elif protocol == "quic":
-        packs = ("zeek_quic", "network_flow")
-    elif protocol == "udp" and "stun" in rule_name:
-        packs = ("zeek_stun", "network_flow")
-    else:
-        packs = ("network_flow", "alert_context")
-
-    anchor: dt.datetime | None = None
-    for candidate in (
-        local.get("anchor_time"),
-        capability.get("anchor_time"),
-    ):
-        if candidate in (None, ""):
-            continue
-        try:
-            anchor = _query_utc(candidate, "authorization anchor_time")
-            break
-        except InvestigationQueryError:
-            continue
-    if anchor is None:
-        envelope = local.get("time_envelope")
-        if isinstance(envelope, dict):
-            try:
-                envelope_start = _query_utc(
-                    envelope.get("start"),
-                    "authorization envelope start",
-                )
-                envelope_end = _query_utc(
-                    envelope.get("end"),
-                    "authorization envelope end",
-                )
-                if envelope_end > envelope_start:
-                    anchor = envelope_start + (
-                        envelope_end - envelope_start
-                    ) / 2
-            except InvestigationQueryError:
-                anchor = None
-    if anchor is None:
-        # Project timestamps use a human-readable double space between the
-        # date and time. Normalize only whitespace before the strict
-        # offset-aware ISO parser; the trusted authorization envelope remains
-        # the preferred source.
-        alert_timestamp = re.sub(
-            r"\s+",
-            " ",
-            str(alert.get("timestamp") or "").strip(),
-        )
-        try:
-            anchor = _query_utc(
-                alert_timestamp,
-                "selected alert timestamp",
-            )
-        except InvestigationQueryError:
-            return []
-    window = {
-        "start": _query_utc_text(anchor - dt.timedelta(minutes=5)),
-        "end": _query_utc_text(anchor + dt.timedelta(minutes=5)),
-    }
-    ips = [
-        str(value)
-        for value in (
-            trusted_tuple.get("source_ip"),
-            trusted_tuple.get("destination_ip"),
-        )
-        if str(value or "").strip()
-    ]
-    observables = {
-        "ips": list(dict.fromkeys(ips)),
-        "domains": [],
-        "hosts": [],
-        "users": [],
-    }
-    output: list[dict[str, Any]] = []
-    elastic_capability = (
-        capability.get("backends", {}).get("elastic", {})
-        if isinstance(capability.get("backends"), dict)
-        else {}
-    )
-    advertised_packs = set(
-        elastic_capability.get("packs", [])
-        if isinstance(elastic_capability, dict)
-        and isinstance(elastic_capability.get("packs"), list)
-        else []
-    )
-    for pack in packs:
-        if pack not in advertised_packs:
-            continue
-        allowed_tuple_fields = pack_event_tuple_fields(pack)
-        event_tuple = {
-            key: value
-            for key, value in trusted_tuple.items()
-            if key in allowed_tuple_fields and value not in (None, "")
-        }
-        role_mode = PACK_ROLE_MODE.get(pack)
-        role_semantics = str(
-            trusted_entry.get("role_semantics") or ""
-        ).strip()
-        if (
-            role_mode == "cross_sensor"
-            or (
-                role_mode == "zeek_originator_responder"
-                and role_semantics != "zeek_originator_responder"
-            )
-        ) and "community_id" not in event_tuple:
-            # Exact IP roles in a Suricata packet are not interchangeable with
-            # Zeek originator/responder roles. In the absence of the reviewed
-            # cross-sensor join key, retain the bounded exact-IP observable
-            # query and omit the semantically unsafe directional tuple.
-            event_tuple = {}
-        output.append(
-            {
-                "query_id": f"deterministic-{pack}",
-                "backend": "elastic",
-                "purpose": (
-                    "validate_detection"
-                    if not output
-                    else "establish_timeline"
-                ),
-                "parameters": {
-                    "pack": pack,
-                    "window": dict(window),
-                    "observables": copy.deepcopy(observables),
-                    **(
-                        {"event_tuple": event_tuple}
-                        if event_tuple
-                        else {}
-                    ),
-                    "size": 100,
-                    "aggregation": (
-                        "events" if not output else "timeline"
-                    ),
-                },
-            }
-        )
-
-    # Network detections commonly carry an ephemeral source port that is too
-    # narrow for historical endpoint attribution.  Add one deterministic,
-    # exact-pair endpoint-history pivot over a bounded day only when the
-    # deployment advertises that fixed pack.  The request deliberately keeps
-    # the source/destination roles, destination service port, and transport,
-    # while omitting the ephemeral source port, rule identifier, and protocol
-    # label.  This remains a subset of the collector-authorized event tuple and
-    # cannot introduce a new observable or widen beyond the trusted envelope.
-    if (
-        protocol in {"http", "tls", "ssl", "dns"}
-        and "osquery_history" in advertised_packs
-        and trusted_tuple.get("source_ip") not in (None, "")
-        and trusted_tuple.get("destination_ip") not in (None, "")
-    ):
-        attribution_start = anchor - dt.timedelta(hours=12)
-        attribution_end = anchor + dt.timedelta(hours=12)
-        envelope = local.get("time_envelope")
-        if isinstance(envelope, dict):
-            try:
-                attribution_start = max(
-                    attribution_start,
-                    _query_utc(
-                        envelope.get("start"),
-                        "authorization envelope start",
-                    ),
-                )
-                attribution_end = min(
-                    attribution_end,
-                    _query_utc(
-                        envelope.get("end"),
-                        "authorization envelope end",
-                    ),
-                )
-            except InvestigationQueryError:
-                attribution_start = anchor - dt.timedelta(hours=12)
-                attribution_end = anchor + dt.timedelta(hours=12)
-        attribution_tuple = {
-            key: trusted_tuple[key]
-            for key in (
-                "source_ip",
-                "destination_ip",
-                "destination_port",
-                "transport",
-            )
-            if trusted_tuple.get(key) not in (None, "")
-        }
-        if attribution_end > attribution_start:
-            output.append(
-                {
-                    "query_id": "deterministic-osquery-history-attribution",
-                    "backend": "elastic",
-                    "purpose": "test_benign_hypothesis",
-                    "parameters": {
-                        "pack": "osquery_history",
-                        "window": {
-                            "start": _query_utc_text(attribution_start),
-                            "end": _query_utc_text(attribution_end),
-                        },
-                        "observables": copy.deepcopy(observables),
-                        "event_tuple": attribution_tuple,
-                        "size": 100,
-                        "aggregation": "anchor_nearest",
-                    },
-                }
-            )
-    return output
 
 
 class _QueryCoordinatorRuntime:

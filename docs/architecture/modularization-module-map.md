@@ -199,6 +199,12 @@ line ranges below remain historical navigation aids for the extraction ledger.
   validation, broker contract-failure classification, and value-safe repair
   prompt projection now live in `analysis.query.repair` behind explicit
   normalization, tuple, and digest ports.
+- Protocol-first Incident Responder planning now lives in
+  `analysis.query.deterministic_planning`. It ranks only collector-authorized
+  event tuples against the selected alert, derives fixed advertised packs and
+  bounded UTC windows, suppresses semantically unsafe cross-sensor direction,
+  and emits no executable query language. Digest, UTC, pack-field, role-mode,
+  and agent-role policy remain injected by the legacy composition root.
 - Fixed model-visible query error categories and bounded raw-error digest
   binding now live in `analysis.query.prompt_errors`; broker, validator, and
   attacker-controlled raw error text remains outside follow-up prompts.
@@ -2195,6 +2201,11 @@ The evaluation-only missing-pivot retry lives under
 instruction lifecycle, prompt-size admission, model-call recording, route
 attestation, and required-request validation while receiving model and harness
 operations only through injected callbacks.
+The initial protocol-first plan lives under
+`onion_sentinel.analysis.query.deterministic_planning`. It is a pure,
+repeatable compiler from the trusted local event tuple and advertised backend
+capabilities to fixed read-only request envelopes. It does not consume model
+observables, query text, credentials, filesystem state, or network access.
 Canonical per-round result handling lives under
 `onion_sentinel.analysis.query.round_result`. It invokes the already-authorized
 broker only through an injected callback, rejects malformed result envelopes
