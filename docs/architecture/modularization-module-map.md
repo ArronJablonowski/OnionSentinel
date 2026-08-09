@@ -224,8 +224,9 @@ line ranges below remain historical navigation aids for the extraction ledger.
 - Exact request envelopes, backend identity, deterministic query-ID fallback,
   backend parameter projection, and cross-backend drop audit now live in
   `analysis.query.request`.
-- Independent public-enrichment execution, evidence contract admission, result
-  binding, and terminal error projection now live in
+- Cache-first public-enrichment collection, bounded record projection,
+  digest-bound evidence identity, independent execution, evidence contract
+  admission, result binding, and terminal error projection now live in
   `analysis.query.execution.enrichment`.
 - Capped PCAP/Zeek-derived execution, provider evidence validation,
   source/query/result digest binding, canonical evidence references, and

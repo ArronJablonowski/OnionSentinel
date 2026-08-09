@@ -4244,60 +4244,14 @@ def collect_investigation_enrichment(
     request: dict[str, Any],
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    parameters = request.get("parameters") if isinstance(request.get("parameters"), dict) else {}
-    payload = {
-        "indicator_type": parameters.get("indicator_type"),
-        "indicator": parameters.get("indicator"),
-    }
-    token = str(config.get("token") or "")
-    timeout = int(config.get("timeout") or 120)
-    cache = _post_investigation_enrichment_json(
-        str(config["alert_store_url"]) + "/investigations/enrichment/cache",
-        payload,
-        {"X-Onion-Sentinel-Asset-Token": token},
-        timeout,
+    module = _query_execution_enrichment()
+    return module.collect(
+        request, config,
+        dependencies=module.CollectionDependencies(
+            post_json=_post_investigation_enrichment_json,
+            project_record=_project_investigation_enrichment_record,
+        ),
     )
-    n8n_invoked = not bool(cache.get("cache_complete"))
-    source = cache
-    if n8n_invoked:
-        source = _post_investigation_enrichment_json(
-            str(config["n8n_url"]),
-            payload,
-            {"X-Relay-Token": token},
-            timeout,
-        )
-    raw_records = (
-        source.get("records")
-        if isinstance(source.get("records"), list)
-        else source.get("enrichment", {}).get("records", [])
-        if isinstance(source.get("enrichment"), dict)
-        else []
-    )
-    records = [
-        projected for projected in
-        (_project_investigation_enrichment_record(item) for item in raw_records[:16])
-        if projected
-    ]
-    canonical_query = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    canonical_result = json.dumps(records, sort_keys=True, separators=(",", ":"), default=str)
-    query_digest = hashlib.sha256(canonical_query.encode("utf-8")).hexdigest()
-    result_digest = hashlib.sha256(canonical_result.encode("utf-8")).hexdigest()
-    return {
-        "schema": "onion-sentinel-investigation-enrichment-evidence-v1",
-        "status": "ok",
-        "indicator_type": payload["indicator_type"],
-        "indicator": payload["indicator"],
-        "cache_checked_first": True,
-        "cache_complete": bool(cache.get("cache_complete")),
-        "n8n_invoked": n8n_invoked,
-        "rate_limits_enforced_by": "alert-store-persisted-provider-scheduler",
-        "records": records,
-        "skipped": (source.get("enrichment") or source).get("skipped", []),
-        "errors": (source.get("enrichment") or source).get("errors", []),
-        "query_digest": query_digest,
-        "result_digest": result_digest,
-        "evidence_ref": f"enrichment:{query_digest[:20]}:{result_digest[:20]}",
-    }
 
 
 def security_onion_authorization_context(value: Any) -> dict[str, Any]:

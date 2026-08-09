@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import unittest
 import urllib.error
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -99,6 +100,57 @@ class EnrichmentExecutionPackageTests(unittest.TestCase):
         )
         self.assertEqual([item["status"] for item in outcome.results], ["error", "ok"])
         self.assertEqual(len(outcome.audits), 1)
+
+    def test_collection_checks_complete_cache_before_n8n(self) -> None:
+        post = mock.Mock(return_value={
+            "cache_complete": True,
+            "records": [{"source": "cache"}],
+            "skipped": [], "errors": [],
+        })
+        result = enrichment.collect(
+            request(), {
+                "token": "private", "timeout": 30,
+                "alert_store_url": "http://127.0.0.1:8766",
+                "n8n_url": "http://127.0.0.1:5678/webhook/enrich",
+            },
+            dependencies=enrichment.CollectionDependencies(
+                post_json=post,
+                project_record=lambda value: {"source": value["source"]},
+            ),
+        )
+        self.assertEqual(post.call_count, 1)
+        self.assertFalse(result["n8n_invoked"])
+        self.assertTrue(result["cache_complete"])
+        self.assertRegex(result["query_digest"], r"^[a-f0-9]{64}$")
+        self.assertRegex(result["result_digest"], r"^[a-f0-9]{64}$")
+        self.assertNotIn("private", str(result))
+
+    def test_collection_uses_n8n_on_incomplete_cache_and_caps_records(self) -> None:
+        post = mock.Mock(side_effect=[
+            {"cache_complete": False},
+            {"enrichment": {
+                "records": [{"number": value} for value in range(20)],
+                "skipped": ["source-a"], "errors": [],
+            }},
+        ])
+        result = enrichment.collect(
+            request(), {
+                "token": "private", "alert_store_url": "http://alert-store",
+                "n8n_url": "http://n8n",
+            },
+            dependencies=enrichment.CollectionDependencies(
+                post_json=post,
+                project_record=lambda value: value,
+            ),
+        )
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(post.call_args_list[0].args[2], {
+            "X-Onion-Sentinel-Asset-Token": "private",
+        })
+        self.assertEqual(post.call_args_list[1].args[2], {"X-Relay-Token": "private"})
+        self.assertTrue(result["n8n_invoked"])
+        self.assertEqual(len(result["records"]), 16)
+        self.assertEqual(result["skipped"], ["source-a"])
 
 
 if __name__ == "__main__":
