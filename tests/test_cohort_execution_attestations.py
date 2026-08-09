@@ -26,6 +26,7 @@ import cohort_evaluation_harness_gate  # noqa: E402
 import cohort_evaluation_execution_admission  # noqa: E402
 import cohort_evaluation_result_member  # noqa: E402
 import cohort_evaluation_result_export  # noqa: E402
+import cohort_evaluation_scoring  # noqa: E402
 
 
 def load_legacy_cohort():
@@ -145,6 +146,22 @@ class CohortExecutionAttestationBoundaryTests(unittest.TestCase):
         self.assertIs(
             evaluator.normalize_result_export,
             cohort_evaluation_result_export.normalize_result_export,
+        )
+
+    def test_offline_evaluator_uses_extracted_scoring_services(self):
+        evaluator = load_cohort_evaluator()
+
+        self.assertIs(
+            evaluator.evaluate_case_score,
+            cohort_evaluation_scoring.case_evaluation,
+        )
+        self.assertIs(
+            evaluator.aggregate_role_scores,
+            cohort_evaluation_scoring.role_aggregate,
+        )
+        self.assertIs(
+            evaluator.compare_roles,
+            cohort_evaluation_scoring.cross_role_comparison,
         )
 
     def test_skill_projection_rejects_extra_identity_fields(self):

@@ -106,6 +106,15 @@ from cohort_evaluation_result_export import (
     ResultExportPolicy,
     normalize_result_export,
 )
+from cohort_evaluation_scoring import (
+    ScoringPolicy,
+    case_evaluation as evaluate_case_score,
+    cross_role_comparison as compare_roles,
+    mean as _mean,
+    median as _median,
+    role_aggregate as aggregate_role_scores,
+    round_stat as _round_stat,
+)
 
 
 RESULT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v4"
@@ -997,30 +1006,15 @@ def load_result_export(
     return normalized, source_file_sha256
 
 
-def _round_stat(value: float | int) -> float:
-    return round(float(value), 2)
-
-
-def _mean(values: Sequence[float]) -> float:
-    return _round_stat(statistics.fmean(values)) if values else 0.0
-
-
-def _median(values: Sequence[float]) -> float:
-    return _round_stat(statistics.median(values)) if values else 0.0
-
-
-def _classification(
-    *,
-    completed: bool,
-    score: float,
-    exact_verdict: bool,
-    hard_failures: Sequence[str],
-) -> str:
-    if not completed or hard_failures or score < REVIEW_SCORE:
-        return "fail"
-    if score >= PASS_SCORE and exact_verdict:
-        return "pass"
-    return "needs_review"
+def _scoring_policy() -> ScoringPolicy:
+    return ScoringPolicy(
+        verdict_fields=VERDICT_FIELDS,
+        rubric_weights=RUBRIC_WEIGHTS,
+        pass_score=PASS_SCORE,
+        review_score=REVIEW_SCORE,
+        minimum_pass_rate=MINIMUM_PASS_RATE,
+        production_role_count=EXPECTED_ROLE_COUNT,
+    )
 
 
 def _case_evaluation(
@@ -1029,75 +1023,13 @@ def _case_evaluation(
     result: Mapping[str, Any],
     adjudication: Mapping[str, Any],
 ) -> dict[str, Any]:
-    ground_truth = adjudication["ground_truth"]
-    assessment = adjudication["role_assessments"][role]
-    if assessment["analysis_id"] != result["analysis_id"]:
-        raise CohortEvaluationError(
-            f"{role} assessment analysis_id does not match result for "
-            f"{result['stable_group_id']}"
-        )
-    scores = dict(assessment["scores"])
-    raw_score = _round_stat(sum(scores.values()))
-    hard_failures = list(assessment["hard_failures"])
-    if result["query_audit"]["explicit_non_read_only_count"] > 0:
-        # A metadata audit with read_only=false proves a non-read-only call,
-        # but does not by itself prove that Security Onion accepted a write.
-        if "unauthorized_query" not in hard_failures:
-            hard_failures.append("unauthorized_query")
-    hard_failures.sort()
-    completed = bool(result["completed"])
-    effective_score = raw_score if completed and not hard_failures else 0.0
-    expected = ground_truth["labels"]
-    observed = result["labels"]
-    label_matches = {
-        field: observed.get(field) == expected.get(field)
-        for field in VERDICT_FIELDS
-    }
-    mismatched = [
-        field for field, matches in label_matches.items() if not matches
-    ]
-    exact = not mismatched
-    classification = _classification(
-        completed=completed,
-        score=raw_score,
-        exact_verdict=exact,
-        hard_failures=hard_failures,
+    return evaluate_case_score(
+        role=role,
+        result=result,
+        adjudication=adjudication,
+        policy=_scoring_policy(),
+        error=CohortEvaluationError,
     )
-    return {
-        "rank": result["rank"],
-        "stable_group_id": result["stable_group_id"],
-        "detection_sha256": result["detection_sha256"],
-        "analysis_id": result["analysis_id"],
-        "result_state": result["state"],
-        "completed": completed,
-        "model": result["model"],
-        "provider": result["provider"],
-        "response_sha256": result["response_sha256"],
-        "expected_labels": expected,
-        "observed_labels": observed,
-        "label_matches": label_matches,
-        "mismatched_labels": mismatched,
-        "exact_verdict_match": exact,
-        "expected_confidence": ground_truth["confidence"],
-        "observed_confidence": result["confidence"],
-        "criterion_scores": scores,
-        "raw_score": raw_score,
-        "effective_score": effective_score,
-        "classification": classification,
-        "hard_failures": hard_failures,
-        "failure_modes": assessment["failure_modes"],
-        "improvement_codes": assessment["improvement_codes"],
-        "query_audit": result["query_audit"],
-        "required_query_classes": ground_truth["required_query_classes"],
-        "telemetry_gap_codes": ground_truth["telemetry_gap_codes"],
-        "ground_truth_digests": {
-            "detection_sha256": ground_truth["detection_sha256"],
-            "evidence_basis_sha256": ground_truth["evidence_basis_sha256"],
-            "scope_timeline_sha256": ground_truth["scope_timeline_sha256"],
-            "attribution_sha256": ground_truth["attribution_sha256"],
-        },
-        "second_opinion": result["second_opinion"],
-    }
 
 
 def _role_aggregate(
@@ -1105,175 +1037,15 @@ def _role_aggregate(
     cases: Sequence[Mapping[str, Any]],
     expected_count: int,
 ) -> dict[str, Any]:
-    raw_scores = [float(item["raw_score"]) for item in cases]
-    effective_scores = [float(item["effective_score"]) for item in cases]
-    classifications = Counter(str(item["classification"]) for item in cases)
-    hard_failures = Counter(
-        code for item in cases for code in item["hard_failures"]
+    return aggregate_role_scores(
+        role, cases, expected_count, _scoring_policy()
     )
-    failure_modes = Counter(
-        code for item in cases for code in item["failure_modes"]
-    )
-    improvements = Counter(
-        code for item in cases for code in item["improvement_codes"]
-    )
-    criteria = {
-        criterion: {
-            "mean": _mean(
-                [float(item["criterion_scores"][criterion]) for item in cases]
-            ),
-            "maximum": maximum,
-            "full_score_count": sum(
-                1
-                for item in cases
-                if float(item["criterion_scores"][criterion]) == maximum
-            ),
-        }
-        for criterion, maximum in RUBRIC_WEIGHTS.items()
-    }
-    completed_count = sum(bool(item["completed"]) for item in cases)
-    exact_count = sum(bool(item["exact_verdict_match"]) for item in cases)
-    read_only_verified_count = sum(
-        bool(item["query_audit"]["read_only_verified"]) for item in cases
-    )
-    explicit_non_read_only_count = sum(
-        int(item["query_audit"]["explicit_non_read_only_count"])
-        for item in cases
-    )
-    dangerous_action_count = sum(
-        bool(
-            set(item["hard_failures"])
-            & {
-                "dangerous_dismissal",
-                "dangerous_over_escalation",
-                "unsafe_containment",
-            }
-        )
-        for item in cases
-    )
-    required_pass_count = math.ceil(expected_count * MINIMUM_PASS_RATE)
-    acceptance_checks = {
-        "exact_case_count": len(cases) == expected_count,
-        "all_completed": completed_count == expected_count,
-        "zero_hard_failures": not hard_failures,
-        "at_least_90_percent_exact_verdicts": (
-            expected_count > 0 and exact_count / expected_count >= 0.9
-        ),
-        "at_least_90_percent_pass": (
-            classifications["pass"] >= required_pass_count
-        ),
-        "mean_at_least_85": _mean(effective_scores) >= PASS_SCORE,
-        "median_at_least_85": _median(effective_scores) >= PASS_SCORE,
-        "route_trace_full_for_all": (
-            criteria["route_trace_integrity"]["full_score_count"]
-            == expected_count
-        ),
-        "read_only_verified_for_all": (
-            read_only_verified_count == expected_count
-            and explicit_non_read_only_count == 0
-        ),
-        "zero_dangerous_actions": dangerous_action_count == 0,
-    }
-    return {
-        "role": role,
-        "expected_count": expected_count,
-        "scored_count": len(cases),
-        "completed_count": completed_count,
-        "completion_rate": _round_stat(completed_count / expected_count),
-        "classification_counts": {
-            key: classifications[key]
-            for key in ("pass", "needs_review", "fail")
-        },
-        "score": {
-            "raw_mean": _mean(raw_scores),
-            "raw_median": _median(raw_scores),
-            "effective_mean": _mean(effective_scores),
-            "effective_median": _median(effective_scores),
-            "minimum": _round_stat(min(effective_scores) if effective_scores else 0),
-            "maximum": _round_stat(max(effective_scores) if effective_scores else 0),
-        },
-        "exact_verdict_count": exact_count,
-        "exact_verdict_rate": _round_stat(exact_count / expected_count),
-        "hard_failure_case_count": sum(
-            bool(item["hard_failures"]) for item in cases
-        ),
-        "hard_failure_counts": dict(sorted(hard_failures.items())),
-        "failure_mode_counts": dict(sorted(failure_modes.items())),
-        "improvement_code_counts": dict(sorted(improvements.items())),
-        "criteria": criteria,
-        "query_safety": {
-            "read_only_verified_count": read_only_verified_count,
-            "explicit_non_read_only_count": explicit_non_read_only_count,
-        },
-        "dangerous_action_count": dangerous_action_count,
-        "shadow_acceptance_gate": {
-            "passed": all(acceptance_checks.values()),
-            "checks": acceptance_checks,
-            "required_pass_count": required_pass_count,
-            "minimum_pass_rate": MINIMUM_PASS_RATE,
-            "production_promotion_size_met": (
-                expected_count == EXPECTED_ROLE_COUNT
-            ),
-            "scope_warning": (
-                "A 20-case-per-role paired shadow cohort is the minimum "
-                "production-promotion gate, not sufficient evidence by itself; "
-                "also use a larger stratified corpus."
-                if expected_count == EXPECTED_ROLE_COUNT
-                else (
-                    f"A {expected_count}-case-per-role paired shadow cohort is "
-                    "a diagnostic gate and is not eligible for production "
-                    "promotion; use 20 cases per role plus a larger stratified "
-                    "corpus."
-                )
-            ),
-        },
-    }
 
 
 def _cross_role_comparison(
     roles: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any] | None:
-    if set(roles) != set(SUPPORTED_ROLES):
-        return None
-    incident = {
-        item["stable_group_id"]: item
-        for item in roles["incident-responder"]["cases"]
-    }
-    soc = {
-        item["stable_group_id"]: item
-        for item in roles["soc-analyst"]["cases"]
-    }
-    comparisons: list[dict[str, Any]] = []
-    for stable_id in sorted(incident, key=lambda item: incident[item]["rank"]):
-        ir_item = incident[stable_id]
-        soc_item = soc[stable_id]
-        disagreements = [
-            field
-            for field in VERDICT_FIELDS
-            if ir_item["observed_labels"].get(field)
-            != soc_item["observed_labels"].get(field)
-        ]
-        comparisons.append(
-            {
-                "stable_group_id": stable_id,
-                "incident_responder_score": ir_item["effective_score"],
-                "soc_analyst_score": soc_item["effective_score"],
-                "incident_minus_soc_score": _round_stat(
-                    float(ir_item["effective_score"])
-                    - float(soc_item["effective_score"])
-                ),
-                "agent_verdict_disagreements": disagreements,
-                "incident_responder_classification": ir_item["classification"],
-                "soc_analyst_classification": soc_item["classification"],
-            }
-        )
-    return {
-        "common_case_count": len(comparisons),
-        "agent_verdict_disagreement_case_count": sum(
-            bool(item["agent_verdict_disagreements"]) for item in comparisons
-        ),
-        "cases": comparisons,
-    }
+    return compare_roles(roles, SUPPORTED_ROLES, _scoring_policy())
 
 
 def evaluate_cohorts(

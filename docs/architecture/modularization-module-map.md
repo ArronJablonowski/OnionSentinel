@@ -595,6 +595,12 @@ frozen-plan reconstruction, and the bounded grading projection. Hashing,
 content policy, execution-contract validation, and member policy are injected;
 the legacy loader is reduced to private file input plus this normalization call.
 
+`operations/cohort_evaluation_scoring.py` owns rubric case scoring, hard-failure
+application, verdict comparison, role statistics, query-safety and dangerous
+action counts, shadow acceptance checks, promotion-scope warnings, and paired
+cross-role comparison. All thresholds, rubric weights, verdict fields, and
+promotion cohort size are supplied by an immutable scoring policy.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental
