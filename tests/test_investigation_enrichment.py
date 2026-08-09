@@ -10,6 +10,10 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "n8n" / "bin" / "run-local-ai-analysis.py"
 ALERT_STORE = ROOT / "n8n" / "alert_store" / "alert_store.js"
+ENRICHMENT_POLICY = ROOT / "n8n" / "alert_store" / "lib" / "enrichment_policy.js"
+ENRICHMENT_PROVIDER_CLIENT = (
+    ROOT / "n8n" / "alert_store" / "services" / "enrichment_provider_client.js"
+)
 WORKFLOW_CODE = ROOT / "n8n" / "workflows" / "code" / "investigation-enrichment.js"
 
 
@@ -135,19 +139,19 @@ class InvestigationEnrichmentTests(unittest.TestCase):
 
     def test_runtime_has_double_cache_and_rate_limit_controls(self) -> None:
         alert_store = ALERT_STORE.read_text(encoding="utf-8")
+        enrichment_policy = ENRICHMENT_POLICY.read_text(encoding="utf-8")
+        provider_client = ENRICHMENT_PROVIDER_CLIENT.read_text(encoding="utf-8")
         workflow = WORKFLOW_CODE.read_text(encoding="utf-8")
         self.assertIn("enrichmentCache.peek", alert_store)
         self.assertIn("cachedLookup(source, indicatorType, indicator", alert_store)
         self.assertIn("reserveProviderRateLimitSlot(source)", alert_store)
         self.assertIn("/investigations/enrichment/query", workflow)
-        self.assertIn(
-            "[vuln?.vendorProject, vuln?.product, vuln?.knownRansomwareCampaignUse],\n    response.body,",
-            alert_store,
-        )
-        self.assertIn(".slice(0, 16)", alert_store)
+        self.assertIn("vuln?.knownRansomwareCampaignUse", provider_client)
+        self.assertIn("'cisa_kev', cve, 'cve'", provider_client)
+        self.assertIn(".slice(0, 16)", enrichment_policy)
         self.assertNotIn(
             "alert_id: `investigation-enrichment:${crypto.createHash",
-            alert_store,
+            enrichment_policy,
         )
 
 

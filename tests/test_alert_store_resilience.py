@@ -21,6 +21,7 @@ ENRICHMENT_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "enrichmen
 ALERT_INGEST_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "alert_ingest_service.js"
 NOTIFICATION_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "notification_service.js"
 ALERT_GROUP_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "alert_group_service.js"
+ENRICHMENT_PROVIDER_CLIENT = REPO_ROOT / "n8n" / "alert_store" / "services" / "enrichment_provider_client.js"
 ANALYST_REVIEW_POLICY = REPO_ROOT / "n8n" / "alert_store" / "lib" / "analyst_review_policy.js"
 
 
@@ -43,6 +44,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.alert_ingest_service = ALERT_INGEST_SERVICE.read_text(encoding="utf-8")
         cls.notification_service = NOTIFICATION_SERVICE.read_text(encoding="utf-8")
         cls.alert_group_service = ALERT_GROUP_SERVICE.read_text(encoding="utf-8")
+        cls.enrichment_provider_client = ENRICHMENT_PROVIDER_CLIENT.read_text(encoding="utf-8")
         cls.analyst_review_policy = ANALYST_REVIEW_POLICY.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
@@ -81,8 +83,14 @@ class AlertStoreResilienceTest(unittest.TestCase):
 
     def test_enrichment_requests_identify_the_service_and_keep_safe_provider_errors(self) -> None:
         self.assertIn("'User-Agent': 'Onion-Sentinel/1.0'", self.http_json_client)
-        self.assertIn("function providerErrorDetail(body)", self.code)
-        self.assertIn("Censys Platform API returned HTTP", self.code)
+        self.assertIn(
+            "function providerErrorDetail(body)",
+            self.enrichment_provider_client,
+        )
+        self.assertIn(
+            "Censys Platform API returned HTTP",
+            self.enrichment_provider_client,
+        )
 
     def test_sqlite_gate_only_wraps_storage(self) -> None:
         self.assertIn(
