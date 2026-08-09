@@ -66,6 +66,13 @@ from scheduler_job_reporting import (
     SchedulerReportingSources,
     transition_ai_job_status,
 )
+from scheduler_outcome import (
+    SchedulerOutcomeRequest,
+    SchedulerOutcomeSources,
+    handle_controlled_claim_rejection,
+    handle_process_outcome,
+    handle_scheduler_exception,
+)
 from scheduler_indexed_state import (
     indexed_reconcilable_ai_job_ids as load_indexed_reconcilable_ai_job_ids,
     indexed_scheduler_available as indexed_scheduler_state_available,
@@ -3479,6 +3486,24 @@ def scheduler_execution_sources() -> SchedulerExecutionSources:
     )
 
 
+def scheduler_outcome_sources() -> SchedulerOutcomeSources:
+    """Bind status reporting, spool recovery, and output effects."""
+    return SchedulerOutcomeSources(
+        report_status=report_ai_job_status,
+        failure_is_retryable=ai_failure_is_retryable,
+        recover_controlled_spool=recover_controlled_evaluation_spool,
+        controlled_spool_pending=controlled_recovery_spool_pending,
+        now=project_now,
+        emit=lambda message: print(message, flush=True),
+        emit_error=lambda message: print(message, file=sys.stderr),
+        write_stdout=lambda message: print(message, end=""),
+        write_stderr=lambda message: print(message, file=sys.stderr, end=""),
+        result_submission_indeterminate_marker=(
+            CONTROLLED_RESULT_SUBMISSION_INDETERMINATE
+        ),
+    )
+
+
 def main() -> int:
     args = parse_args()
     startup_sources = scheduler_startup_sources()
@@ -3652,157 +3677,72 @@ def main() -> int:
                     ),
                 )
                 proc = execution.process
-                if proc.stdout:
-                    print(proc.stdout, end="")
-                if proc.returncode != 0:
-                    detail = proc.stderr.strip() or f"local AI analysis failed rc={proc.returncode}"
-                    result_submission_indeterminate = bool(
-                        controlled_identity_requested
-                        and CONTROLLED_RESULT_SUBMISSION_INDETERMINATE
-                        in detail
-                    )
-                    recovered_indeterminate_result = False
-                    if processing_recorded:
-                        if result_submission_indeterminate:
-                            print(
-                                f"{project_now()} exact controlled result "
-                                "is retained for recovery; its owned job "
-                                "remains processing",
-                                file=sys.stderr,
-                            )
-                            try:
-                                if recover_controlled_evaluation_spool(
-                                    args,
-                                    controlled_evaluation_dir,
-                                ):
-                                    recovered_indeterminate_result = True
-                                    print(
-                                        f"{project_now()} recovered the "
-                                        "indeterminate controlled result "
-                                        "without another inference",
-                                        flush=True,
-                                    )
-                            except RuntimeError as recovery_error:
-                                print(
-                                    f"{project_now()} controlled result "
-                                    "remains safely spooled: "
-                                    f"{recovery_error}",
-                                    file=sys.stderr,
-                                )
-                        else:
-                            report_ai_job_status(
-                                args.alert_store_url,
-                                selected_group_id,
-                                "failed",
-                                detail,
-                                processing_lease_token,
-                                job_type=durable_job_type,
-                                retryable=ai_failure_is_retryable(detail),
-                            )
-                    print(detail, file=sys.stderr)
-                    if recovered_indeterminate_result:
-                        analyzed_count += 1
-                        break
-                    if controlled_exact_lease_owned:
-                        controlled_owned_job_failed = True
-                        controlled_failure_detail = detail
-                        controlled_failure_group_id = selected_group_id
-                        break
-                    continue
-                if proc.stderr:
-                    print(proc.stderr, file=sys.stderr, end="")
-                if (
-                    processing_recorded
-                    and controlled_evaluation_dir is None
-                ):
-                    report_ai_job_status(
-                        args.alert_store_url,
-                        selected_group_id,
-                        "completed",
-                        lease_token=processing_lease_token,
-                        job_type=durable_job_type,
-                    )
-                analyzed_count += 1
+                outcome_request = SchedulerOutcomeRequest(
+                    args=args,
+                    group_id=selected_group_id,
+                    job_type=durable_job_type,
+                    processing_recorded=processing_recorded,
+                    lease_token=processing_lease_token,
+                    controlled=controlled_identity_requested,
+                    controlled_evaluation_dir=controlled_evaluation_dir,
+                    controlled_exact_lease_owned=controlled_exact_lease_owned,
+                )
+                outcome = handle_process_outcome(
+                    scheduler_outcome_sources(),
+                    outcome_request,
+                    proc,
+                )
+                analyzed_count += outcome.analyzed_increment
+                if outcome.controlled_owned_job_failed:
+                    controlled_owned_job_failed = True
+                    controlled_failure_detail = outcome.failure_detail
+                    controlled_failure_group_id = outcome.failure_group_id
+                if outcome.stop:
+                    break
             except ControlledClaimRejected as error:
                 # The exact-claim endpoint rejects before acquiring a lease.
                 # Never fail or otherwise mutate a possibly unrelated durable
                 # job when a frozen dispatch loses this race.
-                if controlled_exact_lease_owned:
-                    try:
-                        # A defensive post-claim validation can only release a
-                        # lease after the server echoed the exact selected job
-                        # ID. Retryable failure returns that owned job to the
-                        # pending queue; it never terminally fails it.
-                        report_ai_job_status(
-                            args.alert_store_url,
-                            selected_group_id,
-                            "failed",
-                            str(error),
-                            processing_lease_token,
-                            job_type=durable_job_type,
-                            retryable=True,
-                        )
-                    except RuntimeError as status_error:
-                        print(
-                            "controlled AI lease release also failed: "
-                            f"{status_error}",
-                            file=sys.stderr,
-                        )
-                    controlled_owned_job_failed = True
-                    controlled_failure_detail = str(error)
-                    controlled_failure_group_id = selected_group_id
-                print(
-                    f"{project_now()} controlled AI claim rejected: {error}",
-                    file=sys.stderr,
+                outcome = handle_controlled_claim_rejection(
+                    scheduler_outcome_sources(),
+                    SchedulerOutcomeRequest(
+                        args=args,
+                        group_id=selected_group_id,
+                        job_type=durable_job_type,
+                        processing_recorded=processing_recorded,
+                        lease_token=processing_lease_token,
+                        controlled=True,
+                        controlled_evaluation_dir=controlled_evaluation_dir,
+                        controlled_exact_lease_owned=controlled_exact_lease_owned,
+                    ),
+                    error,
                 )
+                if outcome.controlled_owned_job_failed:
+                    controlled_owned_job_failed = True
+                    controlled_failure_detail = outcome.failure_detail
+                    controlled_failure_group_id = outcome.failure_group_id
                 break
             except (BoundedProcessError, RuntimeError, OSError) as error:
-                controlled_result_may_be_spooled = bool(
-                    controlled_exact_lease_owned
-                    and controlled_evaluation_dir is not None
-                    and controlled_recovery_spool_pending(
-                        controlled_evaluation_dir
-                    )
+                outcome = handle_scheduler_exception(
+                    scheduler_outcome_sources(),
+                    SchedulerOutcomeRequest(
+                        args=args,
+                        group_id=selected_group_id,
+                        job_type=durable_job_type,
+                        processing_recorded=processing_recorded,
+                        lease_token=processing_lease_token,
+                        controlled=controlled_evaluation_dir is not None,
+                        controlled_evaluation_dir=controlled_evaluation_dir,
+                        controlled_exact_lease_owned=controlled_exact_lease_owned,
+                    ),
+                    error,
                 )
-                if controlled_result_may_be_spooled:
-                    try:
-                        if recover_controlled_evaluation_spool(
-                            args,
-                            controlled_evaluation_dir,
-                        ):
-                            analyzed_count += 1
-                            print(
-                                f"{project_now()} recovered a controlled "
-                                "result after its child process ended "
-                                "indeterminately",
-                                flush=True,
-                            )
-                            continue
-                    except RuntimeError as recovery_error:
-                        print(
-                            f"{project_now()} controlled result remains "
-                            f"safely spooled: {recovery_error}",
-                            file=sys.stderr,
-                        )
-                if processing_recorded:
-                    if not controlled_result_may_be_spooled:
-                        try:
-                            report_ai_job_status(
-                                args.alert_store_url,
-                                selected_group_id,
-                                "failed",
-                                str(error),
-                                processing_lease_token,
-                                job_type=durable_job_type,
-                                retryable=ai_failure_is_retryable(error),
-                            )
-                        except RuntimeError as status_error:
-                            print(f"AI failure callback also failed: {status_error}", file=sys.stderr)
-                print(f"{project_now()} AI group {selected_group_id} failed: {error}", file=sys.stderr)
-                if controlled_exact_lease_owned:
+                analyzed_count += outcome.analyzed_increment
+                if outcome.controlled_owned_job_failed:
                     controlled_owned_job_failed = True
-                    controlled_failure_detail = str(error)
-                    controlled_failure_group_id = selected_group_id
+                    controlled_failure_detail = outcome.failure_detail
+                    controlled_failure_group_id = outcome.failure_group_id
+                if outcome.stop:
                     break
                 continue
 

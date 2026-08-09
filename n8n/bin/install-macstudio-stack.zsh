@@ -580,6 +580,7 @@ cp "$REPO_DIR/n8n/bin/scheduler_indexed_selection.py" "$STACK_DIR/bin/scheduler_
 cp "$REPO_DIR/n8n/bin/scheduler_indexed_state.py" "$STACK_DIR/bin/scheduler_indexed_state.py"
 cp "$REPO_DIR/n8n/bin/scheduler_job_reporting.py" "$STACK_DIR/bin/scheduler_job_reporting.py"
 cp "$REPO_DIR/n8n/bin/scheduler_legacy_selection.py" "$STACK_DIR/bin/scheduler_legacy_selection.py"
+cp "$REPO_DIR/n8n/bin/scheduler_outcome.py" "$STACK_DIR/bin/scheduler_outcome.py"
 cp "$REPO_DIR/n8n/bin/scheduler_settlement.py" "$STACK_DIR/bin/scheduler_settlement.py"
 cp "$REPO_DIR/n8n/bin/scheduler_startup.py" "$STACK_DIR/bin/scheduler_startup.py"
 cp "$REPO_DIR/n8n/bin/scheduler_terminal_recovery.py" "$STACK_DIR/bin/scheduler_terminal_recovery.py"

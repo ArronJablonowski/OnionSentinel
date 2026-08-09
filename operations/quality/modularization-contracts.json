@@ -113,6 +113,19 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_outcome.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_outcome.py",
+      "required_symbols": [
+        "SchedulerOutcome",
+        "SchedulerOutcomeRequest",
+        "SchedulerOutcomeSources",
+        "handle_controlled_claim_rejection",
+        "handle_process_outcome",
+        "handle_scheduler_exception"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_startup.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_startup.py",

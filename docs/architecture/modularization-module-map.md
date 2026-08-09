@@ -275,6 +275,13 @@ explicit request and source bundles keep evidence and inference effects
 testable while the launchd wrapper binds mutable runtime collaborators at call
 time for compatibility.
 
+`scheduler_outcome.py` owns child-process output projection, production
+completion and retryable-failure transitions, exact controlled-lease release,
+and crash-safe controlled result spool recovery. It returns an explicit loop
+outcome instead of controlling the drain directly, so the entrypoint retains
+its established stop/continue and aggregate settlement semantics without
+embedding storage or recovery policy.
+
 `scheduler_job_reporting.py` owns the bounded `/jobs/status` mutation contract,
 terminal status projection, exact controlled-claim validation, indeterminate-
 request retry policy, rolling-deployment 404 behavior, conflict rejection, and
