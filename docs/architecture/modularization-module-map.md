@@ -583,6 +583,12 @@ Prior-analysis lookup, digest verification, task-kind derivation, and timestamp
 parsing are injected, leaving the module independent of persistence and CLI
 concerns.
 
+`operations/cohort_evaluation_result_member.py` owns validation and normalized
+projection of one execution-gated cohort-export member. It binds stable-group
+identity to the detection, enforces unique bounded rank and role, invokes the
+execution-proof port, and emits ordered identity, detection-digest, verdict,
+provider, second-opinion, and query-audit projections without file access.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

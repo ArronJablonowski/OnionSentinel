@@ -98,6 +98,10 @@ from cohort_evaluation_execution_admission import (
     validate_harness_identity,
     validate_response_binding,
 )
+from cohort_evaluation_result_member import (
+    ResultMemberPolicy,
+    normalize_export_member,
+)
 
 
 RESULT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v4"
@@ -1016,140 +1020,31 @@ def load_result_export(
     for index, member in enumerate(members):
         if not isinstance(member, dict):
             raise CohortEvaluationError(f"{label} member {index} is invalid")
-        stable_id = str(member.get("stable_group_id") or "").lower()
-        if (
-            not STABLE_GROUP_ID_RE.fullmatch(stable_id)
-            or stable_id in normalized_members
-        ):
-            raise CohortEvaluationError(
-                f"{label} contains an invalid or duplicate stable group"
-            )
-        try:
-            rank = int(member.get("rank"))
-        except (TypeError, ValueError) as exc:
-            raise CohortEvaluationError(
-                f"{label} contains an invalid member rank"
-            ) from exc
-        if rank < 1 or rank > expected_count or rank in ranks:
-            raise CohortEvaluationError(
-                f"{label} contains an invalid or duplicate member rank"
-            )
-        ranks.add(rank)
-        result = member.get("result")
-        if not isinstance(result, dict):
-            raise CohortEvaluationError(
-                f"{label} member {rank} has no result object"
-            )
-        state = str(result.get("state") or "").strip().lower()
-        analysis = result.get("analysis")
-        if analysis is not None and not isinstance(analysis, dict):
-            raise CohortEvaluationError(
-                f"{label} member {rank} analysis is invalid"
-            )
-        analysis = dict(analysis or {})
-        observed_role = str(analysis.get("agent_role") or "").strip().lower()
-        if observed_role and observed_role != role:
-            raise CohortEvaluationError(
-                f"{label} member {rank} was executed by {observed_role!r}"
-            )
-        analysis_id = str(analysis.get("analysis_id") or "").strip() or None
-        if state == "completed" and not analysis_id:
-            raise CohortEvaluationError(
-                f"{label} member {rank} completed without an analysis ID"
-            )
-        stable_group_key = _stable_group_key(
-            member.get("stable_group_key"),
-            f"{label} member {rank} stable_group_key",
-        )
-        detection = member.get("detection")
-        if not isinstance(detection, dict):
-            raise CohortEvaluationError(
-                f"{label} member {rank} detection is invalid"
-            )
-        detection_group_key = _stable_group_key(
-            detection.get("stable_group_key"),
-            f"{label} member {rank} detection stable_group_key",
-        )
-        if detection_group_key != stable_group_key:
-            raise CohortEvaluationError(
-                f"{label} member {rank} stable_group_key binding changed"
-            )
-        detection_digest = sha256_value(detection)
-        _validate_execution_proof(
+        normalized = normalize_export_member(
             member=member,
             role=role,
             contract=contract,
             cohort_id=str(document.get("cohort_id") or ""),
-            frozen_plan_sha256=str(
-                document.get("frozen_plan_sha256") or ""
+            frozen_plan_sha256=str(document.get("frozen_plan_sha256") or ""),
+            expected_count=expected_count,
+            ranks=ranks,
+            known_stable_ids=set(normalized_members),
+            label=label,
+            policy=ResultMemberPolicy(
+                stable_group_id_pattern=STABLE_GROUP_ID_RE,
+                verdict_fields=VERDICT_FIELDS,
+                stable_group_key=_stable_group_key,
+                hash_value=sha256_value,
+                validate_execution_proof=_validate_execution_proof,
+                observed_labels=_observed_labels,
+                query_audit_summary=_query_audit_summary,
             ),
-            label=f"{label} member {rank}",
+            error=CohortEvaluationError,
         )
-        ordered_identities.append(
-            {
-                "rank": rank,
-                "dashboard_group_id": str(
-                    member.get("dashboard_group_id") or ""
-                ),
-                "stable_group_id": stable_id,
-                "stable_group_key": stable_group_key,
-                "representative_alert_id": str(
-                    member.get("representative_alert_id") or ""
-                ),
-            }
-        )
-        ordered_detection_projection.append(
-            {
-                "rank": rank,
-                "dashboard_group_id": str(
-                    member.get("dashboard_group_id") or ""
-                ),
-                "stable_group_id": stable_id,
-                "stable_group_key": stable_group_key,
-                "representative_alert_id": str(
-                    member.get("representative_alert_id") or ""
-                ),
-                "detection_sha256": detection_digest,
-            }
-        )
-        normalized_members[stable_id] = {
-            "rank": rank,
-            "stable_group_id": stable_id,
-            "analysis_id": analysis_id,
-            "state": state,
-            "completed": state == "completed",
-            "labels": _observed_labels(analysis) if analysis else {
-                field: None for field in VERDICT_FIELDS
-            },
-            "confidence": str(
-                analysis.get("confidence") or ""
-            ).strip().lower() or None,
-            "model": str(analysis.get("model") or "").strip()[:200] or None,
-            "provider": str(
-                (analysis.get("result") or {}).get("_analysis_provider")
-                if isinstance(analysis.get("result"), dict)
-                else ""
-            ).strip()[:80] or None,
-            "query_audit": _query_audit_summary(analysis),
-            "detection_sha256": detection_digest,
-            "response_sha256": str(
-                analysis.get("response_sha256") or ""
-            )[:64] or None,
-            "second_opinion": (
-                {
-                    "status": str(
-                        (result.get("second_opinion") or {}).get("status") or ""
-                    )[:40],
-                    "material_disagreement": bool(
-                        (result.get("second_opinion") or {}).get(
-                            "material_disagreement"
-                        )
-                    ),
-                }
-                if isinstance(result.get("second_opinion"), dict)
-                else None
-            ),
-        }
+        ranks.add(normalized.rank)
+        ordered_identities.append(normalized.identity)
+        ordered_detection_projection.append(normalized.detection_projection)
+        normalized_members[normalized.stable_group_id] = normalized.normalized
     ordered_identities.sort(key=lambda item: int(item["rank"]))
     ordered_detection_projection.sort(key=lambda item: int(item["rank"]))
     if (
