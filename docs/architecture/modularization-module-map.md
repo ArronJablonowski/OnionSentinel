@@ -58,6 +58,11 @@ line ranges below remain historical navigation aids for the extraction ledger.
   reconciliation, prompt loading, role attestation, settings resolution, live
   OSQuery preparation, enrichment preparation, and evidence-contract binding
   now live in `onion_sentinel.startup` behind typed policy and port records.
+- Bounded prompt-builder execution, latest-artifact selection, and concrete
+  prompt-attestation port binding now live in the 100-line
+  `onion_sentinel.startup_runtime_adapter`. Controlled bootstrap still occurs
+  before either prompt path can run, and live runner callables are resolved at
+  invocation time so fail-before-work and characterization seams remain exact.
 - Route resolution, harness eligibility/start/bypass behavior, controlled-mode
   enforcement, shadow-mode failure isolation, running-record publication,
   phase observation, and resource-monitor startup now live in

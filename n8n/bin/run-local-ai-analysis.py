@@ -656,6 +656,14 @@ def _persistence_runtime_adapter():
     return runtime_adapter
 
 
+def _startup_runtime_adapter():
+    package_root = str(BIN_DIR.parent)
+    if package_root not in sys.path:
+        sys.path.insert(0, package_root)
+    from onion_sentinel import startup_runtime_adapter
+    return startup_runtime_adapter
+
+
 def _system_resource_dependencies():
     module = _system_resources()
     return module.Dependencies(
@@ -925,53 +933,12 @@ def build_llm_log_record(
 
 
 def latest_prompt(prompt_dir: Path) -> Path:
-    files = sorted(prompt_dir.glob("*-ai-prompt.json"))
-    if not files:
-        raise SystemExit(f"no prompt packages found in {prompt_dir}")
-    return files[-1]
+    return _startup_runtime_adapter().latest_prompt(prompt_dir)
 
 
 def generate_prompt(args: argparse.Namespace) -> Path:
     """Call the existing prompt builder and return the newly written file path."""
-    builder = Path(__file__).with_name("build-ai-investigation-prompt.py")
-    if not builder.exists():
-        raise SystemExit(f"prompt builder not found: {builder}")
-    cmd = [
-        sys.executable,
-        str(builder),
-        "--levels",
-        args.levels,
-        "--hours",
-        str(args.hours),
-        "--related-limit",
-        str(args.related_limit),
-        "--correlation-limit",
-        str(args.correlation_limit),
-        "--correlation-min-score",
-        str(args.correlation_min_score),
-        "--max-package-bytes",
-        str(args.max_prompt_bytes),
-        "--out-dir",
-        str(args.prompt_dir),
-    ]
-    try:
-        proc = run_bounded_command(
-            cmd,
-            timeout_seconds=min(max(30, args.timeout), 300),
-            max_stdout_bytes=16 * 1024,
-            max_stderr_bytes=256 * 1024,
-        )
-    except BoundedProcessError as exc:
-        raise SystemExit(f"prompt builder exceeded its runtime contract: {exc}") from exc
-    if proc.returncode != 0:
-        if proc.stderr:
-            print(proc.stderr, file=sys.stderr, end="")
-        raise SystemExit(f"prompt builder failed with rc={proc.returncode}")
-    path_text = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
-    prompt_path = Path(path_text)
-    if not prompt_path.exists():
-        raise SystemExit(f"prompt builder did not return a valid path: {path_text}")
-    return prompt_path
+    return _startup_runtime_adapter().generate_prompt(globals(), args)
 
 
 def read_bytes_bounded(path: Path, max_bytes: int) -> bytes:
@@ -5427,29 +5394,9 @@ def main() -> int:
             flush_queue=lambda url, enabled: flush_analysis_index_queue(
                 url, memory_writeback_enabled=enabled),
         )
-        attested = startup_module.load_and_attest(
-            pipeline_context, args,
-            policy=startup_module.PromptAttestationPolicy(
-                package_type="soc-ai-investigation-prompt",
-                allowed_roles=frozenset(CYBER_SECURITY_AGENT_ROLES),
-                default_settings_file=DEFAULT_AI_SETTINGS_FILE,
-                default_live_osquery_file=DEFAULT_LIVE_OSQUERY_CONFIG_FILE,
-                controlled_identity=controlled_result_identity,
-            ),
-            ports=startup_module.PromptAttestationPorts(
-                generate_prompt=generate_prompt,
-                latest_prompt=latest_prompt,
-                load_json=load_json,
-                role_prompt_file=role_prompt_file,
-                role_review_file=role_second_opinion_prompt_file,
-                validate_incident_evidence=validate_incident_evidence_artifact,
-                effective_settings=effective_ai_settings,
-                require_controlled_routes=require_controlled_evaluation_routes,
-                prepare_live_osquery=prepare_live_osquery_context,
-                prepare_enrichment=prepare_investigation_enrichment_context,
-                attach_evidence_contract=attach_evidence_reference_contract,
-            ),
-        )
+        attested = _startup_runtime_adapter().load_and_attest(
+            globals(), startup_module, pipeline_context, args,
+            controlled_result_identity)
         prompt_path = attested.prompt_path
         prompt_package = attested.prompt_package
         agent_role = attested.agent_role
