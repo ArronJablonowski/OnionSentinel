@@ -1918,6 +1918,12 @@ def _query_primitives():
     return primitives
 
 
+def _query_capability():
+    from onion_sentinel.analysis.query import capability
+
+    return capability
+
+
 def _query_request():
     _provider_routing()
     from onion_sentinel.analysis.query import request
@@ -4622,35 +4628,12 @@ def investigation_backend_available(
     *,
     live_osquery_config: dict[str, Any] | None,
 ) -> bool:
-    """Require both an advertised capability and its trusted local prerequisite."""
-    capability = prompt_package.get("investigation_query_capability")
-    backends = capability.get("backends") if isinstance(capability, dict) else None
-    descriptor = backends.get(backend) if isinstance(backends, dict) else None
-    if (
-        not isinstance(capability, dict)
-        or capability.get("enabled") is not True
-        or not isinstance(descriptor, dict)
-        or descriptor.get("enabled") is not True
-    ):
-        return False
-    if backend in {"elastic", "oql"}:
-        local_context = prompt_package.get("_local_investigation_query_context")
-        return bool(
-            isinstance(local_context, dict)
-            and isinstance(local_context.get("anchor"), dict)
-        )
-    if backend == "pcap_zeek":
-        pcap = prompt_package.get("pcap_evidence")
-        return bool(
-            isinstance(pcap, dict)
-            and isinstance(pcap.get("parsed_evidence"), list)
-            and pcap.get("parsed_evidence")
-        )
-    if backend == "osquery":
-        return bool(live_osquery_config and live_osquery_config.get("enabled"))
-    if backend == "enrichment":
-        return bool(descriptor.get("enabled"))
-    return False
+    """Compatibility delegate for trusted backend capability policy."""
+    return _query_capability().available(
+        prompt_package,
+        backend,
+        live_osquery_config=live_osquery_config,
+    )
 
 
 def investigation_request_semantic_digest(request: dict[str, Any]) -> str:

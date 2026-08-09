@@ -3016,6 +3016,7 @@
         "onion_sentinel.analysis.evidence.registry",
         "onion_sentinel.analysis.evidence.traversal",
         "onion_sentinel.analysis.evidence.validation",
+        "onion_sentinel.analysis.query.capability",
         "onion_sentinel.analysis.query.derived",
         "onion_sentinel.analysis.query.deterministic_planning",
         "onion_sentinel.analysis.query.coordinator",
