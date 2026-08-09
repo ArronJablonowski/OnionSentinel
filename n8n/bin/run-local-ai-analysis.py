@@ -2987,33 +2987,6 @@ def _redact_unshared_asset_owners(asset_context: Any) -> Any:
     return sanitized
 
 
-def _positive_project_paths(
-    value: Any,
-    allowed_paths: frozenset[str],
-    path: tuple[str, ...] = (),
-) -> Any:
-    """Project a nested document using exact reviewed leaf paths."""
-    return _evidence_hosted_projection().positive_project_paths(
-        value,
-        allowed_paths,
-        maximum_list_items=200,
-        path=path,
-    )
-
-
-def _project_hosted_result_rows(key: str, value: list[Any]) -> list[Any]:
-    return _evidence_hosted_projection().project_result_rows(
-        key,
-        value,
-        _evidence_hosted_projection_policy(),
-    )
-
-
-def _prune_empty_hosted_projection(value: Any) -> Any:
-    """Remove empty shells while preserving explicit zero-result collections."""
-    return _evidence_hosted_projection().prune_empty(value)
-
-
 def _reviewed_hosted_sha256_evidence_path(
     path: tuple[object, ...],
 ) -> bool:
@@ -3677,13 +3650,6 @@ def _derived_evidence_source_digest(pcap_context: dict[str, Any]) -> str:
     )
 
 
-def _trusted_live_osquery_case_observables(
-    prompt_package: dict[str, Any],
-) -> dict[str, set[str]]:
-    """Compatibility delegate for collector-owned case observables."""
-    return _query_live_endpoint().authorized_observables(prompt_package)
-
-
 def _live_osquery_target_bound_to_case(
     prompt_package: dict[str, Any],
     target_alias: Any,
@@ -3708,34 +3674,6 @@ def _live_osquery_support_bindings(
         prompt_package,
         result,
         config,
-        policy=_query_live_endpoint_policy(),
-        dependencies=_query_live_endpoint_dependencies(),
-    )
-
-
-def _append_live_osquery_audit_batch(
-    prompt_package: dict[str, Any],
-    *,
-    case_id: str,
-    generated_at: str,
-    results: list[dict[str, Any]],
-    complete: bool,
-    partial: bool,
-    validated: bool,
-    control_plane_write_status: str,
-    collection_error: str = "",
-) -> None:
-    """Compatibility delegate for the private endpoint evidence accumulator."""
-    _query_live_endpoint().append_batch(
-        prompt_package,
-        case_id=case_id,
-        generated_at=generated_at,
-        results=results,
-        complete=complete,
-        partial=partial,
-        validated=validated,
-        control_plane_write_status=control_plane_write_status,
-        collection_error=collection_error,
         policy=_query_live_endpoint_policy(),
         dependencies=_query_live_endpoint_dependencies(),
     )
@@ -4973,12 +4911,6 @@ def validate_reviewer_response(
         hypotheses_max=REVIEW_HYPOTHESES_MAX,
     )
     return module.validate(response, review_package, dependencies)
-
-
-def reviewer_supplemental_pivot_reason(
-    reviewer_response: dict[str, Any],
-) -> str:
-    return _review_supplemental().pivot_reason(reviewer_response)
 
 
 def apply_reviewer_supplemental_pivot(
