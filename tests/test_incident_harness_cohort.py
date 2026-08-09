@@ -35,6 +35,7 @@ EVALUATOR_SPEC.loader.exec_module(cohort_evaluator)
 import cohort_evaluation_query_audit  # noqa: E402
 import cohort_query_audit_projection  # noqa: E402
 import cohort_execution_proof_service  # noqa: E402
+import cohort_analysis_metadata  # noqa: E402
 
 
 class IncidentHarnessCohortTests(unittest.TestCase):
@@ -52,6 +53,12 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         self.assertIs(
             cohort.build_execution_proof,
             cohort_execution_proof_service.build_execution_proof,
+        )
+
+    def test_runner_uses_extracted_analysis_metadata_loader(self) -> None:
+        self.assertIs(
+            cohort.load_analysis_metadata,
+            cohort_analysis_metadata.load_analysis_metadata,
         )
 
     def test_query_audit_projection_excludes_query_and_result_content(self) -> None:

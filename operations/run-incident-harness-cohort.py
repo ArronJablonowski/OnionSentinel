@@ -122,6 +122,10 @@ from cohort_execution_proof_service import (
     ExecutionProofPolicy,
     build_execution_proof,
 )
+from cohort_analysis_metadata import (
+    AnalysisMetadataPolicy,
+    load_analysis_metadata,
+)
 
 
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -1994,6 +1998,15 @@ def queue_cohort(
     )
 
 
+def _analysis_metadata_policy() -> AnalysisMetadataPolicy:
+    return AnalysisMetadataPolicy(
+        error=CohortError,
+        require_columns=_require_columns,
+        response_sha256=alert_store_response_sha256,
+        query_audit_projection=_bounded_query_audit_metadata,
+    )
+
+
 def _analysis_metadata(
     connection: sqlite3.Connection,
     analysis_id: str,
@@ -2002,110 +2015,14 @@ def _analysis_metadata(
     expected_alert_id: str,
     expected_agent_role: str = "incident-responder",
 ) -> dict[str, Any]:
-    columns = _require_columns(
+    return load_analysis_metadata(
         connection,
-        "ai_analysis_runs",
-        {
-            "analysis_id",
-            "group_id",
-            "alert_id",
-            "agent_role",
-            "response_json",
-        },
+        analysis_id,
+        stable_group_id,
+        expected_alert_id=expected_alert_id,
+        expected_agent_role=expected_agent_role,
+        policy=_analysis_metadata_policy(),
     )
-    allowed = [
-        item
-        for item in (
-            "analysis_id",
-            "group_id",
-            "alert_id",
-            "agent_role",
-            "generated_at",
-            "model",
-            "model_path",
-            "detection_outcome",
-            "confidence",
-            "evidence_hash",
-            "created_at",
-            "response_json",
-        )
-        if item in columns
-    ]
-    row = connection.execute(
-        "SELECT " + ", ".join(allowed)
-        + " FROM ai_analysis_runs WHERE analysis_id = ?",
-        (analysis_id,),
-    ).fetchone()
-    if not row:
-        raise CohortError(f"analysis result is missing: {analysis_id}")
-    item = dict(row)
-    if (
-        str(item.get("group_id") or "") != stable_group_id
-        or str(item.get("alert_id") or "") != expected_alert_id
-        or str(item.get("agent_role") or "") != expected_agent_role
-    ):
-        raise CohortError(
-            f"analysis {analysis_id} is not bound to the frozen "
-            f"{expected_agent_role} identity"
-        )
-    raw_response = str(item.pop("response_json", "") or "")
-    item["response_bytes"] = len(raw_response.encode("utf-8"))
-    item["response_sha256"] = hashlib.sha256(
-        raw_response.encode("utf-8")
-    ).hexdigest()
-    try:
-        response = json.loads(raw_response)
-    except json.JSONDecodeError as exc:
-        raise CohortError(
-            f"analysis {analysis_id} response JSON is malformed"
-        ) from exc
-    if not isinstance(response, dict):
-        raise CohortError(f"analysis {analysis_id} response is not an object")
-    item["response_canonical_sha256"] = alert_store_response_sha256(
-        raw_response
-    )
-    item["result"] = {
-        key: response.get(key)
-        for key in (
-            "event_status",
-            "detection_validity",
-            "activity_disposition",
-            "handling",
-            "duplicate_of",
-            "final_disposition_status",
-            "_analysis_model",
-            "_analysis_model_path",
-            "_analysis_provider",
-            "_analysis_harness",
-            "_analysis_model_route",
-            "_analysis_input_mode",
-            "_analysis_evaluation_memory_frozen",
-        )
-        if key in response
-        and isinstance(response.get(key), (str, int, float, bool, type(None)))
-    }
-    second_opinion = (
-        response.get("_second_opinion")
-        if isinstance(response.get("_second_opinion"), dict)
-        else {}
-    )
-    reviewer_response = (
-        second_opinion.get("response")
-        if isinstance(second_opinion.get("response"), dict)
-        else {}
-    )
-    if second_opinion:
-        item["result"]["_second_opinion"] = {
-            "status": str(second_opinion.get("status") or ""),
-            "model_route": str(second_opinion.get("model_route") or ""),
-            "response": {
-                "_analysis_model_route": str(
-                    reviewer_response.get("_analysis_model_route") or ""
-                )
-            },
-        }
-    item["query_audit"] = _bounded_query_audit_metadata(response)
-    return item
 
 
 def _bounded_query_audit_metadata(response: Mapping[str, Any]) -> dict[str, Any]:

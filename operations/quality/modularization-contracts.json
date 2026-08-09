@@ -301,6 +301,15 @@
       ]
     },
     {
+      "path": "operations/cohort_analysis_metadata.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_analysis_metadata.py",
+      "required_symbols": [
+        "AnalysisMetadataPolicy",
+        "load_analysis_metadata"
+      ]
+    },
+    {
       "path": "operations/trace_evaluation_skills.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/trace_evaluation_skills.py",

@@ -758,6 +758,11 @@ reviewer proof, read-only tool/query binding, failure aggregation, and sealed
 public proof rendering. Trace loading and query binding remain injected so the
 runner can preserve deterministic failure-path testing and strict I/O control.
 
+`operations/cohort_analysis_metadata.py` owns exact analysis row identity,
+bounded response parsing and hashing, scalar result projection, reviewer-route
+projection, and query-audit projection. Database schema enforcement and
+canonical response hashing are injected by the cohort runner.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental
