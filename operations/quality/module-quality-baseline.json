@@ -36,9 +36,6 @@
     "n8n/bin/process-pcap-evidence.py": {
       "max_lines": 2018
     },
-    "n8n/bin/run-local-ai-analysis.py": {
-      "max_lines": 898
-    },
     "onion-sentinel-dashboard/ac_hunter_review.py": {
       "max_lines": 2225
     },
@@ -593,5 +590,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "b891ecd42de94a94bc18d4ff802a026d3937be3d"
+  "source_release": "2017e3d06a0779ebf9ae86c747ac06cdb5421a92"
 }
