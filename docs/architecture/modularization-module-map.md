@@ -657,6 +657,13 @@ grounding by digest, validates every incident-evidence projection, prioritizes
 exact-alert PCAP evidence, and fails closed if the package still exceeds its
 budget. The builder facade injects evidence validators and digest policy.
 
+`prompt_package_orchestrator.py` owns the ordered application workflow that
+collects the core snapshot, prepares exact detection context, admits trusted
+evidence, builds the response contract, collects bounded history, and assembles
+the final prompt-package view. Runtime ports and immutable bounds enter through
+typed source and policy records; the legacy builder is now a composition root
+and compatibility facade rather than the workflow implementation.
+
 `prompt_pcap_evidence.py` owns bounded prompt-facing PCAP projection. It
 classifies alert-store requests as exact-alert or stable-group-related with an
 exact-alert fallback for legacy schemas, tries sanitized request-ID artifact

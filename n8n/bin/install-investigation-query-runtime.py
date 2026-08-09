@@ -45,6 +45,7 @@ HARDENED_BUILDER_DEPENDENCIES = (
     "prompt_incident_grounding.py",
     "prompt_investigation_query_context.py",
     "prompt_package_compactor.py",
+    "prompt_package_orchestrator.py",
     "prompt_package_view_model.py",
     "prompt_pcap_evidence.py",
     "prompt_prior_analysis.py",
@@ -158,6 +159,30 @@ def _imports_from_symbol(
     return False
 
 
+def _imported_modules(tree: ast.Module) -> set[str]:
+    return {
+        node.module
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and isinstance(node.module, str)
+    }
+
+
+def _reachable_adjacent_modules(
+    builder_path: Path,
+    module_names: set[str],
+) -> set[str]:
+    reachable: set[str] = set()
+    pending = list(_imported_modules(_module_tree(builder_path)) & module_names)
+    while pending:
+        module = pending.pop()
+        if module in reachable:
+            continue
+        reachable.add(module)
+        tree = _module_tree(builder_path.parent / f"{module}.py")
+        pending.extend((_imported_modules(tree) & module_names) - reachable)
+    return reachable
+
+
 def validate_versioned_runtime(directory: Path, expected_contract: str) -> None:
     contract_path = directory / "investigation_query_contract.py"
     collector_path = directory / "collect-investigation-pivots.py"
@@ -195,15 +220,14 @@ def validate_hardened_builder(path: Path) -> None:
         raise QueryRuntimeInstallError(
             "hardened prompt builder does not import the adjacent contract authority"
         )
-    imported_dependencies = {
-        node.module
-        for node in tree.body
-        if isinstance(node, ast.ImportFrom) and isinstance(node.module, str)
-    }
     required_dependencies = {
         Path(name).stem for name in HARDENED_BUILDER_DEPENDENCIES
     }
-    if not required_dependencies.issubset(imported_dependencies):
+    reachable_dependencies = _reachable_adjacent_modules(
+        path,
+        required_dependencies,
+    )
+    if not required_dependencies.issubset(reachable_dependencies):
         raise QueryRuntimeInstallError(
             "hardened prompt builder does not import its adjacent modules"
         )

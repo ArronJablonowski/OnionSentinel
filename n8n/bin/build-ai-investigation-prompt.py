@@ -175,37 +175,21 @@ from prompt_investigation_query_context import (
     build_investigation_query_context,
 )
 from prompt_detection_context import (
-    DetectionContextRequest,
     DetectionContextSources,
     extract_asset_observables_and_events,
-    prepare_detection_context,
     select_exact_detection_group_rows,
 )
 from prompt_evidence_admission import (
-    PromptEvidenceAdmissionRequest,
-    PromptEvidenceAdmissionSources,
     blind_model_authored_context,
-    prepare_prompt_evidence_admission,
-)
-from prompt_evidence_snapshot import (
-    CoreEvidenceSnapshotRequest,
-    CoreEvidenceSnapshotSources,
-    HistoricalEvidenceSnapshotRequest,
-    HistoricalEvidenceSnapshotSources,
-    collect_core_evidence_snapshot,
-    collect_historical_evidence_snapshot,
 )
 from prompt_package_compactor import (
     PackageCompactionSources,
     compact_package_to_budget as compact_prompt_package,
 )
-from prompt_package_view_model import (
-    PreparedPromptPackageView,
-    assemble_prepared_prompt_package,
-)
-from prompt_response_contract import (
-    PromptContractRequest,
-    build_prompt_contract,
+from prompt_package_orchestrator import (
+    PromptPackageWorkflowPolicy,
+    PromptPackageWorkflowSources,
+    build_prepared_prompt_package,
 )
 from prompt_role_task import build_agent_task, build_model_policy
 
@@ -754,205 +738,52 @@ def _detection_context_sources() -> DetectionContextSources:
     )
 
 
-def _collect_core_snapshot(
-    conn: sqlite3.Connection,
-    selected: sqlite3.Row,
-    args: argparse.Namespace,
-):
-    return collect_core_evidence_snapshot(
-        CoreEvidenceSnapshotSources(
-            grouped_alert_context=grouped_alert_context,
-            pcap_evidence_context=pcap_evidence_context,
-            public_enrichment_context=public_enrichment_context,
-            authorized_activity_context=authorized_activity_context,
-            analyst_state_context=analyst_state_context,
-            correlated_alert_context=correlated_alert_context,
-            compact_alert=compact_alert,
+def _package_workflow_sources() -> PromptPackageWorkflowSources:
+    return PromptPackageWorkflowSources(
+        grouped_alert_context=grouped_alert_context,
+        pcap_evidence_context=pcap_evidence_context,
+        public_enrichment_context=public_enrichment_context,
+        authorized_activity_context=authorized_activity_context,
+        analyst_state_context=analyst_state_context,
+        correlated_alert_context=correlated_alert_context,
+        compact_alert=compact_alert,
+        detection_context_sources=_detection_context_sources,
+        investigation_query_context=investigation_query_context,
+        build_agent_memory_context=build_agent_memory_context,
+        blind_model_authored_context=blind_model_authored_context,
+        load_json_bounded=load_json_bounded,
+        validate_incident_evidence=validate_incident_evidence_artifact,
+        reject_preprojected_incident_evidence=(
+            reject_preprojected_incident_evidence_source
         ),
-        CoreEvidenceSnapshotRequest(
-            connection=conn,
-            selected=selected,
-            rollup_dir=args.rollup_dir,
-            rollup_bytes=args.rollup_bytes,
-            related_limit=args.related_limit,
-            include_tests=bool(args.include_tests),
-            pcap_analysis_dir=args.pcap_analysis_dir,
-            pcap_analysis_limit=args.pcap_analysis_limit,
-            correlation_limit=args.correlation_limit,
-            correlation_min_score=args.correlation_min_score,
-        ),
-    )
-
-
-def _collect_detection_context(
-    conn: sqlite3.Connection,
-    selected: sqlite3.Row,
-    args: argparse.Namespace,
-):
-    return prepare_detection_context(
-        _detection_context_sources(),
-        DetectionContextRequest(
-            connection=conn,
-            selected=selected,
-            include_tests=bool(args.include_tests),
-            agent_role=str(args.agent_role),
-            investigation_skills_path=Path(
-                getattr(
-                    args,
-                    "investigation_skills",
-                    DEFAULT_INVESTIGATION_SKILLS_FILE,
-                )
-            ),
-            detection_playbooks_path=Path(
-                getattr(
-                    args,
-                    "detection_playbooks",
-                    DEFAULT_DETECTION_PLAYBOOKS_FILE,
-                )
-            ),
-            asset_inventory_path=Path(
-                getattr(
-                    args,
-                    "asset_inventory_file",
-                    DEFAULT_ASSET_INVENTORY_FILE,
-                )
-            ),
-            maximum_group_rows=MAX_DETECTION_GROUP_ROWS,
-        ),
-    )
-
-
-def _admit_evidence(selected, args, snapshot, detection_context):
-    return prepare_prompt_evidence_admission(
-        PromptEvidenceAdmissionSources(
-            investigation_query_context=investigation_query_context,
-            build_agent_memory_context=build_agent_memory_context,
-            blind_model_authored_context=blind_model_authored_context,
-            load_json_bounded=load_json_bounded,
-            validate_incident_evidence=validate_incident_evidence_artifact,
-            reject_preprojected_incident_evidence=(
-                reject_preprojected_incident_evidence_source
-            ),
-            project_incident_evidence_hits=project_incident_evidence_hits,
-        ),
-        PromptEvidenceAdmissionRequest(
-            selected=selected,
-            agent_role=str(args.agent_role),
-            group_id=str(snapshot.analyst_state.get("group_id") or ""),
-            exact_validation_rows=detection_context.exact_validation_rows,
-            pcap_context=snapshot.pcap_evidence,
-            enrichment_context=snapshot.public_enrichment,
-            compact_alert=snapshot.alert,
-            grouped_alert_context=snapshot.grouped_alert_context,
-            detection_validation=detection_context.detection_validation,
-            asset_context=detection_context.asset_context,
-            authorization_evidence=snapshot.authorization_evidence,
-            analyst_state=snapshot.analyst_state,
-            correlation_context=snapshot.correlated_alert_context,
-            role_memory_file=args.agent_memory_file,
-            shared_memory_file=args.shared_memory_file,
-            memory_bytes=args.memory_bytes,
-            blind_reanalysis=bool(args.blind_reanalysis),
-            incident_evidence_file=args.incident_evidence_file,
-            maximum_incident_evidence_bytes=MAX_INCIDENT_EVIDENCE_BYTES,
-        ),
-    )
-
-
-def _create_prompt_contract(args: argparse.Namespace) -> dict:
-    return build_prompt_contract(
-        PromptContractRequest(
-            agent_role=str(args.agent_role),
-            blind_reanalysis=bool(args.blind_reanalysis),
-            role_prompt=load_system_prompt(args.system_prompt_file),
-            task=agent_task(
-                args.agent_role,
-                blind_reanalysis=args.blind_reanalysis,
-            ),
-            query_packs=tuple(INVESTIGATION_QUERY_PACKS),
-            query_v2=INVESTIGATION_QUERY_V2,
-        )
-    )
-
-
-def _collect_history(
-    conn: sqlite3.Connection,
-    selected: sqlite3.Row,
-    args: argparse.Namespace,
-):
-    return collect_historical_evidence_snapshot(
-        HistoricalEvidenceSnapshotSources(
-            prior_analysis_context=prior_analysis_context,
-            related_alerts=related_alerts,
-            query_rows=rows,
-        ),
-        HistoricalEvidenceSnapshotRequest(
-            connection=conn,
-            selected=selected,
-            analysis_dir=args.analysis_dir,
-            related_limit=args.related_limit,
-            include_tests=bool(args.include_tests),
-            blind_reanalysis=bool(args.blind_reanalysis),
-        ),
-    )
-
-
-def _assemble_package(
-    selected,
-    args,
-    snapshot,
-    detection_context,
-    admitted_evidence,
-    prompt_contract,
-    history,
-) -> dict:
-    return assemble_prepared_prompt_package(
-        PreparedPromptPackageView(
-            agent_role=str(args.agent_role),
-            blind_reanalysis=bool(args.blind_reanalysis),
-            lineage=execution_lineage(
-                selected,
-                blind_reanalysis=args.blind_reanalysis,
-            ),
-            generated_at=project_now(),
-            analysis_policy=model_policy(selected["triage_level"]),
-            runtime_files={
-                "system_prompt_file": str(args.system_prompt_file),
-                "second_opinion_system_prompt_file": str(
-                    args.second_opinion_prompt_file
-                ),
-                "agent_memory_file": str(args.agent_memory_file),
-                "shared_memory_file": str(args.shared_memory_file),
-            },
-            prompt_contract=prompt_contract,
-            core_snapshot=snapshot,
-            detection_context=detection_context,
-            admitted_evidence=admitted_evidence,
-            history=history,
-        )
+        project_incident_evidence_hits=project_incident_evidence_hits,
+        load_system_prompt=load_system_prompt,
+        agent_task=agent_task,
+        prior_analysis_context=prior_analysis_context,
+        related_alerts=related_alerts,
+        query_rows=rows,
+        execution_lineage=execution_lineage,
+        project_now=project_now,
+        model_policy=model_policy,
     )
 
 
 def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argparse.Namespace) -> dict:
-    """Run ordered collection, admission, contract, history, and assembly phases."""
-    snapshot = _collect_core_snapshot(conn, selected, args)
-    detection_context = _collect_detection_context(conn, selected, args)
-    admitted_evidence = _admit_evidence(
+    """Compatibility delegate for ordered prompt-package construction."""
+    return build_prepared_prompt_package(
+        _package_workflow_sources(),
+        PromptPackageWorkflowPolicy(
+            default_investigation_skills_path=DEFAULT_INVESTIGATION_SKILLS_FILE,
+            default_detection_playbooks_path=DEFAULT_DETECTION_PLAYBOOKS_FILE,
+            default_asset_inventory_path=DEFAULT_ASSET_INVENTORY_FILE,
+            maximum_detection_group_rows=MAX_DETECTION_GROUP_ROWS,
+            maximum_incident_evidence_bytes=MAX_INCIDENT_EVIDENCE_BYTES,
+            query_packs=tuple(INVESTIGATION_QUERY_PACKS),
+            query_v2=INVESTIGATION_QUERY_V2,
+        ),
+        conn,
         selected,
         args,
-        snapshot,
-        detection_context,
-    )
-    prompt_contract = _create_prompt_contract(args)
-    history = _collect_history(conn, selected, args)
-    return _assemble_package(
-        selected,
-        args,
-        snapshot,
-        detection_context,
-        admitted_evidence,
-        prompt_contract,
-        history,
     )
 
 

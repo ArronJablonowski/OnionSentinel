@@ -15,11 +15,21 @@ PROMPT_CONTRACT = REPO_ROOT / "n8n" / "bin" / "prompt_response_contract.py"
 class QueryPlanningAccuracyGuidanceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.builder_source = PROMPT_BUILDER.read_text(encoding="utf-8")
+        self.orchestrator_source = (
+            PROMPT_BUILDER.parent / "prompt_package_orchestrator.py"
+        ).read_text(encoding="utf-8")
         self.source = PROMPT_CONTRACT.read_text(encoding="utf-8")
 
     def test_builder_uses_extracted_response_contract(self) -> None:
-        self.assertIn("from prompt_response_contract import (", self.builder_source)
-        self.assertIn("build_prompt_contract(", self.builder_source)
+        self.assertIn(
+            "from prompt_package_orchestrator import (",
+            self.builder_source,
+        )
+        self.assertIn(
+            "from prompt_response_contract import PromptContractRequest",
+            self.orchestrator_source,
+        )
+        self.assertIn("build_prompt_contract(", self.orchestrator_source)
 
     def test_v2_schema_advertises_anchor_nearest(self) -> None:
         self.assertIn(
