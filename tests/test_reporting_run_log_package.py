@@ -14,14 +14,11 @@ from onion_sentinel.analysis.reporting import run_log  # noqa: E402
 
 
 DEPENDENCIES = run_log.Dependencies(
-    alert_summary=lambda package: {"id": package.get("alert", {}).get("alert_id")},
     enabled_routes=lambda settings: settings.get("enabled_routes", []),
     canonical_route=lambda value, routes: str(value or "default-route"),
     assigned_metadata=lambda settings, role: (
         "assigned-model", "frontier-codex-cli", "codex-cli"
     ),
-    pcap_size=lambda package: 123,
-    alert_context_size=lambda package: 456,
 )
 RESOURCES = run_log.Resources(
     gpu_celsius=55.5,
@@ -104,9 +101,56 @@ class RunLogPackageTests(unittest.TestCase):
         self.assertEqual(record["analysis_markdown"], "/tmp/result.md")
         self.assertEqual(record["gpu_temperature_celsius_max"], 55.5)
         self.assertEqual(record["memory_used_percent_max"], 70.0)
-        self.assertEqual(record["pcap_total_size_bytes"], 123)
-        self.assertEqual(record["alert_context_size_bytes"], 456)
-        self.assertEqual(record["alert"], {"id": "alert-1"})
+        self.assertEqual(record["pcap_total_size_bytes"], 0)
+        self.assertGreater(record["alert_context_size_bytes"], 0)
+        self.assertEqual(record["alert"]["primary_alert_id"], "alert-1")
+
+    def test_alert_projection_caps_timeline_and_repairs_count(self) -> None:
+        summary = run_log.alert_summary({
+            "alert": {
+                "alert_id": "primary",
+                "rule_name": "Rule",
+                "seen_count": "invalid",
+            },
+            "grouped_alert_context": {
+                "timeline": [
+                    {"alert_id": f"alert-{number}"} for number in range(30)
+                ],
+            },
+        })
+        self.assertEqual(summary["primary_alert_id"], "primary")
+        self.assertEqual(summary["alert_ids"][0], "primary")
+        self.assertEqual(len(summary["alert_ids"]), 26)
+        self.assertEqual(summary["alert_ids_truncated"], 4)
+        self.assertEqual(summary["alert_count"], 1)
+
+    def test_pcap_size_deduplicates_per_request_and_identity(self) -> None:
+        package = {"pcap_evidence": {"parsed_evidence": [
+            {
+                "request_id": "request-a",
+                "pcap_files": [
+                    {"sha256": "same", "size_bytes": 100},
+                    {"sha256": "same", "size_bytes": 100},
+                    {"name": "negative", "size_bytes": -20},
+                    {"name": "invalid", "size_bytes": "not-a-size"},
+                ],
+            },
+            {
+                "request_id": "request-b",
+                "pcap_files": [{"sha256": "same", "size_bytes": 50}],
+            },
+        ]}}
+        self.assertEqual(run_log.pcap_size_bytes(package), 150)
+
+    def test_context_size_matches_canonical_projection(self) -> None:
+        package = {
+            "alert": {"id": "a"},
+            "grouped_alert_context": {"count": 2},
+            "ignored": "not projected",
+        }
+        baseline = run_log.alert_context_size_bytes(package)
+        package["ignored"] = "x" * 1000
+        self.assertEqual(run_log.alert_context_size_bytes(package), baseline)
 
     def test_failure_uses_only_recognized_observed_active_phase(self) -> None:
         observation = {

@@ -721,72 +721,18 @@ def safe_filename(value: Any) -> str:
 
 
 def prompt_alert_summary(prompt_package: dict[str, Any]) -> dict[str, Any]:
-    """Return bounded alert metadata suitable for an operational LLM run log."""
-    alert = prompt_package.get("alert") if isinstance(prompt_package.get("alert"), dict) else {}
-    grouped = prompt_package.get("grouped_alert_context") if isinstance(prompt_package.get("grouped_alert_context"), dict) else {}
-    timeline = grouped.get("timeline") if isinstance(grouped.get("timeline"), list) else []
-    alert_ids: list[str] = []
-    for item in timeline[:25]:
-        if isinstance(item, dict) and item.get("alert_id"):
-            alert_ids.append(str(item.get("alert_id")))
-    primary_alert_id = str(alert.get("alert_id") or "").strip()
-    if primary_alert_id and primary_alert_id not in alert_ids:
-        alert_ids.insert(0, primary_alert_id)
-    alert_count = grouped.get("raw_alert_rows") or grouped.get("total_observations") or alert.get("seen_count") or len(alert_ids) or 1
-    try:
-        alert_count = max(1, int(alert_count))
-    except (TypeError, ValueError):
-        alert_count = 1
-    return {
-        "primary_alert_id": primary_alert_id,
-        "alert_ids": alert_ids,
-        "alert_ids_truncated": max(0, len(timeline) - len(alert_ids)),
-        "alert_count": alert_count,
-        "rule_name": str(alert.get("rule_name") or "Security Onion Alert"),
-        "triage_level": str(alert.get("triage_level") or "unknown"),
-        "triage_score": alert.get("triage_score"),
-        "source_ip": str(alert.get("source_ip") or ""),
-        "destination_ip": str(alert.get("destination_ip") or ""),
-        "destination_port": str(alert.get("destination_port") or ""),
-        "first_seen": str(grouped.get("first_seen") or alert.get("first_seen") or ""),
-        "last_seen": str(grouped.get("last_seen") or alert.get("last_seen") or ""),
-        "total_observations": grouped.get("total_observations", alert.get("seen_count")),
-    }
+    """Compatibility delegate for operational alert projection."""
+    return _reporting_run_log().alert_summary(prompt_package)
 
 
 def prompt_pcap_size_bytes(prompt_package: dict[str, Any]) -> int:
-    pcap_evidence = prompt_package.get("pcap_evidence") if isinstance(prompt_package.get("pcap_evidence"), dict) else {}
-    parsed = pcap_evidence.get("parsed_evidence") if isinstance(pcap_evidence.get("parsed_evidence"), list) else []
-    total = 0
-    seen: set[tuple[str, str]] = set()
-    for record in parsed:
-        if not isinstance(record, dict):
-            continue
-        request_id = str(record.get("request_id") or "")
-        files = record.get("pcap_files") if isinstance(record.get("pcap_files"), list) else []
-        for item in files:
-            if not isinstance(item, dict):
-                continue
-            key = (request_id, str(item.get("sha256") or item.get("name") or ""))
-            if key in seen:
-                continue
-            seen.add(key)
-            try:
-                total += max(0, int(item.get("size_bytes") or 0))
-            except (TypeError, ValueError):
-                continue
-    return total
+    """Compatibility delegate for deduplicated PCAP size projection."""
+    return _reporting_run_log().pcap_size_bytes(prompt_package)
 
 
 def prompt_alert_context_size_bytes(prompt_package: dict[str, Any]) -> int:
-    context = {
-        "alert": prompt_package.get("alert"),
-        "grouped_alert_context": prompt_package.get("grouped_alert_context"),
-        "public_enrichment": prompt_package.get("public_enrichment"),
-        "analyst_state": prompt_package.get("analyst_state"),
-        "pcap_evidence": prompt_package.get("pcap_evidence"),
-    }
-    return len(json.dumps(context, sort_keys=True, default=str).encode("utf-8"))
+    """Compatibility delegate for prompt-context byte accounting."""
+    return _reporting_run_log().alert_context_size_bytes(prompt_package)
 
 
 def parse_gpu_temperature(output: str) -> float | None:
@@ -1509,12 +1455,9 @@ def _reporting_run_log():
 
 def _reporting_run_log_dependencies():
     return _reporting_run_log().Dependencies(
-        alert_summary=prompt_alert_summary,
         enabled_routes=enabled_agent_model_routes,
         canonical_route=canonical_model_route,
         assigned_metadata=assigned_model_metadata,
-        pcap_size=prompt_pcap_size_bytes,
-        alert_context_size=prompt_alert_context_size_bytes,
     )
 
 

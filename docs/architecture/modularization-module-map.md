@@ -218,7 +218,8 @@ line ranges below remain historical navigation aids for the extraction ledger.
   query identity and bounded result previews but never projects Security Onion
   hit documents or performs collector I/O.
 - Assignment-versus-observed model identity, execution mode, artifact paths,
-  resource maxima, and active-run initialization now live in the pure
+  bounded alert metadata, deduplicated PCAP byte accounting, prompt-context
+  sizing, resource maxima, and active-run initialization now live in the pure
   `analysis.reporting.run_log` projection. Bounded mactop and GPU sensor
   execution, metric parsing, cooperative cancellation, and per-run maxima now
   live in `analysis.system_resources`; operational JSONL/current-record

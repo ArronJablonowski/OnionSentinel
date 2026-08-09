@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any, Callable
 
 
@@ -45,18 +46,139 @@ class Inputs:
 
 @dataclass(frozen=True)
 class Dependencies:
-    alert_summary: Callable[[dict[str, Any]], dict[str, Any]]
     enabled_routes: Callable[[dict[str, Any]], Any]
     canonical_route: Callable[[Any, Any], str]
     assigned_metadata: Callable[
         [dict[str, Any], str], tuple[str, str, str]
     ]
-    pcap_size: Callable[[dict[str, Any]], int]
-    alert_context_size: Callable[[dict[str, Any]], int]
 
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _first_truthy(*values: Any) -> Any:
+    for value in values:
+        if value:
+            return value
+    return values[-1] if values else None
+
+
+def _timeline_ids(grouped: dict[str, Any]) -> tuple[list[str], int]:
+    timeline_value = grouped.get("timeline")
+    timeline = timeline_value if isinstance(timeline_value, list) else []
+    identifiers = [
+        str(item.get("alert_id"))
+        for item in timeline[:25]
+        if isinstance(item, dict) and item.get("alert_id")
+    ]
+    return identifiers, len(timeline)
+
+
+def _alert_count(value: Any) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1
+
+
+def alert_summary(prompt_package: dict[str, Any]) -> dict[str, Any]:
+    """Return bounded alert metadata for an operational analysis record."""
+    alert = _mapping(prompt_package.get("alert"))
+    grouped = _mapping(prompt_package.get("grouped_alert_context"))
+    alert_ids, timeline_count = _timeline_ids(grouped)
+    primary_alert_id = _text(alert.get("alert_id"))
+    if primary_alert_id and primary_alert_id not in alert_ids:
+        alert_ids.insert(0, primary_alert_id)
+    count_value = _first_truthy(
+        grouped.get("raw_alert_rows"),
+        grouped.get("total_observations"),
+        alert.get("seen_count"),
+        len(alert_ids),
+        1,
+    )
+    return {
+        "primary_alert_id": primary_alert_id,
+        "alert_ids": alert_ids,
+        "alert_ids_truncated": max(0, timeline_count - len(alert_ids)),
+        "alert_count": _alert_count(count_value),
+        "rule_name": str(_first_truthy(
+            alert.get("rule_name"), "Security Onion Alert",
+        )),
+        "triage_level": str(_first_truthy(
+            alert.get("triage_level"), "unknown",
+        )),
+        "triage_score": alert.get("triage_score"),
+        "source_ip": str(_first_truthy(alert.get("source_ip"), "")),
+        "destination_ip": str(_first_truthy(alert.get("destination_ip"), "")),
+        "destination_port": str(_first_truthy(
+            alert.get("destination_port"), "",
+        )),
+        "first_seen": str(_first_truthy(
+            grouped.get("first_seen"), alert.get("first_seen"), "",
+        )),
+        "last_seen": str(_first_truthy(
+            grouped.get("last_seen"), alert.get("last_seen"), "",
+        )),
+        "total_observations": grouped.get(
+            "total_observations", alert.get("seen_count")
+        ),
+    }
+
+
+def _pcap_file_records(
+    prompt_package: dict[str, Any],
+):
+    evidence = _mapping(prompt_package.get("pcap_evidence"))
+    parsed_value = evidence.get("parsed_evidence")
+    parsed = parsed_value if isinstance(parsed_value, list) else []
+    for record in parsed:
+        if not isinstance(record, dict):
+            continue
+        files_value = record.get("pcap_files")
+        files = files_value if isinstance(files_value, list) else []
+        for item in files:
+            if isinstance(item, dict):
+                yield str(record.get("request_id") or ""), item
+
+
+def pcap_size_bytes(prompt_package: dict[str, Any]) -> int:
+    """Sum unique, nonnegative collector-reported PCAP artifact sizes."""
+    total = 0
+    seen: set[tuple[str, str]] = set()
+    for request_id, item in _pcap_file_records(prompt_package):
+        identity = (request_id, str(item.get("sha256") or item.get("name") or ""))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        try:
+            total += max(0, int(item.get("size_bytes") or 0))
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def alert_context_size_bytes(prompt_package: dict[str, Any]) -> int:
+    """Measure the exact bounded alert context projected into run telemetry."""
+    context = {
+        key: prompt_package.get(key)
+        for key in (
+            "alert",
+            "grouped_alert_context",
+            "public_enrichment",
+            "analyst_state",
+            "pcap_evidence",
+        )
+    }
+    return len(json.dumps(
+        context,
+        sort_keys=True,
+        default=str,
+    ).encode("utf-8"))
 
 
 def _assigned_route(
@@ -174,9 +296,9 @@ def _artifact_resource_fields(
         "cpu_used_percent_max": resources.cpu_percent,
         "system_metrics_note": resources.note,
         "gpu_temperature_note": resources.note,
-        "pcap_total_size_bytes": dependencies.pcap_size(package) if package else 0,
+        "pcap_total_size_bytes": pcap_size_bytes(package) if package else 0,
         "alert_context_size_bytes": (
-            dependencies.alert_context_size(package) if package else 0
+            alert_context_size_bytes(package) if package else 0
         ),
     }
 
@@ -189,7 +311,7 @@ def build(
 ) -> dict[str, Any]:
     """Build one bounded operational record without performing I/O."""
     package = inputs.prompt_package
-    alert = dependencies.alert_summary(package) if package else {}
+    alert = alert_summary(package) if package else {}
     agent_role = str(package.get("agent_role") or "soc-analyst")
     assigned_route, assigned_model, assigned_path, assigned_mode = (
         _assigned_route(inputs, agent_role, dependencies)
