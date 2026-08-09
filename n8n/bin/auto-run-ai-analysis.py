@@ -75,6 +75,11 @@ from scheduler_startup import (
     initialize_scheduler_run,
     prepare_scheduler_run,
 )
+from scheduler_settlement import (
+    SchedulerSettlement,
+    SchedulerSettlementSources,
+    settle_scheduler_run,
+)
 from scheduler_terminal_recovery import (
     TerminalRecoverySources,
     reconcile_terminal_success,
@@ -3426,6 +3431,18 @@ def scheduler_startup_sources() -> SchedulerStartupSources:
     )
 
 
+def scheduler_settlement_sources() -> SchedulerSettlementSources:
+    """Bind post-drain settlement effects at call time."""
+    return SchedulerSettlementSources(
+        signal_dashboard_refresh=signal_dashboard_refresh,
+        reconcile_worker_state=reconcile_worker_state,
+        emit=lambda message: print(message, flush=True),
+        emit_error=lambda message: print(message, file=sys.stderr),
+        now=project_now,
+        controlled_failure_exit_code=CONTROLLED_SELECTED_JOB_FAILURE_EXIT_CODE,
+    )
+
+
 def main() -> int:
     args = parse_args()
     startup_sources = scheduler_startup_sources()
@@ -3915,40 +3932,18 @@ def main() -> int:
                     break
                 continue
 
-        if analyzed_count:
-            print(f"{project_now()} analyzed {analyzed_count} unique alert group(s)")
-            signal_dashboard_refresh(
-                args,
-                controlled_evaluation=controlled_evaluation_dir is not None,
-            )
-        # Reconcile again before exit because alerts can enqueue durable intent
-        # while a long-running inference is active. This prevents a completed
-        # artifact from waiting for the next five-minute scheduler invocation
-        # before queue/SLO state becomes accurate.
-        reconciled = reconcile_worker_state(
+        return settle_scheduler_run(
+            scheduler_settlement_sources(),
             args,
-            indexed_mode,
-            controlled_evaluation=controlled_evaluation_dir is not None,
+            SchedulerSettlement(
+                analyzed_count=analyzed_count,
+                indexed_mode=indexed_mode,
+                controlled_evaluation=controlled_evaluation_dir is not None,
+                controlled_owned_job_failed=controlled_owned_job_failed,
+                controlled_failure_detail=controlled_failure_detail,
+                controlled_failure_group_id=controlled_failure_group_id,
+            ),
         )
-        if reconciled:
-            print(f"{project_now()} reconciled {reconciled} completed durable AI job(s) before exit", flush=True)
-        if controlled_owned_job_failed:
-            print(
-                json.dumps(
-                    {
-                        "controlled_evaluation": "selected_job_failed",
-                        "error": (
-                            controlled_failure_detail[:1000]
-                            or "selected controlled job failed"
-                        ),
-                        "stable_group_id": controlled_failure_group_id,
-                    },
-                    sort_keys=True,
-                ),
-                file=sys.stderr,
-            )
-            return CONTROLLED_SELECTED_JOB_FAILURE_EXIT_CODE
-        return 0
 
 
 if __name__ == "__main__":

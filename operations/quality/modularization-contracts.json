@@ -102,6 +102,16 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_settlement.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_settlement.py",
+      "required_symbols": [
+        "SchedulerSettlement",
+        "SchedulerSettlementSources",
+        "settle_scheduler_run"
+      ]
+    },
+    {
       "path": "n8n/bin/onion_sentinel_harness.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/onion_sentinel_harness.py",

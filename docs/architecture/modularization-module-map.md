@@ -300,6 +300,12 @@ deferred indexing plus terminal-success recovery complete before initial queue
 reconciliation. Filesystem locking itself remains in the thin entrypoint so
 the lock lifetime still encloses the full drain and settlement sequence.
 
+`scheduler_settlement.py` owns post-drain dashboard signaling, the mandatory
+second reconciliation pass for intent arriving during inference, and the
+distinct bounded controlled-job failure payload/exit code. Runs with no
+completed analysis skip the dashboard wake but still reconcile late durable
+intent before returning.
+
 `scheduler_terminal_recovery.py` owns the read-only proof that a stranded
 processing lease already produced an exact, committed terminal result. It
 requires matching provider lane, group, alert, role, attempt window, harness
