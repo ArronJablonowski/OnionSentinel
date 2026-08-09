@@ -102,6 +102,10 @@ line ranges below remain historical navigation aids for the extraction ledger.
   bounded `local_ai_compatibility_facade.py` installer rebinds extracted
   function globals to the runner namespace so existing monkeypatch and pinned
   compatibility seams remain exact without duplicating implementation.
+- `n8n/bin/local_ai_dependency_compat.py` owns the legacy provider, reporting,
+  primary-execution, and evidence package loaders plus their policy/dependency
+  bindings. It is installed through the same facade-global seam and contains no
+  provider execution, evidence mutation, or persistence policy.
 - Concrete Markdown rendering and atomic output-publication binding now live
   in `local_ai_pipeline_adapters.write_outputs`; the runner transaction port
   delegates directly and no longer retains `render_markdown` or

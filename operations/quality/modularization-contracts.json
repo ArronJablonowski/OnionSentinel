@@ -841,6 +841,18 @@
       ]
     },
     {
+      "path": "n8n/bin/local_ai_dependency_compat.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/local_ai_dependency_compat.py",
+      "required_symbols": [
+        "_evidence_contract",
+        "_primary_execution_dependencies",
+        "_provider_execution_adapter",
+        "_reporting_runtime_adapter",
+        "_evidence_hosted_projection_dependencies"
+      ]
+    },
+    {
       "path": "n8n/bin/local_ai_runtime_compat.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/local_ai_runtime_compat.py",

@@ -72,6 +72,11 @@ class LocalAiRuntimeContractTests(unittest.TestCase):
 
     def test_extracted_runtime_delegates_preserve_runner_patch_seams(self) -> None:
         self.assertIs(self.runner.atomic_write_json.__globals__, vars(self.runner))
+        self.assertIs(self.runner._provider_routing.__globals__, vars(self.runner))
+        self.assertIs(
+            self.runner._evidence_contract_dependencies.__globals__,
+            vars(self.runner),
+        )
         self.assertIsNot(self.runner.atomic_write_json, runtime_compat.atomic_write_json)
         runtime_io = mock.Mock()
         with mock.patch.object(self.runner, "_runtime_io", return_value=runtime_io):
