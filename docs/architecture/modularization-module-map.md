@@ -2168,6 +2168,11 @@ policy. `analysis.review.workflow` now owns bounded model execution and retry
 orchestration through injected provider, harness, query, adjudication, guard,
 clock, and reporting ports; it reads no configuration or environment state
 and directly authorizes no evidence or operational action.
+`analysis.review.adjudication_workflow` separately owns frozen-reviewer versus
+configured-adjudicator route selection, identity separation, harness
+attestation, the two-attempt validation repair, and terminal shadow audit. All
+model, clock, package, validation, and reconciliation operations remain
+injected ports, and the workflow always denies automation authority.
 Authorization-sensitive conclusion guards live under
 `onion_sentinel.analysis.conclusions`; orchestration preserves their existing
 order after factored-verdict normalization and deterministic rule validation.

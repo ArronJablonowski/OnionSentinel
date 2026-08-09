@@ -2256,6 +2256,27 @@ def _review_adjudication():
     return adjudication
 
 
+def _review_adjudication_workflow():
+    _provider_routing()
+    from onion_sentinel.analysis.review import adjudication_workflow
+    return adjudication_workflow
+
+
+def _review_adjudication_workflow_dependencies():
+    module = _review_adjudication_workflow()
+    return module.Dependencies(
+        route_identity=model_route_identity,
+        notify_phase=notify_analysis_phase,
+        build_package=disagreement_adjudication_package,
+        route_is_hosted=model_route_is_hosted,
+        analyze_route=analyze_model_route,
+        validate=validate_disagreement_adjudication,
+        reconcile_endpoint_gaps=reconcile_supplied_endpoint_evidence_gaps,
+        monotonic=time.monotonic,
+        validation_error=DisagreementAdjudicationValidationError,
+    )
+
+
 def _review_authorization():
     _provider_routing()
     from onion_sentinel.analysis.review import authorization
@@ -6815,171 +6836,24 @@ def run_bounded_disagreement_adjudication(
     harness_runtime: OnionSentinelHarnessRun | None = None,
 ) -> dict[str, Any]:
     """Run at most two validation-bounded adjudicator calls in shadow mode."""
-    configured_route = str(
-        (settings.get("agent_adjudicator_models") or {}).get(agent_role) or ""
-    ).strip()
-    frozen_reviewer_route = str(
-        harness_runtime.envelope.assigned_reviewer_route
-        if harness_runtime is not None
-        else ""
-    ).strip()
-    # A harness run has an immutable two-route execution contract. Reuse its
-    # already-authorized reviewer for bounded reconsideration instead of
-    # silently invoking a third model that the run envelope cannot attest.
-    route = frozen_reviewer_route or configured_route
-    route_source = (
-        "frozen_reviewer_route"
-        if frozen_reviewer_route
-        else "configured_adjudicator_route"
+    module = _review_adjudication_workflow()
+    return module.run(
+        module.Context(
+            prompt_package=prompt_package,
+            primary_response=primary_response,
+            reviewer_response=reviewer_response,
+            comparison=comparison,
+            args=args,
+            settings=settings,
+            agent_role=agent_role,
+            phase_callback=phase_callback,
+            harness_runtime=harness_runtime,
+        ),
+        policy=module.Policy(
+            default_prompt_file=DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT_FILE,
+        ),
+        dependencies=_review_adjudication_workflow_dependencies(),
     )
-    if not route:
-        return {
-            "status": "not_configured",
-            "mode": "shadow",
-            "automation_authorized": False,
-            "error": "No independent disagreement adjudicator is configured.",
-        }
-    primary_identity = model_route_identity(
-        (settings.get("agent_models") or {}).get(agent_role), settings
-    )
-    reviewer_identity = model_route_identity(
-        (settings.get("agent_second_opinion_models") or {}).get(agent_role),
-        settings,
-    )
-    route_identity = model_route_identity(route, settings)
-    if route_identity == primary_identity or (
-        route_identity == reviewer_identity and not frozen_reviewer_route
-    ):
-        return {
-            "status": "not_independent",
-            "mode": "shadow",
-            "model_route": route,
-            "automation_authorized": False,
-            "error": (
-                "The configured adjudicator resolves to a primary or reviewer "
-                "provider/model identity."
-            ),
-        }
-    notify_analysis_phase(
-        phase_callback,
-        "disagreement_adjudication",
-        route,
-        "Material primary/reviewer disagreement requires bounded adjudication.",
-    )
-    package = disagreement_adjudication_package(
-        prompt_package,
-        primary_response,
-        reviewer_response,
-        comparison,
-        hosted=model_route_is_hosted(route, settings),
-    )
-    prompt_file = Path(
-        getattr(
-            args,
-            "disagreement_adjudicator_prompt_file",
-            DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT_FILE,
-        )
-    )
-    started = time.monotonic()
-    failures: list[dict[str, Any]] = []
-    attempts = 0
-    try:
-        result: dict[str, Any] | None = None
-        for attempt in range(1, 3):
-            attempts = attempt
-            call_id = f"disagreement-adjudication-{attempt}"
-            if harness_runtime is not None:
-                harness_runtime.preflight_model_call(
-                    call_id=call_id,
-                    input_value=package,
-                    requested_route=route,
-                    purpose="bounded disagreement adjudication",
-                    independent_review=True,
-                )
-            call_started = time.monotonic()
-            candidate = analyze_model_route(
-                route,
-                package,
-                args,
-                settings,
-                system_prompt_file=prompt_file,
-                independent_review=True,
-            )
-            try:
-                result = validate_disagreement_adjudication(candidate, package)
-                result = reconcile_supplied_endpoint_evidence_gaps(
-                    result,
-                    package,
-                )
-                if harness_runtime is not None:
-                    harness_runtime.model_call(
-                        call_id=call_id,
-                        purpose="bounded disagreement adjudication",
-                        requested_route=route,
-                        response=candidate,
-                        input_value=package,
-                        duration_seconds=time.monotonic() - call_started,
-                        independent_review=True,
-                    )
-                break
-            except DisagreementAdjudicationValidationError as exc:
-                if harness_runtime is not None:
-                    harness_runtime.model_call(
-                        call_id=call_id,
-                        purpose="bounded disagreement adjudication",
-                        requested_route=route,
-                        response=candidate,
-                        input_value=package,
-                        duration_seconds=time.monotonic() - call_started,
-                        independent_review=True,
-                        status="validation-failed",
-                    )
-                failures.append({
-                    "attempt": attempt,
-                    "error": str(exc)[:2000],
-                })
-                if attempt >= 2:
-                    raise
-                package["adjudication_contract_repair"] = {
-                    "attempt": 1,
-                    "instruction": (
-                        "Return one fresh complete object matching response_schema. "
-                        "Use only exact contract field names and evidence refs."
-                    ),
-                    "validation_error": str(exc)[:1000],
-                }
-        if result is None:
-            raise DisagreementAdjudicationValidationError(
-                "adjudicator produced no validated response"
-            )
-        return {
-            "status": "completed",
-            "mode": "shadow",
-            "model_route": route,
-            "route_source": route_source,
-            "system_prompt_file": str(prompt_file),
-            "runtime_seconds": round(time.monotonic() - started, 3),
-            "attempts": attempts,
-            "validation_failures": failures,
-            "response": result,
-            "decision": result["decision"],
-            "automation_authorized": False,
-            "human_adjudication_required": True,
-        }
-    except Exception as exc:
-        return {
-            "status": "failed",
-            "mode": "shadow",
-            "model_route": route,
-            "route_source": route_source,
-            "system_prompt_file": str(prompt_file),
-            "runtime_seconds": round(time.monotonic() - started, 3),
-            "attempts": attempts,
-            "validation_failures": failures,
-            "automation_authorized": False,
-            "human_adjudication_required": True,
-            "error": f"{type(exc).__name__}: {exc}"[:2000],
-        }
 
 
 def second_opinion_memory_eligibility(second_opinion: Any) -> tuple[bool, str]:
