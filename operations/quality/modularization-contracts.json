@@ -123,6 +123,18 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_runner_invocation.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_runner_invocation.py",
+      "required_symbols": [
+        "RunnerInvocationDefaults",
+        "RunnerInvocationSources",
+        "analysis_command",
+        "controlled_child_environment",
+        "invoke_analysis_runner"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_javascript_compat.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_javascript_compat.py",

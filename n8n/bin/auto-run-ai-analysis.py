@@ -118,6 +118,12 @@ from scheduler_prompt_builder import (
     PromptBuilderSources,
     build_prompt_package,
 )
+from scheduler_runner_invocation import (
+    RunnerInvocationDefaults,
+    RunnerInvocationSources,
+    analysis_command as build_analysis_command,
+    invoke_analysis_runner,
+)
 from scheduler_controlled_payload import (
     ControlledPayloadPolicy,
     ControlledPayloadSources,
@@ -1400,84 +1406,42 @@ def analysis_command(
     reanalysis_attempt_id: str = "",
     agent_role: str = "",
 ) -> list[str]:
-    agent_role = str(agent_role or "soc-analyst")
-    runner = Path(__file__).with_name("run-local-ai-analysis.py")
-    cmd = [
-        sys.executable,
-        str(runner),
-        "--prompt-package",
-        str(prompt_path),
-        "--prompt-dir",
-        str(getattr(args, "prompt_dir", DEFAULT_PROMPT_DIR)),
-        "--out-dir",
-        str(args.analysis_dir),
-        "--timeout",
-        str(args.timeout),
-        "--max-prompt-bytes",
-        str(
-            effective_prompt_package_limit(
-                args,
-                agent_role=agent_role,
-            )
-        ),
-        "--alert-store-url",
-        args.alert_store_url,
-        "--ai-settings-file",
-        str(args.ai_settings_file),
-        "--investigation-harness-policy",
-        str(
-            getattr(
-                args,
-                "investigation_harness_policy",
-                DEFAULT_INVESTIGATION_HARNESS_POLICY,
-            )
-        ),
-        "--system-prompt-file",
-        str(
-            role_prompt_file(
-                Path(args.ai_settings_file).parent,
-                agent_role,
-            )
-        ),
-        "--second-opinion-prompt-file",
-        str(
-            role_second_opinion_prompt_file(
-                Path(args.ai_settings_file).parent,
-                agent_role,
-            )
-        ),
-        "--disagreement-adjudicator-prompt-file",
-        str(
-            getattr(
-                args,
-                "disagreement_adjudicator_prompt_file",
-                DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT,
-            )
-        ),
-        "--live-osquery-config",
-        str(getattr(args, "live_osquery_config", DEFAULT_LIVE_OSQUERY_CONFIG)),
-        "--incident-evidence-config",
-        str(
-            getattr(
-                args,
-                "incident_evidence_config",
-                DEFAULT_INCIDENT_EVIDENCE_CONFIG,
-            )
-        ),
-        "--investigation-pivot-dir",
-        str(
-            getattr(
-                args,
-                "investigation_pivot_dir",
-                DEFAULT_INVESTIGATION_PIVOT_DIR,
-            )
-        ),
-    ]
-    if args.model:
-        cmd.extend(["--model", args.model])
-    if reanalysis_attempt_id:
-        cmd.extend(["--reanalysis-attempt-id", reanalysis_attempt_id])
-    return cmd
+    return build_analysis_command(
+        runner_invocation_defaults(),
+        runner_invocation_sources(),
+        prompt_path,
+        args,
+        reanalysis_attempt_id=reanalysis_attempt_id,
+        agent_role=agent_role,
+    )
+
+
+def runner_invocation_defaults() -> RunnerInvocationDefaults:
+    return RunnerInvocationDefaults(
+        python_executable=sys.executable,
+        runner_path=Path(__file__).with_name("run-local-ai-analysis.py"),
+        prompt_dir=DEFAULT_PROMPT_DIR,
+        harness_policy=DEFAULT_INVESTIGATION_HARNESS_POLICY,
+        disagreement_prompt=DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT,
+        live_osquery_config=DEFAULT_LIVE_OSQUERY_CONFIG,
+        incident_evidence_config=DEFAULT_INCIDENT_EVIDENCE_CONFIG,
+        investigation_pivot_dir=DEFAULT_INVESTIGATION_PIVOT_DIR,
+        max_stdout_bytes=DEFAULT_MAX_CHILD_STDOUT_BYTES,
+        max_stderr_bytes=DEFAULT_MAX_CHILD_STDERR_BYTES,
+        token_environment_key=CONTROLLED_EVALUATION_TOKEN_ENV,
+        token_pattern=CONTROLLED_EVALUATION_TOKEN_RE,
+    )
+
+
+def runner_invocation_sources() -> RunnerInvocationSources:
+    return RunnerInvocationSources(
+        effective_prompt_limit=effective_prompt_package_limit,
+        role_prompt_file=role_prompt_file,
+        role_second_opinion_prompt_file=role_second_opinion_prompt_file,
+        run_command=run_command,
+        environment_snapshot=lambda: dict(os.environ),
+        fallback_evaluation_token=lambda: _CONTROLLED_EVALUATION_TOKEN,
+    )
 
 
 def run_analysis(
@@ -1489,77 +1453,15 @@ def run_analysis(
     agent_role: str = "",
     controlled_result_identity: dict[str, object] | None = None,
 ):
-    cmd = analysis_command(
+    return invoke_analysis_runner(
+        runner_invocation_defaults(),
+        runner_invocation_sources(),
         prompt_path,
         args,
+        progress_callback=progress_callback,
         reanalysis_attempt_id=reanalysis_attempt_id,
         agent_role=agent_role,
-    )
-    # One durable analysis may now include the initial inference, as many as
-    # three bounded evidence-pivot follow-ups, and an independent review.  The
-    # child enforces the per-call timeout and query budgets; this outer watchdog
-    # must not terminate a healthy multi-turn investigation after only one
-    # model-call allowance.
-    worker_timeout = (args.timeout * 5) + 300
-    child_environment = None
-    if controlled_result_identity:
-        field_environment = {
-            "job_id": "ONION_SENTINEL_EVALUATION_JOB_ID",
-            "job_type": "ONION_SENTINEL_EVALUATION_JOB_TYPE",
-            "lease_token": "ONION_SENTINEL_EVALUATION_LEASE_TOKEN",
-            "cohort_id": "ONION_SENTINEL_EVALUATION_COHORT_ID",
-            "dispatch_id": "ONION_SENTINEL_EVALUATION_DISPATCH_ID",
-            "representative_alert_id": (
-                "ONION_SENTINEL_EVALUATION_REPRESENTATIVE_ALERT_ID"
-            ),
-            "stable_group_id": (
-                "ONION_SENTINEL_EVALUATION_STABLE_GROUP_ID"
-            ),
-            "stable_group_key": (
-                "ONION_SENTINEL_EVALUATION_STABLE_GROUP_KEY"
-            ),
-            "agent_role": "ONION_SENTINEL_EVALUATION_AGENT_ROLE",
-            "reanalysis_attempt_id": (
-                "ONION_SENTINEL_EVALUATION_REANALYSIS_ATTEMPT_ID"
-            ),
-            "release_id": "ONION_SENTINEL_EVALUATION_RELEASE_ID",
-            "expected_assigned_route": (
-                "ONION_SENTINEL_EVALUATION_EXPECTED_ASSIGNED_ROUTE"
-            ),
-            "expected_reviewer_route": (
-                "ONION_SENTINEL_EVALUATION_EXPECTED_REVIEWER_ROUTE"
-            ),
-            "reviewer_required": (
-                "ONION_SENTINEL_EVALUATION_REVIEWER_REQUIRED"
-            ),
-        }
-        child_environment = dict(os.environ)
-        evaluation_token = (
-            str(
-                os.environ.get(CONTROLLED_EVALUATION_TOKEN_ENV)
-                or ""
-            ).strip()
-            or _CONTROLLED_EVALUATION_TOKEN
-        )
-        if CONTROLLED_EVALUATION_TOKEN_RE.fullmatch(evaluation_token):
-            child_environment[
-                CONTROLLED_EVALUATION_TOKEN_ENV
-            ] = evaluation_token
-        child_environment["TMPDIR"] = str(os.environ["TMPDIR"])
-        for field, environment_key in field_environment.items():
-            value = controlled_result_identity.get(field)
-            child_environment[environment_key] = (
-                "1" if field == "reviewer_required" and value is True
-                else str(value or "")
-            )
-    return run_command(
-        cmd,
-        timeout_seconds=worker_timeout,
-        max_stdout_bytes=DEFAULT_MAX_CHILD_STDOUT_BYTES,
-        max_stderr_bytes=DEFAULT_MAX_CHILD_STDERR_BYTES,
-        env=child_environment,
-        progress_callback=progress_callback,
-        progress_interval_seconds=60,
+        controlled_result_identity=controlled_result_identity,
     )
 
 

@@ -580,6 +580,7 @@ cp "$REPO_DIR/n8n/bin/scheduler_ai_settings.py" "$STACK_DIR/bin/scheduler_ai_set
 cp "$REPO_DIR/n8n/bin/scheduler_artifact_repository.py" "$STACK_DIR/bin/scheduler_artifact_repository.py"
 cp "$REPO_DIR/n8n/bin/scheduler_legacy_reconciliation.py" "$STACK_DIR/bin/scheduler_legacy_reconciliation.py"
 cp "$REPO_DIR/n8n/bin/scheduler_prompt_builder.py" "$STACK_DIR/bin/scheduler_prompt_builder.py"
+cp "$REPO_DIR/n8n/bin/scheduler_runner_invocation.py" "$STACK_DIR/bin/scheduler_runner_invocation.py"
 cp "$REPO_DIR/n8n/bin/scheduler_javascript_compat.py" "$STACK_DIR/bin/scheduler_javascript_compat.py"
 cp "$REPO_DIR/n8n/bin/scheduler_controlled_canonical.py" "$STACK_DIR/bin/scheduler_controlled_canonical.py"
 cp "$REPO_DIR/n8n/bin/scheduler_controlled_acceptance.py" "$STACK_DIR/bin/scheduler_controlled_acceptance.py"

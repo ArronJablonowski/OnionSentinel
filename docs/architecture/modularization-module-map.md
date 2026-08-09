@@ -361,6 +361,15 @@ published path exists inside the configured prompt directory and fits the
 role-aware initial package budget. The facade injects mutable defaults and
 process execution at call time for compatibility.
 
+`scheduler_runner_invocation.py` owns the analysis runner argv, role-specific
+prompt and evidence-policy paths, the multi-turn outer watchdog, bounded child
+output, and controlled-evaluation child environment projection. Ordinary jobs
+continue to inherit their environment implicitly; controlled jobs alone receive
+the complete frozen result identity, isolated `TMPDIR`, and a validated
+ephemeral mutation token. The facade resolves mutable defaults and collaborators
+at call time so existing tests, launchd behavior, and operator overrides remain
+observable.
+
 `scheduler_claim.py` owns compare-and-set processing acquisition,
 server-authoritative job/alert/group replacement, controlled claim identity,
 IR reanalysis-attempt binding, contention projection, and automatic-threshold
