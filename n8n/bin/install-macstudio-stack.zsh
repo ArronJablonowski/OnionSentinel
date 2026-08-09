@@ -552,6 +552,7 @@ cp "$REPO_DIR/n8n/bin/prompt_alert_projection.py" "$STACK_DIR/bin/prompt_alert_p
 cp "$REPO_DIR/n8n/bin/prompt_alert_queries.py" "$STACK_DIR/bin/prompt_alert_queries.py"
 cp "$REPO_DIR/n8n/bin/prompt_authorization_context.py" "$STACK_DIR/bin/prompt_authorization_context.py"
 cp "$REPO_DIR/n8n/bin/prompt_builder_cli.py" "$STACK_DIR/bin/prompt_builder_cli.py"
+cp "$REPO_DIR/n8n/bin/prompt_builder_io.py" "$STACK_DIR/bin/prompt_builder_io.py"
 cp "$REPO_DIR/n8n/bin/prompt_correlation_context.py" "$STACK_DIR/bin/prompt_correlation_context.py"
 cp "$REPO_DIR/n8n/bin/prompt_correlation_facts.py" "$STACK_DIR/bin/prompt_correlation_facts.py"
 cp "$REPO_DIR/n8n/bin/prompt_detection_context.py" "$STACK_DIR/bin/prompt_detection_context.py"

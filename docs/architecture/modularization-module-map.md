@@ -532,6 +532,13 @@ and memory paths. The legacy `parse_args()` constructs defaults and callbacks
 at call time, preserving operator overrides while removing parser policy from
 the evidence and package assembly module.
 
+`prompt_builder_io.py` owns bounded runtime-artifact reads, strict object-root
+JSON loading, fail-soft embedded JSON parsing, system-prompt fallback, integer
+normalization, and safe output filename projection. Byte and root-type limits
+are enforced before artifacts enter prompt assembly. The builder retains its
+legacy helper names as compatibility delegates and supplies environment-derived
+limits and fallback text explicitly.
+
 `prompt_investigation_query_context.py` owns the split trust projection for
 investigation pivots. It derives exact anchor-bound observables, typed event
 tuples and sensor role semantics, a selected-alert-centered time envelope, the

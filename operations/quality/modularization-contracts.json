@@ -91,6 +91,20 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_builder_io.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_builder_io.py",
+      "required_symbols": [
+        "load_bounded_json_mapping",
+        "load_prompt_text",
+        "normalized_int",
+        "output_filename_timestamp",
+        "parse_json_mapping",
+        "read_bounded_bytes",
+        "safe_output_filename"
+      ]
+    },
+    {
       "path": "n8n/bin/prompt_correlation_context.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_correlation_context.py",

@@ -33,6 +33,7 @@ HARDENED_BUILDER_DEPENDENCIES = (
     "prompt_alert_queries.py",
     "prompt_authorization_context.py",
     "prompt_builder_cli.py",
+    "prompt_builder_io.py",
     "prompt_correlation_context.py",
     "prompt_correlation_facts.py",
     "prompt_detection_context.py",

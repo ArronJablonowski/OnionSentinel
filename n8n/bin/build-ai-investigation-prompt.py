@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
-import json
 import os
 import re
 import sqlite3
@@ -57,6 +56,15 @@ from prompt_builder_cli import (
     PromptBuilderCliDefaults,
     PromptBuilderCliSources,
     parse_prompt_builder_args,
+)
+from prompt_builder_io import (
+    load_bounded_json_mapping,
+    load_prompt_text,
+    normalized_int,
+    output_filename_timestamp,
+    parse_json_mapping,
+    read_bounded_bytes,
+    safe_output_filename,
 )
 from prompt_authorization_context import (
     AuthorizationContextSources,
@@ -391,22 +399,13 @@ def project_now() -> str:
 
 
 def filename_timestamp(value: str) -> str:
-    match = re.match(r"^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})(Z|[+-]\d{2}:\d{2})$", value)
-    if match:
-        year, month, day, hour, minute, second, zone = match.groups()
-        return f"{year}{month}{day}-{hour}{minute}{second}{zone.replace(':', '')}"
-    return safe_filename(value)
+    """Compatibility delegate for projected output timestamps."""
+    return output_filename_timestamp(value)
 
 
 def safe_filename(value: str) -> str:
-    return (
-        str(value or "alert")
-        .replace(":", "")
-        .replace("/", "-")
-        .replace("\\", "-")
-        .replace("|", "-")
-        .replace(" ", "-")
-    )[:180]
+    """Compatibility delegate for bounded output filenames."""
+    return safe_output_filename(value)
 
 
 def rows(conn: sqlite3.Connection, sql: str, params: Iterable[object] = ()) -> list[sqlite3.Row]:
@@ -427,58 +426,37 @@ def test_filter_sql(prefix: str = "alert_id") -> tuple[str, list[object]]:
 
 
 def parse_alert_json(value: str | None) -> dict:
-    try:
-        parsed = json.loads(value or "{}")
-        return parsed if isinstance(parsed, dict) else {}
-    except json.JSONDecodeError:
-        return {}
+    """Compatibility delegate for fail-soft alert JSON parsing."""
+    return parse_json_mapping(value)
 
 
 def parse_json_object(value: str | None) -> dict:
-    try:
-        parsed = json.loads(value or "{}")
-        return parsed if isinstance(parsed, dict) else {}
-    except json.JSONDecodeError:
-        return {}
+    """Compatibility delegate for fail-soft JSON object parsing."""
+    return parse_json_mapping(value)
 
 
 def safe_int(value: object, default: int = 0) -> int:
-    try:
-        if value in (None, ""):
-            return default
-        return int(value)
-    except (TypeError, ValueError):
-        return default
+    """Compatibility delegate for forgiving integer normalization."""
+    return normalized_int(value, default)
 
 
 def read_bytes_bounded(path: Path, max_bytes: int) -> bytes:
-    """Read a trusted runtime artifact only when it satisfies its size contract."""
-    size = path.stat().st_size
-    if size > max_bytes:
-        raise ValueError(f"artifact exceeds {max_bytes} byte limit: {path.name}")
-    with path.open("rb") as handle:
-        data = handle.read(max_bytes + 1)
-    if len(data) > max_bytes:
-        raise ValueError(f"artifact grew beyond {max_bytes} byte limit: {path.name}")
-    return data
+    """Compatibility delegate for bounded runtime artifact reads."""
+    return read_bounded_bytes(path, max_bytes)
 
 
 def load_json_bounded(path: Path, max_bytes: int = MAX_ARTIFACT_JSON_BYTES) -> dict:
-    parsed = json.loads(read_bytes_bounded(path, max_bytes).decode("utf-8", errors="strict"))
-    if not isinstance(parsed, dict):
-        raise ValueError(f"JSON artifact root must be an object: {path.name}")
-    return parsed
+    """Compatibility delegate for bounded object-root JSON loading."""
+    return load_bounded_json_mapping(path, max_bytes)
 
 
 def load_system_prompt(path: Path) -> str:
     """Load the analyst-editable system prompt used by the AI runner."""
-    try:
-        prompt = read_bytes_bounded(path, MAX_SYSTEM_PROMPT_BYTES).decode("utf-8", errors="replace").strip()
-        if prompt:
-            return prompt
-    except Exception:
-        pass
-    return DEFAULT_SYSTEM_PROMPT
+    return load_prompt_text(
+        path,
+        MAX_SYSTEM_PROMPT_BYTES,
+        DEFAULT_SYSTEM_PROMPT,
+    )
 
 
 def sqlite_value(row_value: sqlite3.Row, key: str, default: object = None) -> object:
