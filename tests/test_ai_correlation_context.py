@@ -16,6 +16,7 @@ PROMPT_BUILDER = REPO_ROOT / "n8n" / "bin" / "build-ai-investigation-prompt.py"
 AI_RUNNER = REPO_ROOT / "n8n" / "bin" / "run-local-ai-analysis.py"
 ALERT_STORE = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
 CORRELATION_MODULE = REPO_ROOT / "n8n" / "alert_store" / "lib" / "correlation_context.js"
+ANALYSIS_RESULT_ROUTES = REPO_ROOT / "n8n" / "alert_store" / "routes" / "analysis_result_routes.js"
 CORRELATION_BACKFILL = REPO_ROOT / "n8n" / "bin" / "backfill-ai-correlation-context.py"
 
 
@@ -376,12 +377,13 @@ class AiCorrelationContextTests(unittest.TestCase):
 
     def test_alert_store_owns_correlation_writes(self) -> None:
         source = ALERT_STORE.read_text(encoding="utf-8")
+        result_routes = ANALYSIS_RESULT_ROUTES.read_text(encoding="utf-8")
         runner = AI_RUNNER.read_text(encoding="utf-8")
 
         self.assertIn("CREATE TABLE IF NOT EXISTS alert_observables", source)
         self.assertIn("CREATE TABLE IF NOT EXISTS ai_analysis_runs", source)
         self.assertIn("CREATE TABLE IF NOT EXISTS alert_correlations", source)
-        self.assertIn("parsedUrl.pathname === '/analysis/result'", source)
+        self.assertIn("path: '/analysis/result'", result_routes)
         self.assertIn("withSqliteWriteGate(() => withImmediateTransaction", source)
         self.assertIn("observable.observable_type = 'community_id'", source)
         self.assertNotIn("sqlite3.connect", runner)

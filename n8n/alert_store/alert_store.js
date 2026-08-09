@@ -37,6 +37,8 @@ const {createDurableJobService} = require('./services/durable_job_service');
 const {createDurableJobRoutes} = require('./routes/durable_job_routes');
 const {createAnalysisRequestService} = require('./services/analysis_request_service');
 const {createAnalysisRequestRoutes} = require('./routes/analysis_request_routes');
+const {createAnalysisResultService} = require('./services/analysis_result_service');
+const {createAnalysisResultRoutes} = require('./routes/analysis_result_routes');
 const {
   loadAuthorizedActivityPolicy,
   matchAuthorizedActivity,
@@ -11802,6 +11804,22 @@ modularRoutes.registerAll(createAnalysisRequestRoutes({
   readJsonBody,
   sendJson,
 }));
+const analysisResultService = createAnalysisResultService({
+  controlledEvaluationMode: () => controlledEvaluationMode,
+  requestHasOwnField,
+  identityConflict: incidentIdentityConflict,
+  withWriteGate: withSqliteWriteGate,
+  withTransaction: withImmediateTransaction,
+  controlledResultAdmission: controlledEvaluationResultAdmission,
+  recordAnalysisResult: recordAiAnalysisResult,
+  transitionJobStatus: transitionDurableJobStatus,
+  applyControlledResultAdmission: applyControlledEvaluationResultAdmission,
+});
+modularRoutes.registerAll(createAnalysisResultRoutes({
+  service: analysisResultService,
+  readJsonBody,
+  sendJson,
+}));
 
 function controlledEvaluationRequestAuthorized(request) {
   if (!controlledEvaluationMode) return true;
@@ -11924,57 +11942,6 @@ async function handleRequest(request, response) {
           payload.indicator,
         ),
       );
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/analysis/result') {
-      // AI workers submit compact, structured results here so alert-store
-      // remains the only SQLite writer. The endpoint is idempotent by
-      // analysis_id and never accepts raw PCAP bytes or unbounded artifacts.
-      const payload = await readJsonBody(request, true);
-      if (
-        !controlledEvaluationMode
-        && requestHasOwnField(payload, 'controlled_job')
-      ) {
-        throw incidentIdentityConflict(
-          'controlled result identity requires controlled evaluation mode',
-        );
-      }
-      const result = await withSqliteWriteGate(async () => {
-        let controlledAdmission = null;
-        const indexed = await withImmediateTransaction(async () => {
-          controlledAdmission = await controlledEvaluationResultAdmission(
-            payload,
-          );
-          const recorded = await recordAiAnalysisResult(payload);
-          if (
-            controlledEvaluationMode
-            && controlledAdmission?.completeRequired
-          ) {
-            const completed = await transitionDurableJobStatus(
-              controlledAdmission.jobType,
-              controlledAdmission.stableGroupId,
-              'completed',
-              '',
-              controlledAdmission.leaseToken,
-              true,
-            );
-            if (!completed.updated) {
-              throw incidentIdentityConflict(
-                'controlled evaluation result could not complete its exact job',
-              );
-            }
-          }
-          return recorded;
-        });
-        // Keep process-local diagnostic state ordered with every gated DB
-        // writer, but only mutate it after the SQLite commit succeeds.
-        applyControlledEvaluationResultAdmission(controlledAdmission);
-        return indexed;
-      });
-      sendJson(response, 200, {
-        ...result,
-        submission_sha256: payload.__body_sha256,
-      });
       return;
     }
     if (request.method === 'POST' && parsedUrl.pathname === '/pcap/request') {
