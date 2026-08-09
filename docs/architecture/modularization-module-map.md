@@ -282,6 +282,13 @@ the dry-run/max-attempt stop contract. Claim contention explicitly returns its
 attempt slot, while completed and recovered outcomes update the shared state
 used by final settlement.
 
+`scheduler_worker.py` is the per-selection application workflow. It composes
+claim, server-authoritative identity replacement, execution, process outcome,
+controlled-claim rejection, and recoverable exception handling while carrying
+the mutable exact-lease receipt across every failure edge. The launchd wrapper
+now owns only preflight, lock lifetime, dependency binding, drain iteration,
+and final settlement.
+
 `scheduler_outcome.py` owns child-process output projection, production
 completion and retryable-failure transitions, exact controlled-lease release,
 and crash-safe controlled result spool recovery. It returns an explicit loop

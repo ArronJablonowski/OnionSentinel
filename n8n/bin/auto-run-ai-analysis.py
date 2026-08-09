@@ -50,13 +50,10 @@ from scheduler_cli import (
     parse_scheduler_args,
 )
 from scheduler_claim import (
-    SchedulerClaimRequest,
-    SchedulerClaimState,
     SchedulerClaimSources,
     acquire_scheduler_claim,
 )
 from scheduler_execution import (
-    SchedulerExecutionRequest,
     SchedulerExecutionSources,
     execute_scheduler_analysis,
 )
@@ -72,7 +69,6 @@ from scheduler_job_reporting import (
     transition_ai_job_status,
 )
 from scheduler_outcome import (
-    SchedulerOutcomeRequest,
     SchedulerOutcomeSources,
     handle_controlled_claim_rejection,
     handle_process_outcome,
@@ -107,6 +103,10 @@ from scheduler_terminal_recovery import (
     TerminalRecoverySources,
     reconcile_terminal_success,
     terminal_success_recovery_candidates as load_terminal_success_recovery_candidates,
+)
+from scheduler_worker import (
+    SchedulerWorkerSources,
+    process_scheduler_selection,
 )
 
 
@@ -3534,6 +3534,22 @@ def scheduler_drain_sources() -> SchedulerDrainSources:
     )
 
 
+def scheduler_worker_sources() -> SchedulerWorkerSources:
+    """Bind the per-selection scheduler application workflow."""
+    return SchedulerWorkerSources(
+        acquire_claim=acquire_scheduler_claim,
+        claim_sources=scheduler_claim_sources,
+        execute_analysis=execute_scheduler_analysis,
+        execution_sources=scheduler_execution_sources,
+        handle_process_outcome=handle_process_outcome,
+        handle_claim_rejection=handle_controlled_claim_rejection,
+        handle_exception=handle_scheduler_exception,
+        outcome_sources=scheduler_outcome_sources,
+        controlled_claim_error=ControlledClaimRejected,
+        execution_errors=(BoundedProcessError, RuntimeError, OSError),
+    )
+
+
 def main() -> int:
     args = parse_args()
     startup_sources = scheduler_startup_sources()
@@ -3575,133 +3591,15 @@ def main() -> int:
             )
             if selection.disposition != "selected":
                 break
-            selected = selection.selected
-            alert_id = selection.alert_id
-            selected_group_id = selection.group_id
-            durable_job_type = selection.job_type
-            job_payload = selection.job_payload
-            durable_intent = selection.durable_intent
-            allowed_analysis_levels = selection.allowed_analysis_levels
-
-            processing_recorded = False
-            processing_lease_token = ""
-            reanalysis_attempt_id = ""
-            controlled_exact_lease_owned = False
-            try:
-                controlled_identity_requested = (
-                    controlled_evaluation_dir is not None
-                )
-                claim_state = SchedulerClaimState()
-                try:
-                    claim = acquire_scheduler_claim(
-                        scheduler_claim_sources(),
-                        SchedulerClaimRequest(
-                            args=args,
-                            selected=selected,
-                            job_payload=job_payload,
-                            alert_id=alert_id,
-                            group_id=selected_group_id,
-                            job_type=durable_job_type,
-                            indexed_mode=indexed_mode,
-                            durable_intent=durable_intent,
-                            controlled=controlled_identity_requested,
-                            allowed_analysis_levels=tuple(
-                                allowed_analysis_levels
-                            ),
-                            state=claim_state,
-                        ),
-                    )
-                finally:
-                    processing_transition = claim_state.processing_transition
-                    processing_recorded = claim_state.processing_recorded
-                    processing_lease_token = claim_state.lease_token
-                    controlled_exact_lease_owned = (
-                        claim_state.controlled_exact_lease_owned
-                    )
-                if claim.disposition == "contended":
-                    drain_state.release_contended_attempt()
-                    continue
-                job_payload = claim.job_payload
-                alert_id = claim.alert_id
-                selected_group_id = claim.group_id
-                reanalysis_attempt_id = claim.reanalysis_attempt_id
-                if claim.disposition == "retired":
-                    continue
-                execution = execute_scheduler_analysis(
-                    scheduler_execution_sources(),
-                    SchedulerExecutionRequest(
-                        args=args,
-                        selected=selected,
-                        job_payload=job_payload,
-                        alert_id=alert_id,
-                        group_id=selected_group_id,
-                        job_type=durable_job_type,
-                        indexed_mode=indexed_mode,
-                        controlled=controlled_identity_requested,
-                        processing_transition=processing_transition,
-                        processing_recorded=processing_recorded,
-                        lease_token=processing_lease_token,
-                        reanalysis_attempt_id=reanalysis_attempt_id,
-                    ),
-                )
-                proc = execution.process
-                outcome_request = SchedulerOutcomeRequest(
-                    args=args,
-                    group_id=selected_group_id,
-                    job_type=durable_job_type,
-                    processing_recorded=processing_recorded,
-                    lease_token=processing_lease_token,
-                    controlled=controlled_identity_requested,
-                    controlled_evaluation_dir=controlled_evaluation_dir,
-                    controlled_exact_lease_owned=controlled_exact_lease_owned,
-                )
-                outcome = handle_process_outcome(
-                    scheduler_outcome_sources(),
-                    outcome_request,
-                    proc,
-                )
-                drain_state.apply_outcome(outcome)
-                if outcome.stop:
-                    break
-            except ControlledClaimRejected as error:
-                # The exact-claim endpoint rejects before acquiring a lease.
-                # Never fail or otherwise mutate a possibly unrelated durable
-                # job when a frozen dispatch loses this race.
-                outcome = handle_controlled_claim_rejection(
-                    scheduler_outcome_sources(),
-                    SchedulerOutcomeRequest(
-                        args=args,
-                        group_id=selected_group_id,
-                        job_type=durable_job_type,
-                        processing_recorded=processing_recorded,
-                        lease_token=processing_lease_token,
-                        controlled=True,
-                        controlled_evaluation_dir=controlled_evaluation_dir,
-                        controlled_exact_lease_owned=controlled_exact_lease_owned,
-                    ),
-                    error,
-                )
-                drain_state.apply_outcome(outcome)
+            if process_scheduler_selection(
+                scheduler_worker_sources(),
+                args,
+                drain_state,
+                selection,
+                indexed_mode=indexed_mode,
+                controlled_evaluation_dir=controlled_evaluation_dir,
+            ):
                 break
-            except (BoundedProcessError, RuntimeError, OSError) as error:
-                outcome = handle_scheduler_exception(
-                    scheduler_outcome_sources(),
-                    SchedulerOutcomeRequest(
-                        args=args,
-                        group_id=selected_group_id,
-                        job_type=durable_job_type,
-                        processing_recorded=processing_recorded,
-                        lease_token=processing_lease_token,
-                        controlled=controlled_evaluation_dir is not None,
-                        controlled_evaluation_dir=controlled_evaluation_dir,
-                        controlled_exact_lease_owned=controlled_exact_lease_owned,
-                    ),
-                    error,
-                )
-                drain_state.apply_outcome(outcome)
-                if outcome.stop:
-                    break
-                continue
 
         return settle_scheduler_run(
             scheduler_settlement_sources(),

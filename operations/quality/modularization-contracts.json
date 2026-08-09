@@ -114,6 +114,15 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_worker.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_worker.py",
+      "required_symbols": [
+        "SchedulerWorkerSources",
+        "process_scheduler_selection"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_legacy_selection.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_legacy_selection.py",
