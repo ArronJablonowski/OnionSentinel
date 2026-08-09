@@ -617,6 +617,7 @@ cp "$REPO_DIR/n8n/bin/local_ai_evaluation_routing_compat.py" "$STACK_DIR/bin/loc
 cp "$REPO_DIR/n8n/bin/local_ai_investigation_compat.py" "$STACK_DIR/bin/local_ai_investigation_compat.py"
 cp "$REPO_DIR/n8n/bin/local_ai_provider_compat.py" "$STACK_DIR/bin/local_ai_provider_compat.py"
 cp "$REPO_DIR/n8n/bin/local_ai_query_dependency_compat.py" "$STACK_DIR/bin/local_ai_query_dependency_compat.py"
+cp "$REPO_DIR/n8n/bin/local_ai_review_compat.py" "$STACK_DIR/bin/local_ai_review_compat.py"
 cp "$REPO_DIR/n8n/bin/local_ai_runtime_compat.py" "$STACK_DIR/bin/local_ai_runtime_compat.py"
 cp "$REPO_DIR/n8n/bin/local_ai_runtime_contract.py" "$STACK_DIR/bin/local_ai_runtime_contract.py"
 cp "$REPO_DIR/n8n/bin/local_ai_analysis_contract.py" "$STACK_DIR/bin/local_ai_analysis_contract.py"

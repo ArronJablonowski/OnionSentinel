@@ -132,6 +132,10 @@ line ranges below remain historical navigation aids for the extraction ledger.
   OpenClaw, and provider-route transport delegates. Bounded process execution,
   credential isolation, schema construction, identity attestation, and route
   selection remain implemented in the provider package modules.
+- `n8n/bin/local_ai_review_compat.py` owns legacy independent-review,
+  supplemental-pivot, disagreement-adjudication, review-gate, and post-commit
+  memory-plan delegates. Reviewer validation, evidence isolation, automation
+  authorization, and transaction semantics remain package-owned.
 - Concrete Markdown rendering and atomic output-publication binding now live
   in `local_ai_pipeline_adapters.write_outputs`; the runner transaction port
   delegates directly and no longer retains `render_markdown` or

@@ -925,6 +925,18 @@
       ]
     },
     {
+      "path": "n8n/bin/local_ai_review_compat.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/local_ai_review_compat.py",
+      "required_symbols": [
+        "analyze_with_config",
+        "apply_configured_second_opinion",
+        "independent_reviewer_package",
+        "persist_postcommit_memory_writeback",
+        "run_bounded_disagreement_adjudication"
+      ]
+    },
+    {
       "path": "n8n/bin/local_ai_runtime_compat.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/local_ai_runtime_compat.py",

@@ -96,6 +96,7 @@ class LocalAiRuntimeContractTests(unittest.TestCase):
         )
         self.assertIsNone(self.runner._PIVOT_COLLECTOR_MODULE)
         self.assertIs(self.runner.analyze_model_route.__globals__, vars(self.runner))
+        self.assertIs(self.runner.analyze_with_config.__globals__, vars(self.runner))
         self.assertIsNot(self.runner.atomic_write_json, runtime_compat.atomic_write_json)
         runtime_io = mock.Mock()
         with mock.patch.object(self.runner, "_runtime_io", return_value=runtime_io):
