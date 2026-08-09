@@ -252,6 +252,38 @@ from cohort_manifest_adapters import (
     validate_release_id,
     validate_stable_group_key,
 )
+from cohort_freeze_state_composition import (
+    SUMMARY_EXPORT_COLUMNS,
+    active_jobs as _active_jobs,
+    active_reanalysis as _active_reanalysis,
+    alert_representative_identity as _alert_representative_identity,
+    analysis_ids_for_group as _analysis_ids_for_group,
+    bind_representative_stable_group_key as _bind_representative_stable_group_key,
+    case_for_stable as _case_for_stable,
+    connect_read_only,
+    current_summary_identity as _current_summary_identity,
+    durable_dispatch_job as _durable_dispatch_job,
+    durable_job_snapshot as _durable_job_snapshot,
+    frozen_analysis_ids as _frozen_analysis_ids,
+    incident_cases as _incident_cases,
+    incident_pre_state as _pre_state,
+    latest_analysis_metadata as _latest_analysis_metadata,
+    load_aliases,
+    representative_state_policy as _representative_state_policy,
+    require_columns as _require_columns,
+    resolve_alias,
+    schema_fingerprint,
+    soc_pre_state as _soc_pre_state,
+    state_policy as _state_policy,
+    storage_policy as _storage_policy,
+    summary_rows as _summary_rows,
+    table_columns as _table_columns,
+    table_exists as _table_exists,
+    validate_frozen_cohort,
+    validate_member_preflight,
+    validate_representative_binding as _validate_representative_binding,
+    verify_zero_fresh_analyses as _verify_zero_fresh_analyses,
+)
 
 
 TRACE_EVALUATOR_PATH = Path(__file__).with_name("evaluate-harness-traces.py")
@@ -274,225 +306,6 @@ def _parse_timestamp(value: Any, label: str) -> dt.datetime:
     if parsed.tzinfo is None:
         raise CohortError(f"{label} must include a timezone")
     return parsed.astimezone(dt.timezone.utc)
-
-
-def connect_read_only(database_path: Path) -> sqlite3.Connection:
-    return open_cohort_database_read_only(database_path, _storage_policy())
-
-
-def _storage_policy() -> CohortStoragePolicy:
-    return CohortStoragePolicy(error=CohortError, sha256_value=sha256_value)
-
-
-def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
-    return storage_table_exists(connection, table)
-
-
-def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
-    return storage_table_columns(connection, table)
-
-
-def _require_columns(
-    connection: sqlite3.Connection,
-    table: str,
-    required: Iterable[str],
-) -> set[str]:
-    return require_storage_columns(
-        connection, table, required, _storage_policy()
-    )
-
-
-def schema_fingerprint(connection: sqlite3.Connection) -> str:
-    return calculate_schema_fingerprint(connection, _storage_policy())
-
-
-def load_aliases(connection: sqlite3.Connection) -> dict[str, str]:
-    return read_group_aliases(connection, _storage_policy())
-
-
-def resolve_alias(identity: str, aliases: Mapping[str, str]) -> str:
-    return resolve_group_alias(identity, aliases, _storage_policy())
-
-
-SUMMARY_EXPORT_COLUMNS = (
-    "group_id",
-    "representative_alert_id",
-    "first_seen",
-    "last_seen",
-    "timestamp",
-    "rule_name",
-    "event_dataset",
-    "severity",
-    "severity_label",
-    "source_ip",
-    "source_port",
-    "destination_ip",
-    "destination_port",
-    "network_protocol",
-    "transport_protocol",
-    "traffic_direction",
-    "triage_score",
-    "triage_level",
-    "raw_alert_count",
-    "total_seen_count",
-)
-
-
-def _summary_rows(connection: sqlite3.Connection) -> list[dict[str, Any]]:
-    return query_summary_rows(connection, _state_policy())
-
-
-def _state_policy() -> CohortStatePolicy:
-    return CohortStatePolicy(
-        error=CohortError,
-        ambiguous_error=AmbiguousDispatchError,
-        storage=_storage_policy(),
-        active_agent_states=frozenset(ACTIVE_AGENT_STATES),
-    )
-
-
-def _incident_cases(
-    connection: sqlite3.Connection,
-    aliases: Mapping[str, str],
-) -> dict[str, list[dict[str, Any]]]:
-    return query_incident_cases(connection, aliases, _state_policy())
-
-
-def _active_jobs(
-    connection: sqlite3.Connection,
-    stable_group_id: str,
-    aliases: Mapping[str, str],
-    *,
-    job_type: str = "incident_response_analysis",
-) -> list[dict[str, Any]]:
-    return query_active_jobs(
-        connection,
-        stable_group_id,
-        aliases,
-        _state_policy(),
-        job_type=job_type,
-    )
-
-
-def _durable_dispatch_job(
-    connection: sqlite3.Connection,
-    *,
-    job_type: str,
-    stable_group_id: str,
-) -> dict[str, Any]:
-    return read_durable_dispatch_job(
-        connection,
-        job_type=job_type,
-        stable_group_id=stable_group_id,
-        policy=_state_policy(),
-    )
-
-
-def _durable_job_snapshot(
-    connection: sqlite3.Connection,
-    *,
-    job_type: str,
-    stable_group_id: str,
-) -> dict[str, Any] | None:
-    return read_durable_job_snapshot(
-        connection,
-        job_type=job_type,
-        stable_group_id=stable_group_id,
-        policy=_state_policy(),
-    )
-
-
-def _active_reanalysis(
-    connection: sqlite3.Connection,
-    stable_group_id: str,
-    case_id: str,
-    aliases: Mapping[str, str],
-) -> list[dict[str, Any]]:
-    return query_active_reanalysis(
-        connection,
-        stable_group_id,
-        case_id,
-        aliases,
-        _state_policy(),
-    )
-
-
-def _analysis_ids_for_group(
-    connection: sqlite3.Connection,
-    stable_group_id: str,
-    *,
-    agent_role: str,
-) -> list[str]:
-    return query_analysis_ids_for_group(
-        connection,
-        stable_group_id,
-        agent_role=agent_role,
-        policy=_state_policy(),
-    )
-
-
-def _frozen_analysis_ids(
-    member: Mapping[str, Any],
-    *,
-    agent_role: str,
-    pre_state_field: str,
-) -> set[str]:
-    return read_frozen_analysis_ids(
-        member,
-        agent_role=agent_role,
-        pre_state_field=pre_state_field,
-        policy=_state_policy(),
-    )
-
-
-def _verify_zero_fresh_analyses(
-    connection: sqlite3.Connection,
-    member: Mapping[str, Any],
-    stable_group_id: str,
-    *,
-    agent_role: str,
-    pre_state_field: str,
-) -> list[str]:
-    return prove_zero_fresh_analyses(
-        connection,
-        member,
-        stable_group_id,
-        agent_role=agent_role,
-        pre_state_field=pre_state_field,
-        policy=_state_policy(),
-    )
-
-
-def _soc_pre_state(
-    connection: sqlite3.Connection,
-    stable_group_id: str,
-    aliases: Mapping[str, str],
-) -> dict[str, Any]:
-    return build_soc_pre_state(
-        connection, stable_group_id, aliases, _state_policy()
-    )
-
-
-def _latest_analysis_metadata(
-    connection: sqlite3.Connection,
-    analysis_id: str,
-) -> dict[str, Any] | None:
-    return read_latest_analysis_metadata(connection, analysis_id)
-
-
-def _pre_state(
-    connection: sqlite3.Connection,
-    stable_group_id: str,
-    aliases: Mapping[str, str],
-    cases_by_stable: Mapping[str, list[dict[str, Any]]],
-) -> dict[str, Any]:
-    return build_incident_pre_state(
-        connection,
-        stable_group_id,
-        aliases,
-        cases_by_stable,
-        _state_policy(),
-    )
 
 
 def freeze_cohort(
@@ -648,130 +461,6 @@ def freeze_cohort_from_rows(
         evaluation_profile=evaluation_profile,
         dry_run=dry_run,
     )
-
-
-def _current_summary_identity(
-    connection: sqlite3.Connection,
-    dashboard_group_id: str,
-    aliases: Mapping[str, str],
-) -> tuple[str, str] | None:
-    return read_current_summary_identity(
-        connection,
-        dashboard_group_id,
-        aliases,
-        _representative_state_policy(),
-    )
-
-
-def _alert_representative_identity(
-    connection: sqlite3.Connection,
-    alert_id: str,
-) -> dict[str, Any] | None:
-    return read_alert_representative_identity(
-        connection,
-        alert_id,
-        _representative_state_policy(),
-    )
-
-
-def _bind_representative_stable_group_key(
-    connection: sqlite3.Connection,
-    representative_alert_id: str,
-    detection: Mapping[str, Any],
-) -> dict[str, Any]:
-    return bind_stable_group_key(
-        connection,
-        representative_alert_id,
-        detection,
-        _representative_state_policy(),
-        alert_identity=_alert_representative_identity,
-    )
-
-
-def _representative_state_policy() -> CohortRepresentativeStatePolicy:
-    return CohortRepresentativeStatePolicy(
-        error=CohortError,
-        storage=_storage_policy(),
-        resolve_alias=resolve_alias,
-        incident_cases=_incident_cases,
-        immutable_fields=FROZEN_REPRESENTATIVE_IMMUTABLE_FIELDS,
-    )
-
-
-def _validate_representative_binding(
-    connection: sqlite3.Connection,
-    member: Mapping[str, Any],
-    current_representative_alert_id: str,
-) -> dict[str, Any]:
-    return prove_representative_binding(
-        connection,
-        member,
-        current_representative_alert_id,
-        alert_identity=_alert_representative_identity,
-        member_stable_group_key=_member_stable_group_key,
-        policy=RepresentativeBindingPolicy(
-            error=CohortError,
-            representative_alert_id_pattern=REPRESENTATIVE_ALERT_ID_RE,
-            immutable_fields=FROZEN_REPRESENTATIVE_IMMUTABLE_FIELDS,
-            binding_schema=REPRESENTATIVE_BINDING_SCHEMA,
-            validate_stable_group_key=validate_stable_group_key,
-            sha256_value=sha256_value,
-        ),
-    )
-
-
-def _case_for_stable(
-    connection: sqlite3.Connection,
-    stable_group_id: str,
-    aliases: Mapping[str, str],
-) -> dict[str, Any] | None:
-    return read_case_for_stable(
-        connection,
-        stable_group_id,
-        aliases,
-        _representative_state_policy(),
-    )
-
-
-def validate_member_preflight(
-    connection: sqlite3.Connection,
-    member: Mapping[str, Any],
-) -> dict[str, Any]:
-    return run_member_preflight(
-        connection,
-        member,
-        MemberPreflightSources(
-            error=CohortError,
-            active_agent_states=frozenset(ACTIVE_AGENT_STATES),
-            load_aliases=load_aliases,
-            current_summary_identity=_current_summary_identity,
-            validate_representative_binding=_validate_representative_binding,
-            soc_pre_state=_soc_pre_state,
-            frozen_analysis_ids=_frozen_analysis_ids,
-            analysis_ids_for_group=_analysis_ids_for_group,
-            case_for_stable=_case_for_stable,
-            active_jobs=_active_jobs,
-            active_reanalysis=_active_reanalysis,
-        ),
-    )
-
-
-def validate_frozen_cohort(
-    database_path: Path,
-    manifest: Mapping[str, Any],
-) -> None:
-    connection = connect_read_only(database_path)
-    try:
-        connection.execute("BEGIN")
-        if (
-            schema_fingerprint(connection)
-            != (manifest.get("database") or {}).get("schema_sha256")
-        ):
-            raise CohortError("alert database schema changed after cohort freeze")
-        for member in manifest["members"]:
-            validate_member_preflight(connection, member)
-    finally:
-        connection.close()
 
 
 def _dispatch_contract_ports() -> DispatchContractPorts:

@@ -51,6 +51,7 @@ import cohort_dispatch_adapters  # noqa: E402
 import cohort_monitor_adapters  # noqa: E402
 import cohort_artifact_adapters  # noqa: E402
 import cohort_manifest_adapters  # noqa: E402
+import cohort_freeze_state_composition  # noqa: E402
 
 
 class IncidentHarnessCohortTests(unittest.TestCase):
@@ -233,6 +234,20 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         self.assertIs(
             cohort.deterministic_dispatch_id,
             cohort_manifest_adapters.deterministic_dispatch_id,
+        )
+
+    def test_runner_uses_extracted_freeze_state_composition(self) -> None:
+        self.assertIs(
+            cohort.connect_read_only,
+            cohort_freeze_state_composition.connect_read_only,
+        )
+        self.assertIs(
+            cohort._summary_rows,
+            cohort_freeze_state_composition.summary_rows,
+        )
+        self.assertIs(
+            cohort.validate_member_preflight,
+            cohort_freeze_state_composition.validate_member_preflight,
         )
 
     def test_query_audit_projection_excludes_query_and_result_content(self) -> None:

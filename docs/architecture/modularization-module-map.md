@@ -841,6 +841,11 @@ policies over the lower-level artifact IO module.
 private-input admission, execution-contract, ordered-identity, frozen-plan, and
 deterministic dispatch-identity policy composition.
 
+`operations/cohort_freeze_state_composition.py` composes read-only SQLite
+admission, cohort state projections, representative identity binding, and
+frozen-member preflight into one bounded service used by freeze, dispatch, and
+monitor workflows.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental
