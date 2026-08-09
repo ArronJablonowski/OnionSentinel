@@ -29,6 +29,7 @@ import cohort_evaluation_execution_proof  # noqa: E402
 import cohort_evaluation_contracts  # noqa: E402
 import cohort_evaluation_private_input  # noqa: E402
 import cohort_evaluation_result_loader  # noqa: E402
+import cohort_evaluation_api  # noqa: E402
 import cohort_evaluation_result_policy  # noqa: E402
 import cohort_execution_result  # noqa: E402
 
@@ -100,6 +101,12 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         self.assertIs(
             evaluator.normalize_result_file,
             cohort_evaluation_result_loader.load_result_export,
+        )
+
+    def test_evaluator_uses_extracted_evaluation_api(self) -> None:
+        self.assertIs(
+            evaluator.run_cohort_evaluation,
+            cohort_evaluation_api.evaluate_cohorts,
         )
 
     def setUp(self) -> None:

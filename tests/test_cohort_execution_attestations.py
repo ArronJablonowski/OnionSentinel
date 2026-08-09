@@ -32,6 +32,7 @@ import cohort_evaluation_scoring  # noqa: E402
 import cohort_evaluation_workflow  # noqa: E402
 import cohort_evaluation_markdown  # noqa: E402
 import cohort_evaluation_private_output  # noqa: E402
+import cohort_evaluation_api  # noqa: E402
 
 
 def load_legacy_cohort():
@@ -181,16 +182,20 @@ class CohortExecutionAttestationBoundaryTests(unittest.TestCase):
         evaluator = load_cohort_evaluator()
 
         self.assertIs(
-            evaluator.validate_request,
+            cohort_evaluation_api.validate_request,
             cohort_evaluation_workflow.validate_request,
         )
         self.assertIs(
-            evaluator.validate_paired_results,
+            cohort_evaluation_api.validate_paired_results,
             cohort_evaluation_workflow.validate_paired_results,
         )
         self.assertIs(
-            evaluator.assemble_report,
+            cohort_evaluation_api.assemble_report,
             cohort_evaluation_workflow.assemble_report,
+        )
+        self.assertIs(
+            evaluator.run_cohort_evaluation,
+            cohort_evaluation_api.evaluate_cohorts,
         )
 
     def test_offline_evaluator_uses_extracted_report_services(self):

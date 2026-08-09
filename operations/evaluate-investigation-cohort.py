@@ -99,12 +99,10 @@ from cohort_evaluation_scoring import (
 )
 from cohort_evaluation_workflow import (
     EvaluationWorkflowPolicy,
-    adjudications_by_stable_id,
-    assemble_report,
-    build_role_reports,
-    result_source,
-    validate_paired_results,
-    validate_request,
+)
+from cohort_evaluation_api import (
+    EvaluationApiPolicy,
+    evaluate_cohorts as run_cohort_evaluation,
 )
 from cohort_evaluation_markdown import render_markdown as render_report_markdown
 from cohort_evaluation_private_output import (
@@ -606,20 +604,14 @@ def _workflow_policy() -> EvaluationWorkflowPolicy:
     )
 
 
-def _load_result_sources(
-    result_paths: Mapping[str, Path],
-    roles: Sequence[str],
-    expected_count: int,
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    loaded_results: dict[str, dict[str, Any]] = {}
-    result_sources: dict[str, dict[str, Any]] = {}
-    for role in roles:
-        loaded, source_sha256 = load_result_export(
-            result_paths[role], role=role, expected_count=expected_count
-        )
-        loaded_results[role] = loaded
-        result_sources[role] = result_source(loaded, source_sha256)
-    return loaded_results, result_sources
+def _evaluation_api_policy() -> EvaluationApiPolicy:
+    return EvaluationApiPolicy(
+        workflow=_workflow_policy(),
+        load_result_export=load_result_export,
+        load_private_json=load_private_json,
+        validate_adjudication=validate_adjudication,
+        error=CohortEvaluationError,
+    )
 
 
 def evaluate_cohorts(
@@ -629,43 +621,12 @@ def evaluate_cohorts(
     expected_count: int = EXPECTED_ROLE_COUNT,
     required_evaluation_profile: str = "",
 ) -> dict[str, Any]:
-    policy = _workflow_policy()
-    roles = validate_request(result_paths, expected_count, policy, CohortEvaluationError)
-    loaded_results, result_sources = _load_result_sources(
-        result_paths, roles, expected_count
-    )
-    incident_result = validate_paired_results(
-        loaded_results,
-        required_evaluation_profile,
-        policy,
-        CohortEvaluationError,
-    )
-    adjudication_raw, adjudication_source_sha256 = load_private_json(
-        adjudication_path, "independent adjudication"
-    )
-    adjudication = validate_adjudication(
-        adjudication_raw,
-        expected_roles=roles,
+    return run_cohort_evaluation(
+        result_paths=result_paths,
+        adjudication_path=adjudication_path,
         expected_count=expected_count,
-    )
-    by_stable = adjudications_by_stable_id(
-        adjudication, loaded_results, roles, CohortEvaluationError
-    )
-    role_reports = build_role_reports(
-        loaded=loaded_results,
-        adjudications=by_stable,
-        roles=roles,
-        expected_count=expected_count,
-        policy=policy,
-    )
-    return assemble_report(
-        adjudication=adjudication,
-        adjudication_source_sha256=adjudication_source_sha256,
-        incident=incident_result,
-        result_sources=result_sources,
-        role_reports=role_reports,
-        expected_count=expected_count,
-        policy=policy,
+        required_evaluation_profile=required_evaluation_profile,
+        policy=_evaluation_api_policy(),
     )
 
 

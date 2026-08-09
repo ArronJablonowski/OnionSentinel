@@ -261,6 +261,15 @@
       ]
     },
     {
+      "path": "operations/cohort_evaluation_api.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_evaluation_api.py",
+      "required_symbols": [
+        "EvaluationApiPolicy",
+        "evaluate_cohorts"
+      ]
+    },
+    {
       "path": "operations/trace_evaluation_skills.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/trace_evaluation_skills.py",

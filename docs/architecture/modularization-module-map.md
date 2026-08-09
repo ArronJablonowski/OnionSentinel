@@ -734,6 +734,12 @@ and member policies for one role, then loads and normalizes the sealed export
 through injected private-I/O and execution-proof ports. The CLI no longer
 constructs the nested result policy inline.
 
+`operations/cohort_evaluation_api.py` is the public sealed-evaluation workflow
+boundary. It loads each role through injected result ports, validates paired
+cohort identity, loads independent adjudication, binds stable groups, builds
+role reports, and assembles the final report without parsing CLI arguments or
+writing output files.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental
