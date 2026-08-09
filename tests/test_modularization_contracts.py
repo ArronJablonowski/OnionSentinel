@@ -139,6 +139,22 @@ class ModularizationCompatibilityContractTests(unittest.TestCase):
         }
         self.assertIn("runtime_adapter.run", calls)
 
+    def test_ai_runner_query_execution_is_a_bounded_runtime_delegate(self) -> None:
+        function = top_level_function(
+            ROOT / "n8n/bin/run-local-ai-analysis.py",
+            "execute_investigation_query_batch",
+        )
+        self.assertLessEqual(function.end_lineno - function.lineno + 1, 40)
+        self.assertFalse(
+            any(isinstance(node, (ast.For, ast.While)) for node in ast.walk(function))
+        )
+        attributes = {
+            node.func.attr for node in ast.walk(function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+        }
+        self.assertIn("execute_batch", attributes)
+
     def test_node_entry_point_matches_package_and_production_installer(self) -> None:
         installer = INSTALLER_PATH.read_text(encoding="utf-8")
         for entry in load_contract()["node_entry_points"]:

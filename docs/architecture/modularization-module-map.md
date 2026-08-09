@@ -104,6 +104,13 @@ line ranges below remain historical navigation aids for the extraction ledger.
   ports to the package query coordinator. The legacy query entry point now
   resolves limits and routes, constructs immutable invocation/policy records,
   and delegates without retaining a second runtime implementation.
+- The 301-line `analysis.query.execution_runtime_adapter` now owns concrete
+  mixed-backend execution binding, Security Onion authorization projection,
+  bounded trusted-query audits, live endpoint and derived-evidence dispatch,
+  and enrichment transport/credential discovery. Controlled evaluation still
+  suppresses production credential discovery before checking either the live
+  environment or `~/n8n-local/.env`; the runner retains thin compatibility
+  delegates so existing authorization and characterization seams remain live.
 - Model roster normalization, exact route construction/parsing, assigned/live
   metadata, external-harness route handling, and reviewer model identity now
   live in `onion_sentinel.analysis.providers.routing`. The legacy runner keeps

@@ -1572,6 +1572,12 @@ def _query_execution_batch():
     return batch
 
 
+def _query_execution_runtime_adapter():
+    _provider_routing()
+    from onion_sentinel.analysis.query import execution_runtime_adapter
+    return execution_runtime_adapter
+
+
 def _query_derived():
     _provider_routing()
     from onion_sentinel.analysis.query import derived
@@ -3026,35 +3032,7 @@ def collect_security_onion_pivots(
 
 
 def _safe_audit_summary(value: Any) -> dict[str, Any]:
-    encoded = json.dumps(
-        value if isinstance(value, (dict, list)) else {},
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    ).encode("utf-8")
-    source = value if isinstance(value, dict) else {}
-    return {
-        "sha256": hashlib.sha256(encoded).hexdigest(),
-        "query_contract": _query_text(
-            source.get("query_contract") or source.get("schema"),
-            128,
-        ),
-        "authorized_request_digest": _query_text(
-            source.get("authorized_request_digest")
-            or source.get("request_digest"),
-            128,
-        ),
-        "authorization_context_digest": _query_text(
-            source.get("authorization_context_digest")
-            or source.get("authorization_digest"),
-            128,
-        ),
-        "security_onion_response_digest": _query_text(
-            source.get("security_onion_response_digest"),
-            128,
-        ),
-        "complete": bool(source.get("complete")),
-    }
+    return _query_execution_runtime_adapter().safe_audit_summary(globals(), value)
 
 
 TRUSTED_QUERY_AUDIT_FIELDS = frozenset(
@@ -3121,40 +3099,8 @@ TRUSTED_QUERY_AUDIT_FIELDS = frozenset(
 
 def _bounded_trusted_query_audit(raw: Any) -> list[dict[str, Any]]:
     """Retain exact broker-rendered queries without carrying full result hits."""
-    if not isinstance(raw, list):
-        return []
-    output: list[dict[str, Any]] = []
-    for item in raw[:MAX_INVESTIGATION_QUERIES_PER_ROUND]:
-        if not isinstance(item, dict):
-            continue
-        selected = {
-            str(key): model_safe_copy(value)
-            for key, value in item.items()
-            if str(key) in TRUSTED_QUERY_AUDIT_FIELDS
-        }
-        # Executed queries are normally only a few KiB. Fail closed rather than
-        # letting a result-derived value bloat the durable analysis artifact.
-        encoded = json.dumps(
-            selected,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        ).encode("utf-8")
-        if len(encoded) > 64 * 1024:
-            selected = {
-                key: value
-                for key, value in selected.items()
-                if key
-                not in {
-                    "query_dsl",
-                    "observables",
-                    "observable_provenance",
-                    "shards",
-                }
-            }
-            selected["audit_truncated"] = True
-        output.append(selected)
-    return output
+    return _query_execution_runtime_adapter().bounded_trusted_query_audit(
+        globals(), raw, TRUSTED_QUERY_AUDIT_FIELDS)
 
 
 def validate_derived_query_evidence(
@@ -3241,26 +3187,7 @@ def accumulate_live_osquery_failure(
 
 
 def _runtime_env_value(name: str) -> str:
-    if (
-        str(os.environ.get(CONTROLLED_EVALUATION_MODE_ENV) or "").strip()
-        == "1"
-    ):
-        # Controlled evaluations have no credential-bearing runtime input.
-        # In particular, never discover production secrets through the real
-        # user's ~/n8n-local/.env while exercising an isolated database.
-        return ""
-    direct = str(os.environ.get(name) or "").strip()
-    if direct:
-        return direct
-    env_file = Path.home() / "n8n-local" / ".env"
-    try:
-        for line in env_file.read_text(encoding="utf-8").splitlines():
-            key, separator, value = line.partition("=")
-            if separator and key.strip() == name:
-                return value.strip().strip('"').strip("'")
-    except OSError:
-        pass
-    return ""
+    return _query_execution_runtime_adapter().runtime_env_value(globals(), name)
 
 
 def prepare_investigation_enrichment_context(
@@ -3268,26 +3195,8 @@ def prepare_investigation_enrichment_context(
     agent_role: str,
     alert_store_url: str,
 ) -> dict[str, Any]:
-    token = _runtime_env_value("N8N_POST_COMMIT_TOKEN")
-    enabled = agent_role in {"soc-analyst", "incident-responder"} and len(token) >= 32
-    config = {
-        "enabled": enabled,
-        "token": token,
-        "alert_store_url": alert_store_url.rstrip("/"),
-        "n8n_url": str(
-            os.environ.get("N8N_INVESTIGATION_ENRICHMENT_URL")
-            or "http://127.0.0.1:5678/webhook/onion-sentinel-investigation-enrichment"
-        ).rstrip("/"),
-        "timeout": 120,
-    }
-    capability = prompt_package.get("investigation_query_capability")
-    if isinstance(capability, dict):
-        backends = capability.get("backends")
-        if isinstance(backends, dict) and isinstance(backends.get("enrichment"), dict):
-            backends["enrichment"]["enabled"] = enabled
-        if enabled:
-            capability["enabled"] = True
-    return config
+    return _query_execution_runtime_adapter().prepare_enrichment_context(
+        globals(), prompt_package, agent_role, alert_store_url)
 
 
 def _post_investigation_enrichment_json(
@@ -3296,158 +3205,60 @@ def _post_investigation_enrichment_json(
     headers: dict[str, str],
     timeout: int,
 ) -> dict[str, Any]:
-    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json", **headers},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        result = read_bounded_json(response, max_bytes=8 * 1024 * 1024)
-    if not isinstance(result, dict) or result.get("ok") is not True:
-        raise InvestigationQueryError("enrichment service returned an unsuccessful response")
-    return result
+    return _query_execution_runtime_adapter().post_enrichment_json(
+        globals(), url, payload, headers, timeout)
 
 
 def _project_investigation_enrichment_record(record: Any) -> dict[str, Any]:
-    if not isinstance(record, dict):
-        return {}
-    raw = record.get("raw_response")
-    serialized = json.dumps(raw, sort_keys=True, separators=(",", ":"), default=str)
-    raw_bytes = serialized.encode("utf-8")
-    digest = str(record.get("raw_response_sha256") or "") or hashlib.sha256(raw_bytes).hexdigest()
-    return {
-        key: record.get(key)
-        for key in (
-            "source", "indicator", "indicator_type", "verdict", "confidence",
-            "tags", "first_seen", "last_seen", "cached_at", "expires_at",
-            "cache_state",
-        )
-    } | {
-        "provider_evidence": {
-            "response_sha256": digest,
-            "response_size_bytes": int(record.get("raw_response_size_bytes") or len(raw_bytes)),
-            "cache_response_complete": record.get("raw_response_complete", True) is True,
-            "prompt_projection_complete": len(raw_bytes) <= 32 * 1024,
-            **(
-                {"response": raw}
-                if len(raw_bytes) <= 32 * 1024
-                else {"response_json_prefix": raw_bytes[: 32 * 1024].decode("utf-8", "ignore")}
-            ),
-        }
-    }
+    return _query_execution_runtime_adapter().project_enrichment_record(record)
 
 
 def collect_investigation_enrichment(
     request: dict[str, Any],
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    module = _query_execution_enrichment()
-    return module.collect(
-        request, config,
-        dependencies=module.CollectionDependencies(
-            post_json=_post_investigation_enrichment_json,
-            project_record=_project_investigation_enrichment_record,
-        ),
-    )
+    return _query_execution_runtime_adapter().collect_enrichment(
+        globals(), request, config)
 
 
 def security_onion_authorization_context(value: Any) -> dict[str, Any]:
     """Project local-only policy data out of the restricted broker contract."""
-    if not isinstance(value, dict):
-        return {}
-    unsupported = set(value).difference(
-        INVESTIGATION_SECURITY_ONION_AUTHORIZATION_CONTEXT_FIELDS,
-        INVESTIGATION_LOCAL_ONLY_AUTHORIZATION_CONTEXT_FIELDS,
-    )
-    if unsupported:
-        raise InvestigationQueryContractError(
-            "local authorization context contains unsupported fields: "
-            + ", ".join(sorted(str(item) for item in unsupported))
-        )
-    return {
-        key: copy.deepcopy(value[key])
-        for key in INVESTIGATION_SECURITY_ONION_AUTHORIZATION_CONTEXT_FIELDS
-        if key in value
-    }
+    return _query_execution_runtime_adapter().security_onion_authorization_context(
+        globals(), value)
 
 
 def _execute_security_query_backend(
     requests: list[dict[str, Any]], context: dict[str, Any],
     round_number: int, executor: Callable[..., dict[str, Any]],
 ):
-    module = _query_execution_security_onion()
-    return module.execute(
-        requests, context, round_number=round_number,
-        policy=module.Policy(
-            query_contract=INVESTIGATION_QUERY_CONTRACT,
-            require_anchor_time=INVESTIGATION_QUERY_V2),
-        dependencies=module.Dependencies(
-            project_context=security_onion_authorization_context,
-            authorize=authorize_investigation_query_request,
-            executor=executor,
-            text=_query_text,
-            random_hex=lambda size: os.urandom(size).hex(),
-            bounded_audit=_bounded_trusted_query_audit,
-            safe_audit_summary=_safe_audit_summary,
-            contract_error=InvestigationQueryContractError,
-            query_error=InvestigationQueryError,
-        ),
-    )
+    return _query_execution_runtime_adapter().execute_security_backend(
+        globals(), requests, context, round_number, executor)
+
+
 def _execute_endpoint_query_backend(
     requests: list[dict[str, Any]], prompt_package: dict[str, Any],
     config: dict[str, Any] | None, executor: Callable[..., dict[str, Any]],
 ):
-    module = _query_execution_endpoint()
-    return module.execute(
-        requests, prompt_package, config,
-        dependencies=module.Dependencies(
-            executor=executor,
-            validate_artifact=validate_live_osquery_result_artifact,
-            case_id=live_osquery_case_id,
-            target_bound=_live_osquery_target_bound_to_case,
-            support_bindings=_live_osquery_support_bindings,
-            accumulate_evidence=accumulate_live_osquery_evidence,
-            accumulate_failure=accumulate_live_osquery_failure,
-            normalize_query=normalize_live_osquery_query,
-            text=_query_text,
-            bounded_audit=_bounded_trusted_query_audit,
-            safe_audit_summary=_safe_audit_summary,
-            client_error=LiveOsqueryClientError,
-            handled_errors=(LiveOsqueryClientError, LiveOsqueryContractError, OSError),
-        ),
-    )
+    return _query_execution_runtime_adapter().execute_endpoint_backend(
+        globals(), requests, prompt_package, config, executor)
+
+
 def _execute_derived_query_backend(
     requests: list[dict[str, Any]], prompt_package: dict[str, Any],
     executor: Callable[..., dict[str, Any]],
 ):
-    module = _query_execution_derived()
-    context = prompt_package.get("pcap_evidence")
-    return module.execute(
-        requests, context if isinstance(context, dict) else {},
-        dependencies=module.Dependencies(
-            executor=executor,
-            validate_evidence=validate_derived_query_evidence,
-            source_digest=_derived_evidence_source_digest,
-            bounded_audit=_bounded_trusted_query_audit,
-            safe_audit_summary=_safe_audit_summary,
-            handled_errors=(InvestigationQueryError, PcapEvidenceQueryError, OSError),
-        ),
-    )
+    return _query_execution_runtime_adapter().execute_derived_backend(
+        globals(), requests, prompt_package, executor)
+
+
 def _execute_enrichment_query_backend(
     requests: list[dict[str, Any]], config: dict[str, Any] | None,
     executor: Callable[..., dict[str, Any]],
 ):
-    module = _query_execution_enrichment()
-    return module.execute(
-        requests, config,
-        dependencies=module.Dependencies(
-            executor=executor,
-            error_type=InvestigationQueryError,
-            handled_errors=(InvestigationQueryError, OSError, urllib.error.URLError),
-        ),
-    )
+    return _query_execution_runtime_adapter().execute_enrichment_backend(
+        globals(), requests, config, executor)
+
+
 def execute_investigation_query_batch(
     prompt_package: dict[str, Any],
     requests: list[dict[str, Any]],
@@ -3464,37 +3275,15 @@ def execute_investigation_query_batch(
     investigation_pivot_dir: Path = DEFAULT_INVESTIGATION_PIVOT_DIR,
 ) -> dict[str, Any]:
     """Execute one mixed, read-only query batch through deterministic adapters."""
-    if security_onion_executor is None:
-        security_onion_executor = lambda proposal, authorization: (
-            collect_security_onion_pivots(
-                proposal, authorization,
-                config_path=security_onion_config_path,
-                out_dir=investigation_pivot_dir)
-        )
-    osquery_executor = osquery_executor or collect_live_osquery
-    derived_executor = derived_executor or query_derived_pcap_evidence
-    enrichment_executor = enrichment_executor or collect_investigation_enrichment
-    local_context = prompt_package.get("_local_investigation_query_context")
-    authorization_context = local_context if isinstance(local_context, dict) else {}
-    module = _query_execution_batch()
-    return module.execute(
-        requests, round_number=round_number,
-        policy=module.Policy(result_schema=INVESTIGATION_QUERY_RESULT_SCHEMA),
-        dependencies=module.Dependencies(
-            security_onion=lambda selected: _execute_security_query_backend(
-                selected, authorization_context, round_number, security_onion_executor,
-            ),
-            endpoint=lambda selected: _execute_endpoint_query_backend(
-                selected, prompt_package, live_osquery_config, osquery_executor,
-            ),
-            derived=lambda selected: _execute_derived_query_backend(
-                selected, prompt_package, derived_executor,
-            ),
-            enrichment=lambda selected: _execute_enrichment_query_backend(
-                selected, enrichment_config, enrichment_executor,
-            ),
-            now=project_now,
-        ),
+    return _query_execution_runtime_adapter().execute_batch(
+        globals(), prompt_package, requests, round_number=round_number,
+        live_osquery_config=live_osquery_config,
+        security_onion_executor=security_onion_executor,
+        osquery_executor=osquery_executor, derived_executor=derived_executor,
+        enrichment_executor=enrichment_executor,
+        enrichment_config=enrichment_config,
+        security_onion_config_path=security_onion_config_path,
+        investigation_pivot_dir=investigation_pivot_dir,
     )
 
 
