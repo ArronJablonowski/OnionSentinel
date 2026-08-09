@@ -19,9 +19,7 @@ import json
 import os
 import re
 import shutil
-import stat
 import sys
-import tempfile
 import threading
 import time
 import urllib.error
@@ -641,6 +639,14 @@ def _system_resources():
     return system_resources
 
 
+def _runtime_io():
+    package_root = str(BIN_DIR.parent)
+    if package_root not in sys.path:
+        sys.path.insert(0, package_root)
+    from onion_sentinel.analysis import runtime_io
+    return runtime_io
+
+
 def _system_resource_dependencies():
     module = _system_resources()
     return module.Dependencies(
@@ -693,79 +699,30 @@ class SystemResourceMonitor:
 
 
 def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    )
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
-        tmp.replace(path)
-    finally:
-        tmp.unlink(missing_ok=True)
+    _runtime_io().atomic_write_json(path, data)
 
 
 def atomic_write_private_json(path: Path, data: dict[str, Any]) -> None:
     """Atomically write owner-only runtime state."""
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path.parent, stat.S_IRWXU)
-    fd, tmp_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    )
-    tmp = Path(tmp_name)
-    try:
-        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        tmp.replace(path)
-        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        tmp.unlink(missing_ok=True)
+    _runtime_io().atomic_write_private_json(path, data)
 
 
 def canonical_payload_digest(value: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()
+    return _runtime_io().canonical_payload_digest(value)
 
 
 def active_analysis_record_path(run_id: object, active_dir: Path | None = None) -> Path:
     directory = active_dir if active_dir is not None else DEFAULT_LLM_ACTIVE_DIR
-    safe_run_id = re.sub(r"[^A-Za-z0-9_-]+", "-", str(run_id or "analysis")).strip("-_")
-    return directory / f"{(safe_run_id or 'analysis')[:120]}.json"
+    return _runtime_io().active_analysis_record_path(run_id, directory)
 
 
 def append_jsonl(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(data, sort_keys=True) + "\n")
+    _runtime_io().append_jsonl(path, data)
 
 
 def best_effort_warning(message: str) -> None:
     """Report supplemental failures without risking the committed job result."""
-    try:
-        sys.stderr.write(f"warning: {message}\n")
-        sys.stderr.flush()
-    except Exception:
-        pass
+    _runtime_io().best_effort_warning(message)
 
 
 def analysis_index_payload(
@@ -1072,40 +1029,21 @@ def generate_prompt(args: argparse.Namespace) -> Path:
 
 def read_bytes_bounded(path: Path, max_bytes: int) -> bytes:
     """Read a runtime file only while it remains inside its admission limit."""
-    try:
-        size = path.stat().st_size
-    except OSError as exc:
-        raise RuntimeArtifactError(f"cannot stat {path}: {exc}") from exc
-    if size > max_bytes:
-        raise RuntimeArtifactError(f"runtime artifact exceeds {max_bytes} byte limit: {path}")
-    try:
-        with path.open("rb") as handle:
-            data = handle.read(max_bytes + 1)
-    except OSError as exc:
-        raise RuntimeArtifactError(f"cannot read {path}: {exc}") from exc
-    if len(data) > max_bytes:
-        raise RuntimeArtifactError(f"runtime artifact grew beyond {max_bytes} byte limit: {path}")
-    return data
+    return _runtime_io().read_bytes_bounded(
+        path, max_bytes, error_type=RuntimeArtifactError)
 
 
 def load_json(path: Path, max_bytes: int = DEFAULT_MAX_JSON_ARTIFACT_BYTES) -> dict[str, Any]:
-    try:
-        value = json.loads(read_bytes_bounded(path, max_bytes).decode("utf-8", errors="strict"))
-    except (RuntimeArtifactError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeArtifactError(f"invalid JSON in {path}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise RuntimeArtifactError(f"JSON root must be an object: {path}")
-    return value
+    return _runtime_io().load_json(
+        path, max_bytes, error_type=RuntimeArtifactError)
 
 
 def load_system_prompt(path: Path) -> str:
     """Read the editable SOC Analyst prompt, falling back to a safe default."""
-    if not path.exists():
-        return DEFAULT_SYSTEM_PROMPT
-    prompt = read_bytes_bounded(path, DEFAULT_MAX_SYSTEM_PROMPT_BYTES).decode(
-        "utf-8", errors="replace"
-    ).strip()
-    return prompt or DEFAULT_SYSTEM_PROMPT
+    return _runtime_io().load_system_prompt(
+        path, max_bytes=DEFAULT_MAX_SYSTEM_PROMPT_BYTES,
+        default_prompt=DEFAULT_SYSTEM_PROMPT,
+        error_type=RuntimeArtifactError)
 
 
 def default_ai_settings() -> dict[str, Any]:

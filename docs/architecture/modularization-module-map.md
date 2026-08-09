@@ -242,8 +242,11 @@ line ranges below remain historical navigation aids for the extraction ledger.
   sizing, resource maxima, and active-run initialization now live in the pure
   `analysis.reporting.run_log` projection. Bounded mactop and GPU sensor
   execution, metric parsing, cooperative cancellation, and per-run maxima now
-  live in `analysis.system_resources`; operational JSONL/current-record
-  persistence remains a runtime composition responsibility.
+  live in `analysis.system_resources`. Atomic JSON, durable owner-only JSON,
+  canonical payload digests, confined active-record names, JSONL append,
+  bounded artifact reads, and bounded system-prompt loading now live in
+  `analysis.runtime_io`; the runner retains only lazy compatibility delegates
+  so the pinned package-free v1 import contract remains intact.
 - Exact request envelopes, backend identity, deterministic query-ID fallback,
   backend parameter projection, and cross-backend drop audit now live in
   `analysis.query.request`.
