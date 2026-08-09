@@ -2553,6 +2553,32 @@ def _evaluation_runtime_isolation_dependencies():
     )
 
 
+def _evaluation_result_identity():
+    _provider_routing()
+    from onion_sentinel.evaluation import result_identity
+    return result_identity
+
+
+def _evaluation_result_identity_policy():
+    return _evaluation_result_identity().Policy(
+        result_environment=CONTROLLED_RESULT_ENVIRONMENT,
+        release_environment_key="ONION_SENTINEL_RELEASE_ID",
+        model_route_pattern=CONTROLLED_MODEL_ROUTE_RE,
+        job_roles={
+            "ai_analysis": "soc-analyst",
+            "incident_response_analysis": "incident-responder",
+        },
+        maximum_settings_bytes=DEFAULT_MAX_SETTINGS_BYTES,
+    )
+
+
+def _evaluation_result_identity_dependencies():
+    return _evaluation_result_identity().Dependencies(
+        environment=os.environ,
+        enabled_routes=enabled_agent_model_routes,
+    )
+
+
 def controlled_evaluation_runtime(
     runtime: argparse.Namespace | str,
 ) -> tuple[bool, Path | None]:
@@ -2613,102 +2639,13 @@ def controlled_evaluation_result_identity(
     *,
     reanalysis_attempt_id: str,
 ) -> dict[str, Any] | None:
-    """Bind an evaluation result to the exact server-owned durable lease."""
-    supplied = {
-        field: str(os.environ.get(environment_key) or "")
-        for field, environment_key in CONTROLLED_RESULT_ENVIRONMENT.items()
-    }
-    for environment_key in CONTROLLED_RESULT_ENVIRONMENT.values():
-        os.environ.pop(environment_key, None)
-    if not enabled:
-        if any(supplied.values()):
-            raise SystemExit(
-                "controlled result identity requires controlled evaluation mode"
-            )
-        return None
-    if any(
-        not value
-        for field, value in supplied.items()
-        if field != "reanalysis_attempt_id"
-    ):
-        raise SystemExit("controlled evaluation result identity is incomplete")
-    try:
-        job_id = int(supplied["job_id"])
-    except ValueError as exc:
-        raise SystemExit(
-            "controlled evaluation job identity is invalid"
-        ) from exc
-    job_type = supplied["job_type"]
-    expected_role = {
-        "ai_analysis": "soc-analyst",
-        "incident_response_analysis": "incident-responder",
-    }.get(job_type)
-    attempt_id = supplied["reanalysis_attempt_id"]
-    assigned_route = supplied["expected_assigned_route"]
-    reviewer_route = supplied["expected_reviewer_route"]
-    stable_group_key = supplied["stable_group_key"]
-    try:
-        stable_group_key_bytes = stable_group_key.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise SystemExit(
-            "controlled evaluation stable group key is invalid"
-        ) from exc
-    if (
-        job_id < 1
-        or expected_role is None
-        or supplied["agent_role"] != expected_role
-        or not re.fullmatch(
-            r"[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-"
-            r"[89ab][a-f0-9]{3}-[a-f0-9]{12}",
-            supplied["lease_token"],
-        )
-        or not re.fullmatch(
-            r"[A-Za-z0-9][A-Za-z0-9._-]{2,63}",
-            supplied["cohort_id"],
-        )
-        or not re.fullmatch(r"[a-f0-9]{64}", supplied["dispatch_id"])
-        or not re.fullmatch(
-            r"[A-Za-z0-9._:@=-]{1,256}",
-            supplied["representative_alert_id"],
-        )
-        or not re.fullmatch(r"[a-f0-9]{20}", supplied["stable_group_id"])
-        or not stable_group_key
-        or "\x00" in stable_group_key
-        or len(stable_group_key_bytes) > 2048
-        or (
-            job_type == "ai_analysis"
-            and attempt_id
-        )
-        or (
-            job_type == "incident_response_analysis"
-            and not re.fullmatch(r"ira-[a-f0-9]{40}", attempt_id)
-        )
-        or attempt_id != str(reanalysis_attempt_id or "")
-        or not CONTROLLED_MODEL_ROUTE_RE.fullmatch(assigned_route)
-        or not CONTROLLED_MODEL_ROUTE_RE.fullmatch(reviewer_route)
-        or assigned_route.rsplit(":", 1)[0]
-        == reviewer_route.rsplit(":", 1)[0]
-        or supplied["reviewer_required"] != "1"
-    ):
-        raise SystemExit(
-            "controlled evaluation result identity is invalid"
-        )
-    runtime_release_id = str(
-        os.environ.get("ONION_SENTINEL_RELEASE_ID") or ""
-    ).strip()
-    if (
-        not re.fullmatch(r"[a-f0-9]{40}", runtime_release_id)
-        or supplied["release_id"] != runtime_release_id
-    ):
-        raise SystemExit(
-            "controlled evaluation release identity is invalid"
-        )
-    return {
-        **supplied,
-        "job_id": job_id,
-        "release_id": runtime_release_id,
-        "reviewer_required": True,
-    }
+    """Compatibility delegate for server-owned durable lease identity."""
+    return _evaluation_result_identity().identity(
+        enabled,
+        reanalysis_attempt_id=reanalysis_attempt_id,
+        policy=_evaluation_result_identity_policy(),
+        dependencies=_evaluation_result_identity_dependencies(),
+    )
 
 
 def controlled_evaluation_claim_digest(identity: dict[str, Any]) -> str:
@@ -2729,61 +2666,18 @@ def require_controlled_evaluation_routes(
     settings: dict[str, Any],
     agent_role: str,
 ) -> None:
-    """Recheck frozen route assignments before any Relay or model call."""
-
-    if identity is None:
-        return
-    assigned_route = identity.get("expected_assigned_route")
-    reviewer_route = identity.get("expected_reviewer_route")
-    if (
-        identity.get("reviewer_required") is not True
-        or identity.get("agent_role") != agent_role
-        or not isinstance(assigned_route, str)
-        or not isinstance(reviewer_route, str)
-        or not CONTROLLED_MODEL_ROUTE_RE.fullmatch(assigned_route)
-        or not CONTROLLED_MODEL_ROUTE_RE.fullmatch(reviewer_route)
-        or assigned_route.rsplit(":", 1)[0]
-        == reviewer_route.rsplit(":", 1)[0]
-    ):
-        raise SystemExit(
-            "controlled evaluation route identity is invalid"
-        )
+    """Compatibility delegate for frozen controlled route admission."""
     settings_path = Path(
         getattr(args, "ai_settings_file", DEFAULT_AI_SETTINGS_FILE)
     )
-    try:
-        if (
-            not settings_path.is_file()
-            or settings_path.stat().st_size > DEFAULT_MAX_SETTINGS_BYTES
-        ):
-            raise ValueError("settings file is missing or oversized")
-        raw = json.loads(settings_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError, TypeError) as exc:
-        raise SystemExit(
-            "controlled evaluation route settings are unavailable"
-        ) from exc
-    raw_assigned = raw.get("agent_models") if isinstance(raw, dict) else None
-    raw_reviewers = (
-        raw.get("agent_second_opinion_models")
-        if isinstance(raw, dict)
-        else None
+    _evaluation_result_identity().require_routes(
+        identity,
+        settings_path,
+        settings,
+        agent_role,
+        policy=_evaluation_result_identity_policy(),
+        dependencies=_evaluation_result_identity_dependencies(),
     )
-    enabled_routes = enabled_agent_model_routes(settings)
-    if (
-        not isinstance(raw_assigned, dict)
-        or raw_assigned.get(agent_role) != assigned_route
-        or not isinstance(raw_reviewers, dict)
-        or raw_reviewers.get(agent_role) != reviewer_route
-        or (settings.get("agent_models") or {}).get(agent_role)
-        != assigned_route
-        or (settings.get("agent_second_opinion_models") or {}).get(agent_role)
-        != reviewer_route
-        or assigned_route not in enabled_routes
-        or reviewer_route not in enabled_routes
-    ):
-        raise SystemExit(
-            "controlled evaluation routes do not exactly match enabled settings"
-        )
 
 
 def require_controlled_evaluation_result_routes(

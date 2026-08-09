@@ -2195,6 +2195,12 @@ evidence route, and explicitly disabled live OSQuery configuration. The runner
 retains only the compatibility return tuple and process-local temp-directory
 binding.
 
+Controlled result lease-environment consumption, durable identity and release
+binding, and exact assigned/reviewer route parity live under
+`onion_sentinel.evaluation.result_identity`. Lease variables are removed before
+model execution, and the frozen settings file, normalized runtime settings,
+and enabled-route roster must agree before Relay or model invocation.
+
 Independent-review package construction, text/repetition policy, and
 fail-closed response validation live under `onion_sentinel.analysis.review`.
 The same package owns bounded shadow-adjudication package and validation
