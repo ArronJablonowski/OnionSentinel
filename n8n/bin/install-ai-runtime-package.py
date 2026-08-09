@@ -94,6 +94,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.review.contracts",
     "onion_sentinel.analysis.review.package",
     "onion_sentinel.analysis.review.projection",
+    "onion_sentinel.analysis.review.runtime_adapter",
     "onion_sentinel.analysis.review.text",
     "onion_sentinel.analysis.review.validation",
     "onion_sentinel.analysis.review.supplemental",

@@ -2030,6 +2030,12 @@ def _review_workflow():
     return workflow
 
 
+def _review_runtime_adapter():
+    _provider_routing()
+    from onion_sentinel.analysis.review import runtime_adapter
+    return runtime_adapter
+
+
 def _review_workflow_dependencies():
     module = _review_workflow()
     return module.Dependencies(
@@ -4201,24 +4207,21 @@ def reviewer_validation_failure(
     input_value: Any, response: dict[str, Any],
 ) -> dict[str, Any]:
     """Return bounded validator telemetry without retaining model output."""
-    return _review_contracts().validation_failure(
-        attempt=attempt, call_id=call_id, error=error, input_value=input_value,
-        response=response, schema=REVIEW_VALIDATION_FAILURE_SCHEMA,
-        message_max=REVIEW_VALIDATION_MESSAGE_MAX, digest_json=harness_digest_json,
+    return _review_runtime_adapter().validation_failure(
+        globals(), attempt=attempt, call_id=call_id, error=error,
+        input_value=input_value, response=response,
     )
 
 
 def reviewer_repair_guidance(validation_message: str) -> list[str]:
     """Translate validator output into bounded field-specific repair steps."""
-    return _review_contracts().repair_guidance(
-        validation_message, message_max=REVIEW_VALIDATION_MESSAGE_MAX,
-    )
+    return _review_runtime_adapter().repair_guidance(globals(), validation_message)
 
 
 def reviewer_repair_error_category(validation_message: str) -> str:
     """Classify a validator failure without echoing rejected observables."""
-    return _review_contracts().repair_error_category(
-        validation_message, message_max=REVIEW_VALIDATION_MESSAGE_MAX,
+    return _review_runtime_adapter().repair_error_category(
+        globals(), validation_message
     )
 
 
@@ -4228,17 +4231,12 @@ class ControlledEvaluationReviewerGateError(RuntimeError):
 
 
 def reviewer_case_id(prompt_package: dict[str, Any]) -> str:
-    return _review_contracts().case_id(
-        prompt_package, bounded_reference=_bounded_reference,
-        model_safe_copy=model_safe_copy,
-    )
+    return _review_runtime_adapter().case_id(globals(), prompt_package)
 
 
 def reviewer_evidence_hash(review_package: dict[str, Any]) -> str:
     """Bind the reviewer response to its blind model-visible package."""
-    return _review_contracts().evidence_hash(
-        review_package, model_safe_copy=model_safe_copy,
-    )
+    return _review_runtime_adapter().evidence_hash(globals(), review_package)
 
 
 def independent_reviewer_package(
@@ -4246,16 +4244,8 @@ def independent_reviewer_package(
     *, hosted: bool = False,
 ) -> dict[str, Any]:
     """Build the exact route-safe blind evidence view sent to the reviewer."""
-    return _review_package().build(
-        prompt_package, hosted=hosted,
-        max_queries=MAX_INVESTIGATION_QUERIES_PER_ROUND,
-        model_safe_copy=model_safe_copy,
-        attach_evidence_contract=attach_evidence_reference_contract,
-        case_id=reviewer_case_id, observable_catalog=reviewer_observable_catalog,
-        taxonomy_catalog=reviewer_non_domain_taxonomy_catalog,
-        artifact_catalog=reviewer_non_domain_artifact_catalog,
-        rule_shorthand_catalog=reviewer_non_domain_rule_shorthand_catalog,
-        evidence_hash=reviewer_evidence_hash,
+    return _review_runtime_adapter().independent_package(
+        globals(), prompt_package, hosted=hosted
     )
 
 
@@ -4273,27 +4263,9 @@ def validate_reviewer_response(
     review_package: dict[str, Any],
 ) -> dict[str, Any]:
     """Fail closed on stale, foreign, repetitive, or ungrounded reviewer output."""
-    module = _review_validation()
-    dependencies = module.Dependencies(
-        error_type=ReviewerValidationError,
-        evidence_hash=reviewer_evidence_hash,
-        taxonomy_catalog=reviewer_non_domain_taxonomy_catalog,
-        artifact_catalog=reviewer_non_domain_artifact_catalog,
-        rule_shorthand_catalog=reviewer_non_domain_rule_shorthand_catalog,
-        bounded_reference=_bounded_reference,
-        response_strings=_response_strings,
-        repetition_reasons=_review_repetition_reasons,
-        ipv4_re=REVIEW_IPV4_RE,
-        domain_re=REVIEW_DOMAIN_RE,
-        community_id_re=REVIEW_COMMUNITY_ID_RE,
-        known_field_paths=REVIEW_KNOWN_FIELD_PATHS,
-        non_domain_suffixes=REVIEW_NON_DOMAIN_SUFFIXES,
-        required_keys=frozenset(REQUIRED_KEYS).union(STRICT_FACTORED_REQUIRED_KEYS),
-        observable_max=REVIEW_OBSERVABLE_MAX,
-        evidence_used_max=REVIEW_EVIDENCE_USED_MAX,
-        hypotheses_max=REVIEW_HYPOTHESES_MAX,
+    return _review_runtime_adapter().validate_reviewer(
+        globals(), response, review_package
     )
-    return module.validate(response, review_package, dependencies)
 
 
 def apply_reviewer_supplemental_pivot(
@@ -4311,14 +4283,14 @@ def apply_reviewer_supplemental_pivot(
     investigation_pivot_dir: Path,
     harness_runtime: OnionSentinelHarnessRun | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    return _review_supplemental().execute(
-        prompt_package, reviewer_response, args, settings, agent_role, route,
-        reviewer_prompt, live_osquery_config=live_osquery_config,
+    return _review_runtime_adapter().supplemental_pivot(
+        globals(), prompt_package, reviewer_response, args, settings,
+        agent_role, route, reviewer_prompt,
+        live_osquery_config=live_osquery_config,
         enrichment_config=enrichment_config,
         security_onion_config_path=security_onion_config_path,
         investigation_pivot_dir=investigation_pivot_dir,
         harness_runtime=harness_runtime,
-        deps=_review_supplemental_dependencies(),
     )
 
 
@@ -4327,11 +4299,7 @@ def second_opinion_trigger(
     prompt_package: dict[str, Any] | None = None,
 ) -> str:
     """Return the deterministic reason an independent review is warranted."""
-    return _review_comparison().trigger(
-        response, prompt_package,
-        control_tuning_values=CONTROL_TUNING_VALUES,
-        consequential_outcomes=CONSEQUENTIAL_CLOSURE_OUTCOMES,
-    )
+    return _review_runtime_adapter().trigger(globals(), response, prompt_package)
 
 
 def compare_analysis_results(
@@ -4339,11 +4307,8 @@ def compare_analysis_results(
     reviewer_response: dict[str, Any],
 ) -> dict[str, Any]:
     """Compare independent conclusions without model self-arbitration."""
-    return _review_comparison().compare(
-        primary_response, reviewer_response,
-        control_tuning_values=CONTROL_TUNING_VALUES,
-        non_escalatory_values=NON_ESCALATORY_HANDLING_VALUES,
-        boolean_setting=boolean_setting,
+    return _review_runtime_adapter().compare(
+        globals(), primary_response, reviewer_response
     )
 
 
@@ -4361,15 +4326,9 @@ def disagreement_adjudication_package(
     hosted: bool,
 ) -> dict[str, Any]:
     """Build a route-safe package containing two immutable disputed positions."""
-    module = _review_adjudication()
-    dependencies = module.PackageDependencies(
-        independent_package=independent_reviewer_package,
-        case_id=reviewer_case_id,
-        model_safe_copy=model_safe_copy,
-    )
-    return module.build_package(
-        prompt_package, primary_response, reviewer_response, comparison,
-        hosted=hosted, deps=dependencies,
+    return _review_runtime_adapter().adjudication_package(
+        globals(), prompt_package, primary_response, reviewer_response,
+        comparison, hosted=hosted,
     )
 
 
@@ -4378,12 +4337,9 @@ def validate_disagreement_adjudication(
     package: dict[str, Any],
 ) -> dict[str, Any]:
     """Validate identity, closed choices, disputed fields, and evidence citations."""
-    module = _review_adjudication()
-    dependencies = module.ValidationDependencies(
-        error_type=DisagreementAdjudicationValidationError,
-        bounded_reference=_bounded_reference,
+    return _review_runtime_adapter().validate_adjudication(
+        globals(), response, package
     )
-    return module.validate(response, package, dependencies)
 
 
 def run_bounded_disagreement_adjudication(
@@ -4398,23 +4354,10 @@ def run_bounded_disagreement_adjudication(
     harness_runtime: OnionSentinelHarnessRun | None = None,
 ) -> dict[str, Any]:
     """Run at most two validation-bounded adjudicator calls in shadow mode."""
-    module = _review_adjudication_workflow()
-    return module.run(
-        module.Context(
-            prompt_package=prompt_package,
-            primary_response=primary_response,
-            reviewer_response=reviewer_response,
-            comparison=comparison,
-            args=args,
-            settings=settings,
-            agent_role=agent_role,
-            phase_callback=phase_callback,
-            harness_runtime=harness_runtime,
-        ),
-        policy=module.Policy(
-            default_prompt_file=DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT_FILE,
-        ),
-        dependencies=_review_adjudication_workflow_dependencies(),
+    return _review_runtime_adapter().run_adjudication(
+        globals(), prompt_package, primary_response, reviewer_response,
+        comparison, args, settings, agent_role,
+        phase_callback=phase_callback, harness_runtime=harness_runtime,
     )
 
 
@@ -4427,9 +4370,8 @@ def reviewer_automation_authorization(
     reviewer_response: dict[str, Any],
     comparison: dict[str, Any],
 ) -> dict[str, Any]:
-    return _review_authorization().automation_authorization(
-        primary_response, reviewer_response, comparison,
-        _review_authorization_dependencies(),
+    return _review_runtime_adapter().automation_authorization(
+        globals(), primary_response, reviewer_response, comparison
     )
 
 
@@ -4522,43 +4464,14 @@ def apply_saved_response_review_gate(
     this run. Consequential primary output remains useful for manual testing,
     but it cannot authorize automation or memory promotion.
     """
-    for key in list(primary_response):
-        if str(key).startswith("_analysis_"):
-            primary_response.pop(key, None)
-    primary_response.pop("_second_opinion", None)
-    primary_response.pop("_disagreement_adjudication", None)
-    primary_response["_analysis_input_mode"] = SAVED_RESPONSE_INPUT_MODE
-    trigger = second_opinion_trigger(primary_response, prompt_package)
-    if not trigger:
-        primary_response["final_disposition_status"] = "primary_not_reviewed"
-        return primary_response
-
-    reason = (
-        "Saved-response mode did not execute the required independent reviewer: "
-        f"{trigger}"
+    return _review_runtime_adapter().saved_response_gate(
+        globals(), prompt_package, primary_response
     )
-    apply_review_required_gate(
-        primary_response,
-        status="review_required_failed",
-        reason=reason,
-    )
-    primary_response["_second_opinion"] = {
-        "status": "review_required_failed",
-        "trigger": trigger,
-        "model_route": "",
-        "error": reason,
-    }
-    reconcile_incident_response_report(primary_response, prompt_package)
-    return primary_response
 
 
 def sanitize_saved_response_input(response: dict[str, Any]) -> dict[str, Any]:
     """Remove caller-supplied runtime attestations from an offline fixture."""
-    return {
-        key: value
-        for key, value in response.items()
-        if isinstance(key, str) and not key.startswith("_")
-    }
+    return _review_runtime_adapter().sanitize_saved_response(response)
 
 
 def apply_configured_second_opinion(
@@ -4576,32 +4489,14 @@ def apply_configured_second_opinion(
     investigation_pivot_dir: Path = DEFAULT_INVESTIGATION_PIVOT_DIR,
 ) -> dict[str, Any]:
     """Run the configured independent-review workflow through injected ports."""
-    module = _review_workflow()
-    return module.execute(
-        module.Context(
-            prompt_package=prompt_package,
-            primary_response=primary_response,
-            args=args,
-            settings=settings,
-            agent_role=agent_role,
-            phase_callback=phase_callback,
-            harness_runtime=harness_runtime,
-            force_review_reason=force_review_reason,
-            live_osquery_config=live_osquery_config,
-            enrichment_config=enrichment_config,
-            security_onion_config_path=security_onion_config_path,
-            investigation_pivot_dir=investigation_pivot_dir,
-            strict_harness_observation=bool(
-                harness_runtime is not None
-                and boolean_setting(
-                    os.environ.get(EVALUATION_FREEZE_MEMORY_ENV)
-                )
-            ),
-        ),
-        module.Policy(
-            default_prompt_file=DEFAULT_SECOND_OPINION_PROMPT_FILE,
-        ),
-        _review_workflow_dependencies(),
+    return _review_runtime_adapter().configured_second_opinion(
+        globals(), prompt_package, primary_response, args, settings, agent_role,
+        phase_callback=phase_callback, harness_runtime=harness_runtime,
+        force_review_reason=force_review_reason,
+        live_osquery_config=live_osquery_config,
+        enrichment_config=enrichment_config,
+        security_onion_config_path=security_onion_config_path,
+        investigation_pivot_dir=investigation_pivot_dir,
     )
 
 
@@ -4623,15 +4518,10 @@ def precommit_controlled_evaluation_reviewer_gate(
     Revalidate the single retained reviewer response and its bounded repair
     grammar before the caller records the decision in the harness ledger.
     """
-    module = _evaluation_reviewer_gate()
-    return module.enforce(
-        prompt_package, response, settings, agent_role,
+    return _review_runtime_adapter().precommit_reviewer_gate(
+        globals(), prompt_package, response, settings, agent_role,
         trigger_reason=trigger_reason,
         freeze_enabled=freeze_enabled,
-        policy=module.Policy(
-            attestation_schema="onion-sentinel-independent-review-validation-v1",
-        ),
-        dependencies=_evaluation_reviewer_gate_dependencies(),
     )
 
 

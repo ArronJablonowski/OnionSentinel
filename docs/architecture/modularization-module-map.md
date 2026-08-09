@@ -197,6 +197,13 @@ line ranges below remain historical navigation aids for the extraction ledger.
   adjudication, automation/memory disposition, failure capture, and terminal
   reconciliation now live in `analysis.review.workflow`. The legacy runner
   constructs every port at call time so existing patch seams remain stable.
+- Concrete blind-package, reviewer-validation, supplemental-pivot,
+  comparison, adjudication, automation-authorization, saved-response,
+  configured-review, and controlled-precommit binding now lives in the
+  274-line `analysis.review.runtime_adapter`. It resolves every policy and port
+  from live runner bindings, strips caller-supplied runtime attestations from
+  saved fixtures, and preserves strict frozen-evaluation observation and
+  reviewer revalidation before commit.
 - Canonical, digest-bound operator authorization validation now lives in
   `analysis.conclusions.authorization_evidence`; the runner retains private
   compatibility delegates used by characterization tests.
