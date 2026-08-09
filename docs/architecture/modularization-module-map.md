@@ -151,7 +151,10 @@ line ranges below remain historical navigation aids for the extraction ledger.
 - Exact top-level compact-column provenance validation, decoding, read-only
   enforcement, and result-bound registration now live in
   `analysis.evidence.columnar`; malformed claimed envelopes are consumed as
-  inert evidence and never recursively reinterpreted.
+  inert evidence and never recursively reinterpreted. The same module owns the
+  stricter hosted-transport recognizer, including exact envelope keys, bounded
+  string tables and row indexes, canonical counts, digest grammar, optional
+  self-accounting validation, and boolean-as-integer rejection.
 - Bounded ordinary evidence-tree traversal and discovery of query, pack,
   query-id, evidence, and PCAP references now live in
   `analysis.evidence.traversal`; nested compact-column lookalikes remain inert.

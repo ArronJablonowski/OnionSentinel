@@ -75,6 +75,58 @@ def sink() -> registry.Registry:
 
 
 class EvidenceColumnarPackageTests(unittest.TestCase):
+    def test_exact_hosted_envelope_requires_complete_bounded_shape(self) -> None:
+        value = envelope()
+        self.assertTrue(columnar.exact_hosted_envelope(
+            value,
+            require_encoded_accounting=True,
+            policy=POLICY,
+            deps=DEPS,
+        ))
+
+        value["rounds"][0]["omitted_rows"] = False
+        self.assertFalse(columnar.exact_hosted_envelope(
+            value,
+            require_encoded_accounting=False,
+            policy=POLICY,
+            deps=DEPS,
+        ))
+
+    def test_exact_hosted_envelope_optionally_defers_self_accounting(self) -> None:
+        value = envelope()
+        value["prompt_projection"]["encoded_bytes"] += 1
+
+        self.assertTrue(columnar.exact_hosted_envelope(
+            value,
+            require_encoded_accounting=False,
+            policy=POLICY,
+            deps=DEPS,
+        ))
+        self.assertFalse(columnar.exact_hosted_envelope(
+            value,
+            require_encoded_accounting=True,
+            policy=POLICY,
+            deps=DEPS,
+        ))
+
+    def test_exact_hosted_envelope_rejects_invalid_rows_and_tables(self) -> None:
+        for mutate in (
+            lambda value: value["rounds"][0]["rows"][0].__setitem__(2, True),
+            lambda value: value["rounds"][0]["rows"][0].__setitem__(8, False),
+            lambda value: value["rounds"][0]["backend_values"].__setitem__(
+                0, "x" * 41
+            ),
+        ):
+            with self.subTest(mutate=mutate):
+                value = envelope()
+                mutate(value)
+                self.assertFalse(columnar.exact_hosted_envelope(
+                    value,
+                    require_encoded_accounting=False,
+                    policy=POLICY,
+                    deps=DEPS,
+                ))
+
     def test_valid_top_level_envelope_registers_result_bound_references(self) -> None:
         catalog = sink()
         self.assertTrue(columnar.process(envelope(), catalog, POLICY, DEPS))

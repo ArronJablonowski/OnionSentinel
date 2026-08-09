@@ -269,3 +269,152 @@ def process(value: Any, sink: ReferenceSink, policy: Policy, deps: Dependencies)
     for item in decoded:
         _register(item, sink, policy, deps)
     return True
+
+
+def exact_hosted_envelope(
+    value: Any,
+    *,
+    require_encoded_accounting: bool,
+    policy: Policy,
+    deps: Dependencies,
+) -> bool:
+    """Recognize only a complete runtime-owned top-level hosted envelope."""
+    parts = _exact_hosted_parts(value, policy)
+    if parts is None:
+        return False
+    projection, round_item = parts
+    if not _exact_hosted_metadata(round_item, projection):
+        return False
+    tables = _tables(round_item, policy.maximum_queries)
+    rows = round_item.get("rows")
+    if tables is None or not _exact_hosted_rows(rows, round_item, policy, deps, tables):
+        return False
+    if require_encoded_accounting:
+        return _exact_encoded_accounting(value, projection, deps)
+    return True
+
+
+def _exact_hosted_parts(
+    value: Any, policy: Policy,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    if not isinstance(value, dict) or set(value) != ENVELOPE_KEYS:
+        return None
+    projection = value.get("prompt_projection")
+    if not _exact_projection_shape(projection):
+        return None
+    round_item = _single_round(value.get("rounds"))
+    if (
+        value.get("schema") != policy.result_schema
+        or round_item is None
+        or not _round_shape_valid(round_item, policy)
+    ):
+        return None
+    return projection, round_item
+
+
+def _exact_projection_shape(value: Any) -> bool:
+    return bool(
+        isinstance(value, dict)
+        and set(value) == PROJECTION_KEYS
+        and value.get("truncated") is True
+        and value.get("columnar_provenance_fallback") is True
+    )
+
+
+def _single_round(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, list) or len(value) != 1:
+        return None
+    return value[0] if isinstance(value[0], dict) else None
+
+
+def _exact_hosted_metadata(
+    round_item: dict[str, Any], projection: dict[str, Any]
+) -> bool:
+    maximum_bytes = _canonical_integer(projection.get("max_bytes"), minimum=1)
+    encoded_bytes = _canonical_integer(projection.get("encoded_bytes"), minimum=1)
+    source_bytes = _canonical_integer(round_item.get("source_bytes"))
+    source_rows = _canonical_integer(
+        round_item.get("source_provenance_rows"), minimum=1
+    )
+    omitted = _canonical_integer(round_item.get("omitted_rows"))
+    source_digest = round_item.get("source_sha256")
+    return bool(
+        maximum_bytes is not None
+        and encoded_bytes is not None
+        and source_bytes is not None
+        and source_rows is not None
+        and omitted == 0
+        and isinstance(source_digest, str)
+        and re.fullmatch(r"[a-f0-9]{64}", source_digest)
+    )
+
+
+def _exact_hosted_rows(
+    rows: Any,
+    round_item: dict[str, Any],
+    policy: Policy,
+    deps: Dependencies,
+    tables: dict[str, list[str]],
+) -> bool:
+    if (
+        not isinstance(rows, list)
+        or not rows
+        or len(rows) != round_item["source_provenance_rows"]
+        or len(rows) > policy.maximum_queries
+    ):
+        return False
+    return all(_exact_hosted_row(row, policy, deps, tables) for row in rows)
+
+
+def _exact_hosted_row(
+    row: Any,
+    policy: Policy,
+    deps: Dependencies,
+    tables: dict[str, list[str]],
+) -> bool:
+    if not isinstance(row, list) or len(row) != len(policy.columns):
+        return False
+    item = dict(zip(policy.columns, row))
+    indexes = {
+        "backend_values": item.get("backend_index"),
+        "status_values": item.get("status_index"),
+        "semantics_values": item.get("semantics_index"),
+        "result_summary_values": item.get("result_summary_index"),
+    }
+    return all((
+        _exact_round_and_query(item, policy),
+        _digests_valid(item),
+        _reference_fields_valid(item),
+        _exact_returned_count(item.get("returned"), deps),
+        all(_table_value(tables, name, index) is not None for name, index in indexes.items()),
+    ))
+
+
+def _exact_round_and_query(item: dict[str, Any], policy: Policy) -> bool:
+    round_number = _canonical_integer(item.get("round"), minimum=1)
+    query_id = item.get("query_id")
+    return bool(
+        round_number is not None
+        and round_number <= policy.maximum_rounds
+        and isinstance(query_id, str)
+        and re.fullmatch(r"[A-Za-z0-9_.:@+=-]{1,128}", query_id)
+    )
+
+
+def _exact_returned_count(value: Any, deps: Dependencies) -> bool:
+    return value is None or deps.canonical_count(value) is not None
+
+
+def _exact_encoded_accounting(
+    value: Any,
+    projection: dict[str, Any],
+    deps: Dependencies,
+) -> bool:
+    try:
+        actual_bytes = len(deps.prompt_json_bytes(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return bool(
+        projection.get("encoded_bytes") == actual_bytes
+        and actual_bytes <= projection["max_bytes"]
+    )
