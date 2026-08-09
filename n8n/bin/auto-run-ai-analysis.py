@@ -59,6 +59,11 @@ from scheduler_controlled_recovery import (
     controlled_recovery_spool_pending as controlled_spool_pending,
     recover_controlled_evaluation_spool as replay_controlled_result_spool,
 )
+from scheduler_controlled_result_client import (
+    ControlledResultClientPolicy,
+    ControlledResultClientSources,
+    post_controlled_recovery_result as post_controlled_result,
+)
 from scheduler_controlled_payload import (
     ControlledPayloadPolicy,
     ControlledPayloadSources,
@@ -375,87 +380,31 @@ def post_controlled_recovery_result(
     *,
     attempts: int = CONTROLLED_RESULT_SUBMISSION_ATTEMPTS,
 ) -> dict[str, Any]:
-    """Replay the exact immutable result with bounded immediate retries."""
-    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    submission_sha256 = hashlib.sha256(body).hexdigest()
-    last_error = ""
-    for attempt_index in range(max(1, min(int(attempts), 5))):
-        if attempt_index:
-            time.sleep(0.05 * attempt_index)
-        request = urllib.request.Request(
-            f"{alert_store_url.rstrip('/')}/analysis/result",
-            data=body,
-            headers=alert_store_mutation_headers(
-                user_agent="Onion-Sentinel-AI-Recovery/1.0",
+    """Compatibility delegate for bounded exact result replay."""
+    return post_controlled_result(
+        ControlledResultClientSources(
+            mutation_headers=lambda user_agent: alert_store_mutation_headers(
+                user_agent=user_agent
             ),
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                if response.status not in range(200, 300):
-                    status_code = int(response.status)
-                    detail = (
-                        f"analysis result recovery returned HTTP "
-                        f"{status_code}"
-                    )
-                    if status_code == 409:
-                        raise RuntimeError(
-                            f"{CONTROLLED_RESULT_SUBMISSION_INDETERMINATE}: "
-                            f"{detail}"
-                        )
-                    if (
-                        status_code < 500
-                        and status_code not in {408, 425, 429}
-                    ):
-                        raise RuntimeError(detail)
-                    last_error = detail
-                    continue
-                result = read_bounded_json(
-                    response,
-                    max_bytes=DEFAULT_MAX_CONTROL_RESPONSE_BYTES,
-                )
-            stored_response_sha256 = str(
-                result.get("stored_response_sha256") or ""
-            ).lower()
-            if (
-                result.get("ok") is True
-                and str(result.get("analysis_id") or "").lower()
-                == str(payload.get("analysis_id") or "").lower()
-                and str(result.get("submission_sha256") or "").lower()
-                == submission_sha256
-                and re.fullmatch(r"[a-f0-9]{64}", stored_response_sha256)
-            ):
-                return result
-            last_error = "analysis result recovery receipt was not exact"
-        except urllib.error.HTTPError as exc:
-            status_code = int(exc.code)
-            exc.close()
-            last_error = (
-                f"analysis result recovery returned HTTP {status_code}"
-            )
-            if status_code == 409:
-                # Node safeString() can produce a lone surrogate at a UTF-16
-                # field limit that SQLite stores as U+FFFD. The original
-                # transaction is authoritative but its exact HTTP replay then
-                # conflicts. Only the complete terminal DB proof may retire it.
-                raise RuntimeError(
-                    f"{CONTROLLED_RESULT_SUBMISSION_INDETERMINATE}: "
-                    f"{last_error}"
-                ) from exc
-            if status_code < 500 and status_code not in {408, 425, 429}:
-                raise RuntimeError(last_error) from exc
-        except (
-            urllib.error.URLError,
-            TimeoutError,
-            OSError,
-            BoundedHttpError,
-        ) as exc:
-            last_error = (
-                f"analysis result recovery transport failed: "
-                f"{type(exc).__name__}"
-            )
-    raise RuntimeError(
-        f"{CONTROLLED_RESULT_SUBMISSION_INDETERMINATE}: {last_error}"
+            open_url=urllib.request.urlopen,
+            read_bounded_json=read_bounded_json,
+            sleep=time.sleep,
+            transport_errors=(
+                urllib.error.URLError,
+                TimeoutError,
+                OSError,
+                BoundedHttpError,
+            ),
+        ),
+        ControlledResultClientPolicy(
+            indeterminate_marker=(
+                CONTROLLED_RESULT_SUBMISSION_INDETERMINATE
+            ),
+            max_response_bytes=DEFAULT_MAX_CONTROL_RESPONSE_BYTES,
+        ),
+        payload,
+        alert_store_url,
+        attempts=attempts,
     )
 
 

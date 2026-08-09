@@ -307,6 +307,14 @@ two explicitly disabled empty candidate lanes before unlinking and fsyncing
 the containing directory. The facade supplies the current effective UID and
 retains the legacy call signatures used by the recovery state machine.
 
+`scheduler_controlled_result_client.py` owns controlled replay transport to
+alert-store. It sends one byte-stable compact JSON body, bounds attempts and
+receipt size, retries transport/5xx/408/425/429 failures, treats HTTP 409 as
+indeterminate pending terminal database proof, rejects other client errors,
+and accepts only a receipt with the exact analysis ID, submission digest, and
+well-formed stored-response digest. Mutation headers remain an injected port
+so the ephemeral controlled-evaluation credential stays in the facade.
+
 `scheduler_claim.py` owns compare-and-set processing acquisition,
 server-authoritative job/alert/group replacement, controlled claim identity,
 IR reanalysis-attempt binding, contention projection, and automatic-threshold
