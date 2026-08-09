@@ -2226,6 +2226,43 @@ def _review_supplemental():
     return supplemental
 
 
+def _review_workflow():
+    _provider_routing()
+    from onion_sentinel.analysis.review import workflow
+    return workflow
+
+
+def _review_workflow_dependencies():
+    module = _review_workflow()
+    return module.Dependencies(
+        trigger=second_opinion_trigger,
+        notify_phase=notify_analysis_phase,
+        route_identity=model_route_identity,
+        role_prompt_file=role_second_opinion_prompt_file,
+        route_is_hosted=model_route_is_hosted,
+        independent_package=independent_reviewer_package,
+        monotonic=time.monotonic,
+        warning=lambda message: print(message, file=sys.stderr),
+        analyze_route=analyze_model_route,
+        validate_reviewer=validate_reviewer_response,
+        reviewer_validation_error=ReviewerValidationError,
+        validation_failure=reviewer_validation_failure,
+        repair_error_category=reviewer_repair_error_category,
+        repair_guidance=reviewer_repair_guidance,
+        validate_response=validate_response,
+        supplemental_pivot=apply_reviewer_supplemental_pivot,
+        compare=compare_analysis_results,
+        automation_authorization=reviewer_automation_authorization,
+        adjudicate=run_bounded_disagreement_adjudication,
+        apply_adjudication_projection=apply_analytical_adjudication_projection,
+        reconcile_report=reconcile_incident_response_report,
+        apply_disagreement_gate=apply_material_disagreement_gate,
+        apply_completed_gate=apply_review_completed_automation_gate,
+        apply_required_gate=apply_review_required_gate,
+        apply_tuning_guard=apply_tuning_coherence_guard,
+    )
+
+
 def _review_supplemental_dependencies():
     module = _review_supplemental()
     return module.Dependencies(
@@ -8033,388 +8070,34 @@ def apply_configured_second_opinion(
     security_onion_config_path: Path = DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE,
     investigation_pivot_dir: Path = DEFAULT_INVESTIGATION_PIVOT_DIR,
 ) -> dict[str, Any]:
-    """Run an optional independent reviewer while preserving primary success.
-
-    The secondary route is never recursive and never replaces the primary
-    response. Its failure is captured in the artifact instead of failing or
-    re-queuing an otherwise complete primary analysis.
-    """
-    # Reviewer provenance is collector-owned. A primary model must never be
-    # able to smuggle a forged reviewer result through a path on which no
-    # independent review is actually invoked.
-    primary_response.pop("_second_opinion", None)
-    primary_response.pop("_disagreement_adjudication", None)
-    trigger = (
-        second_opinion_trigger(primary_response, prompt_package)
-        or str(force_review_reason or "").strip()
+    """Run the configured independent-review workflow through injected ports."""
+    module = _review_workflow()
+    return module.execute(
+        module.Context(
+            prompt_package=prompt_package,
+            primary_response=primary_response,
+            args=args,
+            settings=settings,
+            agent_role=agent_role,
+            phase_callback=phase_callback,
+            harness_runtime=harness_runtime,
+            force_review_reason=force_review_reason,
+            live_osquery_config=live_osquery_config,
+            enrichment_config=enrichment_config,
+            security_onion_config_path=security_onion_config_path,
+            investigation_pivot_dir=investigation_pivot_dir,
+            strict_harness_observation=bool(
+                harness_runtime is not None
+                and boolean_setting(
+                    os.environ.get(EVALUATION_FREEZE_MEMORY_ENV)
+                )
+            ),
+        ),
+        module.Policy(
+            default_prompt_file=DEFAULT_SECOND_OPINION_PROMPT_FILE,
+        ),
+        _review_workflow_dependencies(),
     )
-    if not trigger:
-        primary_response["final_disposition_status"] = "primary_not_reviewed"
-        notify_analysis_phase(phase_callback, "post_processing")
-        return primary_response
-    route = str((settings.get("agent_second_opinion_models") or {}).get(agent_role) or "").strip()
-    if not route:
-        apply_review_required_gate(
-            primary_response,
-            status="review_required_not_configured",
-            reason="no independent reviewer model is configured",
-        )
-        primary_response["_second_opinion"] = {
-            "status": "not_configured",
-            "trigger": trigger,
-            "model_route": "",
-        }
-        notify_analysis_phase(
-            phase_callback,
-            "post_processing",
-            trigger_reason=trigger,
-        )
-        return primary_response
-    primary_route = str((settings.get("agent_models") or {}).get(agent_role) or "").strip()
-    if model_route_identity(primary_route, settings) == model_route_identity(
-        route,
-        settings,
-    ):
-        apply_review_required_gate(
-            primary_response,
-            status="review_required_not_independent",
-            reason="the reviewer resolves to the same provider/model identity as the primary",
-        )
-        primary_response["_second_opinion"] = {
-            "status": "not_independent",
-            "trigger": trigger,
-            "model_route": route,
-            "error": "The configured reviewer resolves to the same provider/model identity as the primary.",
-        }
-        notify_analysis_phase(
-            phase_callback,
-            "post_processing",
-            trigger_reason=trigger,
-        )
-        return primary_response
-    settings_path = getattr(args, "ai_settings_file", None)
-    reviewer_prompt = (
-        role_second_opinion_prompt_file(Path(settings_path).parent, agent_role)
-        if settings_path
-        else Path(
-            str(
-                prompt_package.get("second_opinion_system_prompt_file")
-                or getattr(
-                    args,
-                    "second_opinion_prompt_file",
-                    DEFAULT_SECOND_OPINION_PROMPT_FILE,
-                )
-            )
-        )
-    )
-    notify_analysis_phase(
-        phase_callback,
-        "second_opinion",
-        route,
-        trigger,
-    )
-    started_monotonic = time.monotonic()
-    review_package = independent_reviewer_package(
-        prompt_package,
-        hosted=model_route_is_hosted(route, settings),
-    )
-    evaluation_harness_run = bool(
-        harness_runtime is not None
-        and boolean_setting(os.environ.get(EVALUATION_FREEZE_MEMORY_ENV))
-    )
-
-    def observe_harness(call: Callable[[], Any]) -> Any:
-        if harness_runtime is None:
-            return None
-        try:
-            return call()
-        except Exception as exc:
-            if (
-                harness_runtime.policy.mode == "enforce"
-                or evaluation_harness_run
-            ):
-                raise
-            print(
-                "warning: Onion Sentinel harness shadow reviewer observation "
-                f"failed: {type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-            return None
-
-    validation_failures: list[dict[str, Any]] = []
-    attempts_started = 0
-    try:
-        secondary: dict[str, Any] | None = None
-        for attempt in range(1, 3):
-            attempts_started = attempt
-            call_id = f"independent-review-{attempt}"
-            observe_harness(
-                lambda: harness_runtime.preflight_model_call(
-                    call_id=call_id,
-                    input_value=review_package,
-                    requested_route=route,
-                    purpose="independent second-opinion review",
-                    independent_review=True,
-                )
-                if harness_runtime is not None
-                else None
-            )
-            attempt_started = time.monotonic()
-            try:
-                candidate = analyze_model_route(
-                    route,
-                    review_package,
-                    args,
-                    settings,
-                    system_prompt_file=reviewer_prompt,
-                    independent_review=True,
-                )
-            except (Exception, SystemExit) as exc:
-                observe_harness(
-                    lambda: harness_runtime.model_call(
-                        call_id=call_id,
-                        purpose="independent second-opinion review",
-                        requested_route=route,
-                        response={},
-                        input_value=review_package,
-                        duration_seconds=time.monotonic() - attempt_started,
-                        independent_review=True,
-                        status=f"failed:{type(exc).__name__}",
-                    )
-                    if harness_runtime is not None
-                    else None
-                )
-                raise
-            try:
-                secondary = validate_reviewer_response(candidate, review_package)
-                observe_harness(
-                    lambda: harness_runtime.model_call(
-                        call_id=call_id,
-                        purpose="independent second-opinion review",
-                        requested_route=route,
-                        response=candidate,
-                        input_value=review_package,
-                        duration_seconds=time.monotonic() - attempt_started,
-                        independent_review=True,
-                    )
-                    if harness_runtime is not None
-                    else None
-                )
-                break
-            except ReviewerValidationError as exc:
-                observe_harness(
-                    lambda: harness_runtime.model_call(
-                        call_id=call_id,
-                        purpose="independent second-opinion review",
-                        requested_route=route,
-                        response=candidate,
-                        input_value=review_package,
-                        duration_seconds=time.monotonic() - attempt_started,
-                        independent_review=True,
-                        status="validation-failed",
-                    )
-                    if harness_runtime is not None
-                    else None
-                )
-                validation_failures.append(
-                    reviewer_validation_failure(
-                        attempt=attempt,
-                        call_id=call_id,
-                        error=exc,
-                        input_value=review_package,
-                        response=candidate,
-                    )
-                )
-                if attempt >= 2:
-                    raise
-                validation_message = validation_failures[-1]["message"]
-                review_package["review_contract_repair"] = {
-                    "attempt": 1,
-                    "instruction": (
-                        "The first response failed deterministic validation. Return one fresh "
-                        "complete object matching response_schema; do not copy or discuss the "
-                        "invalid response."
-                    ),
-                    "validation_errors": reviewer_repair_error_category(
-                        validation_message
-                    ),
-                    "field_guidance": reviewer_repair_guidance(
-                        validation_message
-                    ),
-                }
-        if secondary is None:
-            raise ReviewerValidationError("reviewer produced no validated response")
-        secondary = validate_response(secondary, review_package)
-        # A reviewer cannot recursively trigger more model calls.
-        secondary["second_opinion_recommended"] = False
-        secondary["hosted_second_opinion_recommended"] = False
-        secondary, supplemental_pivot = (
-            apply_reviewer_supplemental_pivot(
-                prompt_package,
-                secondary,
-                args,
-                settings,
-                agent_role,
-                route,
-                reviewer_prompt,
-                live_osquery_config=live_osquery_config,
-                enrichment_config=enrichment_config,
-                security_onion_config_path=(
-                    security_onion_config_path
-                ),
-                investigation_pivot_dir=investigation_pivot_dir,
-                harness_runtime=harness_runtime,
-            )
-        )
-        comparison = compare_analysis_results(primary_response, secondary)
-        automation_authorization = reviewer_automation_authorization(
-            primary_response,
-            secondary,
-            comparison,
-        )
-        primary_response["_second_opinion"] = {
-            "status": "completed",
-            "trigger": trigger,
-            "model_route": route,
-            "system_prompt_file": str(reviewer_prompt),
-            "runtime_seconds": round(time.monotonic() - started_monotonic, 3),
-            "attempts": attempts_started,
-            "validation_failures": validation_failures,
-            "supplemental_pivot": supplemental_pivot,
-            "comparison": comparison,
-            "response": secondary,
-            "automation_authorization": automation_authorization,
-        }
-        if comparison["material_disagreement"]:
-            # The adjudicator receives both completed positions only after the
-            # blind reviewer has finished. Its shadow result is durable audit
-            # context; it never rewrites either position or relaxes the human
-            # disagreement gate.
-            primary_response["_disagreement_adjudication"] = (
-                run_bounded_disagreement_adjudication(
-                    prompt_package,
-                    primary_response,
-                    secondary,
-                    comparison,
-                    args,
-                    settings,
-                    agent_role,
-                    phase_callback,
-                    harness_runtime,
-                )
-            )
-            analytical_projection_applied = (
-                apply_analytical_adjudication_projection(
-                    primary_response,
-                    secondary,
-                    primary_response["_disagreement_adjudication"],
-                )
-            )
-            if analytical_projection_applied:
-                reconcile_incident_response_report(
-                    primary_response,
-                    prompt_package,
-                )
-                primary_response["final_disposition_status"] = (
-                    "adjudicated_analytical_pending_human"
-                )
-            else:
-                apply_material_disagreement_gate(
-                    primary_response,
-                    secondary,
-                    comparison,
-                )
-                primary_response["final_disposition_status"] = (
-                    "disputed_pending_human"
-                )
-            primary_response["tuning_recommendation"] = "needs_more_data"
-            primary_response["tuning_reason"] = (
-                "Automatic tuning is blocked because the primary and independent reviewer "
-                "materially disagree."
-            )
-            primary_response["recommended_tuning_actions"] = []
-            primary_response["memory_candidates"] = []
-            primary_response["_automation_controls"] = {
-                "automatic_closure_blocked": True,
-                "containment_blocked": True,
-                "tuning_blocked": True,
-                "memory_writeback_blocked": True,
-                "requires_human_review": True,
-                "reason": (
-                    "shadow adjudication resolved the analytical display but "
-                    "cannot authorize automation"
-                    if analytical_projection_applied
-                    else "material second-opinion disagreement"
-                ),
-            }
-        elif not automation_authorization["authorized"]:
-            apply_review_completed_automation_gate(
-                primary_response,
-                reason=automation_authorization["reason"],
-            )
-        elif comparison["agreement"] == "agreement":
-            primary_response["final_disposition_status"] = "corroborated"
-        else:
-            primary_response["final_disposition_status"] = "primary_with_advisory_disagreement"
-        if not automation_authorization["memory_writeback_authorized"]:
-            controls = (
-                dict(primary_response.get("_automation_controls"))
-                if isinstance(primary_response.get("_automation_controls"), dict)
-                else {}
-            )
-            memory_reason = (
-                "Primary memory writeback requires full high-confidence "
-                "agreement from the independent reviewer."
-            )
-            controls["memory_writeback_blocked"] = True
-            controls["memory_writeback_reason"] = memory_reason
-            if not str(controls.get("reason") or "").strip():
-                controls["reason"] = memory_reason
-            primary_response["_automation_controls"] = controls
-    except (SystemExit, ReviewerValidationError) as exc:
-        apply_review_required_gate(
-            primary_response,
-            status="review_required_failed",
-            reason=str(exc)[:500] or "reviewer validation failed",
-        )
-        primary_response["_second_opinion"] = {
-            "status": "failed",
-            "trigger": trigger,
-            "model_route": route,
-            "system_prompt_file": str(reviewer_prompt),
-            "runtime_seconds": round(time.monotonic() - started_monotonic, 3),
-            "attempts": attempts_started,
-            "validation_failures": validation_failures,
-            "error": str(exc)[:1000],
-        }
-    except Exception as exc:
-        apply_review_required_gate(
-            primary_response,
-            status="review_required_failed",
-            reason=f"{type(exc).__name__}: {exc}"[:500],
-        )
-        primary_response["_second_opinion"] = {
-            "status": "failed",
-            "trigger": trigger,
-            "model_route": route,
-            "system_prompt_file": str(reviewer_prompt),
-            "runtime_seconds": round(time.monotonic() - started_monotonic, 3),
-            "attempts": attempts_started,
-            "validation_failures": validation_failures,
-            "error": f"{type(exc).__name__}: {exc}"[:1000],
-        }
-    finally:
-        apply_tuning_coherence_guard(
-            primary_response,
-            prompt_package,
-        )
-        reconcile_incident_response_report(primary_response, prompt_package)
-        notify_analysis_phase(
-            phase_callback,
-            "post_processing",
-            trigger_reason=trigger,
-        )
-    return primary_response
 
 
 def precommit_controlled_evaluation_reviewer_gate(

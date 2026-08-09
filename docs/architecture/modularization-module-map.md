@@ -131,6 +131,11 @@ line ranges below remain historical navigation aids for the extraction ledger.
   `analysis.review.disagreement`; validated shadow adjudication projection
   lives in `analysis.review.projection`; and required/completed review
   fail-closed automation controls live in `analysis.review.gates`.
+- Reviewer route admission, prompt selection, harness-observed model attempts,
+  deterministic repair, supplemental-pivot composition, comparison,
+  adjudication, automation/memory disposition, failure capture, and terminal
+  reconciliation now live in `analysis.review.workflow`. The legacy runner
+  constructs every port at call time so existing patch seams remain stable.
 - Canonical, digest-bound operator authorization validation now lives in
   `analysis.conclusions.authorization_evidence`; the runner retains private
   compatibility delegates used by characterization tests.
@@ -2141,7 +2146,10 @@ old tree and services untouched.
 Independent-review package construction, text/repetition policy, and
 fail-closed response validation live under `onion_sentinel.analysis.review`.
 The same package owns bounded shadow-adjudication package and validation
-policy, while model execution and retry orchestration remain outside it.
+policy. `analysis.review.workflow` now owns bounded model execution and retry
+orchestration through injected provider, harness, query, adjudication, guard,
+clock, and reporting ports; it reads no configuration or environment state
+and directly authorizes no evidence or operational action.
 Authorization-sensitive conclusion guards live under
 `onion_sentinel.analysis.conclusions`; orchestration preserves their existing
 order after factored-verdict normalization and deterministic rule validation.
