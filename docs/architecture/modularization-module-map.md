@@ -359,6 +359,20 @@ retirement. Its mutable claim receipt is populated immediately after a server
 transition so any later validation error still exposes only the exact owned
 lease to the outer retry/release handler.
 
+`scheduler_claim_snapshot.py` is the read-only repository behind that
+server-authoritative replacement. It validates the returned job, lease-bound
+group, single representative alert, current SQLite stable identity and optional
+stable key, and supported triage severity before returning an immutable
+snapshot to claim orchestration. Database failures are translated without
+weakening identity checks, and the facade injects stable-key and severity
+policy.
+
+The controlled claim contract owns both sides of the exact-lease boundary:
+pre-claim candidate expectations and post-claim frozen-dispatch validation.
+The post-claim check repeats release and enabled-route validation before
+binding job, group, alert, stable-key, and dispatch identities, protecting the
+window between read-only selection and atomic alert-store acquisition.
+
 `scheduler_execution.py` owns processing-lease renewal, controlled-route
 revalidation before Relay evidence collection, Incident Response evidence
 collection, fresh indexed versus reusable legacy prompt selection, assigned

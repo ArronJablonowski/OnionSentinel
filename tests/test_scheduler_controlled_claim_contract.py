@@ -17,11 +17,13 @@ if str(BIN_DIR) not in sys.path:
 
 from scheduler_controlled_claim_contract import (  # noqa: E402
     ControlledClaimSources,
+    ControlledLeaseIdentitySources,
     ControlledRoutePolicy,
     ControlledRouteSources,
     controlled_claim_expectations,
     controlled_job_route_contract,
     incident_reanalysis_attempt_id,
+    require_controlled_lease_identity,
 )
 from scheduler_controlled_release import (  # noqa: E402
     ControlledReleasePolicy,
@@ -251,6 +253,16 @@ class SchedulerControlledClaimContractTests(unittest.TestCase):
             reject=Rejected,
         )
 
+    def lease_sources(self) -> ControlledLeaseIdentitySources:
+        return ControlledLeaseIdentitySources(
+            stable_group_key_valid=lambda value: (
+                isinstance(value, str) and value.startswith("v2|")
+            ),
+            require_release=mock.Mock(return_value="a" * 40),
+            route_contract=mock.Mock(return_value={}),
+            reject=Rejected,
+        )
+
     def args(self, **changes: object) -> SimpleNamespace:
         values = {
             "only_group_id": "group-1",
@@ -298,6 +310,98 @@ class SchedulerControlledClaimContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(Rejected, message):
                     controlled_claim_expectations(
                         self.claim_sources(), args, selected, payload
+                    )
+
+    def test_uncontrolled_post_claim_check_has_no_contract_side_effects(self) -> None:
+        sources = self.lease_sources()
+        require_controlled_lease_identity(
+            sources,
+            SimpleNamespace(),
+            self.payload,
+            claimed_alert_id="alert-1",
+            claimed_group_id="group-1",
+            claimed_job_id=7,
+            expected_job_id=7,
+        )
+        sources.require_release.assert_not_called()
+        sources.route_contract.assert_not_called()
+
+    def test_exact_post_claim_identity_revalidates_release_and_routes(self) -> None:
+        sources = self.lease_sources()
+        require_controlled_lease_identity(
+            sources,
+            self.args(),
+            self.payload,
+            claimed_alert_id="alert-1",
+            claimed_group_id="group-1",
+            claimed_job_id=7,
+            expected_job_id=7,
+        )
+        sources.require_release.assert_called_once_with(self.payload)
+        sources.route_contract.assert_called_once_with(self.payload)
+
+    def test_post_claim_identity_drift_rejects_each_frozen_dimension(self) -> None:
+        cases = (
+            (
+                self.args(only_alert_id=""),
+                self.payload,
+                "alert-1",
+                "group-1",
+                7,
+                7,
+                "incomplete",
+            ),
+            (self.args(), self.payload, "alert-1", "group-1", 8, 7, "job identity"),
+            (self.args(), self.payload, "alert-1", "other", 7, 7, "group identity"),
+            (
+                self.args(),
+                {**self.payload, "stable_group_id": "other"},
+                "alert-1",
+                "group-1",
+                7,
+                7,
+                "group identity",
+            ),
+            (self.args(), self.payload, "other", "group-1", 7, 7, "alert identity"),
+            (
+                self.args(),
+                {**self.payload, "representative_alert_id": "other"},
+                "alert-1",
+                "group-1",
+                7,
+                7,
+                "alert identity",
+            ),
+            (
+                self.args(),
+                {**self.payload, "stable_group_key": "v2|other"},
+                "alert-1",
+                "group-1",
+                7,
+                7,
+                "stable group key",
+            ),
+            (
+                self.args(),
+                {**self.payload, "dispatch_id": "e" * 64},
+                "alert-1",
+                "group-1",
+                7,
+                7,
+                "dispatch identity",
+            ),
+        )
+        for args, payload, alert_id, group_id, job_id, expected_id, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(Rejected, message):
+                    require_controlled_lease_identity(
+                        self.lease_sources(),
+                        args,
+                        payload,
+                        claimed_alert_id=alert_id,
+                        claimed_group_id=group_id,
+                        claimed_job_id=job_id,
+                        expected_job_id=expected_id,
                     )
 
 

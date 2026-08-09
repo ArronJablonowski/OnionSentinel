@@ -32,6 +32,14 @@ class ControlledClaimSources:
     reject: Callable[[str], BaseException]
 
 
+@dataclass(frozen=True)
+class ControlledLeaseIdentitySources:
+    stable_group_key_valid: Callable[[object], bool]
+    require_release: Callable[[dict[str, object]], str]
+    route_contract: Callable[[dict[str, object]], dict[str, object]]
+    reject: Callable[[str], BaseException]
+
+
 def incident_reanalysis_attempt_id(lease_token: str) -> str:
     """Return the non-secret fingerprint used for one IR lease."""
     token = str(lease_token or "").strip()
@@ -194,3 +202,124 @@ def controlled_claim_expectations(
         "expected_stable_group_key": stable_key,
         **route_contract,
     }
+
+
+def _claimed_job_identity_matches(
+    claimed_job_id: int,
+    expected_job_id: int,
+) -> bool:
+    return bool(
+        int(claimed_job_id or 0) == int(expected_job_id or 0)
+        and int(expected_job_id or 0) >= 1
+    )
+
+
+def _claimed_group_identity_matches(
+    claimed_payload: dict[str, object],
+    claimed_group_id: str,
+    expected_group_id: str,
+) -> bool:
+    return bool(
+        str(claimed_group_id or "").strip().lower()
+        == expected_group_id
+        and str(claimed_payload.get("group_id") or "").strip().lower()
+        == expected_group_id
+        and str(
+            claimed_payload.get("stable_group_id") or ""
+        ).strip().lower()
+        == expected_group_id
+    )
+
+
+def _claimed_alert_identity_matches(
+    claimed_payload: dict[str, object],
+    claimed_alert_id: str,
+    expected_alert_id: str,
+) -> bool:
+    return bool(
+        str(claimed_alert_id or "").strip() == expected_alert_id
+        and str(claimed_payload.get("alert_id") or "").strip()
+        == expected_alert_id
+        and str(
+            claimed_payload.get("representative_alert_id") or ""
+        ).strip()
+        == expected_alert_id
+    )
+
+
+def _required_lease_identity(
+    sources: ControlledLeaseIdentitySources,
+    args: Any,
+    claimed_payload: dict[str, object],
+) -> tuple[str, str, str, str] | None:
+    identity = _requested_identity(args)
+    if not any(identity):
+        return None
+    if not all(identity):
+        raise sources.reject(
+            "controlled AI run identity arguments are incomplete"
+        )
+    if not sources.stable_group_key_valid(identity[2]):
+        raise sources.reject("controlled AI run stable group key is invalid")
+    sources.require_release(claimed_payload)
+    sources.route_contract(claimed_payload)
+    return identity
+
+
+def _require_claimed_stable_dispatch(
+    sources: ControlledLeaseIdentitySources,
+    claimed_payload: dict[str, object],
+    stable_key: str,
+    dispatch_id: str,
+) -> None:
+    if (
+        not sources.stable_group_key_valid(
+            claimed_payload.get("stable_group_key")
+        )
+        or claimed_payload.get("stable_group_key") != stable_key
+    ):
+        raise sources.reject(
+            "controlled AI claim stable group key did not match "
+            "--only-stable-group-key"
+        )
+    if str(claimed_payload.get("dispatch_id") or "").strip() != dispatch_id:
+        raise sources.reject(
+            "controlled AI claim dispatch identity did not match "
+            "--only-dispatch-id"
+        )
+
+
+def require_controlled_lease_identity(
+    sources: ControlledLeaseIdentitySources,
+    args: Any,
+    claimed_payload: dict[str, object],
+    *,
+    claimed_alert_id: str,
+    claimed_group_id: str,
+    claimed_job_id: int,
+    expected_job_id: int,
+) -> None:
+    """Fail closed when an exact lease differs from its frozen dispatch."""
+    identity = _required_lease_identity(sources, args, claimed_payload)
+    if identity is None:
+        return
+    expected_group_id, expected_alert_id, stable_key, dispatch_id = identity
+    if not _claimed_job_identity_matches(claimed_job_id, expected_job_id):
+        raise sources.reject(
+            "controlled AI claim job identity did not match the selected job"
+        )
+    if not _claimed_group_identity_matches(
+        claimed_payload, claimed_group_id, expected_group_id
+    ):
+        raise sources.reject(
+            "controlled AI claim group identity did not match --only-group-id"
+        )
+    if not _claimed_alert_identity_matches(
+        claimed_payload, claimed_alert_id, expected_alert_id
+    ):
+        raise sources.reject(
+            "controlled AI claim alert identity did not match --only-alert-id"
+        )
+    _require_claimed_stable_dispatch(
+        sources, claimed_payload, stable_key, dispatch_id
+    )

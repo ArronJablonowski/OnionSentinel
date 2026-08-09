@@ -51,6 +51,15 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_claim_snapshot.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_claim_snapshot.py",
+      "required_symbols": [
+        "ClaimSnapshotPolicy",
+        "claimed_durable_ai_job"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_controlled_runtime.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_controlled_runtime.py",
@@ -182,9 +191,11 @@
         "ControlledRoutePolicy",
         "ControlledRouteSources",
         "ControlledClaimSources",
+        "ControlledLeaseIdentitySources",
         "incident_reanalysis_attempt_id",
         "controlled_job_route_contract",
-        "controlled_claim_expectations"
+        "controlled_claim_expectations",
+        "require_controlled_lease_identity"
       ]
     },
     {

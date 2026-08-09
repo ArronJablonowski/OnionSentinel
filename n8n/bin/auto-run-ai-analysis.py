@@ -101,11 +101,17 @@ from scheduler_controlled_release import (
 )
 from scheduler_controlled_claim_contract import (
     ControlledClaimSources,
+    ControlledLeaseIdentitySources,
     ControlledRoutePolicy,
     ControlledRouteSources,
     controlled_claim_expectations as validate_claim_expectations,
     controlled_job_route_contract as validate_job_route_contract,
     incident_reanalysis_attempt_id as derive_incident_attempt_id,
+    require_controlled_lease_identity,
+)
+from scheduler_claim_snapshot import (
+    ClaimSnapshotPolicy,
+    claimed_durable_ai_job as load_claimed_durable_job,
 )
 from scheduler_controlled_payload import (
     ControlledPayloadPolicy,
@@ -1141,96 +1147,16 @@ def claimed_durable_ai_job(
     expected_job_id: int = 0,
 ) -> tuple[dict[str, object], str, str, str]:
     """Validate and return the exact durable AI snapshot bound to a lease."""
-    claimed_payload = getattr(processing_transition, "job_payload", None)
-    if not isinstance(claimed_payload, dict) or not claimed_payload:
-        raise RuntimeError(
-            "durable AI claim did not return its server-authoritative job identity"
-        )
-
-    claimed_job_type = str(
-        getattr(processing_transition, "job_type", "") or ""
-    ).strip()
-    if claimed_job_type != expected_job_type:
-        raise RuntimeError("durable AI claim job identity is invalid")
-    claimed_job_id = int(
-        getattr(processing_transition, "job_id", 0) or 0
-    )
-    if expected_job_id and claimed_job_id != expected_job_id:
-        raise RuntimeError("durable AI claim job identity is invalid")
-
-    resolved_group_id = str(
-        getattr(processing_transition, "resolved_key", "") or ""
-    ).strip().lower()
-    payload_group_id = str(
-        claimed_payload.get("group_id") or ""
-    ).strip().lower()
-    if (
-        not resolved_group_id
-        or resolved_group_id != expected_group_id.strip().lower()
-        or not payload_group_id
-        or payload_group_id != resolved_group_id
-    ):
-        raise RuntimeError("durable AI claim group identity is invalid")
-
-    payload_alert_ids = {
-        str(claimed_payload.get(field) or "").strip()
-        for field in ("alert_id", "representative_alert_id")
-        if str(claimed_payload.get(field) or "").strip()
-    }
-    if len(payload_alert_ids) != 1:
-        raise RuntimeError("durable AI claim alert identity is invalid")
-    claimed_alert_id = next(iter(payload_alert_ids))
-
-    try:
-        connection = sqlite3.connect(
-            f"file:{database_path}?mode=ro",
-            uri=True,
-        )
-        connection.row_factory = sqlite3.Row
-        try:
-            alert = connection.execute(
-                """
-                SELECT stable_group_id, stable_group_key, triage_level
-                FROM alerts
-                WHERE alert_id = ?
-                LIMIT 1
-                """,
-                (claimed_alert_id,),
-            ).fetchone()
-        finally:
-            connection.close()
-    except sqlite3.Error as exc:
-        raise RuntimeError(
-            "durable AI claim identity verification failed"
-        ) from exc
-
-    if (
-        not alert
-        or str(alert["stable_group_id"] or "").strip().lower()
-        != resolved_group_id
-    ):
-        raise RuntimeError("durable AI claim alert identity is invalid")
-    claimed_stable_group_key = claimed_payload.get("stable_group_key")
-    if (
-        claimed_stable_group_key is not None
-        and (
-            not valid_controlled_stable_group_key(claimed_stable_group_key)
-            or not valid_controlled_stable_group_key(
-                alert["stable_group_key"]
-            )
-            or str(alert["stable_group_key"] or "")
-            != claimed_stable_group_key
-        )
-    ):
-        raise RuntimeError("durable AI claim stable group key is invalid")
-    triage_level = str(alert["triage_level"] or "").strip().lower()
-    if triage_level not in SEVERITY_PRIORITY:
-        raise RuntimeError("durable AI claim alert identity is invalid")
-    return (
-        dict(claimed_payload),
-        claimed_alert_id,
-        resolved_group_id,
-        triage_level,
+    return load_claimed_durable_job(
+        ClaimSnapshotPolicy(
+            severity_priority=SEVERITY_PRIORITY,
+            stable_group_key_valid=valid_controlled_stable_group_key,
+        ),
+        processing_transition,
+        database_path,
+        expected_job_type=expected_job_type,
+        expected_group_id=expected_group_id,
+        expected_job_id=expected_job_id,
     )
 
 
@@ -1244,93 +1170,22 @@ def require_controlled_claim_identity(
     expected_job_id: int,
 ) -> None:
     """Fail closed when a controlled run leases a different frozen member."""
-    expected_group_id = str(
-        getattr(args, "only_group_id", "") or ""
-    ).strip().lower()
-    expected_alert_id = str(
-        getattr(args, "only_alert_id", "") or ""
-    ).strip()
-    expected_stable_group_key = str(
-        getattr(args, "only_stable_group_key", "") or ""
+    require_controlled_lease_identity(
+        ControlledLeaseIdentitySources(
+            stable_group_key_valid=valid_controlled_stable_group_key,
+            require_release=require_controlled_release_attestation,
+            route_contract=lambda payload: controlled_job_route_contract(
+                args, payload
+            ),
+            reject=ControlledClaimRejected,
+        ),
+        args,
+        claimed_payload,
+        claimed_alert_id=claimed_alert_id,
+        claimed_group_id=claimed_group_id,
+        claimed_job_id=claimed_job_id,
+        expected_job_id=expected_job_id,
     )
-    expected_dispatch_id = str(
-        getattr(args, "only_dispatch_id", "") or ""
-    ).strip()
-    configured_identity = (
-        bool(expected_group_id),
-        bool(expected_alert_id),
-        bool(expected_stable_group_key),
-        bool(expected_dispatch_id),
-    )
-    if not any(configured_identity):
-        return
-    if not all(configured_identity):
-        raise ControlledClaimRejected(
-            "controlled AI run identity arguments are incomplete"
-        )
-    if not valid_controlled_stable_group_key(expected_stable_group_key):
-        raise ControlledClaimRejected(
-            "controlled AI run stable group key is invalid"
-        )
-    require_controlled_release_attestation(claimed_payload)
-    controlled_job_route_contract(args, claimed_payload)
-
-    if (
-        int(claimed_job_id or 0) != int(expected_job_id or 0)
-        or int(expected_job_id or 0) < 1
-    ):
-        raise ControlledClaimRejected(
-            "controlled AI claim job identity did not match the selected job"
-        )
-
-    payload_group_id = str(
-        claimed_payload.get("group_id") or ""
-    ).strip().lower()
-    payload_stable_group_id = str(
-        claimed_payload.get("stable_group_id") or ""
-    ).strip().lower()
-    if (
-        str(claimed_group_id or "").strip().lower() != expected_group_id
-        or payload_group_id != expected_group_id
-        or payload_stable_group_id != expected_group_id
-    ):
-        raise ControlledClaimRejected(
-            "controlled AI claim group identity did not match --only-group-id"
-        )
-
-    payload_alert_id = str(claimed_payload.get("alert_id") or "").strip()
-    payload_representative_alert_id = str(
-        claimed_payload.get("representative_alert_id") or ""
-    ).strip()
-    if (
-        str(claimed_alert_id or "").strip() != expected_alert_id
-        or payload_alert_id != expected_alert_id
-        or payload_representative_alert_id != expected_alert_id
-    ):
-        raise ControlledClaimRejected(
-            "controlled AI claim alert identity did not match --only-alert-id"
-        )
-
-    if (
-        not valid_controlled_stable_group_key(
-            claimed_payload.get("stable_group_key")
-        )
-        or claimed_payload.get("stable_group_key")
-        != expected_stable_group_key
-    ):
-        raise ControlledClaimRejected(
-            "controlled AI claim stable group key did not match "
-            "--only-stable-group-key"
-        )
-
-    payload_dispatch_id = str(
-        claimed_payload.get("dispatch_id") or ""
-    ).strip()
-    if payload_dispatch_id != expected_dispatch_id:
-        raise ControlledClaimRejected(
-            "controlled AI claim dispatch identity did not match "
-            "--only-dispatch-id"
-        )
 
 
 def _strict_ai_settings_module() -> Any:
