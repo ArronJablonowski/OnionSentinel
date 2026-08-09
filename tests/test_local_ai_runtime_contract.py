@@ -81,6 +81,10 @@ class LocalAiRuntimeContractTests(unittest.TestCase):
             self.runner._query_security_onion_dependencies.__globals__,
             vars(self.runner),
         )
+        self.assertIs(
+            self.runner._review_workflow_dependencies.__globals__,
+            vars(self.runner),
+        )
         self.assertIsNot(self.runner.atomic_write_json, runtime_compat.atomic_write_json)
         runtime_io = mock.Mock()
         with mock.patch.object(self.runner, "_runtime_io", return_value=runtime_io):

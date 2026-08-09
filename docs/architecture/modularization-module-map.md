@@ -110,6 +110,10 @@ line ranges below remain historical navigation aids for the extraction ledger.
   package loaders and their policy/dependency binding records. Execution,
   authorization, provenance, prompt-budget, and repair behavior remain in the
   package modules; the compatibility layer only supplies the historical ports.
+- `n8n/bin/local_ai_conclusion_review_dependency_compat.py` owns legacy
+  conclusion-guard, incident-report, and independent-review package loaders and
+  dependency records. It contains no verdict, confidence, authorization,
+  adjudication, or evidence policy beyond translating the historical bindings.
 - Concrete Markdown rendering and atomic output-publication binding now live
   in `local_ai_pipeline_adapters.write_outputs`; the runner transaction port
   delegates directly and no longer retains `render_markdown` or

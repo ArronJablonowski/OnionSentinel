@@ -841,6 +841,18 @@
       ]
     },
     {
+      "path": "n8n/bin/local_ai_conclusion_review_dependency_compat.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/local_ai_conclusion_review_dependency_compat.py",
+      "required_symbols": [
+        "_authorization_guard_dependencies",
+        "_conclusion_response_dependencies",
+        "_incident_report_dependencies",
+        "_review_adjudication_workflow_dependencies",
+        "_review_workflow_dependencies"
+      ]
+    },
+    {
       "path": "n8n/bin/local_ai_dependency_compat.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/local_ai_dependency_compat.py",

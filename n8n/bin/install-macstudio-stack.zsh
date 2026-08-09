@@ -610,6 +610,7 @@ cp "$REPO_DIR/n8n/bin/controlled_evaluation_isolation.py" "$STACK_DIR/bin/contro
 cp "$REPO_DIR/n8n/bin/install-ai-runtime-package.py" "$STACK_DIR/bin/install-ai-runtime-package.py"
 cp "$REPO_DIR/n8n/bin/local_ai_pipeline_adapters.py" "$STACK_DIR/bin/local_ai_pipeline_adapters.py"
 cp "$REPO_DIR/n8n/bin/local_ai_compatibility_facade.py" "$STACK_DIR/bin/local_ai_compatibility_facade.py"
+cp "$REPO_DIR/n8n/bin/local_ai_conclusion_review_dependency_compat.py" "$STACK_DIR/bin/local_ai_conclusion_review_dependency_compat.py"
 cp "$REPO_DIR/n8n/bin/local_ai_dependency_compat.py" "$STACK_DIR/bin/local_ai_dependency_compat.py"
 cp "$REPO_DIR/n8n/bin/local_ai_query_dependency_compat.py" "$STACK_DIR/bin/local_ai_query_dependency_compat.py"
 cp "$REPO_DIR/n8n/bin/local_ai_runtime_compat.py" "$STACK_DIR/bin/local_ai_runtime_compat.py"
