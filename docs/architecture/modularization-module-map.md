@@ -538,6 +538,15 @@ excludes raw event bodies. Database reads and trusted fact/scoring policy are
 injected by the builder facade; prior analyses remain labeled hypotheses and
 cannot independently create a correlation candidate.
 
+`prompt_correlation_facts.py` owns trusted collector-field normalization and
+deterministic relationship derivation. It validates canonical Community ID v1
+values, bounds raw JSON before parsing, normalizes IPs, ports, protocols, DNS
+answers, and timestamps, and emits only same-Community-ID, reversed-five-tuple,
+or same-client DNS-answer-to-encrypted-destination relationships within strict
+time bounds. Each relationship carries an interpretation limit and remains a
+lead rather than evidence of authorization or maliciousness. JSON decoding and
+row access are injected by the builder facade.
+
 `prompt_package_compactor.py` owns deterministic prompt admission reduction.
 It stabilizes declared serialized size, attempts lossless compact JSON first,
 then applies an ordered set of bounded historical, asset, enrichment, PCAP,

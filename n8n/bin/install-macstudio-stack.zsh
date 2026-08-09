@@ -548,6 +548,7 @@ cp "$REPO_DIR/n8n/bin/incident_evidence_contract.py" "$STACK_DIR/bin/incident_ev
 cp "$REPO_DIR/n8n/bin/prompt_incident_evidence_projection.py" "$STACK_DIR/bin/prompt_incident_evidence_projection.py"
 cp "$REPO_DIR/n8n/bin/prompt_builder_cli.py" "$STACK_DIR/bin/prompt_builder_cli.py"
 cp "$REPO_DIR/n8n/bin/prompt_correlation_context.py" "$STACK_DIR/bin/prompt_correlation_context.py"
+cp "$REPO_DIR/n8n/bin/prompt_correlation_facts.py" "$STACK_DIR/bin/prompt_correlation_facts.py"
 cp "$REPO_DIR/n8n/bin/prompt_investigation_query_context.py" "$STACK_DIR/bin/prompt_investigation_query_context.py"
 cp "$REPO_DIR/n8n/bin/prompt_package_compactor.py" "$STACK_DIR/bin/prompt_package_compactor.py"
 cp "$REPO_DIR/n8n/bin/collect-incident-evidence.py" "$STACK_DIR/bin/collect-incident-evidence.py"

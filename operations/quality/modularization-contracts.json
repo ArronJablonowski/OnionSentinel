@@ -47,6 +47,19 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_correlation_facts.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_correlation_facts.py",
+      "required_symbols": [
+        "CorrelationFactSources",
+        "correlation_observable_weight",
+        "correlation_relationships",
+        "correlation_row_facts",
+        "correlation_time_bonus",
+        "parse_project_datetime"
+      ]
+    },
+    {
       "path": "n8n/bin/prompt_investigation_query_context.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_investigation_query_context.py",
