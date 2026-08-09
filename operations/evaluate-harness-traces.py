@@ -58,6 +58,11 @@ from trace_evaluation_model_completion import (
     ModelPurposePolicy,
     model_purpose_completion as evaluate_model_purpose_completion,
 )
+from trace_evaluation_model_routes import (
+    ModelRoutePolicy,
+    expected_route_identity,
+    model_route_consistency as evaluate_model_route_consistency,
+)
 
 
 REPORT_SCHEMA = "onion-sentinel-harness-trace-evaluation-v1"
@@ -586,51 +591,14 @@ def budget_operation_id(
     return f"{event_type or 'budget'}:{event.get('sequence') or 'unknown'}"
 
 
-def expected_route_identity(route: object) -> dict[str, str] | None:
-    """Project a supported assigned route into collector-owned model metadata."""
-    normalized = str(route or "").strip()
-    if normalized.startswith("codex-cli:"):
-        value = normalized.removeprefix("codex-cli:")
-        model, separator, _effort = value.rpartition(":")
-        if separator and model:
-            return {
-                "model": model,
-                "provider": "codex-cli",
-                "path": "frontier-codex-cli",
-                "harness": "",
-            }
-        return None
-    if normalized.startswith("ollama:"):
-        model = normalized.removeprefix("ollama:")
-        if model:
-            return {
-                "model": model,
-                "provider": "ollama",
-                "path": "ollama",
-                "harness": "",
-            }
-        return None
-    for provider in ("hermes-agent", "openclaw"):
-        prefix = f"{provider}:"
-        if not normalized.startswith(prefix):
-            continue
-        value = normalized.removeprefix(prefix)
-        model, separator, _effort = value.rpartition(":")
-        if separator and model:
-            return {
-                "model": model,
-                "provider": (
-                    "openai-codex"
-                    if provider == "hermes-agent"
-                    else model.split("/", 1)[0]
-                    if "/" in model
-                    else "openclaw"
-                ),
-                "path": provider,
-                "harness": provider,
-            }
-        return None
-    return None
+def _model_route_policy() -> ModelRoutePolicy:
+    return ModelRoutePolicy(
+        success_statuses=SUCCESS_STATUSES,
+        validation_failed_status=VALIDATION_FAILED_STATUS,
+        maximum_reported=MAX_REPORTED_IDS,
+        normalize_status=normalize_status,
+        safe_json=safe_json,
+    )
 
 
 def model_route_consistency(
@@ -639,260 +607,9 @@ def model_route_consistency(
     model_calls: list[dict[str, Any]],
     malformed: collections.Counter[str],
 ) -> dict[str, Any]:
-    """Evaluate requested-route authorization and observed runtime identity."""
-    authorization_events: dict[str, list[dict[str, Any]]] = {}
-    observation_events: dict[str, list[dict[str, Any]]] = {}
-    denied_call_ids: list[str] = []
-    denied_observation_call_ids: list[str] = []
-    malformed_authorization_events = 0
-    malformed_observation_events = 0
-    for event in events:
-        event_type = str(event.get("event_type") or "")
-        if event_type not in {
-            "policy.model-route",
-            "policy.model-observation",
-        }:
-            continue
-        payload = safe_json(
-            event.get("payload_json"),
-            {},
-            malformed,
-            (
-                "event.policy_model_route.payload_json"
-                if event_type == "policy.model-route"
-                else "event.policy_model_observation.payload_json"
-            ),
-        )
-        call_id = str(payload.get("call_id") or "")
-        if not call_id:
-            if event_type == "policy.model-route":
-                malformed_authorization_events += 1
-            else:
-                malformed_observation_events += 1
-            continue
-        if event_type == "policy.model-route":
-            authorization_events.setdefault(call_id, []).append(payload)
-            if not bool(payload.get("allowed")):
-                denied_call_ids.append(call_id)
-        else:
-            observation_events.setdefault(call_id, []).append(payload)
-            if not bool(payload.get("allowed")):
-                denied_observation_call_ids.append(call_id)
-
-    current_contract = all(
-        key in run for key in ("assigned_route", "assigned_reviewer_route")
+    return evaluate_model_route_consistency(
+        run, events, model_calls, malformed, _model_route_policy()
     )
-    model_call_ids = {
-        str(row.get("call_id") or "")
-        for row in model_calls
-        if str(row.get("call_id") or "")
-    }
-    route_failures: list[dict[str, Any]] = []
-    authorized_call_count = 0
-    authorization_unverified_call_ids: list[str] = []
-    identity_failures: list[dict[str, Any]] = []
-    identity_verified_call_count = 0
-    identity_unverified_call_ids: list[str] = []
-    identity_not_applicable_count = 0
-
-    for row in model_calls:
-        call_id = str(row.get("call_id") or "")
-        independent_review = int(row.get("independent_review") or 0) == 1
-        requested_route = str(row.get("requested_route") or "")
-        expected_route = str(
-            run.get(
-                "assigned_reviewer_route"
-                if independent_review
-                else "assigned_route"
-            )
-            or ""
-        )
-        matching_events = authorization_events.get(call_id, [])
-        matching_observations = observation_events.get(call_id, [])
-        authorization_reasons: list[str] = []
-        if current_contract:
-            if not expected_route:
-                authorization_reasons.append("assigned-route-missing")
-            if requested_route != expected_route:
-                authorization_reasons.append(
-                    "model-ledger-requested-route-mismatch"
-                )
-            if not matching_events:
-                authorization_reasons.append(
-                    "authorization-event-missing"
-                )
-            elif len(matching_events) != 1:
-                authorization_reasons.append(
-                    "authorization-event-count-mismatch"
-                )
-            else:
-                authorization = matching_events[0]
-                if not bool(authorization.get("allowed")):
-                    authorization_reasons.append(
-                        "authorization-denied-but-model-recorded"
-                    )
-                if (
-                    str(authorization.get("requested_route") or "")
-                    != requested_route
-                ):
-                    authorization_reasons.append(
-                        "authorization-requested-route-mismatch"
-                    )
-                if (
-                    str(authorization.get("expected_route") or "")
-                    != expected_route
-                ):
-                    authorization_reasons.append(
-                        "authorization-assignment-mismatch"
-                    )
-                if bool(authorization.get("independent_review")) != (
-                    independent_review
-                ):
-                    authorization_reasons.append(
-                        "authorization-role-mismatch"
-                    )
-            if not matching_observations:
-                authorization_reasons.append(
-                    "model-observation-event-missing"
-                )
-            elif len(matching_observations) != 1:
-                authorization_reasons.append(
-                    "model-observation-event-count-mismatch"
-                )
-            else:
-                observation = matching_observations[0]
-                if (
-                    str(observation.get("requested_route") or "")
-                    != requested_route
-                ):
-                    authorization_reasons.append(
-                        "model-observation-requested-route-mismatch"
-                    )
-                if bool(observation.get("independent_review")) != (
-                    independent_review
-                ):
-                    authorization_reasons.append(
-                        "model-observation-role-mismatch"
-                    )
-            if authorization_reasons:
-                route_failures.append(
-                    {
-                        "call_id": call_id,
-                        "reasons": sorted(set(authorization_reasons)),
-                    }
-                )
-            else:
-                authorized_call_count += 1
-        else:
-            authorization_unverified_call_ids.append(call_id)
-
-        if normalize_status(row.get("status")) not in (
-            SUCCESS_STATUSES | {VALIDATION_FAILED_STATUS}
-        ):
-            identity_not_applicable_count += 1
-            continue
-        expected_identity = expected_route_identity(requested_route)
-        if expected_identity is None:
-            identity_unverified_call_ids.append(call_id)
-            continue
-        observed = {
-            "model": str(row.get("observed_model") or ""),
-            "provider": str(row.get("observed_provider") or ""),
-            "path": str(row.get("observed_model_path") or ""),
-            "harness": str(row.get("observed_harness") or ""),
-        }
-        identity_reasons: list[str] = []
-        if len(matching_observations) == 1:
-            observed_route = str(
-                matching_observations[0].get("observed_route") or ""
-            )
-            if observed_route != requested_route:
-                identity_reasons.append("observed-route-mismatch")
-        for field in ("model", "path", "harness"):
-            expected_value = expected_identity[field]
-            if expected_value and observed[field] != expected_value:
-                identity_reasons.append(f"observed-{field}-mismatch")
-        expected_provider = expected_identity["provider"]
-        if expected_provider and observed["provider"] != expected_provider:
-            identity_reasons.append("observed-provider-mismatch")
-        if identity_reasons:
-            identity_failures.append(
-                {
-                    "call_id": call_id,
-                    "requested_route": requested_route,
-                    "observed_model": observed["model"],
-                    "observed_model_path": observed["path"],
-                    "observed_provider": observed["provider"],
-                    "observed_harness": observed["harness"],
-                    "reasons": sorted(set(identity_reasons)),
-                }
-            )
-        else:
-            identity_verified_call_count += 1
-
-    orphan_authorization_call_ids = sorted(
-        set(authorization_events) - model_call_ids
-    )
-    orphan_observation_call_ids = sorted(
-        set(observation_events) - model_call_ids
-    )
-    return {
-        "contract_available": current_contract,
-        "authorization_event_count": sum(
-            len(items) for items in authorization_events.values()
-        ),
-        "authorization_allowed_event_count": sum(
-            bool(item.get("allowed"))
-            for items in authorization_events.values()
-            for item in items
-        ),
-        "authorization_denied_event_count": len(denied_call_ids),
-        "authorization_denied_call_ids": sorted(set(denied_call_ids))[
-            :MAX_REPORTED_IDS
-        ],
-        "authorization_malformed_event_count": (
-            malformed_authorization_events
-        ),
-        "authorization_orphan_event_count": len(
-            orphan_authorization_call_ids
-        ),
-        "authorization_orphan_call_ids": orphan_authorization_call_ids[
-            :MAX_REPORTED_IDS
-        ],
-        "observation_event_count": sum(
-            len(items) for items in observation_events.values()
-        ),
-        "observation_denied_event_count": len(
-            denied_observation_call_ids
-        ),
-        "observation_denied_call_ids": sorted(
-            set(denied_observation_call_ids)
-        )[:MAX_REPORTED_IDS],
-        "observation_malformed_event_count": malformed_observation_events,
-        "observation_orphan_event_count": len(
-            orphan_observation_call_ids
-        ),
-        "observation_orphan_call_ids": orphan_observation_call_ids[
-            :MAX_REPORTED_IDS
-        ],
-        "authorized_call_count": authorized_call_count,
-        "authorization_failure_count": len(route_failures),
-        "authorization_failures": route_failures[:MAX_REPORTED_IDS],
-        "authorization_unverified_call_count": len(
-            authorization_unverified_call_ids
-        ),
-        "authorization_unverified_call_ids": sorted(
-            set(authorization_unverified_call_ids)
-        )[:MAX_REPORTED_IDS],
-        "identity_verified_call_count": identity_verified_call_count,
-        "identity_mismatch_count": len(identity_failures),
-        "identity_failures": identity_failures[:MAX_REPORTED_IDS],
-        "identity_unverified_call_count": len(identity_unverified_call_ids),
-        "identity_unverified_call_ids": sorted(
-            set(identity_unverified_call_ids)
-        )[:MAX_REPORTED_IDS],
-        "identity_not_applicable_count": identity_not_applicable_count,
-    }
 
 
 def evaluate_run(

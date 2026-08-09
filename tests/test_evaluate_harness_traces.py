@@ -31,6 +31,7 @@ import trace_evaluation_integrity  # noqa: E402
 import trace_evaluation_reviewer  # noqa: E402
 import trace_evaluation_model_contract  # noqa: E402
 import trace_evaluation_model_completion  # noqa: E402
+import trace_evaluation_model_routes  # noqa: E402
 
 HARNESS_SPEC = importlib.util.spec_from_file_location(
     "evaluator_test_harness_module",
@@ -607,6 +608,16 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
         self.assertIs(
             evaluator.evaluate_model_purpose_completion,
             trace_evaluation_model_completion.model_purpose_completion,
+        )
+
+    def test_evaluator_uses_extracted_model_route_services(self):
+        self.assertIs(
+            evaluator.expected_route_identity,
+            trace_evaluation_model_routes.expected_route_identity,
+        )
+        self.assertIs(
+            evaluator.evaluate_model_route_consistency,
+            trace_evaluation_model_routes.model_route_consistency,
         )
 
     def test_resolved_repair_is_not_reported_as_tool_coverage_gap(self) -> None:
@@ -1891,6 +1902,13 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
             (
                 'cp "$REPO_DIR/operations/trace_evaluation_model_completion.py" '
                 '"$STACK_DIR/bin/trace_evaluation_model_completion.py"'
+            ),
+            source,
+        )
+        self.assertIn(
+            (
+                'cp "$REPO_DIR/operations/trace_evaluation_model_routes.py" '
+                '"$STACK_DIR/bin/trace_evaluation_model_routes.py"'
             ),
             source,
         )

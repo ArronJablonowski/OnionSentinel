@@ -253,6 +253,16 @@
       ]
     },
     {
+      "path": "operations/trace_evaluation_model_routes.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/trace_evaluation_model_routes.py",
+      "required_symbols": [
+        "ModelRoutePolicy",
+        "expected_route_identity",
+        "model_route_consistency"
+      ]
+    },
+    {
       "path": "operations/cohort_execution_models.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_execution_models.py",

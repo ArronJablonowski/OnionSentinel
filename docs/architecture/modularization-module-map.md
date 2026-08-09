@@ -546,6 +546,12 @@ ordering, distinguishes valid single calls from the two authorized repair
 sequences, and keeps validation failures visible unless the exact reviewer or
 adjudication repair contract supersedes them.
 
+`operations/trace_evaluation_model_routes.py` owns assigned-route authorization
+and observed runtime identity proof. It indexes bounded policy events, detects
+missing, duplicate, denied, mismatched, and orphaned route evidence, and verifies
+collector-recorded model, provider, path, and harness identity through an
+immutable policy with explicit parsing and normalization ports.
+
 `operations/cohort_freezing.py` owns database-newest and exact-imported-row
 cohort freezing. Immutable policy and explicit source ports bind identity
 validation, read-only database snapshots, representative-alert custody,
