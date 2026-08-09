@@ -209,6 +209,16 @@
       ]
     },
     {
+      "path": "operations/cohort_evaluation_result_policy.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_evaluation_result_policy.py",
+      "required_symbols": [
+        "FORBIDDEN_CONTENT_FLAGS",
+        "validate_safe_export_content",
+        "observed_labels"
+      ]
+    },
+    {
       "path": "operations/trace_evaluation_skills.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/trace_evaluation_skills.py",

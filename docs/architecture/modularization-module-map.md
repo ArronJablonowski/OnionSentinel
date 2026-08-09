@@ -708,6 +708,11 @@ the frozen shadow evaluation contract. It validates release and controlled
 route syntax, requires an independent reviewer model, and enforces the optional
 controlled-profile route pair without loading exports or grading results.
 
+`operations/cohort_evaluation_result_policy.py` owns the metadata-only export
+content gate and bounded observed-verdict projection. It rejects exports that
+do not explicitly exclude sensitive payload classes and converts malformed
+duplicate identifiers into a non-creditable sentinel label for scoring.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

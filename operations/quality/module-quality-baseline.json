@@ -58,7 +58,7 @@
       "max_lines": 1164
     },
     "operations/evaluate-investigation-cohort.py": {
-      "max_lines": 1067
+      "max_lines": 1036
     },
     "operations/run-incident-harness-cohort.py": {
       "max_lines": 3042
@@ -744,5 +744,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "483fd287d6cc426dc6d5534301a60eab274f58b0"
+  "source_release": "cea26b47738a126df6f9f457868579f162adb589"
 }

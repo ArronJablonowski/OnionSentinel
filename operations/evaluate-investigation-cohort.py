@@ -136,6 +136,10 @@ from cohort_evaluation_execution_contract import (
     ExecutionContractPolicy,
     validate_execution_contract,
 )
+from cohort_evaluation_result_policy import (
+    observed_labels as normalize_observed_labels,
+    validate_safe_export_content,
+)
 from cohort_execution_result import (
     expected_task_kind as derive_expected_task_kind,
     prior_analysis_ids as collect_prior_analysis_ids,
@@ -448,48 +452,13 @@ def validate_adjudication(
 
 
 def _safe_export_content_policy(document: Mapping[str, Any], label: str) -> None:
-    policy = document.get("content_policy")
-    forbidden_flags = (
-        "contains_raw_alerts",
-        "contains_prompts",
-        "contains_raw_model_responses",
-        "contains_query_text",
-        "contains_query_results",
-        "contains_credentials",
-    )
-    if not isinstance(policy, dict) or any(
-        policy.get(field) is not False for field in forbidden_flags
-    ):
-        raise CohortEvaluationError(
-            f"{label} is not a metadata-only, secret-free export"
-        )
+    validate_safe_export_content(document, label, CohortEvaluationError)
 
 
 def _observed_labels(analysis: Mapping[str, Any]) -> dict[str, Any]:
-    result = analysis.get("result")
-    if not isinstance(result, dict):
-        result = {}
-    output: dict[str, Any] = {
-        "detection_outcome": str(
-            analysis.get("detection_outcome") or ""
-        ).strip().lower(),
-        "event_status": str(result.get("event_status") or "").strip().lower(),
-        "detection_validity": str(
-            result.get("detection_validity") or ""
-        ).strip().lower(),
-        "activity_disposition": str(
-            result.get("activity_disposition") or ""
-        ).strip().lower(),
-        "handling": str(result.get("handling") or "").strip().lower(),
-        "duplicate_of": None,
-    }
-    try:
-        output["duplicate_of"] = _normalize_duplicate_of(
-            result.get("duplicate_of"), "analysis duplicate_of"
-        )
-    except CohortEvaluationError:
-        output["duplicate_of"] = "__invalid__"
-    return output
+    return normalize_observed_labels(
+        analysis, _normalize_duplicate_of, CohortEvaluationError
+    )
 
 
 def _query_audit_policy() -> QueryAuditPolicy:
