@@ -109,6 +109,10 @@ from cohort_execution_result import (
     expected_task_kind as resolve_expected_task_kind,
     prior_analysis_ids as collect_prior_analysis_ids,
 )
+from cohort_export import (
+    CohortExportSources,
+    export_cohort as run_export_cohort,
+)
 
 
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -2808,6 +2812,20 @@ def _harness_execution_proof(
     )
 
 
+def _cohort_export_sources() -> CohortExportSources:
+    return CohortExportSources(
+        cohort_error=CohortError,
+        export_schema=EXPORT_SCHEMA,
+        monitor_cohort_once=monitor_cohort_once,
+        harness_execution_proof=_harness_execution_proof,
+        member_stable_group_key=_member_stable_group_key,
+        utc_now=utc_now,
+        sha256_value=sha256_value,
+        ordered_identity_projection=ordered_identity_projection,
+        write_private_json=write_private_json,
+    )
+
+
 def export_cohort(
     database_path: Path,
     manifest_path: Path,
@@ -2815,105 +2833,13 @@ def export_cohort(
     *,
     harness_database_path: Path | None = None,
 ) -> dict[str, Any]:
-    manifest, terminal = monitor_cohort_once(database_path, manifest_path)
-    if not terminal:
-        raise CohortError("cohort is not terminal; refusing a partial export")
-    noncompleted = [
-        int(member.get("rank") or 0)
-        for member in manifest["members"]
-        if str((member.get("monitor") or {}).get("state") or "")
-        != "completed"
-    ]
-    if noncompleted:
-        raise CohortError(
-            "cohort contains non-completed results; refusing a gradeable "
-            f"export (ranks={noncompleted})"
-        )
-    members = []
-    for member in manifest["members"]:
-        monitor = member.get("monitor") or {}
-        proof = (
-            _harness_execution_proof(
-                harness_database_path=harness_database_path,
-                manifest=manifest,
-                member=member,
-                monitor=monitor,
-            )
-            if harness_database_path is not None
-            else {
-                "status": "not_attested",
-                "reason": "harness database was not supplied",
-            }
-        )
-        members.append(
-            {
-                "rank": member["rank"],
-                "dashboard_group_id": member["dashboard_group_id"],
-                "stable_group_id": member["stable_group_id"],
-                "stable_group_key": _member_stable_group_key(member),
-                "representative_alert_id": member["representative_alert_id"],
-                "detection": member["detection"],
-                "pre_state": member["pre_state"],
-                "dispatch": member["dispatch"],
-                "result": monitor,
-                "execution_proof": proof,
-            }
-        )
-    selection = (
-        dict(manifest.get("selection"))
-        if isinstance(manifest.get("selection"), dict)
-        else {}
-    )
-    gate_passed = (
-        harness_database_path is not None
-        and len(members) == int(manifest["count"])
-        and all(
-            (member.get("execution_proof") or {}).get("status") == "passed"
-            for member in members
-        )
-    )
-    export = {
-        "schema": EXPORT_SCHEMA,
-        "cohort_id": manifest["cohort_id"],
-        "reason": manifest["reason"],
-        "agent_role": manifest.get("agent_role") or "incident-responder",
-        "count": manifest["count"],
-        "frozen_at": manifest["created_at"],
-        "exported_at": utc_now(),
-        "source_manifest_sha256": manifest["manifest_sha256"],
-        "frozen_plan_sha256": manifest["frozen_plan_sha256"],
-        "selection": selection,
-        "execution_contract": manifest["execution_contract"],
-        "execution_gate": {
-            "status": "passed" if gate_passed else "not_attested",
-            "expected_count": int(manifest["count"]),
-            "passed_count": sum(
-                (member.get("execution_proof") or {}).get("status") == "passed"
-                for member in members
-            ),
-            "ordered_identity_sha256": sha256_value(
-                ordered_identity_projection(members)
-            ),
-            "contract_sha256": sha256_value(
-                manifest["execution_contract"]
-            ),
-        },
-        "security_onion_access": "none",
-        "content_policy": {
-            "contains_raw_alerts": False,
-            "contains_prompts": False,
-            "contains_raw_model_responses": False,
-            "contains_query_text": False,
-            "contains_query_results": False,
-            "contains_credentials": False,
-        },
-        "members": members,
-    }
-    return write_private_json(
+    """Compatibility adapter for a digest-sealed terminal cohort export."""
+    return run_export_cohort(
+        _cohort_export_sources(),
+        database_path,
+        manifest_path,
         output_path,
-        export,
-        digest_field="export_sha256",
-        replace=False,
+        harness_database_path=harness_database_path,
     )
 
 
