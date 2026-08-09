@@ -581,6 +581,8 @@ cp "$REPO_DIR/n8n/bin/scheduler_controlled_acceptance.py" "$STACK_DIR/bin/schedu
 cp "$REPO_DIR/n8n/bin/scheduler_controlled_artifacts.py" "$STACK_DIR/bin/scheduler_controlled_artifacts.py"
 cp "$REPO_DIR/n8n/bin/scheduler_controlled_recovery.py" "$STACK_DIR/bin/scheduler_controlled_recovery.py"
 cp "$REPO_DIR/n8n/bin/scheduler_controlled_result_client.py" "$STACK_DIR/bin/scheduler_controlled_result_client.py"
+cp "$REPO_DIR/n8n/bin/scheduler_controlled_release.py" "$STACK_DIR/bin/scheduler_controlled_release.py"
+cp "$REPO_DIR/n8n/bin/scheduler_controlled_claim_contract.py" "$STACK_DIR/bin/scheduler_controlled_claim_contract.py"
 cp "$REPO_DIR/n8n/bin/scheduler_controlled_payload.py" "$STACK_DIR/bin/scheduler_controlled_payload.py"
 cp "$REPO_DIR/n8n/bin/scheduler_controlled_runtime.py" "$STACK_DIR/bin/scheduler_controlled_runtime.py"
 cp "$REPO_DIR/n8n/bin/scheduler_controlled_terminal_proof.py" "$STACK_DIR/bin/scheduler_controlled_terminal_proof.py"

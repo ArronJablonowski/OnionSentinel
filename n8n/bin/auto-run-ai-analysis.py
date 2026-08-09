@@ -64,6 +64,19 @@ from scheduler_controlled_result_client import (
     ControlledResultClientSources,
     post_controlled_recovery_result as post_controlled_result,
 )
+from scheduler_controlled_release import (
+    ControlledReleasePolicy,
+    current_runtime_release_id as load_runtime_release_id,
+    require_controlled_release_attestation as attest_controlled_release,
+)
+from scheduler_controlled_claim_contract import (
+    ControlledClaimSources,
+    ControlledRoutePolicy,
+    ControlledRouteSources,
+    controlled_claim_expectations as validate_claim_expectations,
+    controlled_job_route_contract as validate_job_route_contract,
+    incident_reanalysis_attempt_id as derive_incident_attempt_id,
+)
 from scheduler_controlled_payload import (
     ControlledPayloadPolicy,
     ControlledPayloadSources,
@@ -524,74 +537,34 @@ def current_runtime_release_id(
     environ: object | None = None,
     env_path: Path | None = None,
 ) -> str:
-    """Return the exact deployed commit attestation without evaluating .env.
-
-    LaunchAgents invoke this worker directly and therefore do not inherit the
-    runtime ``.env`` loaded by alert-store's shell wrapper. An explicitly
-    supplied process value is authoritative; only its absence permits the
-    bounded, literal fallback below.
-    """
-    source = os.environ if environ is None else environ
-    try:
-        explicitly_supplied = RUNTIME_RELEASE_ENV_KEY in source
-    except TypeError:
-        explicitly_supplied = False
-    if explicitly_supplied:
-        candidate = source.get(RUNTIME_RELEASE_ENV_KEY, "")
-        return (
-            candidate
-            if isinstance(candidate, str)
-            and CONTROLLED_RELEASE_ID_RE.fullmatch(candidate)
-            else ""
-        )
-
-    path = DEFAULT_RUNTIME_ENV_PATH if env_path is None else Path(env_path)
-    try:
-        metadata = path.lstat()
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-            return ""
-        if metadata.st_size > MAX_RUNTIME_ENV_BYTES:
-            return ""
-        raw = path.read_bytes()
-    except OSError:
-        return ""
-    if len(raw) > MAX_RUNTIME_ENV_BYTES:
-        return ""
-    try:
-        lines = raw.decode("utf-8").splitlines()
-    except UnicodeDecodeError:
-        return ""
-
-    candidates: list[str] = []
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        if key.strip() == RUNTIME_RELEASE_ENV_KEY:
-            candidates.append(value.strip())
-    if len(candidates) != 1:
-        return ""
-    candidate = candidates[0]
-    return candidate if CONTROLLED_RELEASE_ID_RE.fullmatch(candidate) else ""
+    """Compatibility delegate for literal deployed release loading."""
+    return load_runtime_release_id(
+        ControlledReleasePolicy(
+            environment_key=RUNTIME_RELEASE_ENV_KEY,
+            default_env_path=DEFAULT_RUNTIME_ENV_PATH,
+            max_env_bytes=MAX_RUNTIME_ENV_BYTES,
+            release_pattern=CONTROLLED_RELEASE_ID_RE,
+        ),
+        environ=os.environ if environ is None else environ,
+        env_path=env_path,
+    )
 
 
 def require_controlled_release_attestation(
     claimed_payload: dict[str, object],
 ) -> str:
-    """Bind one controlled durable payload to the code running this worker."""
-    payload_release_id = claimed_payload.get("release_id")
-    runtime_release_id = current_runtime_release_id()
-    if (
-        not isinstance(payload_release_id, str)
-        or not CONTROLLED_RELEASE_ID_RE.fullmatch(payload_release_id)
-        or not runtime_release_id
-        or payload_release_id != runtime_release_id
-    ):
-        raise ControlledClaimRejected(
-            "controlled AI claim release_id did not match the deployed runtime"
-        )
-    return runtime_release_id
+    """Compatibility delegate for durable release attestation."""
+    return attest_controlled_release(
+        ControlledReleasePolicy(
+            environment_key=RUNTIME_RELEASE_ENV_KEY,
+            default_env_path=DEFAULT_RUNTIME_ENV_PATH,
+            max_env_bytes=MAX_RUNTIME_ENV_BYTES,
+            release_pattern=CONTROLLED_RELEASE_ID_RE,
+        ),
+        claimed_payload,
+        current_runtime_release_id(),
+        ControlledClaimRejected,
+    )
 
 
 def alert_time_sql(alias: str = "") -> str:
@@ -911,11 +884,8 @@ def report_ai_job_status(
 
 
 def incident_reanalysis_attempt_id(lease_token: str) -> str:
-    """Return the non-secret fingerprint alert-store uses for one IR lease."""
-    token = str(lease_token or "").strip()
-    if not token:
-        return ""
-    return "ira-" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:40]
+    """Compatibility delegate for one non-secret IR lease fingerprint."""
+    return derive_incident_attempt_id(lease_token)
 
 
 def job_reanalysis_attempt_id(job_payload: dict, lease_token: str) -> str:
@@ -1754,61 +1724,27 @@ def controlled_job_route_contract(
     args: argparse.Namespace,
     job_payload: dict[str, object],
 ) -> dict[str, object]:
-    """Bind a controlled job to exact canonical, enabled role assignments."""
-
-    assigned_route = job_payload.get("expected_assigned_route")
-    reviewer_route = job_payload.get("expected_reviewer_route")
-    reviewer_required = job_payload.get("reviewer_required")
-    role = str(job_payload.get("agent_role") or "").strip().lower()
-    if (
-        not isinstance(assigned_route, str)
-        or not isinstance(reviewer_route, str)
-        or not CONTROLLED_MODEL_ROUTE_RE.fullmatch(assigned_route)
-        or not CONTROLLED_MODEL_ROUTE_RE.fullmatch(reviewer_route)
-        or assigned_route.rsplit(":", 1)[0]
-        == reviewer_route.rsplit(":", 1)[0]
-        or reviewer_required is not True
-        or role not in {"soc-analyst", "incident-responder"}
-    ):
-        raise ControlledClaimRejected(
-            "controlled durable AI job route contract is invalid"
-        )
-
+    """Compatibility delegate for canonical enabled route binding."""
     settings_path = Path(
         getattr(args, "ai_settings_file", DEFAULT_AI_SETTINGS)
     )
-    try:
-        settings, raw, enabled_routes = _strict_controlled_ai_settings(
-            settings_path
-        )
-    except (OSError, UnicodeError, ValueError, TypeError, RuntimeError) as exc:
-        raise ControlledClaimRejected(
-            "controlled AI route settings are unavailable"
-        ) from exc
-    assignments = raw.get("agent_models")
-    reviewers = raw.get("agent_second_opinion_models")
-    normalized_assignments = settings.get("agent_models")
-    normalized_reviewers = settings.get("agent_second_opinion_models")
-    if (
-        not isinstance(assignments, dict)
-        or assignments.get(role) != assigned_route
-        or not isinstance(reviewers, dict)
-        or reviewers.get(role) != reviewer_route
-        or not isinstance(normalized_assignments, dict)
-        or normalized_assignments.get(role) != assigned_route
-        or not isinstance(normalized_reviewers, dict)
-        or normalized_reviewers.get(role) != reviewer_route
-        or assigned_route not in enabled_routes
-        or reviewer_route not in enabled_routes
-    ):
-        raise ControlledClaimRejected(
-            "controlled AI job routes do not exactly match enabled settings"
-        )
-    return {
-        "expected_assigned_route": assigned_route,
-        "expected_reviewer_route": reviewer_route,
-        "reviewer_required": True,
-    }
+    return validate_job_route_contract(
+        ControlledRoutePolicy(model_route_pattern=CONTROLLED_MODEL_ROUTE_RE),
+        ControlledRouteSources(
+            load_settings=lambda: _strict_controlled_ai_settings(
+                settings_path
+            ),
+            reject=ControlledClaimRejected,
+            settings_errors=(
+                OSError,
+                UnicodeError,
+                ValueError,
+                TypeError,
+                RuntimeError,
+            ),
+        ),
+        job_payload,
+    )
 
 
 def controlled_claim_expectations(
@@ -1816,75 +1752,20 @@ def controlled_claim_expectations(
     selected: sqlite3.Row,
     job_payload: dict[str, object],
 ) -> dict[str, object]:
-    """Validate the read-only candidate before asking for an exact atomic claim."""
-    expected_group_id = str(
-        getattr(args, "only_group_id", "") or ""
-    ).strip().lower()
-    expected_alert_id = str(
-        getattr(args, "only_alert_id", "") or ""
-    ).strip()
-    expected_stable_group_key = str(
-        getattr(args, "only_stable_group_key", "") or ""
+    """Compatibility delegate for exact frozen candidate validation."""
+    return validate_claim_expectations(
+        ControlledClaimSources(
+            stable_group_key_valid=valid_controlled_stable_group_key,
+            require_release=require_controlled_release_attestation,
+            route_contract=lambda payload: controlled_job_route_contract(
+                args, payload
+            ),
+            reject=ControlledClaimRejected,
+        ),
+        args,
+        selected,
+        job_payload,
     )
-    expected_dispatch_id = str(
-        getattr(args, "only_dispatch_id", "") or ""
-    ).strip()
-    identity = (
-        expected_group_id,
-        expected_alert_id,
-        expected_stable_group_key,
-        expected_dispatch_id,
-    )
-    if not any(identity):
-        return {}
-    if not all(identity):
-        raise ControlledClaimRejected(
-            "controlled AI run identity arguments are incomplete"
-        )
-    if not valid_controlled_stable_group_key(expected_stable_group_key):
-        raise ControlledClaimRejected(
-            "controlled AI run stable group key is invalid"
-        )
-    require_controlled_release_attestation(job_payload)
-    route_contract = controlled_job_route_contract(args, job_payload)
-    try:
-        expected_job_id = int(selected["durable_job_id"] or 0)
-    except (IndexError, KeyError, TypeError, ValueError):
-        expected_job_id = 0
-    if expected_job_id < 1:
-        raise ControlledClaimRejected(
-            "controlled AI run requires an exact durable AI job"
-        )
-    payload_alert_id = str(job_payload.get("alert_id") or "").strip()
-    payload_representative_alert_id = str(
-        job_payload.get("representative_alert_id") or ""
-    ).strip()
-    payload_group_id = str(job_payload.get("group_id") or "").strip().lower()
-    payload_stable_group_id = str(
-        job_payload.get("stable_group_id") or ""
-    ).strip().lower()
-    if (
-        payload_alert_id != expected_alert_id
-        or payload_representative_alert_id != expected_alert_id
-        or payload_group_id != expected_group_id
-        or payload_stable_group_id != expected_group_id
-        or not valid_controlled_stable_group_key(
-            job_payload.get("stable_group_key")
-        )
-        or job_payload.get("stable_group_key") != expected_stable_group_key
-        or str(job_payload.get("dispatch_id") or "").strip()
-        != expected_dispatch_id
-    ):
-        raise ControlledClaimRejected(
-            "controlled durable AI candidate no longer matches the frozen dispatch"
-        )
-    return {
-        "expected_job_id": expected_job_id,
-        "expected_representative_alert_id": expected_alert_id,
-        "expected_dispatch_id": expected_dispatch_id,
-        "expected_stable_group_key": expected_stable_group_key,
-        **route_contract,
-    }
 
 
 def bounded_int(value: object, default: int, minimum: int, maximum: int) -> int:

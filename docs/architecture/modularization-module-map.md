@@ -315,6 +315,15 @@ and accepts only a receipt with the exact analysis ID, submission digest, and
 well-formed stored-response digest. Mutation headers remain an injected port
 so the ephemeral controlled-evaluation credential stays in the facade.
 
+`scheduler_controlled_release.py` reads the deployed commit attestation from
+an authoritative process value or a bounded literal, non-symlink `.env` file;
+it never evaluates shell syntax and rejects missing, malformed, duplicate, or
+oversized values. `scheduler_controlled_claim_contract.py` derives non-secret
+IR attempt IDs and binds controlled candidates to an exact durable job,
+release, frozen dispatch identity, canonical enabled primary/reviewer routes,
+and distinct reviewer model. Settings loading, stable-key policy, and the
+facade's public rejection type remain injected ports.
+
 `scheduler_claim.py` owns compare-and-set processing acquisition,
 server-authoritative job/alert/group replacement, controlled claim identity,
 IR reanalysis-attempt binding, contention projection, and automatic-threshold
