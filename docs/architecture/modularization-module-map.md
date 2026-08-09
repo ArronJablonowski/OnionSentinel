@@ -528,6 +528,12 @@ terminal-manifest binding. Manifest schemas, identity columns, terminal states,
 hashing, normalization, and the error type are injected so the proof engine is
 independent of SQLite and CLI concerns.
 
+`operations/trace_evaluation_reviewer.py` owns content-free reviewer evidence
+projection and the fail-closed reviewer completion contract. It binds canonical
+review and supplemental calls to exact primary/reviewer decision rows, reports
+material field disagreement, and validates repair and completion counts through
+injected normalization ports.
+
 `operations/cohort_freezing.py` owns database-newest and exact-imported-row
 cohort freezing. Immutable policy and explicit source ports bind identity
 validation, read-only database snapshots, representative-alert custody,

@@ -44,6 +44,12 @@ from trace_evaluation_integrity import (
     ledger_manifest as build_ledger_manifest,
     verify_chain as verify_trace_chain,
 )
+from trace_evaluation_reviewer import (
+    ReviewerEvaluationPolicy,
+    decision_payloads as parse_decision_payloads,
+    reviewer_completion_contract as evaluate_reviewer_completion,
+    reviewer_result as evaluate_reviewer_result,
+)
 
 
 REPORT_SCHEMA = "onion-sentinel-harness-trace-evaluation-v1"
@@ -401,24 +407,23 @@ def verify_chain(
     )
 
 
+def _reviewer_evaluation_policy() -> ReviewerEvaluationPolicy:
+    return ReviewerEvaluationPolicy(
+        reviewer_purpose=REVIEWER_REPAIR_PURPOSE,
+        reviewer_call_ids=REVIEWER_REPAIR_CALL_IDS,
+        supplemental_purpose=SUPPLEMENTAL_REVIEW_PURPOSE,
+        supplemental_call_id=SUPPLEMENTAL_REVIEW_CALL_ID,
+        material_fields=MATERIAL_REVIEW_FIELDS,
+        normalize_status=normalize_status,
+        nonnegative_int=nonnegative_int,
+    )
+
+
 def decision_payloads(
     decisions: Iterable[Mapping[str, Any]],
     malformed: collections.Counter[str],
 ) -> dict[str, dict[str, Any]]:
-    output: dict[str, dict[str, Any]] = {}
-    for row in decisions:
-        decision_id = str(row.get("decision_id") or "")
-        decision_type = str(row.get("decision_type") or "")
-        payload = safe_json(
-            row.get("payload_json"),
-            {},
-            malformed,
-            "decision.payload_json",
-        )
-        output[decision_id or decision_type] = payload
-        if decision_type:
-            output.setdefault(decision_type, payload)
-    return output
+    return parse_decision_payloads(decisions, malformed)
 
 
 def reviewer_result(
@@ -426,117 +431,18 @@ def reviewer_result(
     decisions: list[dict[str, Any]],
     malformed: collections.Counter[str],
 ) -> dict[str, Any]:
-    reviewer_calls = [
-        row
-        for row in model_calls
-        if int(row.get("independent_review") or 0) == 1
-        and str(row.get("purpose") or "") == REVIEWER_REPAIR_PURPOSE
-        and str(row.get("call_id") or "") in REVIEWER_REPAIR_CALL_IDS
-    ]
-    supplemental_calls = [
-        row
-        for row in model_calls
-        if int(row.get("independent_review") or 0) == 1
-        and str(row.get("purpose") or "")
-        == SUPPLEMENTAL_REVIEW_PURPOSE
-        and str(row.get("call_id") or "")
-        == SUPPLEMENTAL_REVIEW_CALL_ID
-    ]
-    payloads = decision_payloads(decisions, malformed)
-    primary = payloads.get("primary")
-    reviewer = payloads.get("independent-review")
-    primary_decision_count = sum(
-        str(row.get("decision_id") or "") == "primary"
-        and str(row.get("decision_type") or "") == "primary-analysis"
-        for row in decisions
+    return evaluate_reviewer_result(
+        model_calls, decisions, malformed, _reviewer_evaluation_policy()
     )
-    reviewer_decision_count = sum(
-        str(row.get("decision_id") or "") == "independent-review"
-        and str(row.get("decision_type") or "") == "independent-review"
-        for row in decisions
-    )
-    disputed_fields: list[str] = []
-    if isinstance(primary, dict) and isinstance(reviewer, dict):
-        disputed_fields = [
-            field
-            for field in MATERIAL_REVIEW_FIELDS
-            if primary.get(field) != reviewer.get(field)
-        ]
-    return {
-        "model_call_count": len(reviewer_calls) + len(supplemental_calls),
-        "completed_model_call_count": sum(
-            normalize_status(row.get("status")) == "completed"
-            for row in reviewer_calls + supplemental_calls
-        ),
-        "supplemental_model_call_count": len(supplemental_calls),
-        "supplemental_completed_model_call_count": sum(
-            normalize_status(row.get("status")) == "completed"
-            for row in supplemental_calls
-        ),
-        "primary_decision_count": primary_decision_count,
-        "reviewer_decision_count": reviewer_decision_count,
-        "has_primary_decision": isinstance(primary, dict),
-        "has_reviewer_decision": isinstance(reviewer, dict),
-        "comparison_basis": (
-            "primary_vs_independent-review"
-            if isinstance(primary, dict) and isinstance(reviewer, dict)
-            else ""
-        ),
-        "decision_comparable": (
-            isinstance(primary, dict) and isinstance(reviewer, dict)
-        ),
-        "material_disagreement": bool(disputed_fields),
-        "disputed_fields": disputed_fields,
-        "missing_reviewer_decision": bool(reviewer_calls)
-        and not isinstance(reviewer, dict),
-    }
 
 
 def reviewer_completion_contract(
     reviewer: Mapping[str, Any],
     purpose_completion: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Fail closed on incomplete reviewer evidence only when review ran."""
-
-    call_count = nonnegative_int(reviewer.get("model_call_count"))
-    exact_repair_count = nonnegative_int(
-        purpose_completion.get("exact_reviewer_repair_count")
+    return evaluate_reviewer_completion(
+        reviewer, purpose_completion, _reviewer_evaluation_policy()
     )
-    supplemental_count = nonnegative_int(
-        reviewer.get("supplemental_model_call_count")
-    )
-    required = call_count > 0
-    failures: list[str] = []
-    if required:
-        if nonnegative_int(reviewer.get("completed_model_call_count")) != (
-            1 + supplemental_count
-        ):
-            failures.append("completed-reviewer-call-count-invalid")
-        if nonnegative_int(reviewer.get("primary_decision_count")) != 1:
-            failures.append("primary-decision-count-not-one")
-        if nonnegative_int(reviewer.get("reviewer_decision_count")) != 1:
-            failures.append("reviewer-decision-count-not-one")
-        if reviewer.get("has_primary_decision") is not True:
-            failures.append("primary-decision-missing")
-        if reviewer.get("has_reviewer_decision") is not True:
-            failures.append("reviewer-decision-missing")
-        if reviewer.get("decision_comparable") is not True:
-            failures.append("reviewer-decision-not-comparable")
-        if reviewer.get("missing_reviewer_decision") is not False:
-            failures.append("reviewer-decision-marked-missing")
-        if call_count != 1 + exact_repair_count + supplemental_count:
-            failures.append("reviewer-call-count-does-not-match-repair")
-        if supplemental_count not in {0, 1}:
-            failures.append("supplemental-reviewer-call-count-invalid")
-        if nonnegative_int(
-            reviewer.get("supplemental_completed_model_call_count")
-        ) != supplemental_count:
-            failures.append("supplemental-reviewer-call-not-completed")
-    return {
-        "completion_contract_required": required,
-        "completion_contract_satisfied": not failures,
-        "completion_contract_failure_reasons": failures,
-    }
 
 
 def canonical_model_call_contract(

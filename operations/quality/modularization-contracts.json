@@ -224,6 +224,17 @@
       ]
     },
     {
+      "path": "operations/trace_evaluation_reviewer.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/trace_evaluation_reviewer.py",
+      "required_symbols": [
+        "ReviewerEvaluationPolicy",
+        "decision_payloads",
+        "reviewer_result",
+        "reviewer_completion_contract"
+      ]
+    },
+    {
       "path": "operations/cohort_execution_models.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_execution_models.py",

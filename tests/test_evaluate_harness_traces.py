@@ -28,6 +28,7 @@ SPEC.loader.exec_module(evaluator)
 import trace_evaluation_skills  # noqa: E402
 import trace_evaluation_storage  # noqa: E402
 import trace_evaluation_integrity  # noqa: E402
+import trace_evaluation_reviewer  # noqa: E402
 
 HARNESS_SPEC = importlib.util.spec_from_file_location(
     "evaluator_test_harness_module",
@@ -582,6 +583,16 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
         self.assertIs(
             evaluator.verify_trace_chain,
             trace_evaluation_integrity.verify_chain,
+        )
+
+    def test_evaluator_uses_extracted_reviewer_services(self):
+        self.assertIs(
+            evaluator.evaluate_reviewer_result,
+            trace_evaluation_reviewer.reviewer_result,
+        )
+        self.assertIs(
+            evaluator.evaluate_reviewer_completion,
+            trace_evaluation_reviewer.reviewer_completion_contract,
         )
 
     def test_resolved_repair_is_not_reported_as_tool_coverage_gap(self) -> None:
@@ -1845,6 +1856,13 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
             (
                 'cp "$REPO_DIR/operations/trace_evaluation_integrity.py" '
                 '"$STACK_DIR/bin/trace_evaluation_integrity.py"'
+            ),
+            source,
+        )
+        self.assertIn(
+            (
+                'cp "$REPO_DIR/operations/trace_evaluation_reviewer.py" '
+                '"$STACK_DIR/bin/trace_evaluation_reviewer.py"'
             ),
             source,
         )
