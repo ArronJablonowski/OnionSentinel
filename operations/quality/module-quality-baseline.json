@@ -10,7 +10,7 @@
       "max_lines": 812
     },
     "n8n/bin/auto-run-ai-analysis.py": {
-      "max_lines": 2012
+      "max_lines": 1933
     },
     "n8n/bin/bounded_process.py": {
       "max_lines": 997
@@ -93,10 +93,6 @@
     },
     "n8n/bin/asset_inventory.py::validate_asset_inventory": {
       "max_complexity": 24
-    },
-    "n8n/bin/auto-run-ai-analysis.py::build_prompt": {
-      "max_complexity": 19,
-      "max_lines": 118
     },
     "n8n/bin/backup-onion-sentinel-runtime.py::create_bundle": {
       "max_lines": 101
@@ -929,5 +925,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "e1ed717290644ce6e38da8673cb0658cd4b93eee"
+  "source_release": "48c3e42f6f35fb22db632461cf9f13457c8a139b"
 }
