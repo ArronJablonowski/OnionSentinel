@@ -774,6 +774,12 @@ derivation of replay-stable dispatch IDs from the frozen plan, exact member
 identity, stable-group key, rank, and dispatch kind. Cryptographic primitives
 and identity patterns remain injected by the cohort runner.
 
+`operations/cohort_manifest_contract.py` owns cohort identity, agent/model
+routes, stable-group keys, the immutable execution contract, ordered member
+identity, and the frozen-plan digest. `operations/cohort_private_input.py`
+separately owns owner, mode, symlink, size, encoding, JSON-root, and bounded
+source-row checks before delegating manifest semantics to that pure contract.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

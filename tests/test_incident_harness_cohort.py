@@ -38,6 +38,8 @@ import cohort_execution_proof_service  # noqa: E402
 import cohort_analysis_metadata  # noqa: E402
 import cohort_preflight  # noqa: E402
 import cohort_dispatch_identity  # noqa: E402
+import cohort_manifest_contract  # noqa: E402
+import cohort_private_input  # noqa: E402
 
 
 class IncidentHarnessCohortTests(unittest.TestCase):
@@ -77,6 +79,24 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         self.assertIs(
             cohort.derive_dispatch_id,
             cohort_dispatch_identity.deterministic_dispatch_id,
+        )
+
+    def test_runner_uses_extracted_manifest_and_private_input_services(self) -> None:
+        self.assertIs(
+            cohort.calculate_frozen_plan_digest,
+            cohort_manifest_contract.frozen_plan_digest,
+        )
+        self.assertIs(
+            cohort.validate_manifest_document,
+            cohort_manifest_contract.validate_manifest_document,
+        )
+        self.assertIs(
+            cohort.read_private_manifest,
+            cohort_private_input.load_private_manifest,
+        )
+        self.assertIs(
+            cohort.read_private_source_rows,
+            cohort_private_input.load_private_source_rows,
         )
 
     def test_query_audit_projection_excludes_query_and_result_content(self) -> None:

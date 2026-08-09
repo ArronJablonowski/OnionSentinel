@@ -46,6 +46,34 @@
       ]
     },
     {
+      "path": "operations/cohort_manifest_contract.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_manifest_contract.py",
+      "required_symbols": [
+        "ManifestContractPolicy",
+        "validate_cohort_identity",
+        "validate_agent_role",
+        "validate_model_route",
+        "validate_release_id",
+        "validate_stable_group_key",
+        "member_stable_group_key",
+        "execution_contract",
+        "ordered_identity_projection",
+        "frozen_plan_digest",
+        "validate_manifest_document"
+      ]
+    },
+    {
+      "path": "operations/cohort_private_input.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_private_input.py",
+      "required_symbols": [
+        "CohortPrivateInputPolicy",
+        "load_private_manifest",
+        "load_private_source_rows"
+      ]
+    },
+    {
       "path": "operations/cohort_dispatch_readback.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_dispatch_readback.py",

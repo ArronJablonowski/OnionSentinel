@@ -30,7 +30,6 @@ import os
 import re
 import shutil
 import sqlite3
-import stat
 import subprocess
 import sys
 import tempfile
@@ -135,6 +134,24 @@ from cohort_preflight import (
 from cohort_dispatch_identity import (
     DispatchIdentityPolicy,
     deterministic_dispatch_id as derive_dispatch_id,
+)
+from cohort_manifest_contract import (
+    ManifestContractPolicy,
+    execution_contract as build_execution_contract,
+    frozen_plan_digest as calculate_frozen_plan_digest,
+    member_stable_group_key as resolve_member_stable_group_key,
+    ordered_identity_projection as project_ordered_identity,
+    validate_agent_role as validate_manifest_agent_role,
+    validate_cohort_identity as validate_manifest_identity,
+    validate_manifest_document,
+    validate_model_route as validate_manifest_model_route,
+    validate_release_id as validate_manifest_release_id,
+    validate_stable_group_key as validate_manifest_stable_group_key,
+)
+from cohort_private_input import (
+    CohortPrivateInputPolicy,
+    load_private_manifest as read_private_manifest,
+    load_private_source_rows as read_private_source_rows,
 )
 
 
@@ -361,172 +378,81 @@ def write_private_json(
     return bound
 
 
-def load_private_manifest(path: Path) -> dict[str, Any]:
-    target = path.expanduser()
-    if target.is_symlink() or not target.is_file():
-        raise CohortError(f"manifest is not a regular file: {target}")
-    metadata = target.stat()
-    mode = stat.S_IMODE(metadata.st_mode)
-    if mode & 0o077:
-        raise CohortError(
-            f"manifest must be owner-only (0600); current mode is {mode:04o}"
-        )
-    if metadata.st_uid != os.geteuid():
-        raise CohortError("manifest is not owned by the current user")
-    if metadata.st_size > MAX_MANIFEST_BYTES:
-        raise CohortError("manifest exceeds the bounded input size")
-    try:
-        document = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise CohortError(f"could not read manifest: {type(exc).__name__}") from exc
-    if not isinstance(document, dict) or document.get("schema") != SCHEMA:
-        raise CohortError("unsupported cohort manifest schema")
-    _validate_digest(document, "manifest_sha256")
-    validate_cohort_identity(
-        str(document.get("cohort_id") or ""),
-        str(document.get("reason") or ""),
+def _manifest_contract_policy() -> ManifestContractPolicy:
+    return ManifestContractPolicy(
+        error=CohortError,
+        schema=SCHEMA,
+        cohort_id_pattern=COHORT_ID_RE,
+        safe_route_pattern=SAFE_ROUTE_RE,
+        controlled_route_pattern=CONTROLLED_ROUTE_RE,
+        release_id_pattern=RELEASE_ID_RE,
+        sha256_pattern=SHA256_RE,
+        agent_roles=frozenset(AGENT_ROLES),
+        maximum_stable_group_key_bytes=MAX_STABLE_GROUP_KEY_BYTES,
+        controlled_evaluation_profile=CONTROLLED_EVALUATION_PROFILE,
+        profile_assigned_route=PROFILE_ASSIGNED_ROUTE,
+        profile_reviewer_route=PROFILE_REVIEWER_ROUTE,
+        sha256_value=sha256_value,
+        constant_time_equal=_constant_time_equal,
     )
-    validate_agent_role(str(document.get("agent_role") or "incident-responder"))
-    members = document.get("members")
-    if not isinstance(members, list) or not members:
-        raise CohortError("cohort manifest has no members")
-    contract = document.get("execution_contract")
-    if not isinstance(contract, dict) or contract != execution_contract(
-        expected_release_id=str(
-            (contract or {}).get("expected_release_id") or ""
+
+
+def _private_input_policy() -> CohortPrivateInputPolicy:
+    policy = _manifest_contract_policy()
+    return CohortPrivateInputPolicy(
+        error=CohortError,
+        maximum_manifest_bytes=MAX_MANIFEST_BYTES,
+        maximum_source_rows_bytes=MAX_SOURCE_ROWS_BYTES,
+        maximum_cohort_size=MAX_COHORT_SIZE,
+        validate_manifest_document=lambda document: validate_manifest_document(
+            document, policy
         ),
-        expected_assigned_route=str(
-            (contract or {}).get("expected_assigned_route") or ""
-        ),
-        expected_reviewer_route=str(
-            (contract or {}).get("expected_reviewer_route") or ""
-        ),
-        evaluation_profile=str(
-            (contract or {}).get("evaluation_profile") or ""
-        ),
-    ):
-        raise CohortError("cohort execution contract is missing or malformed")
-    frozen_plan_sha256 = str(document.get("frozen_plan_sha256") or "")
-    if (
-        not SHA256_RE.fullmatch(frozen_plan_sha256)
-        or not _constant_time_equal(
-            frozen_plan_sha256,
-            _frozen_plan_digest(document),
-        )
-    ):
-        raise CohortError("frozen plan digest does not match the manifest")
-    return document
+    )
+
+
+def load_private_manifest(path: Path) -> dict[str, Any]:
+    return read_private_manifest(path, _private_input_policy())
 
 
 def load_private_source_rows(path: Path) -> tuple[list[dict[str, Any]], str]:
-    """Load an already-frozen owner-only JSON array without changing its order."""
-
-    target = path.expanduser()
-    if target.is_symlink() or not target.is_file():
-        raise CohortError(f"source rows file is not a regular file: {target}")
-    metadata = target.stat()
-    mode = stat.S_IMODE(metadata.st_mode)
-    if mode & 0o077:
-        raise CohortError(
-            f"source rows must be owner-only (0600); current mode is {mode:04o}"
-        )
-    if metadata.st_uid != os.geteuid():
-        raise CohortError("source rows file is not owned by the current user")
-    if metadata.st_size > MAX_SOURCE_ROWS_BYTES:
-        raise CohortError("source rows file exceeds the bounded input size")
-    try:
-        raw = target.read_bytes()
-        document = json.loads(raw.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise CohortError(
-            f"could not read source rows: {type(exc).__name__}"
-        ) from exc
-    if (
-        not isinstance(document, list)
-        or not document
-        or len(document) > MAX_COHORT_SIZE
-        or not all(isinstance(item, dict) for item in document)
-    ):
-        raise CohortError(
-            f"source rows must be a JSON array of 1-{MAX_COHORT_SIZE} objects"
-        )
-    return [dict(item) for item in document], hashlib.sha256(raw).hexdigest()
+    return read_private_source_rows(path, _private_input_policy())
 
 
 def validate_cohort_identity(cohort_id: str, reason: str) -> tuple[str, str]:
-    normalized_id = str(cohort_id or "").strip()
-    normalized_reason = " ".join(str(reason or "").split())
-    if not COHORT_ID_RE.fullmatch(normalized_id):
-        raise CohortError(
-            "cohort ID must be 3-64 characters using letters, digits, '.', '_', or '-'"
-        )
-    if len(normalized_reason) < 10 or len(normalized_reason) > 1000:
-        raise CohortError("cohort reason must contain 10-1000 characters")
-    return normalized_id, normalized_reason
+    return validate_manifest_identity(
+        cohort_id, reason, _manifest_contract_policy()
+    )
 
 
 def validate_agent_role(value: str) -> str:
-    role = str(value or "incident-responder").strip().lower()
-    if role not in AGENT_ROLES:
-        raise CohortError(
-            "agent role must be incident-responder or soc-analyst"
-        )
-    return role
+    return validate_manifest_agent_role(value, _manifest_contract_policy())
 
 
 def validate_model_route(value: str, label: str, *, allow_empty: bool = False) -> str:
-    route = str(value or "").strip()
-    if not route and allow_empty:
-        return ""
-    if not SAFE_ROUTE_RE.fullmatch(route):
-        raise CohortError(f"{label} is missing or malformed")
-    return route
+    return validate_manifest_model_route(
+        value,
+        label,
+        _manifest_contract_policy(),
+        allow_empty=allow_empty,
+    )
 
 
 def validate_release_id(value: Any, label: str = "expected release ID") -> str:
-    release_id = str(value or "").strip()
-    if not RELEASE_ID_RE.fullmatch(release_id):
-        raise CohortError(
-            f"{label} must be exactly 40 lowercase hexadecimal characters"
-        )
-    return release_id
+    return validate_manifest_release_id(
+        value, _manifest_contract_policy(), label
+    )
 
 
 def validate_stable_group_key(value: Any, label: str) -> str:
-    """Validate an opaque stable-group key without changing its identity."""
-
-    if not isinstance(value, str) or not value:
-        raise CohortError(f"{label} is missing or malformed")
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise CohortError(f"{label} is not valid UTF-8") from exc
-    if len(encoded) > MAX_STABLE_GROUP_KEY_BYTES or "\x00" in value:
-        raise CohortError(
-            f"{label} exceeds the bounded stable-group-key contract"
-        )
-    return value
+    return validate_manifest_stable_group_key(
+        value, label, _manifest_contract_policy()
+    )
 
 
 def _member_stable_group_key(member: Mapping[str, Any]) -> str:
-    """Return the exact top-level/detection-bound stable-group key."""
-
-    stable_group_key = validate_stable_group_key(
-        member.get("stable_group_key"),
-        "frozen member stable_group_key",
+    return resolve_member_stable_group_key(
+        member, _manifest_contract_policy()
     )
-    detection = member.get("detection")
-    if not isinstance(detection, dict):
-        raise CohortError("frozen member detection is missing or malformed")
-    detection_group_key = validate_stable_group_key(
-        detection.get("stable_group_key"),
-        "frozen detection stable_group_key",
-    )
-    if detection_group_key != stable_group_key:
-        raise CohortError(
-            "frozen member stable_group_key does not match detection evidence"
-        )
-    return stable_group_key
 
 
 def execution_contract(
@@ -536,110 +462,24 @@ def execution_contract(
     expected_reviewer_route: str = "codex-cli:gpt-5.6-sol:xhigh",
     evaluation_profile: str = "",
 ) -> dict[str, Any]:
-    """Return the immutable controls required for a gradeable harness run."""
-
-    assigned_route = validate_model_route(
-        expected_assigned_route,
-        "expected assigned route",
+    return build_execution_contract(
+        expected_release_id=expected_release_id,
+        expected_assigned_route=expected_assigned_route,
+        expected_reviewer_route=expected_reviewer_route,
+        evaluation_profile=evaluation_profile,
+        policy=_manifest_contract_policy(),
     )
-    reviewer_route = validate_model_route(
-        expected_reviewer_route,
-        "expected reviewer route",
-    )
-    if (
-        not CONTROLLED_ROUTE_RE.fullmatch(assigned_route)
-        or not CONTROLLED_ROUTE_RE.fullmatch(reviewer_route)
-        or assigned_route.rsplit(":", 1)[0]
-        == reviewer_route.rsplit(":", 1)[0]
-    ):
-        raise CohortError(
-            "controlled evaluation requires distinct non-empty canonical Codex "
-            "primary and reviewer routes"
-        )
-    profile = str(evaluation_profile or "").strip()
-    if profile and (
-        profile != CONTROLLED_EVALUATION_PROFILE
-        or assigned_route != PROFILE_ASSIGNED_ROUTE
-        or reviewer_route != PROFILE_REVIEWER_ROUTE
-    ):
-        raise CohortError(
-            "controlled evaluation profile does not match its exact routes"
-        )
-
-    return {
-        "harness_required": True,
-        "harness_mode": "shadow",
-        "memory_frozen": True,
-        "expected_release_id": validate_release_id(expected_release_id),
-        "expected_assigned_route": assigned_route,
-        "expected_reviewer_route": reviewer_route,
-        "reviewer_required": True,
-        "evaluation_profile": profile,
-    }
 
 
 def ordered_identity_projection(
     members: Iterable[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    return [
-        {
-            "rank": int(member["rank"]),
-            "dashboard_group_id": str(member["dashboard_group_id"]),
-            "stable_group_id": str(member["stable_group_id"]),
-            "stable_group_key": _member_stable_group_key(member),
-            "representative_alert_id": str(
-                member["representative_alert_id"]
-            ),
-        }
-        for member in members
-    ]
-
-
-def _member_detection_digest(member: Mapping[str, Any]) -> str:
-    detection = member.get("detection")
-    if not isinstance(detection, dict):
-        raise CohortError("frozen plan member detection is missing or malformed")
-    return sha256_value(detection)
+    return project_ordered_identity(members, _manifest_contract_policy())
 
 
 def _frozen_plan_digest(manifest: Mapping[str, Any]) -> str:
-    selection = manifest.get("selection")
-    members = (
-        manifest.get("members")
-        if isinstance(manifest.get("members"), list)
-        else []
-    )
-    identities = ordered_identity_projection(members)
-    if len(identities) != len(members):
-        raise CohortError("frozen plan member projection is incomplete")
-    return sha256_value(
-        {
-            "schema": manifest.get("schema"),
-            "cohort_id": manifest.get("cohort_id"),
-            "agent_role": manifest.get("agent_role"),
-            "count": manifest.get("count"),
-            "created_at": manifest.get("created_at"),
-            "selection": selection if isinstance(selection, dict) else {},
-            "execution_contract": manifest.get("execution_contract"),
-            "members": [
-                {
-                    **identity,
-                    "pre_state_sha256": sha256_value(
-                        member.get("pre_state")
-                        if isinstance(member.get("pre_state"), dict)
-                        else {}
-                    ),
-                    "detection_sha256": _member_detection_digest(member),
-                    "dispatch_kind": str(
-                        (member.get("dispatch") or {}).get("kind") or ""
-                    ),
-                }
-                for identity, member in zip(
-                    identities,
-                    members,
-                )
-            ],
-        }
+    return calculate_frozen_plan_digest(
+        manifest, _manifest_contract_policy()
     )
 
 
