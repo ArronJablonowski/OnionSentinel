@@ -136,6 +136,10 @@ line ranges below remain historical navigation aids for the extraction ledger.
   supplemental-pivot, disagreement-adjudication, review-gate, and post-commit
   memory-plan delegates. Reviewer validation, evidence isolation, automation
   authorization, and transaction semantics remain package-owned.
+- `n8n/bin/local_ai_conclusion_compat.py` owns legacy factored-verdict,
+  deterministic-guard, confidence, incident-report, audit, and final-response
+  delegates. `local_ai_compatibility_modules.py` provides the ordered package-free
+  registry installed into the 250-line runner facade; it contains no policy.
 - Concrete Markdown rendering and atomic output-publication binding now live
   in `local_ai_pipeline_adapters.write_outputs`; the runner transaction port
   delegates directly and no longer retains `render_markdown` or

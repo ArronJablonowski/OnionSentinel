@@ -841,6 +841,26 @@
       ]
     },
     {
+      "path": "n8n/bin/local_ai_compatibility_modules.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/local_ai_compatibility_modules.py",
+      "required_symbols": [
+        "COMPATIBILITY_MODULES"
+      ]
+    },
+    {
+      "path": "n8n/bin/local_ai_conclusion_compat.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/local_ai_conclusion_compat.py",
+      "required_symbols": [
+        "apply_deterministic_evidence_guard",
+        "calibrate_response_confidence",
+        "normalize_factored_verdict",
+        "reconcile_incident_response_report",
+        "validate_response"
+      ]
+    },
+    {
       "path": "n8n/bin/local_ai_conclusion_review_dependency_compat.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/local_ai_conclusion_review_dependency_compat.py",
