@@ -529,6 +529,14 @@ hidden broker authorization context, and the separate model-visible backend
 capabilities and budgets. Query-contract version policy and legacy parsing
 helpers remain injected by the builder facade, preserving v1/v2 runtime parity.
 
+`prompt_package_compactor.py` owns deterministic prompt admission reduction.
+It stabilizes declared serialized size, attempts lossless compact JSON first,
+then applies an ordered set of bounded historical, asset, enrichment, PCAP,
+memory, Elastic-hit, and OSQuery-row reductions. It preserves mandatory IR
+grounding by digest, validates every incident-evidence projection, prioritizes
+exact-alert PCAP evidence, and fails closed if the package still exceeds its
+budget. The builder facade injects evidence validators and digest policy.
+
 ## Portal Runtime
 
 Current owner: `onion-sentinel-dashboard/report_portal.py` (14,366 lines).

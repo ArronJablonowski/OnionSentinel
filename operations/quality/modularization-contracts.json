@@ -48,6 +48,15 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_package_compactor.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_package_compactor.py",
+      "required_symbols": [
+        "PackageCompactionSources",
+        "compact_package_to_budget"
+      ]
+    },
+    {
       "path": "n8n/bin/auto-run-ai-analysis.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/auto-run-ai-analysis.py",

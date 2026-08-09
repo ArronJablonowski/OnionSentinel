@@ -59,6 +59,10 @@ from prompt_investigation_query_context import (
     QueryContextSources,
     build_investigation_query_context,
 )
+from prompt_package_compactor import (
+    PackageCompactionSources,
+    compact_package_to_budget as compact_prompt_package,
+)
 import investigation_query_contract as INVESTIGATION_CONTRACT
 
 
@@ -3073,239 +3077,19 @@ def incident_prompt_mandatory_grounding_digest(package: dict) -> str:
 
 
 def compact_package_to_budget(package: dict, max_bytes: int) -> tuple[dict, str]:
-    """Apply deterministic evidence reductions before rejecting an oversized prompt.
-
-    The compacted package keeps current-alert facts and response instructions.
-    Historical samples are reduced first because they are supporting context,
-    not permission to exceed the model admission contract.
-    """
-    package["package_budget"] = {
-        "max_bytes": max_bytes,
-        "compacted": False,
-        "compaction_steps": [],
-        "serialization": "pretty",
-    }
-
-    def serialize() -> str:
-        if package["package_budget"]["serialization"] == "compact":
-            return json.dumps(
-                package,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-        return json.dumps(package, indent=2, sort_keys=True)
-
-    def stabilized_output() -> str:
-        """Return bytes whose declared serialized size is self-consistent."""
-        for _ in range(8):
-            output = serialize()
-            actual_bytes = len(output.encode("utf-8"))
-            if package["package_budget"].get("serialized_bytes") == actual_bytes:
-                return output
-            package["package_budget"]["serialized_bytes"] = actual_bytes
-        raise ValueError("prompt package byte-size metadata did not stabilize")
-
-    output = stabilized_output()
-    if len(output.encode("utf-8")) <= max_bytes:
-        return package, output
-
-    steps: list[str] = package["package_budget"]["compaction_steps"]
-    package["package_budget"]["compacted"] = True
-    # Try a deterministic, lossless encoding before reducing any evidence.
-    # Pretty-print whitespace has no evidentiary value.
-    package["package_budget"]["serialization"] = "compact"
-    steps.append("json_whitespace")
-    output = stabilized_output()
-    if len(output.encode("utf-8")) <= max_bytes:
-        return package, output
-
-    incident = package.get("incident_response_evidence")
-    mandatory_grounding_digest = None
-    if isinstance(incident, dict):
-        mandatory_grounding_digest = incident_prompt_mandatory_grounding_digest(
-            package
-        )
-        package["package_budget"]["mandatory_grounding_sha256"] = (
-            mandatory_grounding_digest
-        )
-        package["package_budget"]["mandatory_grounding_preserved"] = True
-
-    rollup = package.get("latest_daily_rollup")
-    if isinstance(rollup, dict) and len(str(rollup.get("content") or "")) > 2000:
-        rollup["content"] = str(rollup["content"])[:2000]
-        rollup["truncated_for_package_budget"] = True
-        steps.append("daily_rollup")
-    for key, retain in (("prior_analyses", 1), ("related_alerts", 5), ("recent_notifications", 5)):
-        value = package.get(key)
-        if isinstance(value, list) and len(value) > retain:
-            package[key] = value[:retain]
-            steps.append(key)
-    grouped = package.get("grouped_alert_context")
-    if isinstance(grouped, dict) and isinstance(grouped.get("timeline_sample"), list):
-        grouped["timeline_sample"] = grouped["timeline_sample"][:8]
-        grouped["timeline_sample_truncated_for_package_budget"] = True
-        steps.append("grouped_alert_timeline")
-    correlation = package.get("correlated_alert_context")
-    if isinstance(correlation, dict) and isinstance(correlation.get("candidates"), list):
-        correlation["candidates"] = correlation["candidates"][:4]
-        steps.append("correlation_candidates")
-    asset_context = package.get("asset_context")
-    if isinstance(asset_context, dict):
-        for key, retain in (
-            ("matched_assets", 64),
-            ("registered_expectation_matches", 64),
-            ("conflicts", 32),
-            ("unmatched_observables", 128),
-        ):
-            value = asset_context.get(key)
-            if isinstance(value, list) and len(value) > retain:
-                asset_context[key] = value[:retain]
-                asset_context[f"{key}_truncated_for_package_budget"] = True
-        for asset in asset_context.get("matched_assets", []):
-            if not isinstance(asset, dict):
-                continue
-            for key, retain in (
-                ("expected_services", 16),
-                ("expected_behaviors", 16),
-                ("matched_observables", 32),
-            ):
-                value = asset.get(key)
-                if isinstance(value, list) and len(value) > retain:
-                    asset[key] = value[:retain]
-                    asset[f"{key}_truncated_for_package_budget"] = True
-        steps.append("asset_context")
-    enrichment = package.get("public_enrichment")
-    if isinstance(enrichment, dict):
-        for key, retain in (("records", 10), ("skipped", 5), ("errors", 5)):
-            if isinstance(enrichment.get(key), list):
-                enrichment[key] = enrichment[key][:retain]
-        steps.append("public_enrichment")
-    pcap = package.get("pcap_evidence")
-    if isinstance(pcap, dict):
-        if isinstance(pcap.get("pcap_requests"), list):
-            pcap["pcap_requests"] = pcap["pcap_requests"][:3]
-        if isinstance(pcap.get("parsed_evidence"), list):
-            pcap["parsed_evidence"].sort(
-                key=lambda evidence: (
-                    0
-                    if isinstance(evidence, dict)
-                    and evidence.get("evidence_relationship") == "exact_alert"
-                    else 1,
-                )
-            )
-            original_evidence_count = len(pcap["parsed_evidence"])
-            pcap["parsed_evidence"] = pcap["parsed_evidence"][:1]
-            if original_evidence_count > len(pcap["parsed_evidence"]):
-                pcap["parsed_evidence_truncated_for_package_budget"] = True
-            pcap["exact_alert_evidence_count"] = sum(
-                1
-                for evidence in pcap["parsed_evidence"]
-                if isinstance(evidence, dict)
-                and evidence.get("evidence_relationship") == "exact_alert"
-            )
-            pcap["stable_group_related_evidence_count"] = sum(
-                1
-                for evidence in pcap["parsed_evidence"]
-                if isinstance(evidence, dict)
-                and evidence.get("evidence_relationship")
-                == "stable_group_related"
-            )
-            for evidence in pcap["parsed_evidence"]:
-                tshark = evidence.get("tshark") if isinstance(evidence, dict) else None
-                if isinstance(tshark, dict) and isinstance(tshark.get("samples"), list):
-                    tshark["samples"] = tshark["samples"][:1]
-                    for sample in tshark["samples"]:
-                        if isinstance(sample, dict):
-                            for key in ("protocol_hierarchy", "conversations", "field_sample_tsv"):
-                                sample[key] = str(sample.get(key) or "")[:1200]
-                if isinstance(tshark, dict) and isinstance(tshark.get("packet_samples"), list):
-                    tshark["packet_samples"] = tshark["packet_samples"][:8]
-                local_index = evidence.get("_local_query_index") if isinstance(evidence, dict) else None
-                if isinstance(local_index, dict):
-                    for operation, values in local_index.items():
-                        if isinstance(values, list):
-                            # Keep a small, deterministic sample for each local
-                            # PCAP pivot. The complete derived artifact remains
-                            # on disk and queryable by the investigation loop;
-                            # repeating dozens of nearly identical packets in
-                            # the initial model prompt crowds out higher-value
-                            # query provenance and alert context.
-                            local_index[operation] = values[:8]
-        steps.append("pcap_evidence")
-    if isinstance(incident, dict):
-        response = incident.get("security_onion_response")
-        results = response.get("results") if isinstance(response, dict) else None
-        if isinstance(results, list):
-            # Query provenance is part of the evidentiary chain. Preserve the
-            # exact executed DSL and its readable KQL equivalent even when hit
-            # samples must be reduced to fit the bounded model prompt.
-            if project_incident_evidence_hits(
-                incident,
-                limit=5,
-                reason="package_budget_compaction",
-            ):
-                validate_incident_evidence_artifact(incident)
-                steps.append("incident_response_hit_samples")
-    memory = package.get("agent_memory")
-    if isinstance(memory, dict):
-        for key in ("role_memory", "shared_memory"):
-            value = memory.get(key)
-            if isinstance(value, str) and len(value) > 2500:
-                memory[key] = value[:2500] + "\n[truncated for prompt package budget]"
-        steps.append("agent_memory")
-
-    output = stabilized_output()
-    if len(output.encode("utf-8")) > max_bytes and isinstance(incident, dict):
-        if project_incident_evidence_osquery_rows(
-            incident,
-            limit=10,
-            max_retained_bytes=16 * 1024,
-            max_row_bytes=4 * 1024,
-            reason="package_budget_compaction",
-        ):
-            validate_incident_evidence_artifact(incident)
-            steps.append("incident_response_osquery_row_samples")
-            output = stabilized_output()
-    if len(output.encode("utf-8")) > max_bytes and isinstance(incident, dict):
-        if project_incident_evidence_hits(
-            incident,
-            limit=1,
-            reason="package_budget_minimal_hit_sample",
-        ):
-            validate_incident_evidence_artifact(incident)
-            steps.append("incident_response_minimal_hit_samples")
-            output = stabilized_output()
-    if len(output.encode("utf-8")) > max_bytes and isinstance(incident, dict):
-        if project_incident_evidence_osquery_rows(
-            incident,
-            limit=0,
-            max_retained_bytes=2,
-            max_row_bytes=0,
-            reason="package_budget_row_omission",
-        ):
-            validate_incident_evidence_artifact(incident)
-            steps.append("incident_response_osquery_rows")
-            output = stabilized_output()
-    if len(output.encode("utf-8")) > max_bytes and isinstance(incident, dict):
-        if project_incident_evidence_hits(
-            incident,
-            limit=0,
-            reason="package_budget_hit_omission",
-        ):
-            validate_incident_evidence_artifact(incident)
-            steps.append("incident_response_hits")
-            output = stabilized_output()
-    if (
-        mandatory_grounding_digest is not None
-        and incident_prompt_mandatory_grounding_digest(package)
-        != mandatory_grounding_digest
-    ):
-        raise ValueError("mandatory incident prompt grounding changed during compaction")
-    if len(output.encode("utf-8")) > max_bytes:
-        raise ValueError(
-            f"prompt package remains above {max_bytes} bytes after deterministic compaction"
-        )
-    return package, output
+    """Compatibility delegate for deterministic package compaction."""
+    return compact_prompt_package(
+        PackageCompactionSources(
+            mandatory_grounding_digest=(
+                incident_prompt_mandatory_grounding_digest
+            ),
+            project_hits=project_incident_evidence_hits,
+            project_osquery_rows=project_incident_evidence_osquery_rows,
+            validate_incident_evidence=validate_incident_evidence_artifact,
+        ),
+        package,
+        max_bytes,
+    )
 
 
 def main() -> int:

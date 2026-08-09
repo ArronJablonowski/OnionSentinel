@@ -31,6 +31,7 @@ HARDENED_BUILDER_DEPENDENCIES = (
     "prompt_builder_cli.py",
     "prompt_incident_evidence_projection.py",
     "prompt_investigation_query_context.py",
+    "prompt_package_compactor.py",
 )
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_RUNTIME_FILE_BYTES = 2 * 1024 * 1024
