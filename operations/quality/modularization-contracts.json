@@ -113,6 +113,16 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_prompt_builder.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_prompt_builder.py",
+      "required_symbols": [
+        "PromptBuilderDefaults",
+        "PromptBuilderSources",
+        "build_prompt_package"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_javascript_compat.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_javascript_compat.py",

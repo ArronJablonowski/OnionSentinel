@@ -113,6 +113,11 @@ from scheduler_claim_snapshot import (
     ClaimSnapshotPolicy,
     claimed_durable_ai_job as load_claimed_durable_job,
 )
+from scheduler_prompt_builder import (
+    PromptBuilderDefaults,
+    PromptBuilderSources,
+    build_prompt_package,
+)
 from scheduler_controlled_payload import (
     ControlledPayloadPolicy,
     ControlledPayloadSources,
@@ -1285,14 +1290,6 @@ def controlled_claim_expectations(
     )
 
 
-def bounded_int(value: object, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = default
-    return max(minimum, min(maximum, parsed))
-
-
 def run_command(
     cmd: list[str],
     *,
@@ -1358,118 +1355,42 @@ def build_prompt(
     job_payload: dict[str, object] | None = None,
     incident_evidence_path: Path | None = None,
 ) -> Path:
-    builder = Path(__file__).with_name("build-ai-investigation-prompt.py")
-    job_payload = job_payload or {}
-    related_limit = bounded_int(job_payload.get("related_limit"), args.related_limit, 1, 500)
-    pcap_analysis_limit = bounded_int(job_payload.get("pcap_analysis_limit"), 8, 1, 25)
-    agent_role = str(job_payload.get("agent_role") or "soc-analyst")
-    prompt_limit = effective_initial_prompt_package_limit(
-        args,
-        agent_role=agent_role,
-    )
-    config_dir = Path(args.ai_settings_file).parent
-    cmd = [
-        sys.executable,
-        str(builder),
-        "--db",
-        str(getattr(args, "db", DEFAULT_DB)),
-        "--alert-id",
+    return build_prompt_package(
+        PromptBuilderDefaults(
+            builder_path=Path(__file__).with_name(
+                "build-ai-investigation-prompt.py"
+            ),
+            python_executable=sys.executable,
+            database=DEFAULT_DB,
+            rollup_dir=DEFAULT_ROLLUP_DIR,
+            agent_memory_dir=DEFAULT_AGENT_MEMORY_DIR,
+            shared_memory_file=DEFAULT_SHARED_MEMORY_FILE,
+            pcap_analysis_dir=DEFAULT_PCAP_ANALYSIS_DIR,
+            prior_analysis_dir=DEFAULT_ANALYSIS_DIR,
+            asset_inventory_file=DEFAULT_ASSET_INVENTORY_FILE,
+            detection_playbooks=DEFAULT_DETECTION_PLAYBOOKS,
+            investigation_skills=DEFAULT_INVESTIGATION_SKILLS,
+            timeout_seconds=180,
+            max_stdout_bytes=1024 * 1024,
+            max_stderr_bytes=DEFAULT_MAX_CHILD_STDERR_BYTES,
+        ),
+        PromptBuilderSources(
+            initial_prompt_limit=effective_initial_prompt_package_limit,
+            role_prompt_file=role_prompt_file,
+            role_second_opinion_prompt_file=(
+                role_second_opinion_prompt_file
+            ),
+            role_memory_file=role_memory_file,
+            run_command=run_command,
+            emit_stderr=lambda message: print(
+                message, file=sys.stderr, end=""
+            ),
+        ),
         alert_id,
-        "--out-dir",
-        str(args.prompt_dir),
-        "--rollup-dir",
-        str(getattr(args, "rollup_dir", DEFAULT_ROLLUP_DIR)),
-        "--related-limit",
-        str(related_limit),
-        "--correlation-limit",
-        str(args.correlation_limit),
-        "--correlation-min-score",
-        str(args.correlation_min_score),
-        "--pcap-analysis-limit",
-        str(pcap_analysis_limit),
-        "--max-package-bytes",
-        str(prompt_limit),
-        "--agent-role",
-        agent_role,
-        "--system-prompt-file",
-        str(role_prompt_file(config_dir, agent_role)),
-        "--second-opinion-prompt-file",
-        str(role_second_opinion_prompt_file(config_dir, agent_role)),
-        "--agent-memory-file",
-        str(
-            role_memory_file(
-                getattr(args, "agent_memory_dir", DEFAULT_AGENT_MEMORY_DIR),
-                agent_role,
-            )
-        ),
-        "--shared-memory-file",
-        str(getattr(args, "shared_memory_file", DEFAULT_SHARED_MEMORY_FILE)),
-        "--pcap-analysis-dir",
-        str(getattr(args, "pcap_analysis_dir", DEFAULT_PCAP_ANALYSIS_DIR)),
-        "--analysis-dir",
-        str(getattr(args, "prior_analysis_dir", DEFAULT_ANALYSIS_DIR)),
-        "--asset-inventory-file",
-        str(getattr(args, "asset_inventory_file", DEFAULT_ASSET_INVENTORY_FILE)),
-        "--detection-playbooks",
-        str(
-            getattr(
-                args,
-                "detection_playbooks",
-                DEFAULT_DETECTION_PLAYBOOKS,
-            )
-        ),
-        "--investigation-skills",
-        str(
-            getattr(
-                args,
-                "investigation_skills",
-                DEFAULT_INVESTIGATION_SKILLS,
-            )
-        ),
-    ]
-    if incident_evidence_path is not None:
-        cmd.extend(["--incident-evidence-file", str(incident_evidence_path)])
-    if job_payload.get("manual_reanalysis") is True:
-        cmd.append("--blind-reanalysis")
-    if args.include_tests:
-        cmd.append("--include-tests")
-    proc = run_command(
-        cmd,
-        timeout_seconds=180,
-        max_stdout_bytes=1024 * 1024,
-        max_stderr_bytes=DEFAULT_MAX_CHILD_STDERR_BYTES,
+        args,
+        job_payload,
+        incident_evidence_path,
     )
-    if proc.returncode != 0:
-        if proc.stderr:
-            print(proc.stderr, file=sys.stderr, end="")
-        # Preserve the bounded terminal diagnostic so deterministic admission
-        # failures (especially an irreducibly oversized package) are retired
-        # instead of being retried forever under the generic wrapper error.
-        stderr_lines = [
-            line.strip()
-            for line in str(proc.stderr or "").splitlines()
-            if line.strip()
-        ]
-        detail = stderr_lines[-1][:700] if stderr_lines else ""
-        suffix = f": {detail}" if detail else ""
-        raise RuntimeError(
-            f"prompt builder failed rc={proc.returncode}{suffix}"
-        )
-    output_lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-    if not output_lines:
-        raise RuntimeError("prompt builder returned no output path")
-    prompt_path = Path(output_lines[-1])
-    if not prompt_path.exists():
-        raise RuntimeError(f"prompt builder did not create a prompt package: {prompt_path}")
-    try:
-        prompt_path.resolve().relative_to(args.prompt_dir.resolve())
-    except ValueError as exc:
-        raise RuntimeError("prompt builder returned a path outside the configured prompt directory") from exc
-    if prompt_path.stat().st_size > prompt_limit:
-        raise RuntimeError(
-            f"prompt package exceeded the {prompt_limit}-byte worker limit"
-        )
-    return prompt_path
 
 
 def analysis_command(

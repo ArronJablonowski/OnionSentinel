@@ -352,6 +352,15 @@ their historical compatibility behavior. The combined projection depends on
 the artifact repository but remains read-only; alert-store owns every status
 mutation.
 
+`scheduler_prompt_builder.py` owns bounded prompt-package preparation. It
+projects scheduler and job inputs into the trusted builder argv, clamps legacy
+related/PCAP limits, binds role-specific prompts and memory, carries incident
+evidence and blind-reanalysis intent, preserves only the bounded terminal
+diagnostic on deterministic builder failure, and accepts output only when the
+published path exists inside the configured prompt directory and fits the
+role-aware initial package budget. The facade injects mutable defaults and
+process execution at call time for compatibility.
+
 `scheduler_claim.py` owns compare-and-set processing acquisition,
 server-authoritative job/alert/group replacement, controlled claim identity,
 IR reanalysis-attempt binding, contention projection, and automatic-threshold
