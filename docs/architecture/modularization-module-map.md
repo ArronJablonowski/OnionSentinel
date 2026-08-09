@@ -529,6 +529,15 @@ hidden broker authorization context, and the separate model-visible backend
 capabilities and budgets. Query-contract version policy and legacy parsing
 helpers remain injected by the builder facade, preserving v1/v2 runtime parity.
 
+`prompt_correlation_context.py` owns read-only cross-alert candidate
+projection. It loads observable-index and persisted-correlation candidates,
+selects one bounded representative per stable group, attaches only size-capped
+collector JSON for deterministic relationship derivation, combines observable,
+time, persisted, and relationship scores, and emits a prompt-safe view that
+excludes raw event bodies. Database reads and trusted fact/scoring policy are
+injected by the builder facade; prior analyses remain labeled hypotheses and
+cannot independently create a correlation candidate.
+
 `prompt_package_compactor.py` owns deterministic prompt admission reduction.
 It stabilizes declared serialized size, attempts lossless compact JSON first,
 then applies an ordered set of bounded historical, asset, enrichment, PCAP,

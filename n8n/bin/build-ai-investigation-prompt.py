@@ -54,6 +54,10 @@ from prompt_builder_cli import (
     PromptBuilderCliSources,
     parse_prompt_builder_args,
 )
+from prompt_correlation_context import (
+    CorrelationContextSources,
+    build_correlated_alert_context,
+)
 from prompt_investigation_query_context import (
     QueryContextPolicy,
     QueryContextSources,
@@ -1732,328 +1736,24 @@ def correlated_alert_context(
     limit: int,
     min_score: int,
 ) -> dict:
-    """Return bounded, deterministic cross-alert context with provenance.
-
-    SQLite observables generate candidates; prior model conclusions only
-    annotate those candidates and never create evidence on their own.
-    """
-    selected_group_id = str(sqlite_value(selected, "stable_group_id") or "").strip().lower()
-    if not selected_group_id:
-        return {
-            "selected_group_id": None,
-            "candidates": [],
-            "candidate_limit": limit,
-            "minimum_score": min_score,
-            "status": "stable group identity unavailable",
-        }
-    try:
-        matches = rows(
-            conn,
-            """
-            SELECT related.group_id,
-                   selected.observable_type,
-                   selected.observable_value,
-                   selected.role AS selected_role,
-                   related.role AS related_role
-            FROM alert_observables AS selected
-            JOIN alert_observables AS related
-              ON related.observable_type = selected.observable_type
-             AND related.observable_value = selected.observable_value
-             AND related.group_id != selected.group_id
-            WHERE selected.group_id = ?
-            LIMIT 4000
-            """,
-            [selected_group_id],
-        )
-        persisted = rows(
-            conn,
-            """
-            SELECT source_group_id, related_group_id, correlation_score,
-                   reasons_json, shared_observables_json, model_status,
-                   model_confidence, model_hypothesis, updated_at
-            FROM alert_correlations
-            WHERE source_group_id = ? OR related_group_id = ?
-            ORDER BY correlation_score DESC, updated_at DESC
-            LIMIT 100
-            """,
-            [selected_group_id, selected_group_id],
-        )
-    except sqlite3.Error:
-        return {
-            "selected_group_id": selected_group_id,
-            "candidates": [],
-            "candidate_limit": limit,
-            "minimum_score": min_score,
-            "status": "correlation index unavailable",
-        }
-
-    candidate_data: dict[str, dict] = {}
-    for match in matches:
-        group_id = str(match["group_id"] or "")
-        observable_type = str(match["observable_type"] or "")
-        observable_value = str(match["observable_value"] or "")
-        key = (
-            observable_type,
-            observable_value,
-            str(match["selected_role"] or ""),
-            str(match["related_role"] or ""),
-        )
-        candidate = candidate_data.setdefault(group_id, {"matches": {}, "persisted": None})
-        candidate["matches"][key] = correlation_observable_weight(observable_type, observable_value)
-
-    for item in persisted:
-        source_id = str(item["source_group_id"] or "")
-        related_id = str(item["related_group_id"] or "")
-        group_id = related_id if source_id == selected_group_id else source_id
-        if not group_id or group_id == selected_group_id:
-            continue
-        candidate = candidate_data.setdefault(group_id, {"matches": {}, "persisted": None})
-        candidate["persisted"] = dict(item)
-
-    ranked_ids = sorted(
-        candidate_data,
-        key=lambda group_id: max(
-            sum(candidate_data[group_id]["matches"].values()),
-            int(float((candidate_data[group_id]["persisted"] or {}).get("correlation_score") or 0)),
+    """Return bounded deterministic cross-alert context with provenance."""
+    return build_correlated_alert_context(
+        CorrelationContextSources(
+            rows=rows,
+            table_columns=table_columns,
+            row_value=sqlite_value,
+            observable_weight=correlation_observable_weight,
+            time_bonus=correlation_time_bonus,
+            row_facts=_correlation_row_facts,
+            relationships=_correlation_relationships,
+            safe_int=safe_int,
+            max_raw_json_bytes=CORRELATION_MAX_RAW_JSON_BYTES,
         ),
-        reverse=True,
-    )[:100]
-    if not ranked_ids:
-        return {
-            "selected_group_id": selected_group_id,
-            "candidates": [],
-            "candidate_limit": limit,
-            "minimum_score": min_score,
-            "status": "no indexed correlation candidates",
-        }
-
-    placeholders = ",".join("?" for _ in ranked_ids)
-    alert_columns = table_columns(conn, "alerts")
-    optional_columns = (
-        "source_port",
-        "network_protocol",
-    )
-    optional_projection = ", ".join(
-        (
-            name
-            if name in alert_columns
-            else f"NULL AS {name}"
-        )
-        for name in optional_columns
-    )
-    timestamp_projection = (
-        "timestamp"
-        if "timestamp" in alert_columns
-        else "NULL AS timestamp"
-    )
-    time_value_sql = (
-        "COALESCE(last_seen, timestamp, first_seen)"
-        if "timestamp" in alert_columns
-        else "COALESCE(last_seen, first_seen)"
-    )
-    normalized_time_sql = (
-        "julianday(replace(replace("
-        f"{time_value_sql}, '  ', ' '), 'T', ' '))"
-    )
-    candidate_rows = rows(
         conn,
-        f"""
-        WITH ranked_candidates AS (
-          SELECT alert_id, stable_group_id, last_seen, first_seen,
-                 {timestamp_projection}, rule_name, source_ip, destination_ip,
-                 destination_port, transport_protocol, triage_level,
-                 triage_score, filter_status, seen_count,
-                 {optional_projection},
-                 ROW_NUMBER() OVER (
-                   PARTITION BY stable_group_id
-                   ORDER BY {normalized_time_sql} DESC, alert_id DESC
-                 ) AS correlation_rank
-          FROM alerts
-          WHERE stable_group_id IN ({placeholders})
-        )
-        SELECT *
-        FROM ranked_candidates
-        WHERE correlation_rank = 1
-        ORDER BY {normalized_time_sql} DESC, alert_id DESC
-        LIMIT 100
-        """,
-        ranked_ids,
+        selected,
+        limit,
+        min_score,
     )
-    representative: dict[str, dict] = {}
-    for item in candidate_rows:
-        representative.setdefault(str(item["stable_group_id"] or ""), dict(item))
-    # Fetch raw JSON only for the at-most-100 already selected representatives.
-    # Keeping it out of the window query prevents recurring groups from
-    # materializing every historical event body merely to choose one row.
-    representative_ids = [
-        str(item.get("alert_id") or "")
-        for item in representative.values()
-        if item.get("alert_id")
-    ][:100]
-    if representative_ids and {
-        "alert_json",
-        "raw_event_json",
-    }.intersection(alert_columns):
-        raw_placeholders = ",".join("?" for _ in representative_ids)
-        raw_projection = ", ".join(
-            (
-                "CASE WHEN length(CAST("
-                f"{name} AS BLOB)) <= {CORRELATION_MAX_RAW_JSON_BYTES} "
-                f"THEN {name} ELSE NULL END AS {name}"
-            )
-            if name in alert_columns
-            else f"NULL AS {name}"
-            for name in ("alert_json", "raw_event_json")
-        )
-        raw_by_alert_id = {
-            str(item["alert_id"]): dict(item)
-            for item in rows(
-                conn,
-                f"""
-                SELECT alert_id, {raw_projection}
-                FROM alerts
-                WHERE alert_id IN ({raw_placeholders})
-                LIMIT 100
-                """,
-                representative_ids,
-            )
-        }
-        for item in representative.values():
-            raw_item = raw_by_alert_id.get(str(item.get("alert_id") or ""), {})
-            item["alert_json"] = raw_item.get("alert_json")
-            item["raw_event_json"] = raw_item.get("raw_event_json")
-
-    analysis_rows = rows(
-        conn,
-        f"""
-        SELECT analysis_id, group_id, generated_at, model, detection_outcome,
-               bluf, summary, confidence
-        FROM ai_analysis_runs
-        WHERE group_id IN ({placeholders})
-        ORDER BY generated_at DESC, analysis_id DESC
-        """,
-        ranked_ids,
-    )
-    prior_analysis: dict[str, dict] = {}
-    for item in analysis_rows:
-        prior_analysis.setdefault(str(item["group_id"] or ""), dict(item))
-
-    candidates = []
-    selected_facts = _correlation_row_facts(selected)
-    for group_id in ranked_ids:
-        item = representative.get(group_id)
-        if not item:
-            continue
-        data = candidate_data[group_id]
-        shared = [
-            {
-                "type": key[0],
-                "value": key[1],
-                "selected_role": key[2],
-                "related_role": key[3],
-                "weight": weight,
-            }
-            for key, weight in sorted(data["matches"].items(), key=lambda pair: (-pair[1], pair[0]))
-        ]
-        evidence_score = min(80, sum(match["weight"] for match in shared))
-        time_score, time_reason = correlation_time_bonus(sqlite_value(selected, "last_seen"), item.get("last_seen"))
-        persisted_item = data["persisted"] or {}
-        persisted_score = int(float(persisted_item.get("correlation_score") or 0))
-        relationships = _correlation_relationships(
-            selected_facts,
-            _correlation_row_facts(item),
-        )
-        relationship_score = max(
-            (
-                safe_int(relationship.get("weight"))
-                + min(time_score, 10)
-                for relationship in relationships
-            ),
-            default=0,
-        )
-        score = min(
-            100,
-            max(
-                evidence_score + time_score,
-                persisted_score,
-                relationship_score,
-            ),
-        )
-        if score < min_score:
-            continue
-        reasons = [f"shared {match['type']}: {match['value']}" for match in shared[:8]]
-        reasons.extend(
-            {
-                "same_community_id": "same collector-observed Community ID",
-                "reversed_five_tuple": "collector-observed reversed five-tuple",
-                "dns_answer_to_destination": (
-                    "same-client DNS answer followed by a connection to that IP"
-                ),
-            }.get(
-                str(relationship.get("kind") or ""),
-                "deterministic alert relationship",
-            )
-            for relationship in relationships
-        )
-        if time_reason:
-            reasons.append(time_reason)
-        if persisted_item:
-            reasons.append("previous correlation record exists")
-        public_alert = {
-            key: item.get(key)
-            for key in (
-                "alert_id",
-                "stable_group_id",
-                "last_seen",
-                "first_seen",
-                "rule_name",
-                "source_ip",
-                "source_port",
-                "destination_ip",
-                "destination_port",
-                "network_protocol",
-                "transport_protocol",
-                "triage_level",
-                "triage_score",
-                "filter_status",
-                "seen_count",
-            )
-        }
-        candidates.append({
-            "group_id": group_id,
-            "score": score,
-            "correlation_reasons": reasons,
-            "shared_observables": shared[:12],
-            "deterministic_relationships": relationships,
-            # The raw JSON columns used for deterministic joins never cross
-            # into the model prompt. Only the existing compact alert projection
-            # and explicit relationship facts are exposed.
-            "alert": public_alert,
-            "prior_analysis": prior_analysis.get(group_id),
-            "previous_correlation": {
-                "model_status": persisted_item.get("model_status"),
-                "model_confidence": persisted_item.get("model_confidence"),
-                "model_hypothesis": persisted_item.get("model_hypothesis"),
-                "updated_at": persisted_item.get("updated_at"),
-            } if persisted_item else None,
-        })
-
-    candidates.sort(key=lambda item: (item["score"], str(item["alert"].get("last_seen") or "")), reverse=True)
-    return {
-        "selected_group_id": selected_group_id,
-        "candidates": candidates[:limit],
-        "candidate_count_before_limit": len(candidates),
-        "candidate_limit": limit,
-        "minimum_score": min_score,
-        "usage_guidance": (
-            "Treat candidates as correlation leads, not confirmed incidents. Shared observables and timestamps are facts; "
-            "deterministic_relationships are collector-derived joins with explicit interpretation limits; prior_analysis and "
-            "previous_correlation are earlier hypotheses. Require current evidence before asserting incident scope, authorization, "
-            "or maliciousness."
-        ),
-    }
-
-
 def grouped_alert_context(conn: sqlite3.Connection, selected: sqlite3.Row, limit: int, include_tests: bool) -> dict:
     """Summarize the dashboard duplicate group so AI weighs alert frequency."""
     selected_group_key = alert_group_key(selected)

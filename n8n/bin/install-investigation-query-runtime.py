@@ -29,6 +29,7 @@ VERSIONED_QUERY_FILES = (
 HARDENED_BUILDER = "build-ai-investigation-prompt.py"
 HARDENED_BUILDER_DEPENDENCIES = (
     "prompt_builder_cli.py",
+    "prompt_correlation_context.py",
     "prompt_incident_evidence_projection.py",
     "prompt_investigation_query_context.py",
     "prompt_package_compactor.py",
