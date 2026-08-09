@@ -44,12 +44,6 @@ from cohort_freezing import (
     freeze_cohort as run_freeze_cohort,
     freeze_cohort_from_rows as run_freeze_cohort_from_rows,
 )
-from cohort_dispatch_contract import (
-    CohortDispatchContract,
-    request_for_member as build_dispatch_request,
-    validate_dispatch_job_payload as validate_job_payload,
-    validate_success_response as validate_dispatch_response,
-)
 from cohort_dispatch_readback import (
     CohortDispatchReadbackSources,
     verify_dispatch_readback as prove_dispatch_readback,
@@ -59,21 +53,10 @@ from cohort_dispatch_workflow import (
     Poster,
     queue_cohort as run_queue_cohort,
 )
-from cohort_http import (
-    CohortHttpPolicy,
-    HttpResult,
-    dashboard_post_json as post_dashboard_json,
-    load_evaluation_token as read_evaluation_token,
-    validate_loopback_base_url as validate_dashboard_base_url,
-)
+from cohort_http import HttpResult
 from cohort_monitor_binding import (
     CohortMonitorBindingSources,
     monitor_dispatch_job_binding as prove_monitor_dispatch_binding,
-)
-from cohort_monitor_contract import (
-    CohortMonitorContract,
-    durable_job_monitor_state as resolve_durable_job_monitor_state,
-    validate_completed_analysis_job_window as validate_analysis_job_window,
 )
 from cohort_monitor_workflow import (
     CohortMonitorSources,
@@ -244,6 +227,24 @@ from cohort_runner_contracts import (
     constant_time_equal,
     sha256_value,
     utc_now,
+)
+from cohort_dispatch_adapters import (
+    DispatchContractPorts,
+    dashboard_post_json,
+    dispatch_contract as build_dispatch_contract,
+    http_policy as _cohort_http_policy,
+    load_evaluation_token,
+    request_for_member as build_adapter_dispatch_request,
+    validate_dispatch_job_payload as validate_adapter_job_payload,
+    validate_loopback_base_url,
+    validate_success_response as validate_adapter_dispatch_response,
+)
+from cohort_monitor_adapters import (
+    MonitorContractPorts,
+    durable_job_monitor_state as resolve_adapter_job_monitor_state,
+    monitor_contract as build_monitor_contract,
+    reanalysis_monitor_case as _reanalysis_monitor_case,
+    validate_completed_analysis_job_window as validate_adapter_analysis_window,
 )
 
 
@@ -958,55 +959,16 @@ def validate_frozen_cohort(
         connection.close()
 
 
-def _cohort_http_policy() -> CohortHttpPolicy:
-    return CohortHttpPolicy(
-        maximum_http_body_bytes=MAX_HTTP_BODY_BYTES,
-        evaluation_token_bytes=MAX_EVALUATION_TOKEN_BYTES,
-        token_pattern=SHA256_RE,
-        cohort_error=CohortError,
-        ambiguous_dispatch_error=AmbiguousDispatchError,
-        canonical_bytes=canonical_bytes,
-    )
-
-
-def validate_loopback_base_url(value: str) -> str:
-    """Compatibility adapter for loopback-origin validation."""
-    return validate_dashboard_base_url(_cohort_http_policy(), value)
-
-
-def load_evaluation_token(path: Path) -> str:
-    """Compatibility adapter for private evaluation-token loading."""
-    return read_evaluation_token(_cohort_http_policy(), path)
-
-
-def dashboard_post_json(
-    url: str,
-    payload: Mapping[str, Any],
-    *,
-    timeout: float,
-    evaluation_token: str | None = None,
-) -> HttpResult:
-    """Compatibility adapter for bounded dashboard POST requests."""
-    return post_dashboard_json(
-        _cohort_http_policy(),
-        url,
-        payload,
-        timeout=timeout,
-        evaluation_token=evaluation_token,
-    )
-
-
-def _cohort_dispatch_contract() -> CohortDispatchContract:
-    return CohortDispatchContract(
-        cohort_error=CohortError,
-        ambiguous_dispatch_error=AmbiguousDispatchError,
-        case_id_pattern=CASE_ID_RE,
-        run_id_pattern=RUN_ID_RE,
+def _dispatch_contract_ports() -> DispatchContractPorts:
+    return DispatchContractPorts(
         validate_release_id=validate_release_id,
         member_stable_group_key=_member_stable_group_key,
         deterministic_dispatch_id=deterministic_dispatch_id,
-        sha256_value=sha256_value,
     )
+
+
+def _cohort_dispatch_contract() -> Any:
+    return build_dispatch_contract(_dispatch_contract_ports())
 
 
 def _request_for_member(
@@ -1015,8 +977,8 @@ def _request_for_member(
     member: Mapping[str, Any],
 ) -> tuple[str, dict[str, Any]]:
     """Compatibility adapter for frozen dispatch request construction."""
-    return build_dispatch_request(
-        _cohort_dispatch_contract(), base_url, manifest, member
+    return build_adapter_dispatch_request(
+        _dispatch_contract_ports(), base_url, manifest, member
     )
 
 
@@ -1026,8 +988,8 @@ def _validate_success_response(
     result: HttpResult,
 ) -> dict[str, Any]:
     """Compatibility adapter for dashboard acceptance validation."""
-    return validate_dispatch_response(
-        _cohort_dispatch_contract(), manifest, member, result
+    return validate_adapter_dispatch_response(
+        _dispatch_contract_ports(), manifest, member, result
     )
 
 
@@ -1041,8 +1003,8 @@ def _validate_dispatch_job_payload(
     expected_reanalysis_run_id: str = "",
 ) -> dict[str, Any]:
     """Compatibility adapter for durable dispatch payload validation."""
-    return validate_job_payload(
-        _cohort_dispatch_contract(),
+    return validate_adapter_job_payload(
+        _dispatch_contract_ports(),
         manifest,
         member,
         job,
@@ -1216,16 +1178,17 @@ def _second_opinion_metadata(
     )
 
 
-def _cohort_monitor_contract() -> CohortMonitorContract:
-    return CohortMonitorContract(
-        cohort_error=CohortError,
-        parse_timestamp=_parse_timestamp,
-    )
+def _monitor_contract_ports() -> MonitorContractPorts:
+    return MonitorContractPorts(parse_timestamp=_parse_timestamp)
+
+
+def _cohort_monitor_contract() -> Any:
+    return build_monitor_contract(_monitor_contract_ports())
 
 
 def _durable_job_monitor_state(job: Mapping[str, Any]) -> str:
     """Compatibility adapter for durable-job monitor state validation."""
-    return resolve_durable_job_monitor_state(_cohort_monitor_contract(), job)
+    return resolve_adapter_job_monitor_state(_monitor_contract_ports(), job)
 
 
 def _validate_completed_analysis_job_window(
@@ -1235,32 +1198,12 @@ def _validate_completed_analysis_job_window(
     analysis: Mapping[str, Any],
 ) -> None:
     """Compatibility adapter for credited analysis time-window validation."""
-    validate_analysis_job_window(
-        _cohort_monitor_contract(),
+    validate_adapter_analysis_window(
+        _monitor_contract_ports(),
         dispatch=dispatch,
         job=job,
         analysis=analysis,
     )
-
-
-def _reanalysis_monitor_case(
-    connection: sqlite3.Connection,
-    run_id: str,
-    case_id: str,
-) -> dict[str, Any] | None:
-    row = connection.execute(
-        """
-        SELECT run_id, case_id, group_id, dashboard_group_id,
-               representative_alert_id, status, skip_reason, latest_error,
-               queued_at, started_at, completed_at, latest_attempt_id,
-               analysis_id, executed_model, executed_provider,
-               executed_model_path, result_generated_at, updated_at
-        FROM incident_reanalysis_run_cases
-        WHERE run_id = ? AND case_id = ?
-        """,
-        (run_id, case_id),
-    ).fetchone()
-    return dict(row) if row else None
 
 
 def _cohort_monitor_sources() -> CohortMonitorSources:

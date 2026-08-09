@@ -58,7 +58,7 @@
       "max_lines": 1164
     },
     "operations/cohort_runner_service.py": {
-      "max_lines": 1435
+      "max_lines": 1378
     },
     "relay/app/relay.py": {
       "max_lines": 2098
@@ -709,5 +709,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "2d29336b7b5a9c0b0a8544879d2f9ac7a5ce441d"
+  "source_release": "4ba8cd76760269d9e50689e21272cafe332010fd"
 }

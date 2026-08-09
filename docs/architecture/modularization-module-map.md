@@ -824,6 +824,15 @@ monitoring and export.
 identity patterns, fail-closed error types, canonical JSON hashing, constant-time
 comparison, and the UTC clock used by the runner composition layer.
 
+`operations/cohort_dispatch_adapters.py` owns the fixed loopback HTTP policy,
+private evaluation-token adapter, bounded dashboard POST adapter, and pure
+request/acceptance/durable-payload contract composition. Dispatch identity
+functions are injected through a narrow ports object.
+
+`operations/cohort_monitor_adapters.py` owns durable-job time-window contract
+composition and the bounded read-only projection for one exact reanalysis run
+case. Timestamp parsing is injected through a narrow ports object.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

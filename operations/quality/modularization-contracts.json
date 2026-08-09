@@ -97,6 +97,34 @@
       ]
     },
     {
+      "path": "operations/cohort_dispatch_adapters.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_dispatch_adapters.py",
+      "required_symbols": [
+        "DispatchContractPorts",
+        "http_policy",
+        "validate_loopback_base_url",
+        "load_evaluation_token",
+        "dashboard_post_json",
+        "dispatch_contract",
+        "request_for_member",
+        "validate_success_response",
+        "validate_dispatch_job_payload"
+      ]
+    },
+    {
+      "path": "operations/cohort_monitor_adapters.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_monitor_adapters.py",
+      "required_symbols": [
+        "MonitorContractPorts",
+        "monitor_contract",
+        "durable_job_monitor_state",
+        "validate_completed_analysis_job_window",
+        "reanalysis_monitor_case"
+      ]
+    },
+    {
       "path": "operations/run-incident-harness-cohort.py",
       "deployment": "repository-only",
       "runtime_path": "operations/run-incident-harness-cohort.py",

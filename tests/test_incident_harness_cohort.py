@@ -47,6 +47,8 @@ import cohort_source_rows  # noqa: E402
 import cohort_representative_state  # noqa: E402
 import cohort_second_opinion_state  # noqa: E402
 import cohort_runner_contracts  # noqa: E402
+import cohort_dispatch_adapters  # noqa: E402
+import cohort_monitor_adapters  # noqa: E402
 
 
 class IncidentHarnessCohortTests(unittest.TestCase):
@@ -178,6 +180,30 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         self.assertIs(cohort.CohortError, cohort_runner_contracts.CohortError)
         self.assertIs(cohort.sha256_value, cohort_runner_contracts.sha256_value)
         self.assertEqual(cohort.SCHEMA, cohort_runner_contracts.SCHEMA)
+
+    def test_runner_uses_extracted_dispatch_adapters(self) -> None:
+        self.assertIs(
+            cohort.validate_loopback_base_url,
+            cohort_dispatch_adapters.validate_loopback_base_url,
+        )
+        self.assertIs(
+            cohort.dashboard_post_json,
+            cohort_dispatch_adapters.dashboard_post_json,
+        )
+        self.assertIs(
+            cohort.build_adapter_dispatch_request,
+            cohort_dispatch_adapters.request_for_member,
+        )
+
+    def test_runner_uses_extracted_monitor_adapters(self) -> None:
+        self.assertIs(
+            cohort.resolve_adapter_job_monitor_state,
+            cohort_monitor_adapters.durable_job_monitor_state,
+        )
+        self.assertIs(
+            cohort._reanalysis_monitor_case,
+            cohort_monitor_adapters.reanalysis_monitor_case,
+        )
 
     def test_query_audit_projection_excludes_query_and_result_content(self) -> None:
         projected = cohort._bounded_query_audit_metadata(
