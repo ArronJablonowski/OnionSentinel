@@ -33,6 +33,8 @@ const {createHealthService} = require('./services/health_service');
 const {createHealthRoutes} = require('./routes/health_routes');
 const {createAnalystStateService} = require('./services/analyst_state_service');
 const {createAnalystStateRoutes} = require('./routes/analyst_state_routes');
+const {createDurableJobService} = require('./services/durable_job_service');
+const {createDurableJobRoutes} = require('./routes/durable_job_routes');
 const {
   loadAuthorizedActivityPolicy,
   matchAuthorizedActivity,
@@ -11766,6 +11768,22 @@ modularRoutes.registerAll(createAnalystStateRoutes({
   readJsonBody,
   sendJson,
 }));
+const durableJobService = createDurableJobService({
+  safeString,
+  withWriteGate: withSqliteWriteGate,
+  withTransaction: withImmediateTransaction,
+  controlledTransitionAdmission: controlledJobTransitionAdmission,
+  transitionJobStatus: transitionDurableJobStatus,
+  applyControlledTransition: applyControlledJobTransition,
+  completePendingByDedupeKeys: (...args) => (
+    durableJobs.completePendingByDedupeKeys(...args)
+  ),
+});
+modularRoutes.registerAll(createDurableJobRoutes({
+  service: durableJobService,
+  readJsonBody,
+  sendJson,
+}));
 
 function controlledEvaluationRequestAuthorized(request) {
   if (!controlledEvaluationMode) return true;
@@ -12018,61 +12036,6 @@ async function handleRequest(request, response) {
       // Intended for relay polling and operator diagnostics.
       const result = await listPcapRequests(parsedUrl.searchParams);
       sendJson(response, 200, result);
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/jobs/status') {
-      const payload = await readJsonBody(request);
-      const jobType = safeString(payload?.job_type, 64);
-      const dedupeKey = safeString(payload?.dedupe_key, 256);
-      const status = safeString(payload?.status, 32).toLowerCase();
-      const leaseToken = safeString(payload?.lease_token, 128);
-      const retryable = payload?.retryable !== false;
-      if (!jobType || !dedupeKey) throw new Error('job_type and dedupe_key are required');
-      const transition = await withSqliteWriteGate(async () => {
-        let controlledAdmission = null;
-        const committed = await withImmediateTransaction(async () => {
-          controlledAdmission = await controlledJobTransitionAdmission(
-            payload,
-          );
-          return transitionDurableJobStatus(
-            jobType,
-            dedupeKey,
-            status,
-            safeString(payload?.error, 1000),
-            leaseToken,
-            retryable,
-            payload,
-          );
-        });
-        // Apply the mirror transition while the same write gate is still held,
-        // after the durable transaction has committed.
-        applyControlledJobTransition(controlledAdmission, committed);
-        return committed;
-      });
-      sendJson(response, transition.updated ? 200 : 404, {
-        ok: transition.updated,
-        job_type: jobType,
-        dedupe_key: transition.resolvedKey,
-        status,
-        lease_token: transition.leaseToken,
-        claim: transition.claim || null,
-      });
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/jobs/reconcile-completed') {
-      // Local workers reconcile queue intent with durable artifacts in one
-      // bounded write. This avoids stale pending rows when an up-to-date AI
-      // artifact makes a queued group ineligible for duplicate analysis.
-      const payload = await readJsonBody(request);
-      const jobType = safeString(payload?.job_type, 64);
-      const dedupeKeys = Array.isArray(payload?.dedupe_keys)
-        ? payload.dedupe_keys.map((value) => safeString(value, 256)).filter(Boolean).slice(0, 2000)
-        : [];
-      if (!jobType || !dedupeKeys.length) throw new Error('job_type and dedupe_keys are required');
-      const completed = await withSqliteWriteGate(() => withImmediateTransaction(
-        () => durableJobs.completePendingByDedupeKeys(jobType, dedupeKeys),
-      ));
-      sendJson(response, 200, {ok: true, job_type: jobType, reconciled: completed});
       return;
     }
     if (request.method === 'POST' && parsedUrl.pathname === '/pcap/claim') {

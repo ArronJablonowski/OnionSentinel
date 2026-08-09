@@ -14,6 +14,8 @@ ENRICHMENT_CACHE = REPO_ROOT / "n8n" / "alert_store" / "lib" / "enrichment_cache
 HEALTH_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "health_service.js"
 ANALYST_STATE_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "analyst_state_service.js"
 ANALYST_STATE_ROUTES = REPO_ROOT / "n8n" / "alert_store" / "routes" / "analyst_state_routes.js"
+DURABLE_JOB_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "durable_job_service.js"
+DURABLE_JOB_ROUTES = REPO_ROOT / "n8n" / "alert_store" / "routes" / "durable_job_routes.js"
 
 
 class AlertStoreResilienceTest(unittest.TestCase):
@@ -28,6 +30,8 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.health_service = HEALTH_SERVICE.read_text(encoding="utf-8")
         cls.analyst_state_service = ANALYST_STATE_SERVICE.read_text(encoding="utf-8")
         cls.analyst_state_routes = ANALYST_STATE_ROUTES.read_text(encoding="utf-8")
+        cls.durable_job_service = DURABLE_JOB_SERVICE.read_text(encoding="utf-8")
+        cls.durable_job_routes = DURABLE_JOB_ROUTES.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
         self.assertIn("require('./lib/provider_scheduler')", self.code)
@@ -183,9 +187,9 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("withSqliteWriteGate(() => completePcapRequest(payload))", self.code)
 
     def test_ai_job_reconciliation_is_bounded_and_transactional(self) -> None:
-        self.assertIn("parsedUrl.pathname === '/jobs/reconcile-completed'", self.code)
-        self.assertIn(".slice(0, 2000)", self.code)
-        self.assertIn("durableJobs.completePendingByDedupeKeys", self.code)
+        self.assertIn("path: '/jobs/reconcile-completed'", self.durable_job_routes)
+        self.assertIn(".slice(0, 2000)", self.durable_job_service)
+        self.assertIn("completePendingByDedupeKeys(jobType, dedupeKeys)", self.durable_job_service)
 
     def test_second_opinion_telemetry_has_an_independent_durable_schema(self) -> None:
         self.assertIn("CREATE TABLE IF NOT EXISTS ai_second_opinion_runs", self.code)
