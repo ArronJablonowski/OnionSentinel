@@ -40,6 +40,7 @@ DASHBOARD_SERVER = (
 )
 BIN_DIR = ROOT / "n8n" / "bin"
 RUNNER_PATH = BIN_DIR / "run-local-ai-analysis.py"
+PIPELINE_ADAPTER_PATH = BIN_DIR / "local_ai_pipeline_adapters.py"
 SCHEDULER_PATH = BIN_DIR / "auto-run-ai-analysis.py"
 INSTALLER_PATH = BIN_DIR / "install-macstudio-stack.zsh"
 RELEASE_ID = "c" * 40
@@ -6175,7 +6176,7 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
     def test_evaluation_spools_are_explicitly_wired_and_do_not_touch_global_dirs(
         self,
     ) -> None:
-        source = RUNNER_PATH.read_text(encoding="utf-8")
+        source = PIPELINE_ADAPTER_PATH.read_text(encoding="utf-8")
         for wiring in (
             "queue_dir=runtime_paths.index_queue_dir",
             "quarantine_dir=runtime_paths.index_quarantine_dir",
