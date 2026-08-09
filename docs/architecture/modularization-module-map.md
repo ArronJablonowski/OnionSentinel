@@ -516,6 +516,16 @@ canonical digests and byte counts, accumulates projection reasons, and rejects
 collector artifacts that arrive preprojected. The legacy builder retains thin
 delegates so package construction and existing integrations keep the same API.
 
+`prompt_incident_grounding.py` owns the immutable incident prompt digest. It
+removes only explicitly mutable projected sample fields, authenticates the
+original Elastic-hit and OSQuery-row counts, byte lengths, and SHA-256 digests,
+and binds package identity, selected alert/group, instructions, response
+schema, detection validation, restricted evidence identity, response controls,
+and every immutable query/execution field. Evidence validation is an injected
+port and runs before the digest is admitted; missing or mismatched grounding
+fails closed. The builder retains compatibility delegates for the package
+compactor and existing integrations.
+
 `prompt_builder_cli.py` owns the prompt builder's stable command-line schema,
 numeric safety bounds, agent-role allowlist, and role-specific default prompt
 and memory paths. The legacy `parse_args()` constructs defaults and callbacks

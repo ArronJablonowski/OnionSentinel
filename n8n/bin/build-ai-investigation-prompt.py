@@ -49,6 +49,11 @@ from prompt_incident_evidence_projection import (
     project_incident_evidence_osquery_rows as project_evidence_osquery_rows,
     reject_preprojected_incident_evidence_source as reject_preprojected_source,
 )
+from prompt_incident_grounding import (
+    IncidentGroundingSources,
+    immutable_query_provenance,
+    mandatory_grounding_digest,
+)
 from prompt_builder_cli import (
     PromptBuilderCliDefaults,
     PromptBuilderCliSources,
@@ -2251,207 +2256,18 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
 
 
 def incident_prompt_immutable_query_provenance(incident: dict) -> dict:
-    """Return all query fields that prompt compaction is forbidden to change."""
-    response = incident.get("security_onion_response")
-    if not isinstance(response, dict):
-        return {
-            "elastic_results": [],
-            "osquery_results": [],
-        }
-
-    elastic_mutable = {
-        "hits",
-        "returned_hits",
-        "truncated",
-        "prompt_projection",
-    }
-    osquery_mutable = {
-        "rows",
-        "returned_rows",
-        "truncated",
-        "prompt_projection",
-    }
-
-    def source_provenance(
-        result: dict,
-        *,
-        samples_key: str,
-        returned_key: str,
-        total_key: str,
-        projection_prefix: str,
-    ) -> dict:
-        projection = result.get("prompt_projection")
-        if isinstance(projection, dict):
-            return {
-                "source_returned": projection[
-                    f"source_returned_{projection_prefix}"
-                ],
-                "source_total": projection[
-                    f"source_total_{projection_prefix}"
-                ],
-                "source_truncated": projection["source_truncated"],
-                "source_samples_bytes": projection[
-                    f"source_{samples_key}_bytes"
-                ],
-                "source_samples_sha256": projection[
-                    f"source_{samples_key}_sha256"
-                ],
-            }
-        samples = result.get(samples_key)
-        encoded = json.dumps(
-            samples,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        return {
-            "source_returned": result.get(returned_key),
-            "source_total": result.get(total_key),
-            "source_truncated": result.get("truncated"),
-            "source_samples_bytes": len(encoded),
-            "source_samples_sha256": hashlib.sha256(encoded).hexdigest(),
-        }
-
-    def immutable_result(
-        result: dict,
-        *,
-        mutable: set[str],
-        samples_key: str,
-        returned_key: str,
-        total_key: str,
-        projection_prefix: str,
-    ) -> dict:
-        return {
-            **{
-                key: value
-                for key, value in result.items()
-                if key not in mutable
-            },
-            "source_evidence_provenance": source_provenance(
-                result,
-                samples_key=samples_key,
-                returned_key=returned_key,
-                total_key=total_key,
-                projection_prefix=projection_prefix,
-            ),
-        }
-
-    elastic_results = response.get("results")
-    osquery_results = response.get("osquery_results")
-    return {
-        "elastic_results": [
-            immutable_result(
-                result,
-                mutable=elastic_mutable,
-                samples_key="hits",
-                returned_key="returned_hits",
-                total_key="total_hits",
-                projection_prefix="hits",
-            )
-            for result in elastic_results
-            if isinstance(result, dict)
-        ]
-        if isinstance(elastic_results, list)
-        else [],
-        "osquery_results": [
-            immutable_result(
-                result,
-                mutable=osquery_mutable,
-                samples_key="rows",
-                returned_key="returned_rows",
-                total_key="total_rows",
-                projection_prefix="rows",
-            )
-            for result in osquery_results
-            if isinstance(result, dict)
-        ]
-        if isinstance(osquery_results, list)
-        else [],
-    }
+    """Compatibility delegate for immutable incident query provenance."""
+    return immutable_query_provenance(incident)
 
 
 def incident_prompt_mandatory_grounding_digest(package: dict) -> str:
-    """Authenticate incident identity, grounding, and query provenance."""
-    incident = package.get("incident_response_evidence")
-    alert = package.get("alert")
-    instructions = package.get("instructions")
-    response_schema = package.get("response_schema")
-    detection_validation = package.get("detection_validation")
-    if package.get("package_type") != "soc-ai-investigation-prompt":
-        raise ValueError("incident prompt is missing its package identity")
-    if package.get("agent_role") != "incident-responder":
-        raise ValueError("incident prompt is missing its incident-responder role")
-    if not isinstance(alert, dict) or not str(alert.get("alert_id") or "").strip():
-        raise ValueError("incident prompt is missing its mandatory alert identity")
-    if not str(package.get("group_id") or "").strip():
-        raise ValueError("incident prompt is missing its mandatory group identity")
-    if (
-        not isinstance(instructions, dict)
-        or not str(instructions.get("role") or "").strip()
-        or not str(instructions.get("task") or "").strip()
-        or not isinstance(instructions.get("grounding"), list)
-        or not instructions["grounding"]
-        or any(
-            not isinstance(item, str) or not item.strip()
-            for item in instructions["grounding"]
-        )
-    ):
-        raise ValueError("incident prompt is missing mandatory grounding instructions")
-    if not isinstance(response_schema, dict) or not response_schema:
-        raise ValueError("incident prompt is missing its mandatory response schema")
-    if not isinstance(detection_validation, dict) or not detection_validation:
-        raise ValueError("incident prompt is missing mandatory detection grounding")
-    if not isinstance(incident, dict):
-        raise ValueError("incident prompt is missing restricted incident evidence")
-    validate_incident_evidence_artifact(incident)
-    if (
-        str(incident.get("alert_id") or "") != str(alert["alert_id"])
-        or str(incident.get("group_id") or "") != str(package["group_id"])
-    ):
-        raise ValueError(
-            "incident evidence identity does not match the prompt alert group"
-        )
-
-    response = incident.get("security_onion_response")
-    immutable_response_grounding = {
-        key: response.get(key)
-        for key in (
-            "ok",
-            "complete",
-            "partial",
-            "read_only",
-            "query_contract",
-            "observables",
-            "controls",
-            "semantic_validity",
-        )
-    }
-    mandatory = {
-        "package_type": package["package_type"],
-        "agent_role": package["agent_role"],
-        "group_id": package["group_id"],
-        "manual_reanalysis": package.get("manual_reanalysis"),
-        "alert": alert,
-        "instructions": instructions,
-        "response_schema": response_schema,
-        "detection_validation": detection_validation,
-        "incident_identity": {
-            "schema": incident.get("schema"),
-            "alert_id": incident.get("alert_id"),
-            "group_id": incident.get("group_id"),
-            "request": incident.get("request"),
-            "response": immutable_response_grounding,
-            "query_provenance": incident_prompt_immutable_query_provenance(
-                incident
-            ),
-        },
-    }
-    encoded = json.dumps(
-        mandatory,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
+    """Compatibility delegate for mandatory incident prompt grounding."""
+    return mandatory_grounding_digest(
+        IncidentGroundingSources(
+            validate_incident_evidence=validate_incident_evidence_artifact,
+        ),
+        package,
+    )
 
 def compact_package_to_budget(package: dict, max_bytes: int) -> tuple[dict, str]:
     """Compatibility delegate for deterministic package compaction."""
