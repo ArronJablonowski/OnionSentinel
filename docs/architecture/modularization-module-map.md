@@ -260,6 +260,14 @@ compatibility facade that resolves its existing mutable defaults and injects
 the alert-ID, dispatch-ID, and stable-group-key policies at parse time, so
 tests and operators keep the exact CLI and environment behavior.
 
+`scheduler_controlled_runtime.py` owns fail-closed admission of a frozen
+one-member evaluation worker: canonical owner-private runtime paths, exact job
+pins, release and ephemeral-token attestations, loopback-only alert-store
+origin, isolated temporary storage, frozen inputs, disabled live OSQuery, and
+runtime-confined mutable markers. The compatibility function constructs its
+policy and collaborators at call time so existing test and operator overrides
+remain observable.
+
 `scheduler_claim.py` owns compare-and-set processing acquisition,
 server-authoritative job/alert/group replacement, controlled claim identity,
 IR reanalysis-attempt binding, contention projection, and automatic-threshold

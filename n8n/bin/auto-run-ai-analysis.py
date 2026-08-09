@@ -49,6 +49,11 @@ from scheduler_cli import (
     SchedulerCliPolicy,
     parse_scheduler_args,
 )
+from scheduler_controlled_runtime import (
+    ControlledRuntimePolicy,
+    ControlledRuntimeSources,
+    validate_controlled_evaluation_runtime,
+)
 from scheduler_claim import (
     SchedulerClaimSources,
     acquire_scheduler_claim,
@@ -317,240 +322,31 @@ def javascript_truthy(value: object) -> bool:
 def controlled_evaluation_runtime(
     args: argparse.Namespace,
 ) -> Path | None:
-    """Validate the one-member, owner-only evaluation worker boundary."""
-    mode_value = str(
-        os.environ.get("ONION_SENTINEL_EVALUATION_MODE") or ""
-    ).strip()
-    if mode_value not in {"", "0", "1"}:
-        raise SystemExit(
-            "ONION_SENTINEL_EVALUATION_MODE must be unset, 0, or 1"
-        )
-    if mode_value != "1":
-        return None
-    if str(getattr(args, "model", "") or "").strip():
-        raise SystemExit(
-            "controlled evaluation forbids --model and SOC_AI_MODEL overrides"
-        )
-    raw_root = str(
-        os.environ.get("ONION_SENTINEL_EVALUATION_RUNTIME_DIR") or ""
-    ).strip()
-    try:
-        root = Path(raw_root)
-        metadata = root.lstat()
-        resolved_root = root.resolve(strict=True)
-        expected_parent = (
-            HOME / "n8n-local" / "harness-evaluations"
-        ).resolve(strict=True)
-        resolved_root.relative_to(expected_parent)
-    except (FileNotFoundError, OSError, ValueError) as exc:
-        raise SystemExit(
-            f"controlled evaluation runtime directory is unsafe: {exc}"
-        ) from exc
-    try:
-        alert_store_origin = urlparse(args.alert_store_url)
-        alert_store_port = alert_store_origin.port
-    except ValueError as exc:
-        raise SystemExit(
-            "controlled evaluation alert-store origin is unsafe"
-        ) from exc
-    controlled_identity = (
-        args.only_group_id,
-        args.only_alert_id,
-        args.only_stable_group_key,
-        args.only_dispatch_id,
+    """Compatibility delegate for frozen controlled-runtime admission."""
+    return validate_controlled_evaluation_runtime(
+        args,
+        ControlledRuntimePolicy(
+            home=HOME,
+            release_environment_key=RUNTIME_RELEASE_ENV_KEY,
+            token_environment_key=CONTROLLED_EVALUATION_TOKEN_ENV,
+            release_pattern=CONTROLLED_RELEASE_ID_RE,
+            token_pattern=CONTROLLED_EVALUATION_TOKEN_RE,
+        ),
+        ControlledRuntimeSources(
+            environment=os.environ,
+            effective_uid=os.getuid,
+            pin_tmpdir=pin_controlled_tmpdir,
+            validate_incident_evidence_route=(
+                validate_controlled_incident_evidence_route
+            ),
+            role_prompt_file=role_prompt_file,
+            role_second_opinion_prompt_file=(
+                role_second_opinion_prompt_file
+            ),
+            role_memory_file=role_memory_file,
+            isolation_error=ControlledEvaluationIsolationError,
+        ),
     )
-    if (
-        not raw_root
-        or not root.is_absolute()
-        or resolved_root != root
-        or root.is_symlink()
-        or not root.is_dir()
-        or metadata.st_uid != os.getuid()
-        or stat.S_IMODE(metadata.st_mode) & 0o077
-        or str(
-            os.environ.get("ONION_SENTINEL_EVALUATION_FREEZE_MEMORY")
-            or ""
-        ).strip() != "1"
-        or not CONTROLLED_RELEASE_ID_RE.fullmatch(
-            str(os.environ.get(RUNTIME_RELEASE_ENV_KEY) or "")
-        )
-        or not CONTROLLED_EVALUATION_TOKEN_RE.fullmatch(
-            str(
-                os.environ.get(CONTROLLED_EVALUATION_TOKEN_ENV)
-                or ""
-            ).strip()
-        )
-        or not all(controlled_identity)
-        or args.max_per_run != 1
-        or alert_store_origin.scheme != "http"
-        or alert_store_origin.hostname != "127.0.0.1"
-        or alert_store_port is None
-        or alert_store_port < 1
-        or alert_store_port == 8787
-        or alert_store_origin.username is not None
-        or alert_store_origin.password is not None
-        or alert_store_origin.path not in {"", "/"}
-        or alert_store_origin.params
-        or alert_store_origin.query
-        or alert_store_origin.fragment
-    ):
-        raise SystemExit(
-            "controlled evaluation requires one exact frozen job, an "
-            "owner-only runtime, frozen memory, a loopback alert store, "
-            "an exact release ID, and an ephemeral authorization token"
-        )
-    try:
-        pin_controlled_tmpdir(resolved_root)
-    except ControlledEvaluationIsolationError as exc:
-        raise SystemExit(f"controlled evaluation {exc}") from exc
-
-    def owner_private_path(
-        candidate: Path,
-        *,
-        label: str,
-        kind: str,
-        inside_runtime: bool = True,
-    ) -> Path:
-        candidate = candidate.expanduser()
-        try:
-            candidate_metadata = candidate.lstat()
-            resolved_candidate = candidate.resolve(strict=True)
-            if inside_runtime:
-                resolved_candidate.relative_to(resolved_root)
-        except (FileNotFoundError, OSError, ValueError) as exc:
-            location = " inside the evaluation runtime" if inside_runtime else ""
-            raise SystemExit(
-                f"controlled evaluation {label} must be a canonical "
-                f"owner-private {kind}{location}"
-            ) from exc
-        expected_kind = (
-            candidate.is_file() if kind == "file" else candidate.is_dir()
-        )
-        if (
-            not candidate.is_absolute()
-            or resolved_candidate != candidate
-            or candidate.is_symlink()
-            or not expected_kind
-            or candidate_metadata.st_uid != os.getuid()
-            or stat.S_IMODE(candidate_metadata.st_mode) & 0o077
-        ):
-            location = " inside the evaluation runtime" if inside_runtime else ""
-            raise SystemExit(
-                f"controlled evaluation {label} must be a canonical "
-                f"owner-private {kind}{location}"
-            )
-        return resolved_candidate
-
-    def owner_private_mutable_file(candidate: Path, *, label: str) -> None:
-        candidate = candidate.expanduser()
-        try:
-            resolved_candidate = candidate.resolve(strict=False)
-            resolved_candidate.relative_to(resolved_root)
-        except (OSError, ValueError) as exc:
-            raise SystemExit(
-                f"controlled evaluation {label} must stay inside its "
-                "runtime directory"
-            ) from exc
-        if not candidate.is_absolute() or resolved_candidate != candidate:
-            raise SystemExit(
-                f"controlled evaluation {label} must stay inside its "
-                "runtime directory"
-            )
-        if candidate.exists():
-            owner_private_path(candidate, label=label, kind="file")
-            return
-        owner_private_path(candidate.parent, label=f"{label} parent", kind="directory")
-
-    context_directories = {
-        "prompt directory": args.prompt_dir,
-        "analysis output directory": args.analysis_dir,
-        "prior-analysis directory": args.prior_analysis_dir,
-        "PCAP analysis directory": args.pcap_analysis_dir,
-        "rollup directory": args.rollup_dir,
-        "agent-memory directory": args.agent_memory_dir,
-        "incident-evidence directory": args.incident_evidence_dir,
-        "investigation-pivot directory": args.investigation_pivot_dir,
-    }
-    for label, candidate in context_directories.items():
-        owner_private_path(candidate, label=label, kind="directory")
-    if args.analysis_dir.resolve() == args.prior_analysis_dir.resolve():
-        raise SystemExit(
-            "controlled evaluation prior analysis must be frozen separately "
-            "from analysis output"
-        )
-
-    config_dir = args.ai_settings_file.parent
-    runtime_read_files = {
-        "clone database": args.db,
-        "AI settings": args.ai_settings_file,
-        "harness policy": args.investigation_harness_policy,
-        "detection playbooks": args.detection_playbooks,
-        "investigation skills": args.investigation_skills,
-        "shared memory": args.shared_memory_file,
-        "asset inventory": args.asset_inventory_file,
-        "live OSQuery config": args.live_osquery_config,
-        "disagreement prompt": args.disagreement_adjudicator_prompt_file,
-        "SOC Analyst prompt": role_prompt_file(config_dir, "soc-analyst"),
-        "SOC Analyst reviewer prompt": role_second_opinion_prompt_file(
-            config_dir,
-            "soc-analyst",
-        ),
-        "Incident Responder prompt": role_prompt_file(
-            config_dir,
-            "incident-responder",
-        ),
-        "Incident Responder reviewer prompt": role_second_opinion_prompt_file(
-            config_dir,
-            "incident-responder",
-        ),
-        "SOC Analyst frozen memory": role_memory_file(
-            args.agent_memory_dir,
-            "soc-analyst",
-        ),
-        "Incident Responder frozen memory": role_memory_file(
-            args.agent_memory_dir,
-            "incident-responder",
-        ),
-    }
-    for label, candidate in runtime_read_files.items():
-        owner_private_path(candidate, label=label, kind="file")
-
-    try:
-        validate_controlled_incident_evidence_route(
-            args.incident_evidence_config,
-            resolved_root,
-            expected_home=HOME,
-        )
-    except ControlledEvaluationIsolationError as exc:
-        raise SystemExit(
-            f"controlled evaluation {exc}"
-        ) from exc
-
-    try:
-        live_osquery_document = json.loads(
-            args.live_osquery_config.read_text(encoding="utf-8")
-        )
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise SystemExit(
-            "controlled evaluation live OSQuery config is invalid"
-        ) from exc
-    if (
-        not isinstance(live_osquery_document, dict)
-        or live_osquery_document.get("enabled") is not False
-    ):
-        raise SystemExit(
-            "controlled evaluation requires live OSQuery to be explicitly disabled"
-        )
-
-    for label, candidate in {
-        "lock file": args.lock_file,
-        "worker wake file": args.wake_file,
-        "dashboard wake file": args.portal_wake_file,
-    }.items():
-        owner_private_mutable_file(candidate, label=label)
-    return resolved_root
-
-
 def valid_controlled_stable_group_key(value: object) -> bool:
     """Return whether a frozen group key has one safe bounded UTF-8 encoding."""
     if not isinstance(value, str) or not value or "\x00" in value:

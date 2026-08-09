@@ -51,6 +51,16 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_controlled_runtime.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_controlled_runtime.py",
+      "required_symbols": [
+        "ControlledRuntimePolicy",
+        "ControlledRuntimeSources",
+        "validate_controlled_evaluation_runtime"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_execution.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_execution.py",
