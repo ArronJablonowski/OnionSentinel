@@ -40,6 +40,7 @@ const {createAiAnalysisAcceptance} = require('./services/ai_analysis_acceptance'
 const {createControlledJobTransition} = require('./services/controlled_job_transition');
 const {createControlledResultAdmission} = require('./services/controlled_result_admission');
 const {createDurableJobRecovery} = require('./services/durable_job_recovery');
+const {createDurableJobTransitionExecutor} = require('./services/durable_job_transition_executor');
 const {createIncidentAnalysisCompletion} = require('./services/incident_analysis_completion');
 const {createIncidentReanalysisBindingService} = require('./services/incident_reanalysis_binding');
 const {createHealthRoutes} = require('./routes/health_routes');
@@ -3612,305 +3613,15 @@ async function transitionDurableJobStatus(
   retryable = true,
   requestedClaimIdentity = null,
 ) {
-  let resolvedKey = dedupeKey;
-  const exactClaim = controlledEvaluationMode
-    ? controlledJobClaimIdentity(requestedClaimIdentity)
-    : null;
-  let exactCandidate = null;
-  if (exactClaim) {
-    if (
-      status !== 'processing'
-      || leaseToken
-      || !['ai_analysis', 'incident_response_analysis'].includes(jobType)
-      || !stableGroupIdPattern.test(resolvedKey)
-    ) {
-      throw incidentIdentityConflict(
-        'controlled durable job claim is not valid for this transition',
-      );
-    }
-    exactCandidate = await get(
-      `SELECT id, job_type, dedupe_key, payload_json, status, rerun_requested,
-              attempt_count, lease_token, lease_expires_at
-       FROM durable_jobs WHERE job_type = ? AND dedupe_key = ?`,
-      [jobType, resolvedKey],
-    );
-    if (
-      !exactCandidate
-      || Number(exactCandidate.id || 0) !== exactClaim.jobId
-      || !['pending', 'processing'].includes(exactCandidate.status)
-      || Number(exactCandidate.rerun_requested || 0) !== 0
-    ) {
-      throw incidentIdentityConflict(
-        'controlled durable job changed before it could be claimed',
-      );
-    }
-    const candidatePayload = incidentReanalysisJobPayload(exactCandidate);
-    const runtimeReleaseId = controlledRuntimeReleaseId();
-    const expectedRole = (
-      jobType === 'incident_response_analysis'
-        ? 'incident-responder'
-        : 'soc-analyst'
-    );
-    if (
-      candidatePayload.alert_id !== exactClaim.representativeAlertId
-      || candidatePayload.representative_alert_id
-        !== exactClaim.representativeAlertId
-      || candidatePayload.group_id !== resolvedKey
-      || candidatePayload.stable_group_id !== resolvedKey
-      || candidatePayload.stable_group_key !== exactClaim.stableGroupKey
-      || candidatePayload.dispatch_id !== exactClaim.dispatchId
-      || candidatePayload.expected_assigned_route
-        !== exactClaim.expectedAssignedRoute
-      || candidatePayload.expected_reviewer_route
-        !== exactClaim.expectedReviewerRoute
-      || candidatePayload.reviewer_required !== exactClaim.reviewerRequired
-      || !runtimeReleaseId
-      || candidatePayload.release_id !== runtimeReleaseId
-      || typeof candidatePayload.agent_role !== 'string'
-      || candidatePayload.agent_role !== expectedRole
-    ) {
-      throw incidentIdentityConflict(
-        'controlled durable job payload changed before it could be claimed',
-      );
-    }
-    const currentRepresentative = await get(
-      `SELECT stable_group_id, stable_group_key
-       FROM alerts WHERE alert_id = ? LIMIT 1`,
-      [exactClaim.representativeAlertId],
-    );
-    if (
-      currentRepresentative?.stable_group_id !== resolvedKey
-      || currentRepresentative?.stable_group_key !== exactClaim.stableGroupKey
-    ) {
-      throw incidentIdentityConflict(
-        'controlled durable job representative changed before it could be claimed',
-      );
-    }
-    if (exactCandidate.status === 'processing') {
-      const replayLeaseToken = safeString(
-        exactCandidate.lease_token,
-        128,
-      );
-      if (!replayLeaseToken) {
-        throw incidentIdentityConflict(
-          'controlled durable job processing lease is incomplete',
-        );
-      }
-      // Reasserting the same frozen claim also revives an expired transport
-      // lease without minting a new bearer token or counting another attempt.
-      // This lets the scheduler resume heartbeats after a lost response or
-      // alert-store restart while preserving the exact raw claim receipt.
-      const replayLeaseExpiry = new Date(
-        Date.now() + aiAnalysisLeaseSeconds * 1000,
-      ).toISOString();
-      const replayed = await run(
-        `UPDATE durable_jobs
-         SET lease_expires_at = ?, updated_at = ?
-         WHERE id = ? AND status = 'processing' AND lease_token = ?
-           AND rerun_requested = 0`,
-        [
-          replayLeaseExpiry,
-          nowUtc(),
-          exactCandidate.id,
-          replayLeaseToken,
-        ],
-      );
-      if (Number(replayed.changes || 0) !== 1) {
-        throw incidentIdentityConflict(
-          'controlled durable job changed before its claim could be replayed',
-        );
-      }
-      const replayClaim = {
-        job_id: Number(exactCandidate.id),
-        job_type: jobType,
-        dedupe_key: resolvedKey,
-        payload: candidatePayload,
-      };
-      if (jobType === 'incident_response_analysis') {
-        const attemptId = incidentReanalysisAttemptId(replayLeaseToken);
-        const attempt = await get(
-          `SELECT attempt_id, run_id, case_id
-           FROM incident_reanalysis_attempts WHERE attempt_id = ?`,
-          [attemptId],
-        );
-        replayClaim.reanalysis_attempt_id = attempt?.attempt_id || null;
-        replayClaim.reanalysis_run_id = attempt?.run_id || null;
-        replayClaim.case_id = attempt?.case_id || null;
-      }
-      return {
-        updated: true,
-        resolvedKey,
-        leaseToken: replayLeaseToken,
-        claim: replayClaim,
-        idempotentClaim: true,
-      };
-    }
-  }
-  if (
-    !exactClaim
-    &&
-    jobType === 'incident_response_analysis'
-    && status === 'processing'
-    && !leaseToken
-  ) {
-    const candidate = await get(
-      `SELECT id, job_type, dedupe_key, payload_json, status
-       FROM durable_jobs
-       WHERE job_type = ? AND dedupe_key = ?`,
-      [jobType, resolvedKey],
-    );
-    if (
-      candidate
-      && (
-        await retireCompletedIncidentReanalysisJob(candidate)
-        || await retireSupersededIncidentReanalysisJob(candidate)
-      )
-    ) {
-      return {
-        updated: false,
-        resolvedKey,
-        leaseToken: null,
-        retiredCompleted: true,
-        claim: null,
-      };
-    }
-  }
-  let transition = await durableJobs.transition(
+  return durableJobTransitionExecutor.transition(
     jobType,
-    resolvedKey,
+    dedupeKey,
     status,
     error,
     leaseToken,
     retryable,
-    exactClaim ? {
-      expectedJobId: exactClaim.jobId,
-      expectedPayloadJson: exactCandidate.payload_json,
-    } : {},
+    requestedClaimIdentity,
   );
-  let updated = Boolean(transition?.updated);
-  if (exactClaim && !updated) {
-    throw incidentIdentityConflict(
-      'controlled durable job changed before it could be claimed',
-    );
-  }
-  let claim = null;
-  if (
-    !exactClaim
-    && !updated
-    && ['ai_analysis', 'incident_response_analysis'].includes(jobType)
-  ) {
-    // Workers deployed before stable V2 group identities report the legacy
-    // dashboard key. Resolve that key at the write boundary so rolling
-    // upgrades cannot leave healthy analysis work permanently pending.
-    const alias = await get(
-      'SELECT stable_group_id FROM alert_group_alias WHERE legacy_group_id = ?',
-      [dedupeKey],
-    );
-    if (alias?.stable_group_id) {
-      resolvedKey = String(alias.stable_group_id);
-      transition = await durableJobs.transition(
-        jobType, resolvedKey, status, error, leaseToken, retryable,
-      );
-      updated = Boolean(transition?.updated);
-    }
-  }
-  if (updated) {
-    const job = await get(
-      `SELECT id, dedupe_key, status, attempt_count, updated_at, last_completed_at,
-              payload_json, last_error
-       FROM durable_jobs WHERE job_type = ? AND dedupe_key = ?`,
-      [jobType, resolvedKey],
-    );
-    const eventType = status === 'processing' ? 'started' : status;
-    if (pipelineMetrics) {
-      await pipelineMetrics.record(jobType, eventType, resolvedKey, {
-        eventKey: `${jobType}:${eventType}:${resolvedKey}:${job?.attempt_count || 0}:${job?.last_completed_at || job?.updated_at || nowUtc()}`,
-      });
-    }
-    if (jobType === 'ai_analysis' && status === 'completed' && job?.status === 'pending') {
-      // Evidence arrived while this inference was running. The queue retained
-      // one coalesced rerun request; wake launchd after the completed run.
-      void signalAiWorkers('ai-rerun-pending');
-    }
-    if (
-      ['ai_analysis', 'incident_response_analysis'].includes(jobType)
-      && status === 'processing'
-      && job?.status === 'processing'
-    ) {
-      // The payload can be replaced by a coalescing enqueue after a worker's
-      // read-only selection but before this lease is acquired. Bind every AI
-      // worker to the exact durable-job snapshot that the lease claimed.
-      claim = {
-        ...(exactClaim ? {job_id: Number(job.id || 0)} : {}),
-        job_type: jobType,
-        dedupe_key: resolvedKey,
-        payload: incidentReanalysisJobPayload(job),
-      };
-    }
-    if (jobType === 'incident_response_analysis') {
-      const progressLeaseToken = leaseToken || transition?.leaseToken || '';
-      const progress = await updateIncidentReanalysisProgress({
-        job,
-        requestedStatus: status,
-        error,
-        leaseToken: progressLeaseToken,
-        groupId: resolvedKey,
-        newLease: status === 'processing' && !leaseToken,
-      });
-      if (
-        status === 'completed'
-        && job?.status === 'pending'
-        && await retireSupersededIncidentReanalysisJob({
-          ...job,
-          job_type: jobType,
-          dedupe_key: resolvedKey,
-        })
-      ) {
-        job.status = 'completed';
-      }
-      if (status === 'processing' && job?.status === 'processing') {
-        claim = {
-          ...claim,
-          reanalysis_attempt_id: progress?.attempt_id || null,
-          reanalysis_run_id: progress?.run_id || null,
-          case_id: progress?.case_id || null,
-        };
-      }
-      const agentStatus = {
-        pending: 'queued',
-        processing: 'analyzing',
-        completed: 'analyzed',
-        failed: 'failed',
-      }[job?.status] || 'queued';
-      const caseRow = await get('SELECT case_id FROM incident_response_cases WHERE group_id = ?', [resolvedKey]);
-      if (caseRow?.case_id) {
-        await run(
-          `UPDATE incident_response_cases
-           SET agent_status = ?, latest_error = ?, updated_at = ?
-           WHERE case_id = ?`,
-          [agentStatus, job?.status === 'failed' ? safeString(error, 1000) : null, nowUtc(), caseRow.case_id],
-        );
-      }
-      if (status === 'completed' && job?.status === 'pending') {
-        void signalAiWorkers('incident-response-rerun-pending');
-      }
-    }
-    if (
-      controlledEvaluationMode
-      && status === 'completed'
-      && job?.status !== 'completed'
-    ) {
-      throw incidentIdentityConflict(
-        'controlled evaluation completion unexpectedly queued another run',
-      );
-    }
-  }
-  return {
-    updated,
-    resolvedKey,
-    leaseToken: transition?.leaseToken || null,
-    claim,
-  };
 }
 
 async function recoverExpiredDurableJobs() {
@@ -7966,6 +7677,26 @@ const durableJobRecovery = createDurableJobRecovery({
   signalAiWorkers,
   drainEnrichmentJobs,
   drainPostCommitJobs: drainN8nPostCommitJobs,
+});
+const durableJobTransitionExecutor = createDurableJobTransitionExecutor({
+  controlledEvaluationMode,
+  parseClaimIdentity: controlledJobClaimIdentity,
+  stableGroupIdPattern,
+  identityConflict: incidentIdentityConflict,
+  get,
+  run,
+  safeString,
+  incidentReanalysisJobPayload,
+  controlledRuntimeReleaseId,
+  incidentReanalysisAttemptId,
+  aiAnalysisLeaseSeconds,
+  nowUtc,
+  durableJobs: () => durableJobs,
+  pipelineMetrics: () => pipelineMetrics,
+  retireCompletedIncidentReanalysisJob,
+  retireSupersededIncidentReanalysisJob,
+  updateIncidentReanalysisProgress,
+  signalAiWorkers,
 });
 
 async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppression, campaign = null) {

@@ -97,6 +97,7 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/services/controlled_job_transition.js" \
     "$ALERT_STORE_STAGE_DIR/services/controlled_result_admission.js" \
     "$ALERT_STORE_STAGE_DIR/services/durable_job_recovery.js" \
+    "$ALERT_STORE_STAGE_DIR/services/durable_job_transition_executor.js" \
     "$ALERT_STORE_STAGE_DIR/services/incident_analysis_completion.js" \
     "$ALERT_STORE_STAGE_DIR/services/incident_reanalysis_binding.js" \
     "$ALERT_STORE_STAGE_DIR/routes/health_routes.js" \
