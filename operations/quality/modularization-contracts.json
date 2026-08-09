@@ -38,6 +38,16 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_authorization_context.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_authorization_context.py",
+      "required_symbols": [
+        "AuthorizationContextSources",
+        "authorized_activity_context",
+        "canonical_authorized_activity_entry"
+      ]
+    },
+    {
       "path": "n8n/bin/prompt_builder_cli.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_builder_cli.py",

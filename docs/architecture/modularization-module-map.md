@@ -557,6 +557,16 @@ time bounds. Each relationship carries an interpretation limit and remains a
 lead rather than evidence of authorization or maliciousness. JSON decoding and
 row access are injected by the builder facade.
 
+`prompt_authorization_context.py` owns fail-closed operator-authorization
+normalization and projection. It validates bounded endpoint, rule, port,
+transport, and UTC time selectors; derives the exact selected event tuple;
+requires every tuple component to be covered; revalidates stored campaign
+membership against the current policy; and exposes only digest-bound canonical
+coverage plus bounded observations. Free-form authorization prose and operator
+identity never enter prompt evidence. Database connections, row queries, row
+access, alert parsing, and timestamp parsing remain injected by the builder
+facade, while missing schemas and malformed records yield no trusted evidence.
+
 `prompt_detection_context.py` owns ordered preparation of the exact detection
 group, deterministic investigation-skill selection, rule/playbook predicate
 validation, bounded packet features, and time-aware asset resolution. The

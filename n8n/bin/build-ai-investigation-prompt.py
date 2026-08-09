@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
-import ipaddress
 import json
 import os
 import re
@@ -58,6 +57,11 @@ from prompt_builder_cli import (
     PromptBuilderCliDefaults,
     PromptBuilderCliSources,
     parse_prompt_builder_args,
+)
+from prompt_authorization_context import (
+    AuthorizationContextSources,
+    authorized_activity_context as project_authorized_activity_context,
+    canonical_authorized_activity_entry as canonical_authorization_entry,
 )
 from prompt_correlation_context import (
     CorrelationContextSources,
@@ -1063,225 +1067,28 @@ def related_alerts(conn: sqlite3.Connection, selected: sqlite3.Row, limit: int, 
     return [dict(item) for item in found]
 
 
+def _authorization_context_sources() -> AuthorizationContextSources:
+    return AuthorizationContextSources(
+        row_value=sqlite_value,
+        parse_alert_json=parse_alert_json,
+        parse_datetime=parse_project_datetime,
+        query_row=row,
+        query_rows=rows,
+    )
+
+
 def authorized_activity_context(
     conn: sqlite3.Connection,
     selected: sqlite3.Row,
     limit: int = 500,
 ) -> dict[str, Any] | None:
-    """Return exact operator authorization and bounded campaign observations.
-
-    The alert-store owns this record. It is deliberately separate from asset
-    identity and model memory: an authorized source/rule/port/time tuple is
-    evidence of authorization only for that exact scope.
-    """
-    if conn is None:
-        return None
-    try:
-        campaign = conn.execute(
-            """
-            SELECT campaign.*
-            FROM authorized_activity_campaign_members AS member
-            JOIN authorized_activity_campaigns AS campaign
-              ON campaign.campaign_id = member.campaign_id
-            WHERE member.alert_id = ?
-            ORDER BY campaign.bucket_start DESC
-            LIMIT 1
-            """,
-            [selected["alert_id"]],
-        ).fetchone()
-    except sqlite3.OperationalError:
-        return None
-    if campaign is None:
-        return None
-    try:
-        authorization = json.loads(str(campaign["authorization_json"] or "{}"))
-    except (TypeError, ValueError):
-        authorization = {}
-    canonical_entry = canonical_authorized_activity_entry(
-        selected,
-        authorization,
-        policy_id=campaign["policy_id"],
-    )
-    if canonical_entry is None:
-        # Membership is not sufficient by itself.  Older, corrupt, or manually
-        # edited campaign rows must not become trusted authorization unless the
-        # stored policy scope still covers this exact selected event.
-        return None
-    observations = rows(
+    """Compatibility delegate for exact operator authorization evidence."""
+    return project_authorized_activity_context(
+        _authorization_context_sources(),
         conn,
-        """
-        SELECT alert_id, stable_group_id, destination_ip, destination_port,
-               observed_at
-        FROM authorized_activity_campaign_members
-        WHERE campaign_id = ?
-        ORDER BY observed_at ASC, alert_id ASC
-        LIMIT ?
-        """,
-        [campaign["campaign_id"], max(1, min(int(limit), 500))],
+        selected,
+        limit,
     )
-    return {
-        "status": "operator_authorized",
-        "entries": [canonical_entry],
-        "campaign_id": campaign["campaign_id"],
-        "policy_id": campaign["policy_id"],
-        "representative_alert_id": campaign["representative_alert_id"],
-        "representative_group_id": campaign["representative_group_id"],
-        "campaign_window": {
-            "start": campaign["bucket_start"],
-            "end": campaign["bucket_end"],
-        },
-        "first_seen": campaign["first_seen"],
-        "last_seen": campaign["last_seen"],
-        "member_count": int(campaign["member_count"] or 0),
-        "distinct_target_count": int(campaign["distinct_target_count"] or 0),
-        # Expose only the canonical selectors used for the decision.  Human
-        # names, free-form provenance, and policy prose are not required by the
-        # model or verdict guard and therefore stay out of the prompt.
-        "authorization": {
-            "status": "operator_authorized",
-            **canonical_entry["coverage"],
-        },
-        "observations": [dict(item) for item in observations],
-        "observations_truncated": len(observations) < int(campaign["member_count"] or 0),
-        "interpretation": (
-            "This is structured operator authorization only for the exact "
-            "source/destination endpoint selectors, rule, bounded port selectors, transport, and authorization "
-            "time bounds recorded above. It does not authorize a different "
-            "tuple and does not prove that every packet matched the approved task."
-        ),
-    }
-
-
-def _authorized_activity_exact_strings(
-    value: Any,
-    *,
-    required: bool,
-    validator: Any,
-) -> list[str]:
-    if (value is None or value == []) and not required:
-        return []
-    if not isinstance(value, list) or not value or len(value) > 100:
-        raise ValueError("authorization selector must be a bounded list")
-    result: list[str] = []
-    for item in value:
-        normalized = str(item or "").strip().lower()
-        if not normalized or not validator(normalized):
-            raise ValueError("authorization selector contains an invalid value")
-        if normalized not in result:
-            result.append(normalized)
-    return result
-
-
-def _authorized_activity_ports(
-    value: Any,
-    *,
-    required: bool = False,
-) -> list[int]:
-    if (value is None or value == []) and not required:
-        return []
-    if not isinstance(value, list) or not value or len(value) > 100:
-        raise ValueError("authorization port selector must be a bounded list")
-    result: list[int] = []
-    for item in value:
-        if isinstance(item, bool):
-            raise ValueError("authorization port is invalid")
-        try:
-            port = int(item)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("authorization port is invalid") from exc
-        if str(item).strip() != str(port) or not 1 <= port <= 65535:
-            raise ValueError("authorization port is invalid")
-        if port not in result:
-            result.append(port)
-    return result
-
-
-def _authorized_activity_port_ranges(value: Any) -> list[list[int]]:
-    if value is None or value == []:
-        return []
-    if not isinstance(value, list) or not value or len(value) > 20:
-        raise ValueError("authorization port ranges must be a bounded list")
-    result: list[list[int]] = []
-    for item in value:
-        if (
-            not isinstance(item, list)
-            or len(item) != 2
-            or any(isinstance(part, bool) for part in item)
-        ):
-            raise ValueError("authorization port range is invalid")
-        try:
-            start, end = (int(part) for part in item)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("authorization port range is invalid") from exc
-        if (
-            any(str(part).strip() != str(parsed) for part, parsed in zip(item, (start, end)))
-            or start < 1
-            or end > 65535
-            or start > end
-        ):
-            raise ValueError("authorization port range is invalid")
-        result.append([start, end])
-    return result
-
-
-def _authorization_event_tuple(selected: Any) -> dict[str, Any] | None:
-    alert = parse_alert_json(str(sqlite_value(selected, "alert_json") or ""))
-    source = alert.get("source") if isinstance(alert.get("source"), dict) else {}
-    destination = (
-        alert.get("destination")
-        if isinstance(alert.get("destination"), dict)
-        else {}
-    )
-    network = alert.get("network") if isinstance(alert.get("network"), dict) else {}
-    timestamp = None
-    for candidate in (
-        alert.get("timestamp"),
-        sqlite_value(selected, "timestamp"),
-        sqlite_value(selected, "last_seen"),
-        sqlite_value(selected, "first_seen"),
-    ):
-        timestamp = parse_project_datetime(candidate)
-        if timestamp is not None:
-            break
-    if timestamp is None:
-        return None
-
-    def selected_port(row_name: str, nested: Any) -> int | None:
-        raw = sqlite_value(selected, row_name)
-        raw = raw if raw is not None else nested
-        if isinstance(raw, bool):
-            return None
-        try:
-            port = int(raw)
-        except (TypeError, ValueError):
-            return None
-        return port if 1 <= port <= 65535 else None
-
-    return {
-        "timestamp": timestamp.astimezone(dt.timezone.utc),
-        "source_ip": str(
-            sqlite_value(selected, "source_ip") or source.get("ip") or ""
-        ).strip().lower(),
-        "destination_ip": str(
-            sqlite_value(selected, "destination_ip")
-            or destination.get("ip")
-            or ""
-        ).strip().lower(),
-        "source_port": selected_port("source_port", source.get("port")),
-        "destination_port": selected_port(
-            "destination_port", destination.get("port")
-        ),
-        "rule_id": str(
-            sqlite_value(selected, "rule_id") or alert.get("rule_id") or ""
-        ).strip().lower(),
-        "transport": str(
-            sqlite_value(selected, "transport_protocol")
-            or sqlite_value(selected, "network_protocol")
-            or network.get("transport")
-            or network.get("protocol")
-            or ""
-        ).strip().lower(),
-    }
 
 
 def canonical_authorized_activity_entry(
@@ -1290,123 +1097,13 @@ def canonical_authorized_activity_entry(
     *,
     policy_id: Any,
 ) -> dict[str, Any] | None:
-    """Bind stored operator authorization to one exact selected event.
-
-    This mirrors ``authorized_activity_policy.js`` rather than trusting mere
-    campaign membership.  Any malformed selector, unknown time, or tuple
-    mismatch fails closed and yields no trusted entry.
-    """
-    try:
-        if not isinstance(authorization, dict):
-            raise ValueError("authorization must be an object")
-        if str(authorization.get("status") or "").strip().lower() != "operator_authorized":
-            raise ValueError("authorization status is not trusted")
-        normalized_policy_id = str(policy_id or "").strip().lower()
-        stored_policy_id = str(authorization.get("policy_id") or "").strip().lower()
-        if (
-            not re.fullmatch(r"[a-z0-9][a-z0-9_-]{2,79}", normalized_policy_id)
-            or stored_policy_id != normalized_policy_id
-        ):
-            raise ValueError("authorization policy identity is invalid")
-        ip_validator = lambda item: bool(ipaddress.ip_address(item))
-        source_ips = _authorized_activity_exact_strings(
-            authorization.get("source_ips"),
-            required=False,
-            validator=ip_validator,
-        )
-        destination_ips = _authorized_activity_exact_strings(
-            authorization.get("destination_ips"),
-            required=False,
-            validator=ip_validator,
-        )
-        if not source_ips and not destination_ips:
-            raise ValueError("authorization requires an endpoint selector")
-        rule_ids = _authorized_activity_exact_strings(
-            authorization.get("rule_ids"),
-            required=True,
-            validator=lambda item: bool(re.fullmatch(r"[a-z0-9_.:-]{1,128}", item)),
-        )
-        source_ports = _authorized_activity_ports(
-            authorization.get("source_ports")
-        )
-        destination_ports = _authorized_activity_ports(
-            authorization.get("destination_ports")
-        )
-        destination_port_ranges = _authorized_activity_port_ranges(
-            authorization.get("destination_port_ranges")
-        )
-        if not destination_ports and not destination_port_ranges:
-            raise ValueError("authorization requires a destination port selector")
-        transport_protocols = _authorized_activity_exact_strings(
-            authorization.get("transport_protocols"),
-            required=True,
-            validator=lambda item: bool(re.fullmatch(r"[a-z0-9_.-]{1,32}", item)),
-        )
-        authorization_start = parse_project_datetime(
-            authorization.get("authorization_start")
-        )
-        authorization_end = parse_project_datetime(
-            authorization.get("authorization_end")
-        )
-        if (
-            authorization_start is None
-            or authorization_end is None
-            or authorization_end <= authorization_start
-        ):
-            raise ValueError("authorization time bounds are invalid")
-        authorization_start = authorization_start.astimezone(dt.timezone.utc)
-        authorization_end = authorization_end.astimezone(dt.timezone.utc)
-        event = _authorization_event_tuple(selected)
-        if event is None:
-            raise ValueError("selected event tuple is incomplete")
-        destination_port = event["destination_port"]
-        covered = (
-            authorization_start <= event["timestamp"] <= authorization_end
-            and (not source_ips or event["source_ip"] in source_ips)
-            and (not destination_ips or event["destination_ip"] in destination_ips)
-            and event["rule_id"] in rule_ids
-            and (not source_ports or event["source_port"] in source_ports)
-            and (
-                destination_port in destination_ports
-                or any(
-                    start <= destination_port <= end
-                    for start, end in destination_port_ranges
-                )
-            )
-            and event["transport"] in transport_protocols
-        )
-        if not covered:
-            raise ValueError("authorization does not cover selected event")
-    except (TypeError, ValueError):
-        return None
-
-    def iso_z(value: dt.datetime) -> str:
-        return value.isoformat(timespec="seconds").replace("+00:00", "Z")
-
-    coverage = {
-        "source_ips": source_ips,
-        "destination_ips": destination_ips,
-        "rule_ids": rule_ids,
-        "source_ports": source_ports,
-        "destination_ports": destination_ports,
-        "destination_port_ranges": destination_port_ranges,
-        "transport_protocols": transport_protocols,
-        "authorization_start": iso_z(authorization_start),
-        "authorization_end": iso_z(authorization_end),
-    }
-    digest = hashlib.sha256(
-        json.dumps(
-            {"coverage": coverage},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    return {
-        "authorized": True,
-        "source": "operator_assertion",
-        "evidence_ref": f"authorized-activity:sha256:{digest}",
-        "coverage": coverage,
-    }
+    """Compatibility delegate for exact authorization tuple binding."""
+    return canonical_authorization_entry(
+        _authorization_context_sources(),
+        selected,
+        authorization,
+        policy_id=policy_id,
+    )
 
 
 def _correlation_row_facts(

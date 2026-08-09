@@ -547,6 +547,7 @@ cp "$REPO_DIR/n8n/bin/migrate-assets-to-postgres.py" "$STACK_DIR/bin/migrate-ass
 cp "$REPO_DIR/n8n/bin/incident_evidence_contract.py" "$STACK_DIR/bin/incident_evidence_contract.py"
 cp "$REPO_DIR/n8n/bin/prompt_incident_evidence_projection.py" "$STACK_DIR/bin/prompt_incident_evidence_projection.py"
 cp "$REPO_DIR/n8n/bin/prompt_incident_grounding.py" "$STACK_DIR/bin/prompt_incident_grounding.py"
+cp "$REPO_DIR/n8n/bin/prompt_authorization_context.py" "$STACK_DIR/bin/prompt_authorization_context.py"
 cp "$REPO_DIR/n8n/bin/prompt_builder_cli.py" "$STACK_DIR/bin/prompt_builder_cli.py"
 cp "$REPO_DIR/n8n/bin/prompt_correlation_context.py" "$STACK_DIR/bin/prompt_correlation_context.py"
 cp "$REPO_DIR/n8n/bin/prompt_correlation_facts.py" "$STACK_DIR/bin/prompt_correlation_facts.py"
