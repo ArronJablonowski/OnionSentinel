@@ -76,6 +76,11 @@ from prompt_public_enrichment import (
     build_public_enrichment_context,
     compact_public_enrichment_record as project_public_enrichment_record,
 )
+from prompt_prior_analysis import (
+    PriorAnalysisRequest,
+    PriorAnalysisSources,
+    build_prior_analysis_context,
+)
 from prompt_correlation_context import (
     CorrelationContextSources,
     build_correlated_alert_context,
@@ -601,64 +606,21 @@ def prior_analysis_context(
     selected: sqlite3.Row,
     limit: int = 3,
 ) -> list[dict]:
-    alert_id = str(selected["alert_id"] or "")
-    found: list[dict] = []
-    stable_group_id = str(sqlite_value(selected, "stable_group_id") or "").strip()
-    try:
-        indexed = rows(
-            conn,
-            """
-            SELECT analysis_id, generated_at, model, model_path,
-                   detection_outcome, bluf, summary, confidence, artifact_path
-            FROM ai_analysis_runs
-            WHERE alert_id = ? OR (? <> '' AND group_id = ?)
-            ORDER BY generated_at DESC
-            LIMIT ?
-            """,
-            [alert_id, stable_group_id, stable_group_id, limit],
-        )
-    except sqlite3.Error:
-        indexed = []
-    for item in indexed:
-        found.append({
-            "analysis_id": item["analysis_id"],
-            "artifact": item["artifact_path"],
-            "generated_at": item["generated_at"],
-            "model": item["model"],
-            "model_path": item["model_path"],
-            "detection_outcome": item["detection_outcome"],
-            "bluf": item["bluf"],
-            "summary": item["summary"],
-            "confidence": item["confidence"],
-        })
-    if found:
-        return found
-    if not analysis_dir.exists():
-        return found
-    # Compatibility path for pre-index artifacts. The scan and each file read
-    # are bounded so a large historical corpus cannot monopolize one worker.
-    for path in sorted(analysis_dir.glob("*-local-ai-analysis.json"), reverse=True)[:LEGACY_ARTIFACT_SCAN_LIMIT]:
-        try:
-            payload = load_json_bounded(path)
-        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
-            continue
-        text = json.dumps(payload, sort_keys=True)
-        if alert_id not in text:
-            continue
-        result = payload.get("analysis") if isinstance(payload.get("analysis"), dict) else payload
-        found.append({
-            "artifact": str(path),
-            "generated_at": payload.get("generated_at") or result.get("generated_at"),
-            "model": payload.get("analysis_model") or payload.get("model"),
-            "detection_outcome": result.get("detection_outcome"),
-            "bluf": result.get("bluf"),
-            "summary": result.get("summary"),
-            "confidence": result.get("confidence"),
-            "tuning_recommendation": result.get("tuning_recommendation"),
-        })
-        if len(found) >= limit:
-            break
-    return found
+    """Compatibility delegate for indexed and legacy prior analyses."""
+    return build_prior_analysis_context(
+        PriorAnalysisSources(
+            row_value=sqlite_value,
+            query_rows=rows,
+            load_json_bounded=load_json_bounded,
+        ),
+        PriorAnalysisRequest(
+            connection=conn,
+            analysis_dir=analysis_dir,
+            selected=selected,
+            result_limit=limit,
+            legacy_scan_limit=LEGACY_ARTIFACT_SCAN_LIMIT,
+        ),
+    )
 
 
 def compact_pcap_analysis(record: dict) -> dict:

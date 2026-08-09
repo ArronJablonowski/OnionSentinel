@@ -41,6 +41,7 @@ HARDENED_BUILDER_DEPENDENCIES = (
     "prompt_package_compactor.py",
     "prompt_package_view_model.py",
     "prompt_pcap_evidence.py",
+    "prompt_prior_analysis.py",
     "prompt_public_enrichment.py",
     "prompt_response_contract.py",
 )

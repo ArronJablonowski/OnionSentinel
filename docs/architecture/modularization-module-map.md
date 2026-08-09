@@ -623,6 +623,15 @@ explicitly treat enrichment as reputation and context rather than sole proof
 of compromise. Group-row access and JSON parsing remain injected by the
 builder facade.
 
+`prompt_prior_analysis.py` owns bounded historical model-output projection.
+It prefers the indexed `ai_analysis_runs` record for the exact alert or stable
+group and only falls back to pre-index JSON artifacts when the index is empty
+or unavailable. The compatibility scan and admitted result count are explicit
+bounds, invalid or oversized artifacts are skipped, and indexed results remain
+authoritative whenever present. Database execution, row access, and bounded
+JSON loading remain injected by the builder facade; blind-reanalysis exclusion
+remains the responsibility of the historical snapshot orchestrator.
+
 `prompt_response_contract.py` owns the model-visible instruction and response
 schema contract. Static grounding, factored verdict fields, hypothesis and
 memory shapes, governed query-request schema, and the incident-response report
