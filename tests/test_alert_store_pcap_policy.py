@@ -9,6 +9,13 @@ ALERT_STORE = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
 HEALTH_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "health_service.js"
 PCAP_ROUTES = REPO_ROOT / "n8n" / "alert_store" / "routes" / "pcap_routes.js"
 PCAP_POLICY = REPO_ROOT / "n8n" / "alert_store" / "lib" / "pcap_policy.js"
+PCAP_TRANSFER_REPOSITORY = (
+    REPO_ROOT
+    / "n8n"
+    / "alert_store"
+    / "repositories"
+    / "pcap_transfer_repository.js"
+)
 SOC_ANALYSIS_POLICY = REPO_ROOT / "n8n" / "alert_store" / "lib" / "soc_analysis_policy.js"
 COMPOSE = REPO_ROOT / "n8n" / "docker-compose.yml"
 ENV_EXAMPLE = REPO_ROOT / "n8n" / ".env.example"
@@ -156,15 +163,20 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
     def test_singular_no_matching_packet_errors_are_normalized(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
         pcap_policy = PCAP_POLICY.read_text(encoding="utf-8")
+        transfer_repository = PCAP_TRANSFER_REPOSITORY.read_text(encoding="utf-8")
         self.assertIn("detail.includes('no matching packet')", pcap_policy)
         self.assertIn("outcome = 'failed'", code)
-        self.assertIn("requestedOutcome !== 'failed'", code)
+        self.assertIn("requestedOutcome !== 'failed'", transfer_repository)
 
     def test_large_transfer_progress_renews_claim_lease(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
+        transfer_repository = PCAP_TRANSFER_REPOSITORY.read_text(encoding="utf-8")
         routes = PCAP_ROUTES.read_text(encoding="utf-8")
         self.assertIn("ensureColumn('pcap_requests', 'transfer_progress_at', 'TEXT')", code)
-        self.assertIn("COALESCE(transfer_progress_at, claimed_at, updated_at, created_at)", code)
+        self.assertIn(
+            "COALESCE(transfer_progress_at, claimed_at, updated_at, created_at)",
+            transfer_repository,
+        )
         self.assertIn("post('/pcap/progress', 'progress')", routes)
         workflow = json.loads(PCAP_WORKFLOW.read_text(encoding="utf-8"))
         progress_webhook = next(node for node in workflow["nodes"] if node["name"] == "PCAP Progress Webhook")
@@ -172,12 +184,14 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
 
     def test_pcap_transfer_duration_is_persisted_and_backfilled(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
+        transfer_repository = PCAP_TRANSFER_REPOSITORY.read_text(encoding="utf-8")
         self.assertIn("ensureColumn('pcap_requests', 'transfer_duration_seconds', 'INTEGER')", code)
         self.assertIn("julianday(replace(completed_at, '  ', 'T'))", code)
-        self.assertIn("transfer_duration_seconds = CASE", code)
+        self.assertIn("transfer_duration_seconds = CASE", transfer_repository)
 
     def test_pcap_transfer_retries_are_durable_bounded_and_stage_aware(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
+        transfer_repository = PCAP_TRANSFER_REPOSITORY.read_text(encoding="utf-8")
         routes = PCAP_ROUTES.read_text(encoding="utf-8")
         for column in (
             "transfer_attempt_count",
@@ -188,9 +202,9 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
         ):
             self.assertIn(f"ensureColumn('pcap_requests', '{column}'", code)
         self.assertIn("PCAP_TRANSFER_MAX_ATTEMPTS", code)
-        self.assertIn("async function retryPcapRequest(payload)", code)
+        self.assertIn("async function retryRequest(payload)", transfer_repository)
         self.assertIn("post('/pcap/retry', 'retry')", routes)
-        self.assertIn("retry_scheduled: !exhausted", code)
+        self.assertIn("retry_scheduled: !exhausted", transfer_repository)
         self.assertIn("p.next_attempt_at IS NULL", code)
 
     def test_pcap_proxy_workflow_includes_generated_retry_route(self) -> None:
