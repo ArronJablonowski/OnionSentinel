@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -712,8 +713,7 @@ def canonical_payload_digest(value: Any) -> str:
 
 
 def active_analysis_record_path(run_id: object, active_dir: Path | None = None) -> Path:
-    directory = active_dir if active_dir is not None else DEFAULT_LLM_ACTIVE_DIR
-    return _runtime_io().active_analysis_record_path(run_id, directory)
+    return _runtime_io().active_analysis_record_path(run_id, active_dir if active_dir is not None else DEFAULT_LLM_ACTIVE_DIR)
 
 
 def append_jsonl(path: Path, data: dict[str, Any]) -> None:
