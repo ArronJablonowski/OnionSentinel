@@ -574,6 +574,12 @@ It requires successful dynamic read-only evidence, exact audit-to-ledger
 identity and digest equality, and Security Onion query evidence for Incident
 Responder runs before producing the tool portion of an execution proof.
 
+`operations/cohort_execution_trace.py` owns harness run identity, execution
+status, role/task/correlation/alert binding, assigned routes, hash-chain and
+terminal-ledger integrity, response commit digests, and dispatch-to-completion
+timestamp ordering. It returns validated terminal evidence without performing
+database access or rendering the final cohort proof.
+
 `prompt_incident_evidence_projection.py` owns the model-facing, in-memory
 projection of already-validated incident evidence. It applies deterministic
 prefix limits to Elastic hits and OSQuery rows, records source and retained

@@ -114,6 +114,17 @@
       ]
     },
     {
+      "path": "operations/cohort_execution_trace.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_execution_trace.py",
+      "required_symbols": [
+        "TraceExecutionPolicy",
+        "TraceExecutionExpectation",
+        "TraceExecutionEvidence",
+        "evaluate_trace_execution"
+      ]
+    },
+    {
       "path": "n8n/bin/run-local-ai-analysis.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/run-local-ai-analysis.py",

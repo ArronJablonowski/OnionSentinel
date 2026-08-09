@@ -97,6 +97,11 @@ from cohort_execution_skills import (
     validate_skill_attestation,
 )
 from cohort_execution_tools import evaluate_tool_execution
+from cohort_execution_trace import (
+    TraceExecutionExpectation,
+    TraceExecutionPolicy,
+    evaluate_trace_execution,
+)
 
 
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -2813,45 +2818,35 @@ def _harness_execution_proof(
     )
     if not skill_attestation_valid:
         failures.append("harness-skill-selection-attestation-invalid")
-    if str(trace.get("run_id") or "") != analysis_id:
-        failures.append("harness-run-analysis-binding-failed")
-    if str(trace.get("status") or "") != "succeeded":
-        failures.append("harness-run-not-succeeded")
-    if str(trace.get("stage") or "") != "complete":
-        failures.append("harness-run-not-complete")
-    if str(trace.get("role") or "") != role:
-        failures.append("harness-role-mismatch")
     dispatch_kind = str(dispatch.get("kind") or "")
-    if str(trace.get("task_kind") or "") != _expected_task_kind(
-        role,
-        dispatch_kind,
-    ):
-        failures.append("harness-task-kind-mismatch")
-    if str(trace.get("correlation_id") or "") != str(
-        member.get("stable_group_id") or ""
-    ):
-        failures.append("harness-stable-group-binding-failed")
-    if str(trace.get("alert_id") or "") != str(
-        member.get("representative_alert_id") or ""
-    ):
-        failures.append("harness-alert-binding-failed")
-    if str(trace.get("policy_mode") or "") != str(
-        contract.get("harness_mode") or ""
-    ):
-        failures.append("harness-mode-mismatch")
-    if str(trace.get("assigned_route") or "") != expected_route:
-        failures.append("harness-assigned-route-mismatch")
-    if (
-        str(trace.get("assigned_reviewer_route") or "")
-        != expected_reviewer_route
-    ):
-        failures.append("harness-reviewer-route-mismatch")
-    if not integrity.get("valid"):
-        failures.append("harness-chain-invalid")
-    if not integrity.get("ledger_manifest_bound"):
-        failures.append("harness-terminal-ledger-unbound")
-    if int(models.get("successful_primary_call_count") or 0) < 1:
-        failures.append("harness-primary-model-call-missing")
+    trace_execution = evaluate_trace_execution(
+        trace_report,
+        trace,
+        models,
+        analysis,
+        TraceExecutionExpectation(
+            analysis_id=analysis_id,
+            role=role,
+            task_kind=_expected_task_kind(role, dispatch_kind),
+            stable_group_id=str(member.get("stable_group_id") or ""),
+            representative_alert_id=str(
+                member.get("representative_alert_id") or ""
+            ),
+            harness_mode=str(contract.get("harness_mode") or ""),
+            assigned_route=expected_route,
+            reviewer_route=expected_reviewer_route,
+        ),
+        TraceExecutionPolicy(
+            timestamp_error=CohortError,
+            parse_timestamp=_parse_timestamp,
+            sha256_pattern=SHA256_RE,
+        ),
+        dispatch_started=dispatch_started,
+        analysis_generated=analysis_generated,
+    )
+    failures.extend(trace_execution.failures)
+    integrity = trace_execution.integrity
+    terminal = trace_execution.terminal
     model_execution = evaluate_model_execution(
         trace,
         models,
@@ -2900,48 +2895,12 @@ def _harness_execution_proof(
     read_only_tool_call_count = tool_execution.read_only_tool_call_count
     trace_bindings = tool_execution.trace_bindings
     trace_binding_digest = tool_execution.trace_binding_digest
-    if trace_report.get("data_quality", {}).get("malformed_json_counts"):
-        failures.append("harness-trace-malformed-json")
-    if terminal.get("evaluation_memory_frozen") is not True:
-        failures.append("harness-memory-freeze-not-attested")
-    if str(terminal.get("analysis_id") or "") != analysis_id:
-        failures.append("harness-terminal-analysis-binding-failed")
-    canonical_response_sha256 = str(
-        analysis.get("response_canonical_sha256") or ""
+    canonical_response_sha256 = (
+        trace_execution.canonical_response_sha256
     )
-    submitted_response_sha256 = str(
-        terminal.get("submitted_response_sha256") or ""
+    submitted_response_sha256 = (
+        trace_execution.submitted_response_sha256
     )
-    stored_response_sha256 = str(
-        terminal.get("stored_response_sha256") or ""
-    )
-    # The alert store deliberately normalizes timestamp strings before
-    # persistence. Consequently the pre-normalization submitted response may
-    # have a different canonical digest. Its digest is still hash-chain bound
-    # in the terminal event; only the commit receipt's stored digest can be
-    # compared to the canonical response read back from ai_analysis_runs.
-    if not SHA256_RE.fullmatch(submitted_response_sha256):
-        failures.append("harness-terminal-submitted-response-digest-invalid")
-    if (
-        not SHA256_RE.fullmatch(stored_response_sha256)
-        or stored_response_sha256 != canonical_response_sha256
-    ):
-        failures.append("harness-terminal-stored-response-digest-mismatch")
-    try:
-        harness_started = _parse_timestamp(
-            trace.get("started_at"),
-            "harness started_at",
-        )
-        harness_completed = _parse_timestamp(
-            trace.get("completed_at"),
-            "harness completed_at",
-        )
-        if dispatch_started and harness_started < dispatch_started:
-            failures.append("harness-run-predates-dispatch")
-        if analysis_generated and harness_completed < analysis_generated:
-            failures.append("harness-completed-before-analysis")
-    except CohortError:
-        failures.append("harness-timestamp-invalid")
 
     if failures:
         raise CohortError(

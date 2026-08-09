@@ -17,6 +17,7 @@ if str(OPERATIONS) not in sys.path:
 import cohort_execution_models  # noqa: E402
 import cohort_execution_skills  # noqa: E402
 import cohort_execution_tools  # noqa: E402
+import cohort_execution_trace  # noqa: E402
 
 
 def load_legacy_cohort():
@@ -44,6 +45,10 @@ class CohortExecutionAttestationBoundaryTests(unittest.TestCase):
         self.assertIs(
             legacy.evaluate_tool_execution,
             cohort_execution_tools.evaluate_tool_execution,
+        )
+        self.assertIs(
+            legacy.evaluate_trace_execution,
+            cohort_execution_trace.evaluate_trace_execution,
         )
 
     def test_skill_projection_rejects_extra_identity_fields(self):
