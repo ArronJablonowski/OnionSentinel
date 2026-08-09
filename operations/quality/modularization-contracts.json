@@ -853,6 +853,18 @@
       ]
     },
     {
+      "path": "n8n/bin/local_ai_query_dependency_compat.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/local_ai_query_dependency_compat.py",
+      "required_symbols": [
+        "_query_audit_dependencies",
+        "_query_execution_runtime_adapter",
+        "_query_prompt_admission_dependencies",
+        "_query_security_onion_dependencies",
+        "_query_window"
+      ]
+    },
+    {
       "path": "n8n/bin/local_ai_runtime_compat.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/local_ai_runtime_compat.py",

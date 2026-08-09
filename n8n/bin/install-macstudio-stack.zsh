@@ -611,6 +611,7 @@ cp "$REPO_DIR/n8n/bin/install-ai-runtime-package.py" "$STACK_DIR/bin/install-ai-
 cp "$REPO_DIR/n8n/bin/local_ai_pipeline_adapters.py" "$STACK_DIR/bin/local_ai_pipeline_adapters.py"
 cp "$REPO_DIR/n8n/bin/local_ai_compatibility_facade.py" "$STACK_DIR/bin/local_ai_compatibility_facade.py"
 cp "$REPO_DIR/n8n/bin/local_ai_dependency_compat.py" "$STACK_DIR/bin/local_ai_dependency_compat.py"
+cp "$REPO_DIR/n8n/bin/local_ai_query_dependency_compat.py" "$STACK_DIR/bin/local_ai_query_dependency_compat.py"
 cp "$REPO_DIR/n8n/bin/local_ai_runtime_compat.py" "$STACK_DIR/bin/local_ai_runtime_compat.py"
 cp "$REPO_DIR/n8n/bin/local_ai_runtime_contract.py" "$STACK_DIR/bin/local_ai_runtime_contract.py"
 cp "$REPO_DIR/n8n/bin/local_ai_analysis_contract.py" "$STACK_DIR/bin/local_ai_analysis_contract.py"

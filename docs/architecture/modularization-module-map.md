@@ -106,6 +106,10 @@ line ranges below remain historical navigation aids for the extraction ledger.
   primary-execution, and evidence package loaders plus their policy/dependency
   bindings. It is installed through the same facade-global seam and contains no
   provider execution, evidence mutation, or persistence policy.
+- `n8n/bin/local_ai_query_dependency_compat.py` owns legacy investigation-query
+  package loaders and their policy/dependency binding records. Execution,
+  authorization, provenance, prompt-budget, and repair behavior remain in the
+  package modules; the compatibility layer only supplies the historical ports.
 - Concrete Markdown rendering and atomic output-publication binding now live
   in `local_ai_pipeline_adapters.write_outputs`; the runner transaction port
   delegates directly and no longer retains `render_markdown` or
