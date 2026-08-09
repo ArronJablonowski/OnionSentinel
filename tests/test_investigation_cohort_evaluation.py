@@ -30,6 +30,7 @@ import cohort_evaluation_contracts  # noqa: E402
 import cohort_evaluation_private_input  # noqa: E402
 import cohort_evaluation_result_loader  # noqa: E402
 import cohort_evaluation_api  # noqa: E402
+import cohort_evaluation_service  # noqa: E402
 import cohort_evaluation_result_policy  # noqa: E402
 import cohort_execution_result  # noqa: E402
 
@@ -107,6 +108,17 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         self.assertIs(
             evaluator.run_cohort_evaluation,
             cohort_evaluation_api.evaluate_cohorts,
+        )
+
+    def test_cli_is_thin_service_facade(self) -> None:
+        self.assertLessEqual(len(MODULE_PATH.read_text().splitlines()), 250)
+        self.assertIs(
+            evaluator.evaluate_cohorts,
+            cohort_evaluation_service.evaluate_cohorts,
+        )
+        self.assertIs(
+            evaluator.CohortEvaluationError,
+            cohort_evaluation_service.CohortEvaluationError,
         )
 
     def setUp(self) -> None:

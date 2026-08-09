@@ -270,6 +270,19 @@
       ]
     },
     {
+      "path": "operations/cohort_evaluation_service.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_evaluation_service.py",
+      "required_symbols": [
+        "CohortEvaluationError",
+        "evaluate_cohorts",
+        "load_result_export",
+        "validate_adjudication",
+        "render_markdown",
+        "write_private_json"
+      ]
+    },
+    {
       "path": "operations/trace_evaluation_skills.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/trace_evaluation_skills.py",

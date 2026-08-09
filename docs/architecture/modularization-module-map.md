@@ -740,6 +740,12 @@ cohort identity, loads independent adjudication, binds stable groups, builds
 role reports, and assembles the final report without parsing CLI arguments or
 writing output files.
 
+`operations/cohort_evaluation_service.py` configures the canonical contracts,
+admission policies, scoring policy, API ports, and bounded report adapters. The
+160-line `evaluate-investigation-cohort.py` executable is now only argument
+parsing, API invocation, output selection, summary printing, and exit status;
+its compatibility facade delegates the prior import surface to this service.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental
