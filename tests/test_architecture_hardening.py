@@ -42,22 +42,33 @@ class ArchitectureHardeningTest(unittest.TestCase):
         self.assertIn("no-new-privileges:true", compose)
 
     def test_alert_store_exposes_operational_metrics(self):
-        code = (ROOT / "n8n/alert_store/alert_store.js").read_text(encoding="utf-8")
-        self.assertIn("async function operationalMetricsSnapshot", code)
-        self.assertIn("'/metrics'", code)
-        self.assertIn("oldest_pending_job_seconds", code)
-        self.assertIn("oldest_pending_jobs", code)
-        self.assertIn("latest_completed_jobs", code)
-        self.assertIn("oldest_pending_pcap_seconds", code)
-        self.assertIn("MIN(COALESCE(updated_at, created_at))", code)
-        self.assertIn("ingest_latency_ms_average", code)
+        routes = (
+            ROOT / "n8n/alert_store/routes/health_routes.js"
+        ).read_text(encoding="utf-8")
+        service = (
+            ROOT / "n8n/alert_store/services/health_service.js"
+        ).read_text(encoding="utf-8")
+        repository = (
+            ROOT / "n8n/alert_store/repositories/health_repository.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn("path: '/metrics'", routes)
+        self.assertIn("async function metricsSnapshot", service)
+        self.assertIn("oldest_pending_job_seconds", service)
+        self.assertIn("oldest_pending_jobs", service)
+        self.assertIn("latest_completed_jobs", service)
+        self.assertIn("oldest_pending_pcap_seconds", service)
+        self.assertIn("MIN(COALESCE(updated_at, created_at))", repository)
+        self.assertIn("ingest_latency_ms_average", service)
 
     def test_group_alias_is_refreshed_with_each_group_summary(self):
-        code = (ROOT / "n8n/alert_store/alert_store.js").read_text(encoding="utf-8")
+        code = (
+            ROOT / "n8n/alert_store/services/alert_group_service.js"
+        ).read_text(encoding="utf-8")
         summary = code[code.index("async function refreshAlertGroupSummary"):]
         summary = summary[:summary.index("async function rebuildAlertGroupSummariesUnlocked")]
         self.assertIn("INSERT INTO alert_group_alias", summary)
-        self.assertIn("DELETE FROM alert_group_alias", summary)
+        self.assertIn("await removeEmptyGroup(groupId)", summary)
+        self.assertIn("DELETE FROM alert_group_alias", code)
 
     def test_ai_launch_agent_does_not_override_settings_model(self):
         plist = (ROOT / "n8n/launchd/com.arron.soc.ai-analysis.plist").read_text(encoding="utf-8")
@@ -132,9 +143,17 @@ class ArchitectureHardeningTest(unittest.TestCase):
             installer.index("if ! start_ai_deployment_guard"),
             installer.index("critical_launch_agents_down\n"),
         )
-        self.assertIn(
-            "release_ai_deployment_guard\n  return $exit_code",
-            installer,
+        failure_cleanup = installer[
+            installer.index("keep_critical_agents_down_on_failure()"):
+            installer.index("trap keep_critical_agents_down_on_failure EXIT")
+        ]
+        self.assertLess(
+            failure_cleanup.index("release_ai_deployment_guard"),
+            failure_cleanup.index("cleanup_alert_store_stage"),
+        )
+        self.assertLess(
+            failure_cleanup.index("cleanup_alert_store_stage"),
+            failure_cleanup.index("return $exit_code"),
         )
         self.assertIn("for attempt in {1..20}", installer)
 

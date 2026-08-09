@@ -20,6 +20,7 @@ PCAP_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "pcap_service.js
 ENRICHMENT_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "enrichment_service.js"
 ALERT_INGEST_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "alert_ingest_service.js"
 NOTIFICATION_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "notification_service.js"
+ALERT_GROUP_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "alert_group_service.js"
 ANALYST_REVIEW_POLICY = REPO_ROOT / "n8n" / "alert_store" / "lib" / "analyst_review_policy.js"
 
 
@@ -41,6 +42,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.enrichment_service = ENRICHMENT_SERVICE.read_text(encoding="utf-8")
         cls.alert_ingest_service = ALERT_INGEST_SERVICE.read_text(encoding="utf-8")
         cls.notification_service = NOTIFICATION_SERVICE.read_text(encoding="utf-8")
+        cls.alert_group_service = ALERT_GROUP_SERVICE.read_text(encoding="utf-8")
         cls.analyst_review_policy = ANALYST_REVIEW_POLICY.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
@@ -236,7 +238,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("transitionDurableJobStatus(", self.code)
 
     def test_summary_rebuild_uses_one_windowed_scan(self) -> None:
-        rebuild = self.code.split("async function rebuildAlertGroupSummariesUnlocked()", 1)[1].split(
+        rebuild = self.alert_group_service.split("async function rebuildAlertGroupSummariesUnlocked()", 1)[1].split(
             "async function rebuildAlertGroupSummaries()", 1
         )[0]
         self.assertIn("ROW_NUMBER() OVER", rebuild)
