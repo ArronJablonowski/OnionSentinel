@@ -889,6 +889,18 @@
       ]
     },
     {
+      "path": "n8n/bin/local_ai_investigation_compat.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/local_ai_investigation_compat.py",
+      "required_symbols": [
+        "InvestigationQueryError",
+        "collect_security_onion_pivots",
+        "investigation_query_repair_scope",
+        "normalize_investigation_query_request",
+        "validate_derived_query_evidence"
+      ]
+    },
+    {
       "path": "n8n/bin/local_ai_query_dependency_compat.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/local_ai_query_dependency_compat.py",

@@ -90,6 +90,11 @@ class LocalAiRuntimeContractTests(unittest.TestCase):
             vars(self.runner),
         )
         self.assertIs(self.runner.model_safe_copy.__globals__, vars(self.runner))
+        self.assertIs(
+            self.runner.apply_investigation_query_loop.__globals__,
+            vars(self.runner),
+        )
+        self.assertIsNone(self.runner._PIVOT_COLLECTOR_MODULE)
         self.assertIsNot(self.runner.atomic_write_json, runtime_compat.atomic_write_json)
         runtime_io = mock.Mock()
         with mock.patch.object(self.runner, "_runtime_io", return_value=runtime_io):

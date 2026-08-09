@@ -122,6 +122,12 @@ line ranges below remain historical navigation aids for the extraction ledger.
   immutable evidence-reference, and reviewer-catalog compatibility delegates.
   It binds only package-owned evidence/review behavior and carries no collector,
   query-execution, or transport implementation.
+- `n8n/bin/local_ai_investigation_compat.py` owns supporting provider-neutral
+  investigation-query normalization, audit, prompt-admission, and repair
+  delegates. The runner retains only the two statically verified execution and
+  bounded-loop composition delegates. Every path calls package-owned policy and
+  runtime adapters; the module retains the mutable pivot-loader slot solely for
+  exact test and pinned-runtime compatibility.
 - Concrete Markdown rendering and atomic output-publication binding now live
   in `local_ai_pipeline_adapters.write_outputs`; the runner transaction port
   delegates directly and no longer retains `render_markdown` or
