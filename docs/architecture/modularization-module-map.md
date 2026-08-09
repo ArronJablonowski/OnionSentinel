@@ -576,6 +576,13 @@ dynamic read-only query evidence, Incident Responder Security Onion coverage,
 and response/chain digests. It receives canonical hashing and model-call proof
 validation as ports and performs no trace, database, or network access.
 
+`operations/cohort_evaluation_execution_admission.py` owns exact fresh-analysis
+admission, accepted-once proof, primary and reviewer response-route binding,
+public proof identity, harness identity, and dispatch/run timestamp freshness.
+Prior-analysis lookup, digest verification, task-kind derivation, and timestamp
+parsing are injected, leaving the module independent of persistence and CLI
+concerns.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

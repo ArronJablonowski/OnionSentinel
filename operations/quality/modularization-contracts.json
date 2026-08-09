@@ -115,6 +115,19 @@
       ]
     },
     {
+      "path": "operations/cohort_evaluation_execution_admission.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_evaluation_execution_admission.py",
+      "required_symbols": [
+        "ExecutionAdmission",
+        "admit_fresh_analysis",
+        "validate_response_binding",
+        "admit_public_proof",
+        "validate_harness_identity",
+        "validate_harness_freshness"
+      ]
+    },
+    {
       "path": "operations/cohort_execution_models.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_execution_models.py",

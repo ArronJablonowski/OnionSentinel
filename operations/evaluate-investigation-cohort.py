@@ -90,6 +90,14 @@ from cohort_evaluation_harness_gate import (
     HarnessGatePolicy,
     validate_harness_gate,
 )
+from cohort_evaluation_execution_admission import (
+    ExecutionAdmission,
+    admit_fresh_analysis,
+    admit_public_proof,
+    validate_harness_freshness,
+    validate_harness_identity,
+    validate_response_binding,
+)
 
 
 RESULT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v4"
@@ -829,167 +837,22 @@ def _validate_skill_selection_attestation_proof(
     )
 
 
-def _validate_execution_proof(
+def _validate_query_bound_harness(
     *,
-    member: Mapping[str, Any],
+    harness: Mapping[str, Any],
+    admission: ExecutionAdmission,
     role: str,
-    contract: Mapping[str, Any],
-    cohort_id: str,
-    frozen_plan_sha256: str,
+    canonical_response_sha256: str,
     label: str,
-) -> dict[str, Any]:
-    result = member.get("result")
-    analysis = (
-        result.get("analysis")
-        if isinstance(result, dict)
-        and isinstance(result.get("analysis"), dict)
-        else {}
-    )
-    analysis_result = (
-        analysis.get("result")
-        if isinstance(analysis.get("result"), dict)
-        else {}
-    )
-    analysis_id = str(analysis.get("analysis_id") or "")
-    if (
-        not isinstance(result, dict)
-        or str(result.get("state") or "") != "completed"
-        or not analysis_id
-        or str(result.get("analysis_id") or "") != analysis_id
-    ):
-        raise CohortEvaluationError(
-            f"{label} is not one exact completed analysis"
-        )
-    if analysis_id in _prior_analysis_ids(member):
-        raise CohortEvaluationError(f"{label} reuses an old analysis ID")
-    dispatch = (
-        member.get("dispatch")
-        if isinstance(member.get("dispatch"), dict)
-        else {}
-    )
-    if (
-        dispatch.get("state") != "accepted"
-        or int(dispatch.get("attempt_count") or 0) != 1
-    ):
-        raise CohortEvaluationError(
-            f"{label} was not accepted exactly once"
-        )
-    dispatch_started = _parse_timestamp(
-        dispatch.get("started_at"),
-        f"{label} dispatch started_at",
-    )
-    generated_at = _parse_timestamp(
-        analysis.get("generated_at"),
-        f"{label} analysis generated_at",
-    )
-    if generated_at < dispatch_started:
-        raise CohortEvaluationError(f"{label} predates its dispatch")
-    _validate_durable_job_proof(
-        member=member,
-        result=result,
-        analysis=analysis,
-        contract=contract,
-        cohort_id=cohort_id,
-        frozen_plan_sha256=frozen_plan_sha256,
-        label=label,
-    )
-    if str(analysis.get("agent_role") or "") != role:
-        raise CohortEvaluationError(f"{label} agent role does not match")
-    expected_route = str(contract["expected_assigned_route"])
-    if (
-        str(analysis_result.get("_analysis_model_route") or "")
-        != expected_route
-        or analysis_result.get("_analysis_evaluation_memory_frozen")
-        is not True
-    ):
-        raise CohortEvaluationError(
-            f"{label} response route/freeze attestation does not match"
-        )
-    expected_reviewer_route = str(contract["expected_reviewer_route"])
-    second_opinion = (
-        analysis_result.get("_second_opinion")
-        if isinstance(analysis_result.get("_second_opinion"), dict)
-        else {}
-    )
-    reviewer_response = (
-        second_opinion.get("response")
-        if isinstance(second_opinion.get("response"), dict)
-        else {}
-    )
-    if (
-        second_opinion.get("status") != "completed"
-        or second_opinion.get("model_route") != expected_reviewer_route
-        or reviewer_response.get("_analysis_model_route")
-        != expected_reviewer_route
-    ):
-        raise CohortEvaluationError(
-            f"{label} response reviewer route attestation does not match"
-        )
-    canonical_response_sha256 = str(
-        analysis.get("response_canonical_sha256") or ""
-    )
-    if not SHA256_RE.fullmatch(canonical_response_sha256):
-        raise CohortEvaluationError(
-            f"{label} canonical response digest is missing"
-        )
-
-    proof = member.get("execution_proof")
-    if not isinstance(proof, dict):
-        raise CohortEvaluationError(f"{label} has no execution proof")
-    _validate_embedded_digest(proof, "proof_sha256")
-    if (
-        proof.get("status") != "passed"
-        or proof.get("fresh_analysis") is not True
-        or proof.get("dispatch_accepted_once") is not True
-        or str(proof.get("analysis_id") or "") != analysis_id
-        or str(proof.get("release_id") or "")
-        != str(contract["expected_release_id"])
-    ):
-        raise CohortEvaluationError(f"{label} execution proof did not pass")
-    proof_generated = _parse_timestamp(
-        proof.get("analysis_generated_at"),
-        f"{label} proof generated_at",
-    )
-    if proof_generated != generated_at:
-        raise CohortEvaluationError(
-            f"{label} proof generated_at does not match the analysis"
-        )
-    harness = proof.get("harness")
-    if not isinstance(harness, dict):
-        raise CohortEvaluationError(f"{label} has no harness proof")
-    _validate_skill_selection_attestation_proof(harness, label)
-    expected_harness = {
-        "run_id": analysis_id,
-        "status": "succeeded",
-        "stage": "complete",
-        "role": role,
-        "task_kind": _expected_task_kind(
-            role,
-            str(dispatch.get("kind") or ""),
-        ),
-        "policy_mode": "shadow",
-        "assigned_route": expected_route,
-        "assigned_reviewer_route": str(
-            contract["expected_reviewer_route"]
-        ),
-        "stable_group_id": str(member.get("stable_group_id") or ""),
-        "representative_alert_id": str(
-            member.get("representative_alert_id") or ""
-        ),
-    }
-    for field, expected in expected_harness.items():
-        if str(harness.get(field) or "") != str(expected):
-            raise CohortEvaluationError(
-                f"{label} harness {field} does not match"
-            )
-    query_audit_binding = _query_audit_execution_binding(analysis)
-    if harness.get("query_audit") != query_audit_binding:
+) -> None:
+    query_audit = _query_audit_execution_binding(admission.analysis)
+    if harness.get("query_audit") != query_audit:
         raise CohortEvaluationError(
             f"{label} collector query-audit binding does not match"
         )
     validate_harness_gate(
         harness=harness,
-        query_audit=query_audit_binding,
+        query_audit=query_audit,
         role=role,
         canonical_response_sha256=canonical_response_sha256,
         label=label,
@@ -1000,18 +863,93 @@ def _validate_execution_proof(
         ),
         error=CohortEvaluationError,
     )
-    harness_started = _parse_timestamp(
-        harness.get("started_at"),
-        f"{label} harness started_at",
+
+
+def _admit_execution_harness(
+    *,
+    member: Mapping[str, Any],
+    admission: ExecutionAdmission,
+    role: str,
+    contract: Mapping[str, Any],
+    label: str,
+) -> tuple[Mapping[str, Any], Mapping[str, Any], str]:
+    response_sha256 = validate_response_binding(
+        admission=admission,
+        role=role,
+        contract=contract,
+        digest_pattern=SHA256_RE,
+        label=label,
+        error=CohortEvaluationError,
     )
-    harness_completed = _parse_timestamp(
-        harness.get("completed_at"),
-        f"{label} harness completed_at",
+    proof, harness = admit_public_proof(
+        member=member,
+        admission=admission,
+        contract=contract,
+        label=label,
+        validate_embedded_digest=_validate_embedded_digest,
+        parse_timestamp=_parse_timestamp,
+        error=CohortEvaluationError,
     )
-    if harness_started < dispatch_started or harness_completed < generated_at:
-        raise CohortEvaluationError(
-            f"{label} harness timestamps do not prove a fresh run"
-        )
+    _validate_skill_selection_attestation_proof(harness, label)
+    validate_harness_identity(
+        harness=harness,
+        member=member,
+        admission=admission,
+        role=role,
+        contract=contract,
+        expected_task_kind=_expected_task_kind,
+        label=label,
+        error=CohortEvaluationError,
+    )
+    return proof, harness, response_sha256
+
+
+def _validate_execution_proof(
+    *,
+    member: Mapping[str, Any],
+    role: str,
+    contract: Mapping[str, Any],
+    cohort_id: str,
+    frozen_plan_sha256: str,
+    label: str,
+) -> dict[str, Any]:
+    admission = admit_fresh_analysis(
+        member=member,
+        label=label,
+        prior_analysis_ids=_prior_analysis_ids,
+        parse_timestamp=_parse_timestamp,
+        error=CohortEvaluationError,
+    )
+    _validate_durable_job_proof(
+        member=member,
+        result=admission.result,
+        analysis=admission.analysis,
+        contract=contract,
+        cohort_id=cohort_id,
+        frozen_plan_sha256=frozen_plan_sha256,
+        label=label,
+    )
+    proof, harness, response_sha256 = _admit_execution_harness(
+        member=member,
+        admission=admission,
+        role=role,
+        contract=contract,
+        label=label,
+    )
+    _validate_query_bound_harness(
+        harness=harness,
+        admission=admission,
+        role=role,
+        canonical_response_sha256=response_sha256,
+        label=label,
+    )
+    validate_harness_freshness(
+        harness=harness,
+        admission=admission,
+        label=label,
+        parse_timestamp=_parse_timestamp,
+        error=CohortEvaluationError,
+    )
     return dict(proof)
 
 
