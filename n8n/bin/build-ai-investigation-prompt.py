@@ -114,6 +114,7 @@ from prompt_detection_context import (
     DetectionContextRequest,
     DetectionContextSources,
     prepare_detection_context,
+    select_exact_detection_group_rows,
 )
 from prompt_evidence_admission import (
     PromptEvidenceAdmissionRequest,
@@ -952,50 +953,13 @@ def exact_detection_group_rows(
     group_rows: list[sqlite3.Row],
     selected_rule_context: dict,
 ) -> tuple[list[sqlite3.Row], dict]:
-    """Keep packet copies bound to the selected SID, revision, and rule digest."""
-    selected_parsed = (
-        selected_rule_context.get("parsed_rule")
-        if isinstance(selected_rule_context.get("parsed_rule"), dict)
-        else {}
+    """Compatibility delegate for exact deployed-rule row binding."""
+    return select_exact_detection_group_rows(
+        _detection_context_sources(),
+        group_rows,
+        selected_rule_context,
+        MAX_DETECTION_GROUP_ROWS,
     )
-    selected_sid = str(selected_rule_context.get("sid") or "")
-    selected_revision = selected_rule_context.get("revision")
-    selected_digest = str(selected_parsed.get("rule_sha256") or "")
-    exact: list[sqlite3.Row] = []
-    excluded = 0
-    input_truncated = len(group_rows) > MAX_DETECTION_GROUP_ROWS
-    for item in group_rows[:MAX_DETECTION_GROUP_ROWS]:
-        alert = parse_alert_json(str(sqlite_value(item, "alert_json") or ""))
-        raw = parse_json_object(str(sqlite_value(item, "raw_event_json") or ""))
-        context = extract_rule_context(alert, raw, sqlite_value(item, "rule_id"))
-        parsed = context.get("parsed_rule") if isinstance(context.get("parsed_rule"), dict) else {}
-        conflicts = context.get("identity_conflicts")
-        identity_conflict = bool(
-            isinstance(conflicts, dict)
-            and any(conflicts.get(key) for key in ("sid", "revision"))
-        )
-        same = not identity_conflict
-        if selected_sid:
-            same = same and str(context.get("sid") or "") == selected_sid
-        if selected_revision is not None:
-            same = same and context.get("revision") == selected_revision
-        if selected_digest:
-            same = same and str(parsed.get("rule_sha256") or "") == selected_digest
-        if same:
-            exact.append(item)
-        else:
-            excluded += 1
-    return exact, {
-        "input_rows": min(len(group_rows), MAX_DETECTION_GROUP_ROWS),
-        "exact_rule_rows": len(exact),
-        "excluded_nonmatching_rows": excluded,
-        "input_truncated": input_truncated,
-        "identity": {
-            "sid": selected_sid,
-            "revision": selected_revision,
-            "rule_sha256": selected_digest,
-        },
-    }
 
 
 def model_policy(level: str | None) -> dict:
@@ -1072,7 +1036,6 @@ def _detection_context_sources() -> DetectionContextSources:
         extract_rule_context=extract_rule_context,
         load_investigation_skills=load_investigation_skills,
         resolve_investigation_skills=resolve_investigation_skills,
-        exact_detection_group_rows=exact_detection_group_rows,
         load_detection_playbooks=load_detection_playbooks,
         resolve_detection_playbook=resolve_detection_playbook,
         marker_specs=marker_specs,

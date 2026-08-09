@@ -32,7 +32,6 @@ class DetectionContextSources:
     extract_rule_context: Callable[[dict, dict, Any], dict]
     load_investigation_skills: Callable[[Path], dict]
     resolve_investigation_skills: Callable[[dict, dict, str], dict]
-    exact_detection_group_rows: Callable[[list[Any], dict], tuple[list[Any], dict]]
     load_detection_playbooks: Callable[[Path], dict]
     resolve_detection_playbook: Callable[[dict, dict], dict | None]
     marker_specs: Callable[[dict, dict | None], list]
@@ -63,6 +62,98 @@ VALIDATION_EXTRA_COLUMNS = (
     "transport_protocol",
     "destination_port",
 )
+
+
+def _selected_rule_identity(rule_context: dict) -> tuple[str, Any, str]:
+    parsed = (
+        rule_context.get("parsed_rule")
+        if isinstance(rule_context.get("parsed_rule"), dict)
+        else {}
+    )
+    return (
+        str(rule_context.get("sid") or ""),
+        rule_context.get("revision"),
+        str(parsed.get("rule_sha256") or ""),
+    )
+
+
+def _candidate_rule_context(sources: DetectionContextSources, item: Any) -> dict:
+    alert = sources.parse_alert_json(
+        str(sources.row_value(item, "alert_json") or "")
+    )
+    raw = sources.parse_json_object(
+        str(sources.row_value(item, "raw_event_json") or "")
+    )
+    return sources.extract_rule_context(
+        alert,
+        raw,
+        sources.row_value(item, "rule_id"),
+    )
+
+
+def _identity_conflict(context: dict) -> bool:
+    conflicts = context.get("identity_conflicts")
+    return bool(
+        isinstance(conflicts, dict)
+        and any(conflicts.get(key) for key in ("sid", "revision"))
+    )
+
+
+def _matches_rule_identity(
+    context: dict,
+    selected_sid: str,
+    selected_revision: Any,
+    selected_digest: str,
+) -> bool:
+    parsed = (
+        context.get("parsed_rule")
+        if isinstance(context.get("parsed_rule"), dict)
+        else {}
+    )
+    checks = [not _identity_conflict(context)]
+    if selected_sid:
+        checks.append(str(context.get("sid") or "") == selected_sid)
+    if selected_revision is not None:
+        checks.append(context.get("revision") == selected_revision)
+    if selected_digest:
+        checks.append(str(parsed.get("rule_sha256") or "") == selected_digest)
+    return all(checks)
+
+
+def select_exact_detection_group_rows(
+    sources: DetectionContextSources,
+    group_rows: list[Any],
+    selected_rule_context: dict,
+    maximum_group_rows: int,
+) -> tuple[list[Any], dict]:
+    """Bind packet-validation rows to the exact selected rule identity."""
+    selected_sid, selected_revision, selected_digest = _selected_rule_identity(
+        selected_rule_context
+    )
+    exact: list[Any] = []
+    excluded = 0
+    for item in group_rows[:maximum_group_rows]:
+        context = _candidate_rule_context(sources, item)
+        if _matches_rule_identity(
+            context,
+            selected_sid,
+            selected_revision,
+            selected_digest,
+        ):
+            exact.append(item)
+        else:
+            excluded += 1
+    return exact, {
+        "input_rows": min(len(group_rows), maximum_group_rows),
+        "exact_rule_rows": len(exact),
+        "excluded_nonmatching_rows": excluded,
+        "input_truncated": len(group_rows) > maximum_group_rows,
+        "identity": {
+            "sid": selected_sid,
+            "revision": selected_revision,
+            "rule_sha256": selected_digest,
+        },
+    }
 
 
 def _skill_match_context(sources: DetectionContextSources, selected: Any) -> dict:
@@ -114,9 +205,11 @@ def _validate_detection(
     validation_rows: list[Any],
     rule_context: dict,
 ) -> tuple[list[Any], dict]:
-    exact_rows, validation_scope = sources.exact_detection_group_rows(
+    exact_rows, validation_scope = select_exact_detection_group_rows(
+        sources,
         validation_rows,
         rule_context,
+        request.maximum_group_rows,
     )
     playbook_registry = sources.load_detection_playbooks(
         request.detection_playbooks_path

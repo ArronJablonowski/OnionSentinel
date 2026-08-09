@@ -2,6 +2,7 @@
 """Direct contracts for prompt detection and asset-context preparation."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -18,6 +19,7 @@ from prompt_detection_context import (  # noqa: E402
     DetectionContextSources,
     VALIDATION_EXTRA_COLUMNS,
     prepare_detection_context,
+    select_exact_detection_group_rows,
 )
 
 
@@ -56,9 +58,6 @@ def sources(**changes) -> DetectionContextSources:
         "extract_rule_context": mock.Mock(return_value={"sid": "rule-1"}),
         "load_investigation_skills": mock.Mock(return_value={"skills": 1}),
         "resolve_investigation_skills": mock.Mock(return_value={"selected": ["tls"]}),
-        "exact_detection_group_rows": mock.Mock(
-            return_value=([{"exact": 1}], {"input_truncated": True})
-        ),
         "load_detection_playbooks": mock.Mock(return_value={"playbooks": 1}),
         "resolve_detection_playbook": mock.Mock(return_value={"playbook": 1}),
         "marker_specs": mock.Mock(return_value=[{"marker": 1}]),
@@ -86,10 +85,14 @@ class PromptDetectionContextTests(unittest.TestCase):
             extra_columns=VALIDATION_EXTRA_COLUMNS,
             row_limit=26,
         )
-        dependencies.extract_rule_context.assert_called_once_with(
+        self.assertEqual(dependencies.extract_rule_context.call_count, 2)
+        self.assertEqual(
+            dependencies.extract_rule_context.call_args_list[0],
+            mock.call(
             {"parsed_alert": 1},
             {"parsed_event": 1},
             "rule-1",
+            ),
         )
         dependencies.resolve_investigation_skills.assert_called_once_with(
             {"skills": 1},
@@ -103,15 +106,16 @@ class PromptDetectionContextTests(unittest.TestCase):
             "incident-responder",
         )
         packet_features = dependencies.build_detection_validation.call_args.args[1]
-        self.assertEqual(packet_features["group_scope"], {"input_truncated": True})
-        self.assertIs(packet_features["truncated"], True)
+        self.assertEqual(packet_features["group_scope"]["exact_rule_rows"], 1)
+        self.assertIs(packet_features["group_scope"]["input_truncated"], False)
+        self.assertNotIn("truncated", packet_features)
         dependencies.resolve_asset_context.assert_called_once_with(
             {"assets": 1},
             [{"type": "ip"}],
             "2026-08-08T12:00:00Z",
             [{"flow": 1}],
         )
-        self.assertEqual(prepared.exact_validation_rows, [{"exact": 1}])
+        self.assertEqual(prepared.exact_validation_rows, [{"candidate": 1}])
         self.assertEqual(prepared.investigation_skills, {"selected": ["tls"]})
         self.assertEqual(prepared.detection_validation, {"intent": "match"})
         self.assertEqual(prepared.asset_context, {"matched": ["asset-1"]})
@@ -129,13 +133,74 @@ class PromptDetectionContextTests(unittest.TestCase):
 
     def test_exact_group_failure_stops_playbook_and_asset_processing(self):
         exact_rows = mock.Mock(side_effect=ValueError("ambiguous detection group"))
-        dependencies = sources(exact_detection_group_rows=exact_rows)
+        dependencies = sources()
 
-        with self.assertRaisesRegex(ValueError, "ambiguous detection group"):
-            prepare_detection_context(dependencies, request())
+        with mock.patch(
+            "prompt_detection_context.select_exact_detection_group_rows",
+            exact_rows,
+        ):
+            with self.assertRaisesRegex(ValueError, "ambiguous detection group"):
+                prepare_detection_context(dependencies, request())
 
         dependencies.load_detection_playbooks.assert_not_called()
         dependencies.load_asset_inventory.assert_not_called()
+
+    def test_exact_scope_requires_sid_revision_digest_and_no_identity_conflict(self):
+        digest = "a" * 64
+        selected_context = {
+            "sid": "900001",
+            "revision": 3,
+            "parsed_rule": {"rule_sha256": digest},
+        }
+
+        def context_from_raw(_alert, raw, _rule_id):
+            return raw["context"]
+
+        def candidate(name, context):
+            return {
+                "id": name,
+                "alert_json": "{}",
+                "raw_event_json": json.dumps({"context": context}),
+                "rule_id": "900001",
+            }
+
+        dependencies = sources(
+            parse_alert_json=lambda raw: json.loads(raw),
+            parse_json_object=lambda raw: json.loads(raw),
+            extract_rule_context=context_from_raw,
+        )
+        candidates = [
+            candidate("exact", selected_context),
+            candidate(
+                "wrong-revision",
+                {**selected_context, "revision": 2},
+            ),
+            candidate(
+                "conflicted",
+                {
+                    **selected_context,
+                    "identity_conflicts": {"sid": ["other"]},
+                },
+            ),
+            candidate("outside-bound", selected_context),
+        ]
+
+        exact, scope = select_exact_detection_group_rows(
+            dependencies,
+            candidates,
+            selected_context,
+            3,
+        )
+
+        self.assertEqual([item["id"] for item in exact], ["exact"])
+        self.assertEqual(scope["input_rows"], 3)
+        self.assertEqual(scope["exact_rule_rows"], 1)
+        self.assertEqual(scope["excluded_nonmatching_rows"], 2)
+        self.assertIs(scope["input_truncated"], True)
+        self.assertEqual(
+            scope["identity"],
+            {"sid": "900001", "revision": 3, "rule_sha256": digest},
+        )
 
 
 if __name__ == "__main__":

@@ -107,7 +107,8 @@
         "DetectionContextRequest",
         "DetectionContextSources",
         "PreparedDetectionContext",
-        "prepare_detection_context"
+        "prepare_detection_context",
+        "select_exact_detection_group_rows"
       ]
     },
     {

@@ -585,7 +585,10 @@ key derivation remain injected by the builder facade.
 
 `prompt_detection_context.py` owns ordered preparation of the exact detection
 group, deterministic investigation-skill selection, rule/playbook predicate
-validation, bounded packet features, and time-aware asset resolution. The
+validation, bounded packet features, and time-aware asset resolution. Exact
+rows are bound to the selected deployed rule's SID, revision, and rule digest;
+rows with conflicting collector identities are excluded before packet feature
+extraction. The
 legacy builder composition root injects every database, parser, registry, and
 resolver operation; the module opens no database and reads no runtime file on
 its own. Exact-group selection failures stop playbook and asset processing, and
