@@ -4411,17 +4411,6 @@ def _ollama_chat_for_model(
     )
 
 
-def ollama_chat(prompt_package: dict[str, Any], args: argparse.Namespace, settings: dict[str, Any]) -> dict[str, Any]:
-    return _ollama_provider().chat_with_failover(
-        prompt_package,
-        args,
-        settings,
-        normalize_roster=normalized_model_roster,
-        chat_for_model=_ollama_chat_for_model,
-        fallback_model=FALLBACK_OLLAMA_MODEL,
-    )
-
-
 def summarize_codex_cli_failure(stderr: str, returncode: int) -> str:
     return _codex_provider().summarize_failure(stderr, returncode)
 

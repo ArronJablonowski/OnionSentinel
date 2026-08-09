@@ -590,7 +590,12 @@ class PcapAnalysisHardeningTest(unittest.TestCase):
             ) as request,
             mock.patch.object(runner, "_unload_ollama_model"),
         ):
-            response = runner.ollama_chat(package, args, {})
+            response = runner._ollama_chat_for_model(
+                package,
+                args,
+                {},
+                runner.FALLBACK_OLLAMA_MODEL,
+            )
 
         self.assertEqual(request.call_count, 1)
         first_package = request.call_args_list[0].args[0]

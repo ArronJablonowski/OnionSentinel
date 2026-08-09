@@ -414,21 +414,6 @@ class AiModelRoutingTests(unittest.TestCase):
                 },
             )
 
-    def test_ollama_uses_enabled_models_as_ordered_failover(self) -> None:
-        args = type("Args", (), {})()
-        settings = {"enabled_ollama_models": ["primary:latest", "fallback:latest"]}
-        completed = {"summary": "completed", "_analysis_model": "fallback:latest"}
-
-        with mock.patch.object(
-            self.runner,
-            "_ollama_chat_for_model",
-            side_effect=[SystemExit("primary unavailable"), completed],
-        ) as analyze:
-            response = self.runner.ollama_chat({}, args, settings)
-
-        self.assertEqual(response, completed)
-        self.assertEqual([call.args[3] for call in analyze.call_args_list], ["primary:latest", "fallback:latest"])
-
     def test_ollama_chat_request_keeps_model_for_bounded_follow_up(self) -> None:
         args = type(
             "Args",
