@@ -865,6 +865,18 @@
       ]
     },
     {
+      "path": "n8n/bin/local_ai_evaluation_routing_compat.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/local_ai_evaluation_routing_compat.py",
+      "required_symbols": [
+        "attest_model_route_response",
+        "controlled_evaluation_result_identity",
+        "effective_ai_settings",
+        "normalize_agent_models",
+        "require_controlled_evaluation_routes"
+      ]
+    },
+    {
       "path": "n8n/bin/local_ai_query_dependency_compat.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/local_ai_query_dependency_compat.py",

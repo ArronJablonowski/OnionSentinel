@@ -114,6 +114,10 @@ line ranges below remain historical navigation aids for the extraction ledger.
   conclusion-guard, incident-report, and independent-review package loaders and
   dependency records. It contains no verdict, confidence, authorization,
   adjudication, or evidence policy beyond translating the historical bindings.
+- `n8n/bin/local_ai_evaluation_routing_compat.py` owns controlled-evaluation
+  route/identity delegates, model-roster normalization, runtime attestation,
+  phase publication, settings loading, and provider-output parsing facades. The
+  actual isolation, routing, identity, and provider policy remains package-owned.
 - Concrete Markdown rendering and atomic output-publication binding now live
   in `local_ai_pipeline_adapters.write_outputs`; the runner transaction port
   delegates directly and no longer retains `render_markdown` or
