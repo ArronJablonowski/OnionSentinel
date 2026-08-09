@@ -289,6 +289,16 @@ routes, frozen-memory marker, claim digest, and completed reviewer response,
 then produces the immutable recovery projection and both response digests.
 The scheduler facade injects route patterns and canonicalization policies.
 
+The controlled storage compatibility boundary is split into three small,
+layered modules. `scheduler_javascript_compat.py` implements bounded ECMAScript
+trim, truthiness, string conversion, UTF-16 truncation, JSON number rendering,
+Unicode escaping, and object-key ordering. `scheduler_controlled_canonical.py`
+uses those primitives to mirror alert-store timestamp normalization and
+canonical JSON hashing. `scheduler_controlled_acceptance.py` projects and
+compares every immutable `recordAiAnalysisResult` field. This isolates the
+cross-runtime parity code from scheduler orchestration while retaining facade
+imports for compatibility.
+
 `scheduler_claim.py` owns compare-and-set processing acquisition,
 server-authoritative job/alert/group replacement, controlled claim identity,
 IR reanalysis-attempt binding, contention projection, and automatic-threshold

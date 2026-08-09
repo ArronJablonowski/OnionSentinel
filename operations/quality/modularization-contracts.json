@@ -61,6 +61,35 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_javascript_compat.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_javascript_compat.py",
+      "required_symbols": [
+        "javascript_safe_string",
+        "javascript_json_number",
+        "javascript_object_key_order"
+      ]
+    },
+    {
+      "path": "n8n/bin/scheduler_controlled_canonical.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_controlled_canonical.py",
+      "required_symbols": [
+        "controlled_normalize_timestamp",
+        "controlled_storage_canonical_json",
+        "controlled_storage_canonical_digest"
+      ]
+    },
+    {
+      "path": "n8n/bin/scheduler_controlled_acceptance.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_controlled_acceptance.py",
+      "required_symbols": [
+        "controlled_expected_accepted_fields",
+        "controlled_accepted_fields_match"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_controlled_recovery.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_controlled_recovery.py",
