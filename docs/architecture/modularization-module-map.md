@@ -597,6 +597,12 @@ contract digests, restricted-content policy, and the non-replacing private
 export write. Database monitoring and per-member proof evaluation remain
 injected ports so export cannot broaden evidence or campaign authority.
 
+`operations/cohort_model_call_proof.py` is the canonical offline model-call
+grammar verifier. It recomputes primary planning/follow-up rounds, exact
+reviewer and adjudicator repair sequences, supplemental-review bounds, route
+and purpose identity, aggregate counts, fact digests, and reviewer completion
+from the exported bounded facts rather than trusting claimed proof totals.
+
 `prompt_incident_evidence_projection.py` owns the model-facing, in-memory
 projection of already-validated incident evidence. It applies deterministic
 prefix limits to Elastic hits and OSQuery rows, records source and retained

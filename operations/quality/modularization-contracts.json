@@ -155,6 +155,15 @@
       ]
     },
     {
+      "path": "operations/cohort_model_call_proof.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_model_call_proof.py",
+      "required_symbols": [
+        "FactLedger",
+        "bounded_model_call_proof_valid"
+      ]
+    },
+    {
       "path": "n8n/bin/run-local-ai-analysis.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/run-local-ai-analysis.py",

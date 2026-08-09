@@ -61,7 +61,7 @@
       "max_lines": 2662
     },
     "operations/evaluate-investigation-cohort.py": {
-      "max_lines": 3014
+      "max_lines": 2739
     },
     "operations/run-incident-harness-cohort.py": {
       "max_lines": 3042
@@ -685,10 +685,6 @@
       "max_complexity": 41,
       "max_lines": 167
     },
-    "operations/evaluate-investigation-cohort.py::_bounded_model_call_proof_valid": {
-      "max_complexity": 149,
-      "max_lines": 268
-    },
     "operations/evaluate-investigation-cohort.py::_execution_contract": {
       "max_complexity": 16
     },
@@ -823,5 +819,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "b41585a3220967cd6336162ae8426b0be87f01dc"
+  "source_release": "c612e93c2c48a7ad9d549fca747aa494da94f7a4"
 }

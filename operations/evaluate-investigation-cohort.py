@@ -43,6 +43,28 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+OPERATIONS_DIR = Path(__file__).resolve().parent
+if str(OPERATIONS_DIR) not in sys.path:
+    sys.path.insert(0, str(OPERATIONS_DIR))
+
+from cohort_model_call_proof import (
+    ADJUDICATION_CALL_IDS,
+    ADJUDICATION_PURPOSE,
+    FOLLOWUP_CALL_RE,
+    MAX_RUNTIME_MODEL_CALLS,
+    MODEL_CALL_CONTRACT_SCHEMA,
+    MODEL_CALL_FACT_KEYS,
+    PRIMARY_MODEL_CALLS,
+    QUERY_PLANNING_REPAIR_CALL_ID,
+    QUERY_PLANNING_REPAIR_PURPOSE,
+    REVIEWER_CALL_IDS,
+    REVIEWER_PURPOSE,
+    SAFE_ROUTE_RE,
+    SUPPLEMENTAL_REVIEW_CALL_ID,
+    SUPPLEMENTAL_REVIEW_PURPOSE,
+    bounded_model_call_proof_valid as validate_bounded_model_call_proof,
+)
+
 
 RESULT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v4"
 MANIFEST_SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -85,48 +107,16 @@ SKILL_SELECTION_SUMMARY_KEYS = frozenset(
         "advisory_mode",
     }
 )
-SAFE_ROUTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{2,255}")
 CONTROLLED_ROUTE_RE = re.compile(
     r"codex-cli:(?:gpt-5\.5|gpt-5\.6-(?:sol|terra|luna)):"
     r"(?:low|medium|high|xhigh)"
 )
-MODEL_CALL_CONTRACT_SCHEMA = "onion-sentinel-model-call-contract-v1"
 CONTROLLED_EVALUATION_PROFILE = (
     "onion-sentinel-gpt55-high-gpt56-sol-xhigh-v1"
 )
 PROFILE_ASSIGNED_ROUTE = "codex-cli:gpt-5.5:high"
 PROFILE_REVIEWER_ROUTE = "codex-cli:gpt-5.6-sol:xhigh"
-MAX_RUNTIME_MODEL_CALLS = 6
 DISPATCH_ID_SCHEMA = "onion-sentinel-cohort-member-dispatch-v1"
-MODEL_CALL_FACT_KEYS = frozenset(
-    {
-        "call_id",
-        "purpose",
-        "requested_route",
-        "independent_review",
-        "status",
-    }
-)
-PRIMARY_MODEL_CALLS = {
-    "primary-initial": "initial primary analysis",
-    "primary-query-planning-retry-1": (
-        "evaluation query-planning retry 1 of 1"
-    ),
-}
-QUERY_PLANNING_REPAIR_CALL_ID = "primary-query-planning-repair-1"
-QUERY_PLANNING_REPAIR_PURPOSE = "primary query-planning repair 1 of 1"
-FOLLOWUP_CALL_RE = re.compile(r"primary-followup-([1-3])")
-REVIEWER_CALL_IDS = ("independent-review-1", "independent-review-2")
-REVIEWER_PURPOSE = "independent second-opinion review"
-SUPPLEMENTAL_REVIEW_CALL_ID = "independent-review-supplemental-1"
-SUPPLEMENTAL_REVIEW_PURPOSE = (
-    "independent reviewer supplemental reconciliation round 1"
-)
-ADJUDICATION_CALL_IDS = (
-    "disagreement-adjudication-1",
-    "disagreement-adjudication-2",
-)
-ADJUDICATION_PURPOSE = "bounded disagreement adjudication"
 
 RUBRIC_WEIGHTS = {
     "occurrence_validity": 14,
@@ -304,273 +294,8 @@ def _stable_group_key(value: Any, label: str) -> str:
 
 
 def _bounded_model_call_proof_valid(harness: Mapping[str, Any]) -> bool:
-    """Recompute the bounded call/reviewer facts in an offline export."""
-
-    contract = harness.get("model_call_contract")
-    reviewer = harness.get("reviewer_completion")
-    if not isinstance(contract, dict) or not isinstance(reviewer, dict):
-        return False
-    facts = contract.get("facts")
-    if (
-        contract.get("schema") != MODEL_CALL_CONTRACT_SCHEMA
-        or contract.get("valid") is not True
-        or not isinstance(facts, list)
-        or not 1 <= len(facts) <= MAX_RUNTIME_MODEL_CALLS
-        or str(contract.get("facts_sha256") or "") != sha256_value(facts)
-        or int(contract.get("model_call_count") or 0) != len(facts)
-        or int(contract.get("canonical_model_call_count") or 0)
-        != len(facts)
-        or int(contract.get("noncanonical_model_call_count") or 0) != 0
-        or int(contract.get("violation_count") or 0) != 0
-        or contract.get("violations") != []
-        or contract.get("global_reasons") != []
-    ):
-        return False
-
-    primary_route = str(harness.get("assigned_route") or "")
-    reviewer_route = str(harness.get("assigned_reviewer_route") or "")
-    call_ids: list[str] = []
-    followup_rounds: list[int] = []
-    query_planning_repair_rounds: list[int] = []
-    reviewer_facts: list[Mapping[str, Any]] = []
-    supplemental_reviewer_facts: list[Mapping[str, Any]] = []
-    adjudicator_facts: list[Mapping[str, Any]] = []
-    purpose_keys: set[tuple[bool, str, str]] = set()
-    completed_count = 0
-    completed_primary_count = 0
-    planning_count = 0
-    planning_repair_count = 0
-    next_primary_round = 1
-    for fact in facts:
-        if not isinstance(fact, dict) or set(fact) != MODEL_CALL_FACT_KEYS:
-            return False
-        call_id = str(fact.get("call_id") or "")
-        purpose = str(fact.get("purpose") or "")
-        route = str(fact.get("requested_route") or "")
-        status = str(fact.get("status") or "")
-        independent = fact.get("independent_review")
-        if (
-            not call_id
-            or not SAFE_ROUTE_RE.fullmatch(route)
-            or not isinstance(independent, bool)
-        ):
-            return False
-        call_ids.append(call_id)
-        purpose_keys.add((independent, purpose, route))
-        if status == "completed":
-            completed_count += 1
-            if independent is False:
-                completed_primary_count += 1
-        if call_id in PRIMARY_MODEL_CALLS:
-            if (
-                independent
-                or purpose != PRIMARY_MODEL_CALLS[call_id]
-                or status != "completed"
-                or route != primary_route
-            ):
-                return False
-            if call_id == "primary-query-planning-retry-1":
-                planning_count += 1
-            continue
-        if call_id == QUERY_PLANNING_REPAIR_CALL_ID:
-            planning_repair_count += 1
-            query_planning_repair_rounds.append(next_primary_round)
-            next_primary_round += 1
-            if (
-                independent
-                or purpose != QUERY_PLANNING_REPAIR_PURPOSE
-                or status != "completed"
-                or route != primary_route
-            ):
-                return False
-            continue
-        followup_match = FOLLOWUP_CALL_RE.fullmatch(call_id)
-        if followup_match:
-            round_number = int(followup_match.group(1))
-            followup_rounds.append(round_number)
-            if (
-                round_number != next_primary_round
-                or independent
-                or purpose
-                != f"primary investigation follow-up round {round_number}"
-                or status != "completed"
-                or route != primary_route
-            ):
-                return False
-            next_primary_round += 1
-            continue
-        if call_id == SUPPLEMENTAL_REVIEW_CALL_ID:
-            supplemental_reviewer_facts.append(fact)
-            if (
-                independent is not True
-                or purpose
-                != SUPPLEMENTAL_REVIEW_PURPOSE
-                or status != "completed"
-                or not reviewer_route
-                or route != reviewer_route
-            ):
-                return False
-            continue
-        if call_id in ADJUDICATION_CALL_IDS:
-            adjudicator_facts.append(fact)
-            allowed_statuses = (
-                {"completed", "validation-failed"}
-                if call_id == ADJUDICATION_CALL_IDS[0]
-                else {"completed"}
-            )
-            if (
-                independent is not True
-                or purpose != ADJUDICATION_PURPOSE
-                or status not in allowed_statuses
-                or not reviewer_route
-                or route != reviewer_route
-            ):
-                return False
-            continue
-        if call_id not in REVIEWER_CALL_IDS:
-            return False
-        reviewer_facts.append(fact)
-        allowed_statuses = (
-            {"completed", "validation-failed"}
-            if call_id == REVIEWER_CALL_IDS[0]
-            else {"completed"}
-        )
-        if (
-            independent is not True
-            or purpose != REVIEWER_PURPOSE
-            or status not in allowed_statuses
-            or not reviewer_route
-            or route != reviewer_route
-        ):
-            return False
-
-    if len(call_ids) != len(set(call_ids)):
-        return False
-    primary_initial_count = call_ids.count("primary-initial")
-    unique_followups = sorted(set(followup_rounds))
-    primary_rounds = sorted(
-        followup_rounds + query_planning_repair_rounds
-    )
-    unique_primary_rounds = sorted(set(primary_rounds))
-    if (
-        primary_initial_count != 1
-        or planning_count not in {0, 1}
-        or planning_repair_count not in {0, 1}
-        or len(unique_followups) != len(followup_rounds)
-        or len(unique_primary_rounds) != len(primary_rounds)
-        or (
-            unique_primary_rounds
-            and unique_primary_rounds
-            != list(range(1, max(unique_primary_rounds) + 1))
-        )
-        or len(unique_primary_rounds) > (2 if planning_count else 3)
-    ):
-        return False
-    reviewer_ids = [str(fact["call_id"]) for fact in reviewer_facts]
-    reviewer_statuses = [str(fact["status"]) for fact in reviewer_facts]
-    exact_repair_count = 0
-    if reviewer_facts:
-        if reviewer_ids == [REVIEWER_CALL_IDS[0]] and reviewer_statuses == [
-            "completed"
-        ]:
-            pass
-        elif reviewer_ids == list(REVIEWER_CALL_IDS) and reviewer_statuses == [
-            "validation-failed",
-            "completed",
-        ]:
-            exact_repair_count = 1
-        else:
-            return False
-    if len(supplemental_reviewer_facts) not in {0, 1}:
-        return False
-    adjudicator_ids = [
-        str(fact["call_id"]) for fact in adjudicator_facts
-    ]
-    adjudicator_statuses = [
-        str(fact["status"]) for fact in adjudicator_facts
-    ]
-    exact_adjudication_repair_count = 0
-    if adjudicator_facts:
-        if adjudicator_ids == [ADJUDICATION_CALL_IDS[0]] and (
-            adjudicator_statuses == ["completed"]
-        ):
-            pass
-        elif adjudicator_ids == list(ADJUDICATION_CALL_IDS) and (
-            adjudicator_statuses == ["validation-failed", "completed"]
-        ):
-            exact_adjudication_repair_count = 1
-        else:
-            return False
-    all_reviewer_facts = reviewer_facts + supplemental_reviewer_facts
-
-    if (
-        int(contract.get("primary_initial_call_count") or 0) != 1
-        or int(contract.get("query_planning_call_count") or 0)
-        != planning_count
-        or int(contract.get("query_planning_repair_call_count") or 0)
-        != planning_repair_count
-        or int(contract.get("primary_followup_call_count") or 0)
-        != len(followup_rounds)
-        or int(contract.get("reviewer_model_call_count") or 0)
-        != len(all_reviewer_facts)
-        or int(contract.get("adjudicator_model_call_count") or 0)
-        != len(adjudicator_facts)
-        or int(harness.get("model_call_count") or 0) != len(facts)
-        or int(harness.get("successful_model_call_count") or 0)
-        != completed_count
-        or int(harness.get("successful_primary_model_call_count") or 0)
-        != completed_primary_count
-        or int(harness.get("model_purpose_count") or 0)
-        != len(purpose_keys)
-        or int(harness.get("exact_reviewer_repair_count") or 0)
-        != exact_repair_count
-        or int(harness.get("exact_adjudication_repair_count") or 0)
-        != exact_adjudication_repair_count
-        or int(
-            harness.get("superseded_validation_failure_count") or 0
-        )
-        != exact_repair_count + exact_adjudication_repair_count
-    ):
-        return False
-
-    reviewer_call_count = int(reviewer.get("model_call_count") or 0)
-    supplemental_call_count = len(supplemental_reviewer_facts)
-    if (
-        reviewer_call_count != len(all_reviewer_facts)
-        or int(reviewer.get("completed_model_call_count") or 0)
-        != len(all_reviewer_facts) - exact_repair_count
-        or int(reviewer.get("supplemental_model_call_count") or 0)
-        != supplemental_call_count
-        or int(
-            reviewer.get("supplemental_completed_model_call_count") or 0
-        )
-        != supplemental_call_count
-    ):
-        return False
-    if reviewer_call_count:
-        return bool(
-            int(reviewer.get("completed_model_call_count") or 0)
-            == 1 + supplemental_call_count
-            and int(reviewer.get("primary_decision_count") or 0) == 1
-            and int(reviewer.get("reviewer_decision_count") or 0) == 1
-            and reviewer.get("has_primary_decision") is True
-            and reviewer.get("has_reviewer_decision") is True
-            and reviewer.get("decision_comparable") is True
-            and reviewer.get("missing_reviewer_decision") is False
-            and reviewer.get("completion_contract_required") is True
-            and reviewer.get("completion_contract_satisfied") is True
-            and reviewer.get("completion_contract_failure_reasons") == []
-            and reviewer_call_count
-            == 1 + exact_repair_count + supplemental_call_count
-        )
-    return bool(
-        reviewer.get("completion_contract_required") is False
-        and reviewer.get("completion_contract_satisfied") is True
-        and reviewer.get("completion_contract_failure_reasons") == []
-        and int(reviewer.get("reviewer_decision_count") or 0) == 0
-        and reviewer.get("has_reviewer_decision") is False
-        and reviewer.get("missing_reviewer_decision") is False
-    )
+    """Compatibility adapter for canonical offline model-call proof validation."""
+    return validate_bounded_model_call_proof(harness, sha256_value)
 
 
 def file_sha256(path: Path) -> str:
