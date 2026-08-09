@@ -25,6 +25,7 @@ const {createSecurityLogger} = require('./lib/security_logger');
 const {createPipelineMetrics} = require('./lib/pipeline_metrics');
 const {createSocAnalysisPolicy} = require('./lib/soc_analysis_policy');
 const {createRouteRegistry} = require('./lib/route_registry');
+const {createRequestDispatcher} = require('./lib/http_dispatch');
 const {createInventoryService} = require('./services/inventory_service');
 const {createInventoryRoutes} = require('./routes/inventory_routes');
 const {createHealthRepository} = require('./repositories/health_repository');
@@ -12164,55 +12165,14 @@ async function handleRequest(request, response) {
   }
 }
 
-async function dispatchRequest(request, response) {
-  const requestId = crypto.randomUUID();
-  const started = process.hrtime.bigint();
-  const requestPath = (() => {
-    try {
-      return new URL(request.url, 'http://127.0.0.1').pathname;
-    } catch {
-      return String(request.url || '').split('?', 1)[0].slice(0, 512);
-    }
-  })();
-  response.setHeader('X-Request-ID', requestId);
-  response.once('finish', () => {
-    applicationLogger.log(
-      response.statusCode >= 500 ? 'error' : (
-        response.statusCode >= 400 ? 'warning' : 'info'
-      ),
-      'http.request.completed',
-      {
-        request_id: requestId,
-        method: request.method,
-        path: requestPath,
-        status_code: response.statusCode,
-        duration_ms: Number(process.hrtime.bigint() - started) / 1_000_000,
-        remote_address: request.socket?.remoteAddress || null,
-      },
-    );
-  });
-  if (request.method !== 'POST') {
-    await handleRequest(request, response);
-    return;
-  }
-  const release = postRequestAdmission.tryAcquire();
-  if (!release) {
-    applicationLogger.log('warning', 'http.request.rejected_capacity', {
-      request_id: requestId,
-      method: request.method,
-      path: requestPath,
-    });
-    request.resume();
-    response.setHeader('Retry-After', '1');
-    sendJson(response, 503, {ok: false, status: 'busy', reason: 'alert-store POST capacity is busy'});
-    return;
-  }
-  try {
-    await handleRequest(request, response);
-  } finally {
-    release();
-  }
-}
+const dispatchRequest = createRequestDispatcher({
+  handleRequest,
+  postRequestAdmission,
+  logger: applicationLogger,
+  sendJson,
+  randomUUID: crypto.randomUUID,
+  monotonicNow: process.hrtime.bigint,
+});
 
 let controlledEvaluationShutdownStarted = false;
 

@@ -8,6 +8,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ALERT_STORE = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
 PROVIDER_SCHEDULER = REPO_ROOT / "n8n" / "alert_store" / "lib" / "provider_scheduler.js"
 HTTP_RUNTIME = REPO_ROOT / "n8n" / "alert_store" / "lib" / "http_runtime.js"
+HTTP_DISPATCH = REPO_ROOT / "n8n" / "alert_store" / "lib" / "http_dispatch.js"
 HTTP_JSON_CLIENT = REPO_ROOT / "n8n" / "alert_store" / "lib" / "http_json_client.js"
 ENRICHMENT_CACHE = REPO_ROOT / "n8n" / "alert_store" / "lib" / "enrichment_cache.js"
 HEALTH_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "health_service.js"
@@ -19,6 +20,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.code = ALERT_STORE.read_text(encoding="utf-8")
         cls.provider_scheduler = PROVIDER_SCHEDULER.read_text(encoding="utf-8")
         cls.http_runtime = HTTP_RUNTIME.read_text(encoding="utf-8")
+        cls.http_dispatch = HTTP_DISPATCH.read_text(encoding="utf-8")
         cls.http_json_client = HTTP_JSON_CLIENT.read_text(encoding="utf-8")
         cls.enrichment_cache = ENRICHMENT_CACHE.read_text(encoding="utf-8")
         cls.health_service = HEALTH_SERVICE.read_text(encoding="utf-8")
@@ -225,7 +227,8 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("server.headersTimeout", self.http_runtime)
         self.assertIn("server.maxRequestsPerSocket", self.http_runtime)
         self.assertIn("server.maxConnections", self.http_runtime)
-        self.assertIn("postRequestAdmission.tryAcquire()", self.code)
+        self.assertIn("createRequestDispatcher({", self.code)
+        self.assertIn("postRequestAdmission.tryAcquire()", self.http_dispatch)
 
     def test_new_intake_stops_before_the_eighty_percent_disk_ceiling(self) -> None:
         self.assertIn("function assertDiskWriteAdmission", self.code)
