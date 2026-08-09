@@ -58,7 +58,7 @@
       "max_lines": 1164
     },
     "operations/evaluate-harness-traces.py": {
-      "max_lines": 2477
+      "max_lines": 2425
     },
     "operations/evaluate-investigation-cohort.py": {
       "max_lines": 1303
@@ -784,5 +784,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "e38930555d282d448d0ae96802f5f13eb3d39089"
+  "source_release": "a4f25a4c7a5030cf5b9acc3d4d554fe015ad0ea9"
 }

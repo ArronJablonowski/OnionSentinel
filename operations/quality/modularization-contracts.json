@@ -200,6 +200,19 @@
       ]
     },
     {
+      "path": "operations/trace_evaluation_storage.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/trace_evaluation_storage.py",
+      "required_symbols": [
+        "TraceStoragePolicy",
+        "connect_read_only",
+        "table_names",
+        "database_schema_version",
+        "selected_runs",
+        "rows_for_run"
+      ]
+    },
+    {
       "path": "operations/cohort_execution_models.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_execution_models.py",

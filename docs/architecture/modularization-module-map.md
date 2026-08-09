@@ -516,6 +516,12 @@ and exact job-digest binding through an injected hashing port. The legacy trace
 evaluator remains the composition root and preserves pre-attestation trace
 compatibility.
 
+`operations/trace_evaluation_storage.py` owns read-only SQLite admission and
+ledger loading for trace evaluation. It resolves only existing regular files,
+opens SQLite with `mode=ro` and `query_only`, holds one consistent read
+transaction, rejects newer schema versions, and exposes bounded run/table reads
+without initialization or migration behavior.
+
 `operations/cohort_freezing.py` owns database-newest and exact-imported-row
 cohort freezing. Immutable policy and explicit source ports bind identity
 validation, read-only database snapshots, representative-alert custody,

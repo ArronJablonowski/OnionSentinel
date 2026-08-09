@@ -21,7 +21,6 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping
-from urllib.parse import quote
 
 OPERATIONS_DIR = Path(__file__).resolve().parent
 if str(OPERATIONS_DIR) not in sys.path:
@@ -30,6 +29,14 @@ if str(OPERATIONS_DIR) not in sys.path:
 from trace_evaluation_skills import (
     TraceSkillPolicy,
     skill_selection_attestation_result as evaluate_skill_attestation,
+)
+from trace_evaluation_storage import (
+    TraceStoragePolicy,
+    connect_read_only as open_trace_database,
+    database_schema_version as read_database_schema_version,
+    rows_for_run as read_rows_for_run,
+    selected_runs as read_selected_runs,
+    table_names as read_table_names,
 )
 
 
@@ -296,89 +303,35 @@ def skill_selection_attestation_result(
     )
 
 
+def _trace_storage_policy() -> TraceStoragePolicy:
+    return TraceStoragePolicy(
+        current_schema_version=CURRENT_SQL_SCHEMA_VERSION,
+        error=EvaluationError,
+    )
+
+
 def connect_read_only(path: Path) -> sqlite3.Connection:
-    """Open an existing SQLite database without creating or migrating it."""
-    try:
-        resolved = path.expanduser().resolve(strict=True)
-    except FileNotFoundError as exc:
-        raise EvaluationError(f"harness database does not exist: {path}") from exc
-    if not resolved.is_file():
-        raise EvaluationError(f"harness database is not a regular file: {resolved}")
-    uri = f"file:{quote(str(resolved), safe='/')}?mode=ro"
-    connection: sqlite3.Connection | None = None
-    try:
-        connection = sqlite3.connect(uri, uri=True, timeout=10.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA query_only = ON")
-        connection.execute("PRAGMA busy_timeout = 10000")
-        # Hold one consistent read snapshot across run, event, and aggregate
-        # queries even while a production worker appends newer traces.
-        connection.execute("BEGIN")
-        return connection
-    except sqlite3.Error as exc:
-        if connection is not None:
-            connection.close()
-        raise EvaluationError(f"cannot open harness database read-only: {exc}") from exc
+    return open_trace_database(path, _trace_storage_policy())
 
 
 def table_names(connection: sqlite3.Connection) -> set[str]:
-    return {
-        str(row[0])
-        for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
-        ).fetchall()
-    }
+    return read_table_names(connection)
 
 
 def database_schema_version(
     connection: sqlite3.Connection,
     available_tables: set[str],
 ) -> int | None:
-    if "harness_metadata" not in available_tables:
-        return None
-    try:
-        row = connection.execute(
-            """
-            SELECT value
-            FROM harness_metadata
-            WHERE key = 'schema_version'
-            """
-        ).fetchone()
-    except sqlite3.Error as exc:
-        raise EvaluationError(
-            f"cannot read harness database schema version: {exc}"
-        ) from exc
-    if row is None:
-        return None
-    try:
-        version = int(row[0])
-    except (TypeError, ValueError) as exc:
-        raise EvaluationError(
-            "harness database schema version is invalid"
-        ) from exc
-    if version > CURRENT_SQL_SCHEMA_VERSION:
-        raise EvaluationError(
-            "harness database was created by a newer runtime"
-        )
-    return version
+    return read_database_schema_version(
+        connection, available_tables, _trace_storage_policy()
+    )
 
 
 def selected_runs(
     connection: sqlite3.Connection,
     run_id: str | None,
 ) -> list[dict[str, Any]]:
-    if run_id:
-        rows = connection.execute(
-            "SELECT * FROM harness_runs WHERE run_id = ?",
-            (run_id,),
-        ).fetchall()
-        if not rows:
-            raise EvaluationError(f"unknown harness run_id: {run_id}")
-    else:
-        rows = connection.execute(
-            "SELECT * FROM harness_runs ORDER BY started_at, run_id"
-        ).fetchall()
-    return [dict(row) for row in rows]
+    return read_selected_runs(connection, run_id, _trace_storage_policy())
 
 
 def rows_for_run(
@@ -388,14 +341,9 @@ def rows_for_run(
     run_id: str,
     order_by: str,
 ) -> list[dict[str, Any]]:
-    if table not in available_tables:
-        return []
-    # Table and ordering names are closed constants owned by this program.
-    rows = connection.execute(
-        f"SELECT * FROM {table} WHERE run_id = ? ORDER BY {order_by}",
-        (run_id,),
-    ).fetchall()
-    return [dict(row) for row in rows]
+    return read_rows_for_run(
+        connection, available_tables, table, run_id, order_by
+    )
 
 
 def hypothesis_manifest_digest(rows: Iterable[Mapping[str, Any]]) -> str:

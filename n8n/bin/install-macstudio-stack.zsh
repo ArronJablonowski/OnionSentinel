@@ -591,6 +591,7 @@ cp "$REPO_DIR/n8n/bin/onion_sentinel_harness.py" "$STACK_DIR/bin/onion_sentinel_
 cp "$REPO_DIR/n8n/bin/security_jsonl_log.py" "$STACK_DIR/bin/security_jsonl_log.py"
 cp "$REPO_DIR/operations/evaluate-harness-traces.py" "$STACK_DIR/bin/evaluate-harness-traces.py"
 cp "$REPO_DIR/operations/trace_evaluation_skills.py" "$STACK_DIR/bin/trace_evaluation_skills.py"
+cp "$REPO_DIR/operations/trace_evaluation_storage.py" "$STACK_DIR/bin/trace_evaluation_storage.py"
 cp "$REPO_DIR/n8n/bin/controlled_evaluation_isolation.py" "$STACK_DIR/bin/controlled_evaluation_isolation.py"
 /usr/bin/python3 "$REPO_DIR/n8n/bin/install-ai-runtime-package.py" \
   --source "$REPO_DIR/n8n/onion_sentinel" \
