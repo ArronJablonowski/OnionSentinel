@@ -282,6 +282,13 @@ lease state, frozen dispatch metadata, accepted fields, full stored-response
 digest, claim binding, and role-appropriate attempt completion. Parse, schema,
 or database failures return no proof and never mutate state.
 
+`scheduler_controlled_payload.py` owns fail-closed validation of a spooled
+controlled result. It binds the exact identity field set, release, dispatch,
+alert, group, role, lease-derived IR attempt, independent primary and reviewer
+routes, frozen-memory marker, claim digest, and completed reviewer response,
+then produces the immutable recovery projection and both response digests.
+The scheduler facade injects route patterns and canonicalization policies.
+
 `scheduler_claim.py` owns compare-and-set processing acquisition,
 server-authoritative job/alert/group replacement, controlled claim identity,
 IR reanalysis-attempt binding, contention projection, and automatic-threshold

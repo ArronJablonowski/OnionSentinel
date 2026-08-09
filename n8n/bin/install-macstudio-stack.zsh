@@ -576,6 +576,7 @@ cp "$REPO_DIR/n8n/bin/auto-run-ai-analysis.py" "$STACK_DIR/bin/auto-run-ai-analy
 cp "$REPO_DIR/n8n/bin/scheduler_claim.py" "$STACK_DIR/bin/scheduler_claim.py"
 cp "$REPO_DIR/n8n/bin/scheduler_cli.py" "$STACK_DIR/bin/scheduler_cli.py"
 cp "$REPO_DIR/n8n/bin/scheduler_controlled_recovery.py" "$STACK_DIR/bin/scheduler_controlled_recovery.py"
+cp "$REPO_DIR/n8n/bin/scheduler_controlled_payload.py" "$STACK_DIR/bin/scheduler_controlled_payload.py"
 cp "$REPO_DIR/n8n/bin/scheduler_controlled_runtime.py" "$STACK_DIR/bin/scheduler_controlled_runtime.py"
 cp "$REPO_DIR/n8n/bin/scheduler_controlled_terminal_proof.py" "$STACK_DIR/bin/scheduler_controlled_terminal_proof.py"
 cp "$REPO_DIR/n8n/bin/scheduler_drain.py" "$STACK_DIR/bin/scheduler_drain.py"

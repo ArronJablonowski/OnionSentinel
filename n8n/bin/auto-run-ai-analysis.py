@@ -60,6 +60,11 @@ from scheduler_controlled_recovery import (
     controlled_recovery_spool_pending as controlled_spool_pending,
     recover_controlled_evaluation_spool as replay_controlled_result_spool,
 )
+from scheduler_controlled_payload import (
+    ControlledPayloadPolicy,
+    ControlledPayloadSources,
+    validate_controlled_recovery_payload as validate_controlled_payload,
+)
 from scheduler_controlled_terminal_proof import (
     ControlledTerminalProofSources,
     prove_controlled_terminal_success,
@@ -947,127 +952,24 @@ def validate_controlled_recovery_payload(
     payload: dict[str, Any],
     args: argparse.Namespace,
 ) -> dict[str, Any]:
-    """Bind a spooled result to the frozen scheduler pins and old lease."""
-    identity = payload.get("controlled_job")
-    response = payload.get("response")
-    expected_identity_fields = {
-        "job_id",
-        "job_type",
-        "lease_token",
-        "cohort_id",
-        "dispatch_id",
-        "representative_alert_id",
-        "stable_group_id",
-        "stable_group_key",
-        "agent_role",
-        "reanalysis_attempt_id",
-        "release_id",
-        "expected_assigned_route",
-        "expected_reviewer_route",
-        "reviewer_required",
-    }
-    if (
-        not isinstance(identity, dict)
-        or set(identity) != expected_identity_fields
-        or not isinstance(response, dict)
-    ):
-        raise RuntimeError(
-            "controlled evaluation recovery identity is incomplete"
-        )
-    job_id = identity.get("job_id")
-    job_type = identity.get("job_type")
-    lease_token = identity.get("lease_token")
-    cohort_id = identity.get("cohort_id")
-    role = identity.get("agent_role")
-    attempt_id = identity.get("reanalysis_attempt_id")
-    release_id = identity.get("release_id")
-    assigned_route = identity.get("expected_assigned_route")
-    reviewer_route = identity.get("expected_reviewer_route")
-    expected_role = {
-        "ai_analysis": "soc-analyst",
-        "incident_response_analysis": "incident-responder",
-    }.get(job_type)
-    expected_attempt = (
-        ""
-        if job_type == "ai_analysis"
-        else incident_reanalysis_attempt_id(str(lease_token or ""))
-    )
-    runtime_release_id = current_runtime_release_id()
-    claim_digest = controlled_canonical_digest(
-        identity,
-        ensure_ascii=False,
-    )
-    analysis_id = payload.get("analysis_id")
-    if (
-        not isinstance(job_id, int)
-        or isinstance(job_id, bool)
-        or job_id < 1
-        or not isinstance(job_type, str)
-        or not isinstance(lease_token, str)
-        or not CONTROLLED_LEASE_TOKEN_RE.fullmatch(lease_token)
-        or not isinstance(cohort_id, str)
-        or not CONTROLLED_COHORT_ID_RE.fullmatch(cohort_id)
-        or identity.get("dispatch_id") != args.only_dispatch_id
-        or identity.get("representative_alert_id") != args.only_alert_id
-        or identity.get("stable_group_id") != args.only_group_id
-        or identity.get("stable_group_key") != args.only_stable_group_key
-        or not isinstance(role, str)
-        or role != expected_role
-        or not isinstance(attempt_id, str)
-        or attempt_id != expected_attempt
-        or not isinstance(release_id, str)
-        or release_id != runtime_release_id
-        or not isinstance(assigned_route, str)
-        or not CONTROLLED_MODEL_ROUTE_RE.fullmatch(assigned_route)
-        or not isinstance(reviewer_route, str)
-        or not CONTROLLED_MODEL_ROUTE_RE.fullmatch(reviewer_route)
-        or assigned_route.rsplit(":", 1)[0]
-        == reviewer_route.rsplit(":", 1)[0]
-        or identity.get("reviewer_required") is not True
-        or not isinstance(analysis_id, str)
-        or not CONTROLLED_ANALYSIS_ID_RE.fullmatch(analysis_id)
-        or payload.get("alert_id") != args.only_alert_id
-        or payload.get("agent_role") != role
-        or str(payload.get("reanalysis_attempt_id") or "") != attempt_id
-        or response.get("_analysis_evaluation_memory_frozen") is not True
-        or response.get("_analysis_controlled_claim_sha256")
-        != claim_digest
-        or response.get("_analysis_model_route") != assigned_route
-        or not isinstance(response.get("_second_opinion"), dict)
-        or response["_second_opinion"].get("status") != "completed"
-        or response["_second_opinion"].get("model_route") != reviewer_route
-        or not isinstance(
-            response["_second_opinion"].get("response"),
-            dict,
-        )
-        or response["_second_opinion"]["response"].get(
-            "_analysis_model_route"
-        ) != reviewer_route
-    ):
-        raise RuntimeError(
-            "controlled evaluation recovery identity does not match "
-            "the frozen scheduler pins"
-        )
-    return {
-        "analysis_id": analysis_id,
-        "job_id": job_id,
-        "job_type": job_type,
-        "lease_token": lease_token,
-        "stable_group_id": args.only_group_id,
-        # The runner binds frozen-memory tasks to its pre-storage response
-        # digest. Alert-store separately normalizes timestamps before hashing
-        # the stored response, so recovery must retain both exact bindings.
-        "response_digest": controlled_canonical_digest(response),
-        "stored_response_fallback_digest": (
-            controlled_storage_canonical_digest(response)
+    """Compatibility delegate for exact controlled payload validation."""
+    return validate_controlled_payload(
+        ControlledPayloadPolicy(
+            lease_token_pattern=CONTROLLED_LEASE_TOKEN_RE,
+            cohort_id_pattern=CONTROLLED_COHORT_ID_RE,
+            model_route_pattern=CONTROLLED_MODEL_ROUTE_RE,
+            analysis_id_pattern=CONTROLLED_ANALYSIS_ID_RE,
         ),
-        "accepted_fields": controlled_expected_accepted_fields(
-            payload,
-            response,
+        ControlledPayloadSources(
+            current_release_id=current_runtime_release_id,
+            incident_attempt_id=incident_reanalysis_attempt_id,
+            canonical_digest=controlled_canonical_digest,
+            storage_canonical_digest=controlled_storage_canonical_digest,
+            expected_accepted_fields=controlled_expected_accepted_fields,
         ),
-        "claim_digest": claim_digest,
-        "identity": identity,
-    }
+        payload,
+        args,
+    )
 
 
 def settle_controlled_frozen_memory_artifacts(

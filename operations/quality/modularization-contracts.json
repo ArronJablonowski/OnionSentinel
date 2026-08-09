@@ -72,6 +72,16 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_controlled_payload.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_controlled_payload.py",
+      "required_symbols": [
+        "ControlledPayloadPolicy",
+        "ControlledPayloadSources",
+        "validate_controlled_recovery_payload"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_controlled_terminal_proof.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_controlled_terminal_proof.py",
