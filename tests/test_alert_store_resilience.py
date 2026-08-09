@@ -10,6 +10,7 @@ PROVIDER_SCHEDULER = REPO_ROOT / "n8n" / "alert_store" / "lib" / "provider_sched
 HTTP_RUNTIME = REPO_ROOT / "n8n" / "alert_store" / "lib" / "http_runtime.js"
 HTTP_JSON_CLIENT = REPO_ROOT / "n8n" / "alert_store" / "lib" / "http_json_client.js"
 ENRICHMENT_CACHE = REPO_ROOT / "n8n" / "alert_store" / "lib" / "enrichment_cache.js"
+HEALTH_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "health_service.js"
 
 
 class AlertStoreResilienceTest(unittest.TestCase):
@@ -20,6 +21,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.http_runtime = HTTP_RUNTIME.read_text(encoding="utf-8")
         cls.http_json_client = HTTP_JSON_CLIENT.read_text(encoding="utf-8")
         cls.enrichment_cache = ENRICHMENT_CACHE.read_text(encoding="utf-8")
+        cls.health_service = HEALTH_SERVICE.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
         self.assertIn("require('./lib/provider_scheduler')", self.code)
@@ -231,7 +233,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("assertDiskWriteAdmission('alert ingestion')", self.code)
         self.assertIn("assertDiskWriteAdmission('alert enrichment')", self.code)
         self.assertIn("error.statusCode = 507", self.code)
-        self.assertIn("disk_capacity: diskCapacitySnapshot()", self.code)
+        self.assertIn("disk_capacity: state.diskCapacitySnapshot()", self.health_service)
 
     def test_heartbeats_are_accepted_before_disk_admission_is_checked(self) -> None:
         route = self.code.split("if (request.method === 'POST' && request.url === '/alert')", 1)[1]
@@ -242,7 +244,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
     def test_pipeline_observability_is_bounded_and_outside_network_paths(self) -> None:
         self.assertIn("require('./lib/pipeline_metrics')", self.code)
         self.assertIn("PIPELINE_EVENT_RETENTION_HOURS", self.code)
-        self.assertIn("pipelineMetrics.snapshot()", self.code)
+        self.assertIn("state.pipelineMetrics.snapshot()", self.health_service)
         self.assertIn("pipelineMetrics.captureDiskSample", self.code)
 
     def test_n8n_report_work_is_enqueued_inside_commit_and_delivered_afterward(self) -> None:

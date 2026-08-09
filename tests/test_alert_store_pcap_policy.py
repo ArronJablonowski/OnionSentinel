@@ -6,6 +6,7 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ALERT_STORE = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
+HEALTH_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "health_service.js"
 SOC_ANALYSIS_POLICY = REPO_ROOT / "n8n" / "alert_store" / "lib" / "soc_analysis_policy.js"
 COMPOSE = REPO_ROOT / "n8n" / "docker-compose.yml"
 ENV_EXAMPLE = REPO_ROOT / "n8n" / ".env.example"
@@ -129,11 +130,12 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
 
     def test_pcap_terminal_outcomes_and_storage_metrics_are_durable(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
+        health_service = HEALTH_SERVICE.read_text(encoding="utf-8")
         self.assertIn("ensureColumn('pcap_requests', 'outcome', 'TEXT')", code)
         self.assertIn("function classifyPcapOutcome", code)
         self.assertIn("backfillPcapOutcomes", code)
-        self.assertIn("pcap_outcomes", code)
-        self.assertIn("pcap_storage", code)
+        self.assertIn("pcap_outcomes", health_service)
+        self.assertIn("pcap_storage", health_service)
         self.assertIn("datetime(replace(p.last_seen, '  ', 'T'), '+' || ? || ' seconds')", code)
 
     def test_singular_no_matching_packet_errors_are_normalized(self) -> None:

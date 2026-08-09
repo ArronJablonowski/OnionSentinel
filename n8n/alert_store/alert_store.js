@@ -27,6 +27,9 @@ const {createSocAnalysisPolicy} = require('./lib/soc_analysis_policy');
 const {createRouteRegistry} = require('./lib/route_registry');
 const {createInventoryService} = require('./services/inventory_service');
 const {createInventoryRoutes} = require('./routes/inventory_routes');
+const {createHealthRepository} = require('./repositories/health_repository');
+const {createHealthService} = require('./services/health_service');
+const {createHealthRoutes} = require('./routes/health_routes');
 const {
   loadAuthorizedActivityPolicy,
   matchAuthorizedActivity,
@@ -11680,81 +11683,6 @@ function sendJson(response, code, payload) {
   response.end(body);
 }
 
-async function operationalMetricsSnapshot() {
-  const durable = durableJobs ? await durableJobs.stats() : [];
-  const oldestJob = await get(`SELECT MAX(0, CAST((julianday('now') - julianday(replace(MIN(next_attempt_at), '  ', 'T'))) * 86400 AS INTEGER)) AS seconds
-    FROM durable_jobs WHERE status = 'pending'`);
-  const oldestJobsByType = await all(`SELECT job_type,
-      MAX(0, CAST((julianday('now') - julianday(replace(MIN(next_attempt_at), '  ', 'T'))) * 86400 AS INTEGER)) AS seconds
-    FROM durable_jobs WHERE status = 'pending' GROUP BY job_type`);
-  const latestCompletedJobsByType = await all(`SELECT job_type,
-      MAX(0, CAST((julianday('now') - julianday(replace(MAX(last_completed_at), '  ', 'T'))) * 86400 AS INTEGER)) AS seconds
-    FROM durable_jobs WHERE last_completed_at IS NOT NULL GROUP BY job_type`);
-  const oldestProcessingJobsByType = await all(`SELECT job_type,
-      MAX(0, CAST((julianday('now') - julianday(replace(MIN(updated_at), '  ', 'T'))) * 86400 AS INTEGER)) AS seconds
-    FROM durable_jobs WHERE status = 'processing' GROUP BY job_type`);
-  const pcap = await all('SELECT status, analysis_status, COUNT(*) AS count FROM pcap_requests GROUP BY status, analysis_status');
-  const pcapOutcomes = await all("SELECT COALESCE(outcome, 'unknown') AS outcome, COUNT(*) AS count FROM pcap_requests GROUP BY COALESCE(outcome, 'unknown')");
-  const pcapStorage = await get(`SELECT
-      COUNT(*) AS fulfilled_count,
-      COALESCE(SUM(artifact_size_bytes), 0) AS artifact_bytes_total,
-      COALESCE(AVG(artifact_size_bytes), 0) AS artifact_bytes_average,
-      COALESCE(MAX(artifact_size_bytes), 0) AS artifact_bytes_maximum,
-      COALESCE(SUM(CASE WHEN datetime(replace(completed_at, '  ', 'T')) >= datetime('now', '-24 hours') THEN artifact_size_bytes ELSE 0 END), 0) AS artifact_bytes_24h,
-      SUM(CASE WHEN datetime(replace(completed_at, '  ', 'T')) >= datetime('now', '-24 hours') THEN 1 ELSE 0 END) AS fulfilled_24h
-    FROM pcap_requests WHERE status = 'fulfilled'`);
-  const oldestPcap = await get(`SELECT MAX(0, CAST((julianday('now') - julianday(replace(MIN(COALESCE(updated_at, created_at)), '  ', 'T'))) * 86400 AS INTEGER)) AS seconds
-    FROM pcap_requests WHERE status = 'pending'`);
-  const pageCount = await get('PRAGMA page_count');
-  const pageSize = await get('PRAGMA page_size');
-  const sqliteBytes = Number(pageCount?.page_count || 0) * Number(pageSize?.page_size || 0);
-  return {
-    generated_at: nowUtc(),
-    process: {
-      ...serviceMetrics,
-      post_request_admission: postRequestAdmission.snapshot(),
-      ingest_latency_ms_average: serviceMetrics.ingest_requests
-        ? Math.round(serviceMetrics.ingest_latency_ms_total / serviceMetrics.ingest_requests) : 0,
-    },
-    durable_jobs: durable,
-    postgres_shadow_outbox: postgresShadowOutbox
-      ? await postgresShadowOutbox.stats()
-      : null,
-    postgres_shadow_projector: postgresShadowProjector
-      ? postgresShadowProjector.snapshot()
-      : {enabled: postgresShadowEnabled, active: false},
-    asset_inventory: postgresAssetStore
-      ? await postgresAssetStore.stats()
-      : {
-        enabled: assetPostgresEnabled,
-        backend: 'postgresql',
-        available: false,
-        error: postgresAssetStoreError || null,
-      },
-    ac_hunter: postgresAcHunterStore
-      ? await postgresAcHunterStore.stats()
-      : {
-        enabled: acHunterPostgresEnabled,
-        backend: 'postgresql',
-        available: false,
-        error: postgresAcHunterStoreError || null,
-      },
-    oldest_pending_job_seconds: Number(oldestJob?.seconds || 0),
-    oldest_pending_jobs: oldestJobsByType,
-    latest_completed_jobs: latestCompletedJobsByType,
-    oldest_processing_jobs: oldestProcessingJobsByType,
-    pcap,
-    pcap_outcomes: pcapOutcomes,
-    pcap_storage: pcapStorage || {},
-    oldest_pending_pcap_seconds: Number(oldestPcap?.seconds || 0),
-    enrichment_cache: await enrichmentCache.stats(),
-    telegram_outbox: await telegramOutboxSnapshot(),
-    sqlite_bytes: sqliteBytes,
-    disk_capacity: diskCapacitySnapshot(),
-    pipeline: pipelineMetrics ? await pipelineMetrics.snapshot() : null,
-  };
-}
-
 async function capturePipelineDiskSample() {
   if (!pipelineMetrics) return;
   const pageCount = await get('PRAGMA page_count');
@@ -11783,6 +11711,44 @@ const modularRoutes = createRouteRegistry(createInventoryRoutes({
   readJsonBody,
   sendJson,
 }));
+const healthRepository = createHealthRepository({get, all});
+const healthService = createHealthService({
+  repository: healthRepository,
+  runtime: () => ({
+    controlledEvaluationMode,
+    controlledEvaluationLeases,
+    controlledRoutes: controlledEvaluationRequests,
+    runtimeReleaseId: runtimeReleaseIdValue,
+    host,
+    port,
+    activeSqliteWrites,
+    telegramOutboxSnapshot,
+    enrichmentScheduler,
+    enrichmentCache,
+    authorizedActivityPolicyPath,
+    authorizedActivityPolicyCount: authorizedActivityPolicy.policies.length,
+    authorizedCampaignReconciliation,
+    diskCapacitySnapshot,
+    postgresShadowOutbox,
+    postgresShadowProjector,
+    postgresShadowEnabled,
+    postgresAssetStore,
+    assetPostgresEnabled,
+    postgresAssetStoreError,
+    postgresSoftwareStore,
+    softwarePostgresEnabled,
+    postgresSoftwareStoreError,
+    postgresAcHunterStore,
+    acHunterPostgresEnabled,
+    postgresAcHunterStoreError,
+    durableJobs,
+    serviceMetrics,
+    postRequestAdmission,
+    pipelineMetrics,
+    nowUtc,
+  }),
+});
+modularRoutes.registerAll(createHealthRoutes({service: healthService, sendJson}));
 
 function controlledEvaluationRequestAuthorized(request) {
   if (!controlledEvaluationMode) return true;
@@ -11842,84 +11808,6 @@ async function handleRequest(request, response) {
       return;
     }
     if (await modularRoutes.dispatch({request, response, parsedUrl})) return;
-    if (request.method === 'GET' && request.url === '/health') {
-      // Used by the Mac Studio monitor LaunchAgent.
-      const health = {
-        ok: true,
-        status: 'healthy',
-        service: 'onion-sentinel-alert-store',
-        controlled_evaluation: controlledEvaluationMode,
-        evaluation_mode: controlledEvaluationMode,
-        runtime_mode: controlledEvaluationMode
-          ? 'controlled-evaluation'
-          : 'production',
-        release_id: runtimeReleaseIdValue || 'unversioned',
-        listen_host: host,
-        listen_port: port,
-        accepting_requests: true,
-        active_writes: activeSqliteWrites,
-        active_controlled_leases: controlledEvaluationMode
-          ? controlledEvaluationLeases.size
-          : 0,
-        controlled_results_pending_completion: controlledEvaluationMode
-          ? [...controlledEvaluationLeases.values()]
-            .filter((lease) => lease.resultCommitted).length
-          : 0,
-        route_allowlist: controlledEvaluationMode
-          ? [...controlledEvaluationRequests].sort()
-          : [],
-        background_jobs_enabled: !controlledEvaluationMode,
-        outbound_network_enabled: !controlledEvaluationMode,
-        worker_wake_signaling_enabled: !controlledEvaluationMode,
-      };
-      if (!controlledEvaluationMode) {
-        health.telegram_outbox = await telegramOutboxSnapshot();
-        health.enrichment_scheduler = enrichmentScheduler.snapshot();
-        health.enrichment_cache = enrichmentCache.snapshot();
-        health.authorized_activity_campaigns = {
-          policy_path: authorizedActivityPolicyPath,
-          configured_policy_count: authorizedActivityPolicy.policies.length,
-          reconciliation: authorizedCampaignReconciliation,
-        };
-        health.disk_capacity = diskCapacitySnapshot();
-        health.postgres_shadow_outbox = postgresShadowOutbox
-          ? await postgresShadowOutbox.stats()
-          : null;
-        health.postgres_shadow_projector = postgresShadowProjector
-          ? postgresShadowProjector.snapshot()
-          : {enabled: postgresShadowEnabled, active: false};
-        health.asset_inventory = postgresAssetStore
-          ? await postgresAssetStore.stats()
-          : {
-            enabled: assetPostgresEnabled,
-            backend: 'postgresql',
-            available: false,
-            error: postgresAssetStoreError || null,
-          };
-        health.software_inventory = postgresSoftwareStore
-          ? await postgresSoftwareStore.stats()
-          : {
-            enabled: softwarePostgresEnabled,
-            backend: 'postgresql',
-            available: false,
-            error: postgresSoftwareStoreError || null,
-          };
-        health.ac_hunter = postgresAcHunterStore
-          ? await postgresAcHunterStore.stats()
-          : {
-            enabled: acHunterPostgresEnabled,
-            backend: 'postgresql',
-            available: false,
-            error: postgresAcHunterStoreError || null,
-          };
-      }
-      sendJson(response, 200, health);
-      return;
-    }
-    if (request.method === 'GET' && parsedUrl.pathname === '/metrics') {
-      sendJson(response, 200, {ok: true, metrics: await operationalMetricsSnapshot()});
-      return;
-    }
     if (request.method === 'GET' && parsedUrl.pathname === '/analyst-status') {
       sendJson(response, 200, await analystStatusSnapshot());
       return;
@@ -12142,10 +12030,6 @@ async function handleRequest(request, response) {
       // Intended for relay polling and operator diagnostics.
       const result = await listPcapRequests(parsedUrl.searchParams);
       sendJson(response, 200, result);
-      return;
-    }
-    if (request.method === 'GET' && parsedUrl.pathname === '/jobs/stats') {
-      sendJson(response, 200, {ok: true, jobs: durableJobs ? await durableJobs.stats() : []});
       return;
     }
     if (request.method === 'POST' && parsedUrl.pathname === '/jobs/status') {

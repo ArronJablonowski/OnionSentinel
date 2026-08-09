@@ -79,8 +79,11 @@ prepare_alert_store_stage() {
     for (const modulePath of process.argv.slice(1)) require(modulePath);
   ' \
     "$ALERT_STORE_STAGE_DIR/lib/route_registry.js" \
+    "$ALERT_STORE_STAGE_DIR/repositories/health_repository.js" \
     "$ALERT_STORE_STAGE_DIR/routes/inventory_routes.js" \
-    "$ALERT_STORE_STAGE_DIR/services/inventory_service.js"
+    "$ALERT_STORE_STAGE_DIR/routes/health_routes.js" \
+    "$ALERT_STORE_STAGE_DIR/services/inventory_service.js" \
+    "$ALERT_STORE_STAGE_DIR/services/health_service.js"
 }
 
 trap cleanup_alert_store_stage EXIT
