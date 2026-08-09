@@ -255,7 +255,11 @@ function createControlledJobTransition({
     if (['completed', 'failed'].includes(admission.action)) leases.delete(admission.key);
   }
 
-  return {leases, leaseKey, admit, apply};
+  function retireLease(key) {
+    leases.delete(key);
+  }
+
+  return {leases, leaseKey, admit, apply, retireLease};
 }
 
 module.exports = {createControlledJobTransition};

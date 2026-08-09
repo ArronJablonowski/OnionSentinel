@@ -152,4 +152,6 @@ test('post-commit mirror applies claim and heartbeat only after updated receipt'
   env.owner.apply({action: 'processing', key: 'key-2', owned}, {updated: true});
   assert.deepEqual(env.owner.leases.get('key-2'), owned);
   assert.equal(env.owner.leases.size, 1);
+  env.owner.retireLease('key-2');
+  assert.equal(env.owner.leases.size, 0);
 });
