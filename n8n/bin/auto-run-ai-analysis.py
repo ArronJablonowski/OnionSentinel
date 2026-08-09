@@ -48,6 +48,14 @@ from scheduler_cli import (
     SchedulerCliPolicy,
     parse_scheduler_args,
 )
+from scheduler_ai_settings import (
+    SchedulerSettingsPolicy,
+    StrictSettingsSources,
+    cli_agent_roles as discover_cli_agent_roles,
+    configured_analysis_levels as apply_analysis_level_floor,
+    role_uses_codex_cli,
+    strict_controlled_ai_settings,
+)
 from scheduler_controlled_runtime import (
     ControlledRuntimePolicy,
     ControlledRuntimeSources,
@@ -659,52 +667,18 @@ def project_now_precise() -> str:
     ).replace("T", "  ")
 
 
-def cli_agent_roles(settings_path: Path) -> set[str]:
-    """Return roles explicitly assigned to a hosted CLI inference lane.
+def scheduler_settings_policy() -> SchedulerSettingsPolicy:
+    return SchedulerSettingsPolicy(
+        max_bytes=MAX_AI_SETTINGS_BYTES,
+        agent_roles=AGENT_ROLES,
+        codex_models=CODEX_CLI_MODEL_CATALOG,
+        codex_efforts=CODEX_CLI_REASONING_EFFORTS,
+    )
 
-    Settings are treated as untrusted runtime input. A missing, oversized, or
-    malformed file fails closed to the local lane so a configuration accident
-    cannot unexpectedly send alert evidence to a hosted model.
-    """
-    try:
-        if not settings_path.is_file() or settings_path.stat().st_size > MAX_AI_SETTINGS_BYTES:
-            return set()
-        raw = json.loads(settings_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return set()
-    routes = raw.get("agent_models") if isinstance(raw, dict) else {}
-    if not isinstance(routes, dict):
-        return set()
-    codex_models = raw.get("codex_cli_models", [])
-    if not isinstance(codex_models, list):
-        return set()
-    enabled_codex_routes: set[str] = set()
-    for entry in codex_models:
-        if not isinstance(entry, dict) or entry.get("enabled") is not True:
-            continue
-        model = str(entry.get("model") or "").strip()
-        effort = str(entry.get("reasoning_effort") or "").strip().lower()
-        if (
-            model in CODEX_CLI_MODEL_CATALOG
-            and effort in CODEX_CLI_REASONING_EFFORTS
-        ):
-            enabled_codex_routes.add(f"codex-cli:{model}:{effort}")
-    enabled_hosted_routes = set(enabled_codex_routes)
-    if raw.get("hermes_agent_enabled") is True:
-        model = str(raw.get("hermes_agent_model") or "gpt-5.5").strip()
-        effort = str(raw.get("hermes_agent_reasoning_effort") or "medium").strip().lower()
-        if model in CODEX_CLI_MODEL_CATALOG and effort == "medium":
-            enabled_hosted_routes.add(f"hermes-agent:{model}:{effort}")
-    # The isolated OpenClaw adapter currently admits explicit ollama/ routes
-    # only. Those runs consume the serialized local GPU lane and must never be
-    # classified as hosted CLI work, even if an untrusted settings file names
-    # a different OpenClaw provider.
-    cli_roles: set[str] = set()
-    for role in AGENT_ROLES:
-        route = str(routes.get(role) or "").strip()
-        if route.lower() in {"gpt-cli", "codex-cli"} or route in enabled_hosted_routes:
-            cli_roles.add(role)
-    return cli_roles
+
+def cli_agent_roles(settings_path: Path) -> set[str]:
+    """Compatibility delegate for fail-closed hosted-lane discovery."""
+    return discover_cli_agent_roles(settings_path, scheduler_settings_policy())
 
 
 def _role_uses_codex_cli(
@@ -712,37 +686,15 @@ def _role_uses_codex_cli(
     *,
     agent_role: str = "",
 ) -> bool:
-    """Return whether either configured route for this role uses Codex CLI."""
+    """Return whether any configured route for this role uses Codex CLI."""
     role = str(agent_role or "").strip()
     settings_path = Path(
         getattr(args, "ai_settings_file", DEFAULT_AI_SETTINGS)
     )
-    routes: list[str] = []
-    try:
-        if (
-            settings_path.is_file()
-            and settings_path.stat().st_size <= MAX_AI_SETTINGS_BYTES
-        ):
-            raw = json.loads(settings_path.read_text(encoding="utf-8"))
-        else:
-            raw = {}
-        if isinstance(raw, dict):
-            for field in (
-                "agent_models",
-                "agent_second_opinion_models",
-                "agent_adjudicator_models",
-            ):
-                mapping = raw.get(field)
-                if isinstance(mapping, dict):
-                    routes.append(
-                        str(mapping.get(role) or "").strip().lower()
-                    )
-    except (OSError, ValueError, TypeError):
-        routes = []
-    return any(
-        route in {"gpt-cli", "codex-cli"}
-        or route.startswith("codex-cli:")
-        for route in routes
+    return role_uses_codex_cli(
+        settings_path,
+        scheduler_settings_policy(),
+        role,
     )
 
 
@@ -784,35 +736,12 @@ def configured_analysis_levels(settings_path: Path, configured_levels: str) -> l
     Older settings files retain the historical all-severity analysis behavior
     until the operator explicitly saves the new control.
     """
-    requested = [
-        level.strip().lower()
-        for level in str(configured_levels or "").split(",")
-        if level.strip().lower() in SEVERITY_PRIORITY
-    ]
-    try:
-        if not settings_path.is_file() or settings_path.stat().st_size > MAX_AI_SETTINGS_BYTES:
-            raw = {}
-        else:
-            raw = json.loads(settings_path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                raw = {}
-    except (OSError, ValueError, TypeError):
-        raw = {}
-    threshold = str(
-        raw.get("soc_analyst_analysis_min_severity", "informational") or ""
-    ).strip().lower()
-    if threshold == "info":
-        threshold = "informational"
-    if threshold == "disabled":
-        return []
-    if threshold not in SEVERITY_PRIORITY:
-        threshold = "informational"
-    highest_allowed_index = SEVERITY_PRIORITY.index(threshold)
-    return [
-        level
-        for level in SEVERITY_PRIORITY[: highest_allowed_index + 1]
-        if level in requested
-    ]
+    return apply_analysis_level_floor(
+        settings_path,
+        scheduler_settings_policy(),
+        configured_levels,
+        SEVERITY_PRIORITY,
+    )
 
 
 def provider_lane_sql(args: argparse.Namespace) -> tuple[str, list[object]]:
@@ -1701,23 +1630,17 @@ def _strict_controlled_ai_settings(
 ) -> tuple[dict[str, Any], dict[str, Any], set[str]]:
     """Return runner-normalized settings plus exact persisted assignments."""
 
-    if (
-        not settings_path.is_file()
-        or settings_path.stat().st_size > MAX_AI_SETTINGS_BYTES
-    ):
-        raise RuntimeError("settings file is missing or oversized")
     runner = _strict_ai_settings_module()
-    settings = runner.load_ai_settings(settings_path)
-    raw = json.loads(
-        runner.read_bytes_bounded(
-            settings_path,
-            runner.DEFAULT_MAX_SETTINGS_BYTES,
-        ).decode("utf-8", errors="strict")
+    return strict_controlled_ai_settings(
+        settings_path,
+        MAX_AI_SETTINGS_BYTES,
+        StrictSettingsSources(
+            load_ai_settings=runner.load_ai_settings,
+            read_bytes_bounded=runner.read_bytes_bounded,
+            enabled_agent_model_routes=runner.enabled_agent_model_routes,
+            max_settings_bytes=runner.DEFAULT_MAX_SETTINGS_BYTES,
+        ),
     )
-    if not isinstance(settings, dict) or not isinstance(raw, dict):
-        raise RuntimeError("AI settings root must be an object")
-    enabled_routes = set(runner.enabled_agent_model_routes(settings))
-    return settings, raw, enabled_routes
 
 
 def controlled_job_route_contract(

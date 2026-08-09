@@ -61,6 +61,20 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_ai_settings.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_ai_settings.py",
+      "required_symbols": [
+        "SchedulerSettingsPolicy",
+        "StrictSettingsSources",
+        "load_untrusted_settings",
+        "cli_agent_roles",
+        "role_uses_codex_cli",
+        "configured_analysis_levels",
+        "strict_controlled_ai_settings"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_javascript_compat.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_javascript_compat.py",

@@ -324,6 +324,15 @@ release, frozen dispatch identity, canonical enabled primary/reviewer routes,
 and distinct reviewer model. Settings loading, stable-key policy, and the
 facade's public rejection type remain injected ports.
 
+`scheduler_ai_settings.py` is the scheduler's fail-closed projection of the
+untrusted AI settings document. It performs bounded UTF-8 object loading,
+derives hosted Codex/Hermes lane roles without admitting OpenClaw's local GPU
+routes, detects Codex use across primary/reviewer/adjudicator assignments,
+applies the saved automatic-analysis severity floor, and builds the strict
+normalized-plus-raw snapshot used by controlled route binding. The canonical
+runner parser and bounded reader are injected so scheduler and runner retain
+one normalization contract.
+
 `scheduler_claim.py` owns compare-and-set processing acquisition,
 server-authoritative job/alert/group replacement, controlled claim identity,
 IR reanalysis-attempt binding, contention projection, and automatic-threshold
