@@ -89,6 +89,7 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/routes/analysis_result_routes.js" \
     "$ALERT_STORE_STAGE_DIR/routes/pcap_routes.js" \
     "$ALERT_STORE_STAGE_DIR/routes/enrichment_routes.js" \
+    "$ALERT_STORE_STAGE_DIR/routes/maintenance_routes.js" \
     "$ALERT_STORE_STAGE_DIR/services/inventory_service.js" \
     "$ALERT_STORE_STAGE_DIR/services/health_service.js" \
     "$ALERT_STORE_STAGE_DIR/services/analyst_state_service.js" \

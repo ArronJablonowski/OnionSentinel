@@ -43,6 +43,7 @@ const {createPcapService} = require('./services/pcap_service');
 const {createPcapRoutes} = require('./routes/pcap_routes');
 const {createEnrichmentService} = require('./services/enrichment_service');
 const {createEnrichmentRoutes} = require('./routes/enrichment_routes');
+const {createMaintenanceRoutes} = require('./routes/maintenance_routes');
 const {
   loadAuthorizedActivityPolicy,
   matchAuthorizedActivity,
@@ -11855,6 +11856,13 @@ modularRoutes.registerAll(createEnrichmentRoutes({
   readJsonBody,
   sendJson,
 }));
+modularRoutes.registerAll(createMaintenanceRoutes({
+  service: {
+    rescore: rescoreAlerts,
+    refreshGroups: rebuildAlertGroupSummaries,
+  },
+  sendJson,
+}));
 
 function controlledEvaluationRequestAuthorized(request) {
   if (!controlledEvaluationMode) return true;
@@ -11933,18 +11941,6 @@ async function handleRequest(request, response) {
       serviceMetrics.ingest_latency_ms_max = Math.max(serviceMetrics.ingest_latency_ms_max, latency);
       writeN8nBeacon('stored', alert, result);
       sendJson(response, result.ok ? 200 : 400, result);
-      return;
-    }
-    if (request.method === 'POST' && request.url === '/rescore') {
-      // Manual tuning endpoint after changing scoring rules.
-      const result = await rescoreAlerts();
-      sendJson(response, 200, result);
-      return;
-    }
-    if (request.method === 'POST' && request.url === '/refresh-groups') {
-      // Manual repair endpoint after DB restore or schema troubleshooting.
-      const result = await rebuildAlertGroupSummaries();
-      sendJson(response, 200, result);
       return;
     }
     sendJson(response, 404, {ok: false, status: 'not_found'});
