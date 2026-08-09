@@ -5659,46 +5659,12 @@ def _is_incident_responder_package(prompt_package: dict[str, Any] | None) -> boo
     return role == "incident-responder"
 
 
-def _canonical_authorization_timestamp(value: Any) -> dt.datetime | None:
-    return _conclusion_authorization_evidence().canonical_timestamp(value)
-
-
-def _prompt_authorization_event_tuple(
-    prompt_package: dict[str, Any],
-) -> dict[str, Any] | None:
-    return _conclusion_authorization_evidence().prompt_event(prompt_package)
-
-
-def _canonical_authorization_coverage(value: Any) -> dict[str, Any] | None:
-    return _conclusion_authorization_evidence().canonical_coverage(value)
-
-
-def _canonical_authorization_entry_covers_event(
-    entry: Any, event: dict[str, Any],
-) -> bool:
-    return _conclusion_authorization_evidence().entry_covers_event(entry, event)
-
-
 def _has_structured_authorization_evidence(
     prompt_package: dict[str, Any] | None,
 ) -> bool:
     return _conclusion_authorization_evidence().has_structured_evidence(
         prompt_package
     )
-
-
-def _tuning_material_evidence_gap_signals(
-    response: dict[str, Any],
-) -> list[str]:
-    return _conclusion_tuning().material_evidence_gap_signals(
-        response, _tuning_guard_dependencies(),
-    )
-
-
-def _unresolved_reviewer_material_disagreement(
-    response: dict[str, Any],
-) -> bool:
-    return _conclusion_tuning().unresolved_reviewer_material_disagreement(response)
 
 
 def apply_tuning_coherence_guard(
@@ -5731,10 +5697,6 @@ def apply_policy_sensitive_activity_guard(
     )
 
 
-def _incident_timeline_timestamp(value: Any) -> dt.datetime | None:
-    return _conclusion_incident_report().timeline_timestamp(value)
-
-
 def validate_incident_response_report_shape(value: Any) -> dict[str, Any]:
     return _conclusion_incident_report().validate_shape(
         value, _incident_report_dependencies(),
@@ -5754,22 +5716,6 @@ def apply_incident_evidence_completeness_guard(
     """Cap confidence when required Incident Responder evidence is incomplete."""
     return _conclusion_incident_completeness().apply(
         response, prompt_package, _incident_completeness_dependencies(),
-    )
-
-
-def _canonical_incident_disposition_sentence(response: dict[str, Any]) -> str:
-    return _conclusion_incident_report().canonical_disposition(
-        response, _incident_report_dependencies(),
-    )
-
-
-def _human_review_incident_actions(response: dict[str, Any]) -> dict[str, list[str]]:
-    return _conclusion_incident_report().human_review_actions(response)
-
-
-def _incident_report_requests_containment(report: dict[str, Any]) -> bool:
-    return _conclusion_incident_report().requests_containment(
-        report, _incident_report_dependencies(),
     )
 
 
@@ -5840,25 +5786,6 @@ def live_osquery_case_id(prompt_package: dict[str, Any]) -> str:
     return _query_live_workflow().case_id(prompt_package)
 
 
-def apply_live_osquery_follow_up(
-    prompt_package: dict[str, Any],
-    primary_response: dict[str, Any],
-    args: argparse.Namespace,
-    settings: dict[str, Any],
-    config: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """Compatibility delegate for the single bounded endpoint follow-up."""
-    return _query_live_workflow().follow_up(
-        prompt_package,
-        primary_response,
-        args,
-        settings,
-        config,
-        policy=_query_live_workflow_policy(),
-        dependencies=_query_live_workflow_dependencies(),
-    )
-
-
 def validate_response(
     response: dict[str, Any],
     prompt_package: dict[str, Any] | None = None,
@@ -5879,25 +5806,6 @@ def validate_response(
 
 def markdown_list(items: list[str]) -> str:
     return _reporting_incident().markdown_list(items)
-
-
-def render_incident_response_markdown(response: dict[str, Any]) -> list[str]:
-    return _reporting_incident().render_incident_response(
-        response,
-        bounded_text_list=bounded_text_list,
-    )
-
-
-def render_incident_query_audit_markdown(response: dict[str, Any]) -> list[str]:
-    return _reporting_incident().render_security_onion_query_audit(response)
-
-
-def render_incident_osquery_audit_markdown(response: dict[str, Any]) -> list[str]:
-    return _reporting_incident().render_appliance_osquery_audit(response)
-
-
-def render_incident_live_osquery_audit_markdown(response: dict[str, Any]) -> list[str]:
-    return _reporting_incident().render_live_osquery_audit(response)
 
 
 def render_markdown(
