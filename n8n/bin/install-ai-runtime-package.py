@@ -34,6 +34,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.evidence.transport",
     "onion_sentinel.analysis.evidence.contract",
     "onion_sentinel.analysis.evidence.registry",
+    "onion_sentinel.analysis.evidence.runtime_adapter",
     "onion_sentinel.analysis.evidence.traversal",
     "onion_sentinel.analysis.evidence.validation",
     "onion_sentinel.analysis.query.derived",

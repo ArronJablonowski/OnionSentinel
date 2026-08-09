@@ -1120,10 +1120,14 @@ def _evidence_references():
     return references
 
 
+def _evidence_runtime_adapter():
+    _provider_routing()
+    from onion_sentinel.analysis.evidence import runtime_adapter
+    return runtime_adapter
+
+
 def _evidence_reference_policy():
-    return _evidence_references().Policy(
-        maximum_text_length=EVIDENCE_REFERENCE_TEXT_MAX,
-    )
+    return _evidence_runtime_adapter().reference_policy(globals())
 
 
 def _evidence_validation():
@@ -1139,15 +1143,7 @@ def _evidence_registry():
 
 
 def _evidence_registry_instance():
-    module = _evidence_registry()
-    return module.Registry(
-        maximum_references=EVIDENCE_REFERENCE_MAX,
-        deps=module.Dependencies(
-            bounded_reference=_bounded_reference,
-            source_class=evidence_source_class,
-            canonical_count=_canonical_investigation_count,
-        ),
-    )
+    return _evidence_runtime_adapter().registry_instance(globals())
 
 
 def _evidence_columnar():
@@ -1157,25 +1153,11 @@ def _evidence_columnar():
 
 
 def _evidence_columnar_policy():
-    module = _evidence_columnar()
-    return module.Policy(
-        result_schema=INVESTIGATION_QUERY_RESULT_SCHEMA,
-        provenance_schema=INVESTIGATION_COLUMNAR_PROVENANCE_SCHEMA,
-        columns=tuple(INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS),
-        empty_ref_instruction=INVESTIGATION_COLUMNAR_EMPTY_REF_INSTRUCTION,
-        success_statuses=frozenset(INVESTIGATION_QUERY_SUCCESS_STATUSES),
-        maximum_queries=MAX_INVESTIGATION_QUERIES_TOTAL,
-        maximum_rounds=MAX_INVESTIGATION_QUERY_ROUNDS,
-    )
+    return _evidence_runtime_adapter().columnar_policy(globals())
 
 
 def _evidence_columnar_dependencies():
-    module = _evidence_columnar()
-    return module.Dependencies(
-        prompt_json_bytes=_investigation_prompt_json_bytes,
-        canonical_count=_canonical_investigation_count,
-        result_bound_reference=result_bound_query_reference,
-    )
+    return _evidence_runtime_adapter().columnar_dependencies(globals())
 
 
 def _evidence_hosted_projection():
@@ -1185,21 +1167,11 @@ def _evidence_hosted_projection():
 
 
 def _evidence_hosted_projection_policy():
-    module = _evidence_hosted_projection()
-    return module.Policy(
-        provenance_schema=INVESTIGATION_COLUMNAR_PROVENANCE_SCHEMA,
-        columns=tuple(INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS),
-        maximum_queries=MAX_INVESTIGATION_QUERIES_TOTAL,
-        list_path_sentinel=_MODEL_LIST_PATH_SENTINEL,
-    )
+    return _evidence_runtime_adapter().hosted_projection_policy(globals())
 
 
 def _evidence_hosted_projection_dependencies():
-    module = _evidence_hosted_projection()
-    return module.Dependencies(
-        exact_columnar_envelope=_exact_hosted_columnar_envelope,
-        prompt_json_bytes=_investigation_prompt_json_bytes,
-    )
+    return _evidence_runtime_adapter().hosted_projection_dependencies(globals())
 
 
 def _evidence_transport():
@@ -1209,23 +1181,11 @@ def _evidence_transport():
 
 
 def _evidence_transport_policy():
-    return _evidence_transport().Policy(
-        internal_keys=frozenset(MODEL_INTERNAL_KEYS),
-        hosted_forbidden_keys=frozenset(HOSTED_FORBIDDEN_KEYS),
-        list_path_sentinel=_MODEL_LIST_PATH_SENTINEL,
-        fixed_point_max_passes=HOSTED_TRANSPORT_FIXED_POINT_MAX_PASSES,
-    )
+    return _evidence_runtime_adapter().transport_policy(globals())
 
 
 def _evidence_transport_dependencies():
-    return _evidence_transport().Dependencies(
-        redact_asset_owners=_redact_unshared_asset_owners,
-        reviewed_sha256_path=_reviewed_hosted_sha256_evidence_path,
-        exact_columnar_envelope=_exact_hosted_columnar_envelope,
-        sanitize_hosted_evidence=_sanitize_hosted_investigation_evidence,
-        refinalize_columnar_envelope=_refinalize_hosted_columnar_envelope,
-        evidence_reference_contract=evidence_reference_contract,
-    )
+    return _evidence_runtime_adapter().transport_dependencies(globals())
 
 
 def _evidence_endpoint():
@@ -1235,20 +1195,11 @@ def _evidence_endpoint():
 
 
 def _evidence_endpoint_policy():
-    module = _evidence_endpoint()
-    return module.Policy(
-        live_schema=LIVE_OSQUERY_SCHEMA,
-        support_schema="onion-sentinel-live-osquery-support-v1",
-        success_statuses=frozenset(INVESTIGATION_QUERY_SUCCESS_STATUSES),
-    )
+    return _evidence_runtime_adapter().endpoint_policy(globals())
 
 
 def _evidence_endpoint_dependencies():
-    module = _evidence_endpoint()
-    return module.Dependencies(
-        normalize_live_query=normalize_live_osquery_query,
-        normalization_error=LiveOsqueryContractError,
-    )
+    return _evidence_runtime_adapter().endpoint_dependencies(globals())
 
 
 def _evidence_traversal():
@@ -1258,19 +1209,11 @@ def _evidence_traversal():
 
 
 def _evidence_traversal_policy():
-    module = _evidence_traversal()
-    return module.Policy(
-        success_statuses=frozenset(INVESTIGATION_QUERY_SUCCESS_STATUSES),
-        columnar_schema=INVESTIGATION_COLUMNAR_PROVENANCE_SCHEMA,
-    )
+    return _evidence_runtime_adapter().traversal_policy(globals())
 
 
 def _evidence_traversal_dependencies():
-    module = _evidence_traversal()
-    return module.Dependencies(
-        bounded_reference=_bounded_reference,
-        result_bound_reference=result_bound_query_reference,
-    )
+    return _evidence_runtime_adapter().traversal_dependencies(globals())
 
 
 def _evidence_contract():
@@ -1280,19 +1223,7 @@ def _evidence_contract():
 
 
 def _evidence_contract_dependencies():
-    module = _evidence_contract()
-    return module.Dependencies(
-        registry_factory=_evidence_registry_instance,
-        traverse=lambda value, path, sink: _evidence_traversal().visit(
-            value, path, sink, _evidence_traversal_policy(),
-            _evidence_traversal_dependencies(),
-        ),
-        process_columnar=lambda value, sink: _evidence_columnar().process(
-            value, sink, _evidence_columnar_policy(),
-            _evidence_columnar_dependencies(),
-        ),
-        has_structured_authorization=_has_structured_authorization_evidence,
-    )
+    return _evidence_runtime_adapter().contract_dependencies(globals())
 
 
 def _query_primitives():
@@ -1998,25 +1929,11 @@ def _review_catalogs():
 
 
 def _review_catalog_policy():
-    module = _review_catalogs()
-    return module.Policy(
-        observable_max=REVIEW_OBSERVABLE_MAX,
-        observable_kinds=REVIEW_OBSERVABLE_KINDS,
-        ipv4_pattern=REVIEW_IPV4_RE,
-        domain_pattern=REVIEW_DOMAIN_RE,
-        taxonomy_field_paths=REVIEW_TAXONOMY_FIELD_PATHS,
-        artifact_field_paths=REVIEW_ARTIFACT_FIELD_PATHS,
-        artifact_suffixes=REVIEW_ARTIFACT_SUFFIXES,
-        rule_label_field_paths=REVIEW_RULE_LABEL_FIELD_PATHS,
-    )
+    return _review_runtime_adapter().catalog_policy(globals())
 
 
 def _review_catalog_dependencies():
-    module = _review_catalogs()
-    return module.Dependencies(
-        bounded_reference=_bounded_reference,
-        reviewer_safe_copy=lambda value: model_safe_copy(value, reviewer_safe=True),
-    )
+    return _review_runtime_adapter().catalog_dependencies(globals())
 
 
 def _review_text():
@@ -2520,33 +2437,14 @@ HOSTED_FORBIDDEN_KEYS = {
 
 def _redact_unshared_asset_owners(asset_context: Any) -> Any:
     """Remove owner aliases that operators did not approve for external review."""
-    if not isinstance(asset_context, dict):
-        return asset_context
-    sanitized = dict(asset_context)
-    matched_assets = sanitized.get("matched_assets")
-    if not isinstance(matched_assets, list):
-        return sanitized
-    sanitized_assets: list[Any] = []
-    for raw_asset in matched_assets:
-        if not isinstance(raw_asset, dict):
-            sanitized_assets.append(raw_asset)
-            continue
-        asset = dict(raw_asset)
-        if asset.get("share_with_hosted_models") is not True:
-            asset.pop("owner_ref", None)
-        sanitized_assets.append(asset)
-    sanitized["matched_assets"] = sanitized_assets
-    return sanitized
+    return _evidence_runtime_adapter().redact_unshared_asset_owners(asset_context)
 
 
 def _reviewed_hosted_sha256_evidence_path(
     path: tuple[object, ...],
 ) -> bool:
     """Allow SHA-256 only at positively projected Elastic source paths."""
-    return _evidence_hosted_projection().reviewed_sha256_path(
-        path,
-        _evidence_hosted_projection_policy(),
-    )
+    return _evidence_runtime_adapter().reviewed_sha256_path(globals(), path)
 
 
 def _exact_hosted_columnar_envelope(
@@ -2555,21 +2453,14 @@ def _exact_hosted_columnar_envelope(
     require_encoded_accounting: bool,
 ) -> bool:
     """Recognize only the runtime-owned top-level columnar envelope."""
-    return _evidence_columnar().exact_hosted_envelope(
-        value,
-        require_encoded_accounting=require_encoded_accounting,
-        policy=_evidence_columnar_policy(),
-        deps=_evidence_columnar_dependencies(),
-    )
+    return _evidence_runtime_adapter().exact_hosted_columnar_envelope(
+        globals(), value, require_encoded_accounting=require_encoded_accounting)
 
 
 def _refinalize_hosted_columnar_envelope(value: Any) -> Any:
     """Refresh self-accounting after hosted string redaction."""
-    return _evidence_hosted_projection().refinalize_columnar(
-        value,
-        maximum_passes=HOSTED_TRANSPORT_FIXED_POINT_MAX_PASSES,
-        dependencies=_evidence_hosted_projection_dependencies(),
-    )
+    return _evidence_runtime_adapter().refinalize_hosted_columnar_envelope(
+        globals(), value)
 
 
 def _sanitize_hosted_investigation_evidence(
@@ -2579,12 +2470,8 @@ def _sanitize_hosted_investigation_evidence(
     preserve_columnar_rows: bool = False,
 ) -> Any:
     """Keep safe facts/query provenance while removing hosted-sensitive values."""
-    return _evidence_hosted_projection().sanitize(
-        value,
-        path=path,
-        preserve_columnar_rows=preserve_columnar_rows,
-        policy=_evidence_hosted_projection_policy(),
-    )
+    return _evidence_runtime_adapter().sanitize_hosted_evidence(
+        globals(), value, path, preserve_columnar_rows=preserve_columnar_rows)
 
 
 def model_safe_copy(
@@ -2601,11 +2488,9 @@ def model_safe_copy(
     model or independent reviewer receives them only when that individual asset
     record explicitly opts in.
     """
-    return _evidence_transport().model_safe_copy(
-        value, hosted=hosted, reviewer_safe=reviewer_safe, path=_path,
-        policy=_evidence_transport_policy(),
-        dependencies=_evidence_transport_dependencies(),
-    )
+    return _evidence_runtime_adapter().model_safe_copy(
+        globals(), value, hosted=hosted, reviewer_safe=reviewer_safe,
+        path=_path)
 
 
 def synchronize_hosted_investigation_contract(
@@ -2617,16 +2502,8 @@ def synchronize_hosted_investigation_contract(
     bounded convergence check. This keeps prompt admission transactional if a
     future transport rule is accidentally non-idempotent.
     """
-    module = _evidence_transport()
-    return module.synchronize_hosted_contract(
-        prompt_package,
-        maximum_passes=HOSTED_TRANSPORT_FIXED_POINT_MAX_PASSES,
-        dependencies=module.SynchronizationDependencies(
-            model_safe_copy=lambda value: model_safe_copy(value, hosted=True),
-            prompt_json_bytes=_investigation_prompt_json_bytes,
-            validation_error=InvestigationQueryError,
-        ),
-    )
+    return _evidence_runtime_adapter().synchronize_hosted_contract(
+        globals(), prompt_package)
 
 
 EVIDENCE_REFERENCE_MAX = 400
@@ -2665,27 +2542,7 @@ REVIEW_NON_DOMAIN_SUFFIXES = frozenset(
 )
 def _review_known_field_paths() -> frozenset[str]:
     """Return reviewed dotted field paths and their non-domain prefixes."""
-    paths = {
-        "dns.question.name",
-        "event.dataset",
-        "event.module",
-        "host.name",
-        "network.community_id",
-        "process.name",
-        "rule.id",
-        "rule.name",
-        "rule.uuid",
-        "suricata.flags",
-        "source.ip",
-        "destination.ip",
-        "user.name",
-    }
-    for pack in INVESTIGATION_QUERY_PACK_DEFINITIONS.values():
-        for field in pack.get("fields", []):
-            parts = str(field).lower().split(".")
-            for length in range(2, len(parts) + 1):
-                paths.add(".".join(parts[:length]))
-    return frozenset(paths)
+    return _review_runtime_adapter().known_field_paths(globals())
 
 
 REVIEW_KNOWN_FIELD_PATHS = _review_known_field_paths()
@@ -2719,14 +2576,12 @@ REVIEW_RULE_LABEL_FIELD_PATHS = frozenset(
 
 
 def _bounded_reference(value: Any) -> str:
-    return _evidence_references().bounded(
-        value, _evidence_reference_policy()
-    )
+    return _evidence_runtime_adapter().bounded_reference(globals(), value)
 
 
 def evidence_source_class(source: Any) -> str:
     """Group multiple citations from one underlying source into one signal."""
-    return _evidence_references().source_class(source)
+    return _evidence_runtime_adapter().source_class(globals(), source)
 
 
 def result_bound_query_reference(
@@ -2743,43 +2598,34 @@ def result_bound_query_reference(
     execution of the same query cannot collide with or silently reuse evidence
     from a different result set.
     """
-    return _evidence_references().result_bound(
-        query_digest, result_digest, namespace=namespace, label=label,
-        policy=_evidence_reference_policy(),
-    )
+    return _evidence_runtime_adapter().result_bound_reference(
+        globals(), query_digest, result_digest,
+        namespace=namespace, label=label)
 
 
 def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any]:
-    return _evidence_contract().build(
-        prompt_package, _evidence_contract_dependencies()
-    )
+    return _evidence_runtime_adapter().reference_contract(
+        globals(), prompt_package)
 
 
 def attach_evidence_reference_contract(
     prompt_package: dict[str, Any],
 ) -> dict[str, Any]:
-    return _evidence_contract().attach(
-        prompt_package, _evidence_contract_dependencies()
-    )
+    return _evidence_runtime_adapter().attach_reference_contract(
+        globals(), prompt_package)
 
 
 def validate_evidence_references(
     response: dict[str, Any],
     prompt_package: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    return _evidence_validation().apply(
-        response, prompt_package,
-        _evidence_validation().Dependencies(
-            bounded_reference=_bounded_reference,
-        ),
-    )
+    return _evidence_runtime_adapter().validate_references(
+        globals(), response, prompt_package)
 
 
 def reviewer_observable_catalog(prompt_package: dict[str, Any]) -> list[dict[str, str]]:
     """Return exact observables that an independent reviewer may mention."""
-    return _review_catalogs().observables(
-        prompt_package, _review_catalog_policy(), _review_catalog_dependencies(),
-    )
+    return _review_runtime_adapter().observable_catalog(globals(), prompt_package)
 
 
 def reviewer_non_domain_taxonomy_catalog(
@@ -2793,18 +2639,14 @@ def reviewer_non_domain_taxonomy_catalog(
     evidence package supplies that exact value.  Arbitrary dotted prose and
     values under unrelated keys never enter this catalog.
     """
-    return _review_catalogs().taxonomy(
-        prompt_package, _review_catalog_policy(), _review_catalog_dependencies(),
-    )
+    return _review_runtime_adapter().taxonomy_catalog(globals(), prompt_package)
 
 
 def reviewer_non_domain_artifact_catalog(
     prompt_package: dict[str, Any],
 ) -> list[str]:
     """Return exact script-like names from collector-owned command/path fields."""
-    return _review_catalogs().artifacts(
-        prompt_package, _review_catalog_policy(), _review_catalog_dependencies(),
-    )
+    return _review_runtime_adapter().artifact_catalog(globals(), prompt_package)
 
 
 def reviewer_non_domain_rule_shorthand_catalog(
@@ -2820,9 +2662,8 @@ def reviewer_non_domain_rule_shorthand_catalog(
     value already present in the label is deliberately excluded so real DNS
     names continue through the domain-observable validator.
     """
-    return _review_catalogs().rule_shorthands(
-        prompt_package, _review_catalog_policy(), _review_catalog_dependencies(),
-    )
+    return _review_runtime_adapter().rule_shorthand_catalog(
+        globals(), prompt_package)
 
 
 class InvestigationQueryError(ValueError):

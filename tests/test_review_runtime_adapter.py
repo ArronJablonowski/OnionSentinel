@@ -18,6 +18,50 @@ from onion_sentinel.analysis.review import runtime_adapter
 
 
 class ReviewRuntimeAdapterTests(unittest.TestCase):
+    def test_catalog_binding_preserves_typed_paths_and_reviewer_safe_copy(self) -> None:
+        class Policy:
+            def __init__(self, **values):
+                self.__dict__.update(values)
+
+        class Dependencies:
+            def __init__(self, **values):
+                self.__dict__.update(values)
+
+        module = SimpleNamespace(Policy=Policy, Dependencies=Dependencies)
+        safe_copy = mock.Mock(return_value={})
+        bounded = mock.Mock()
+        bindings = {
+            "_review_catalogs": lambda: module,
+            "REVIEW_OBSERVABLE_MAX": 256,
+            "REVIEW_OBSERVABLE_KINDS": frozenset({"ip", "domain"}),
+            "REVIEW_IPV4_RE": object(), "REVIEW_DOMAIN_RE": object(),
+            "REVIEW_TAXONOMY_FIELD_PATHS": frozenset({"event_dataset"}),
+            "REVIEW_ARTIFACT_FIELD_PATHS": frozenset({"process_path"}),
+            "REVIEW_ARTIFACT_SUFFIXES": frozenset({"sh"}),
+            "REVIEW_RULE_LABEL_FIELD_PATHS": frozenset({"rule_name"}),
+            "_bounded_reference": bounded, "model_safe_copy": safe_copy,
+        }
+        policy = runtime_adapter.catalog_policy(bindings)
+        dependencies = runtime_adapter.catalog_dependencies(bindings)
+        self.assertEqual(policy.observable_max, 256)
+        self.assertEqual(policy.observable_kinds, frozenset({"ip", "domain"}))
+        self.assertEqual(policy.taxonomy_field_paths, frozenset({"event_dataset"}))
+        self.assertIs(dependencies.bounded_reference, bounded)
+        dependencies.reviewer_safe_copy({"owner_ref": "private"})
+        safe_copy.assert_called_once_with(
+            {"owner_ref": "private"}, reviewer_safe=True)
+
+    def test_known_field_paths_include_every_pack_prefix(self) -> None:
+        paths = runtime_adapter.known_field_paths({
+            "INVESTIGATION_QUERY_PACK_DEFINITIONS": {
+                "dns": {"fields": ["zeek.dns.query.name"]},
+            }
+        })
+        self.assertIn("zeek.dns", paths)
+        self.assertIn("zeek.dns.query", paths)
+        self.assertIn("zeek.dns.query.name", paths)
+        self.assertIn("network.community_id", paths)
+
     def test_independent_package_uses_only_live_bounded_catalog_ports(self) -> None:
         package_module = mock.Mock()
         package_module.build.side_effect = lambda *_args, **kwargs: kwargs

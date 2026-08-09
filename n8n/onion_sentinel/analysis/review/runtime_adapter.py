@@ -9,6 +9,75 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 
+def catalog_policy(b: Mapping[str, Any]) -> Any:
+    module = b["_review_catalogs"]()
+    return module.Policy(
+        observable_max=b["REVIEW_OBSERVABLE_MAX"],
+        observable_kinds=b["REVIEW_OBSERVABLE_KINDS"],
+        ipv4_pattern=b["REVIEW_IPV4_RE"],
+        domain_pattern=b["REVIEW_DOMAIN_RE"],
+        taxonomy_field_paths=b["REVIEW_TAXONOMY_FIELD_PATHS"],
+        artifact_field_paths=b["REVIEW_ARTIFACT_FIELD_PATHS"],
+        artifact_suffixes=b["REVIEW_ARTIFACT_SUFFIXES"],
+        rule_label_field_paths=b["REVIEW_RULE_LABEL_FIELD_PATHS"],
+    )
+
+
+def catalog_dependencies(b: Mapping[str, Any]) -> Any:
+    module = b["_review_catalogs"]()
+    return module.Dependencies(
+        bounded_reference=b["_bounded_reference"],
+        reviewer_safe_copy=lambda value: b["model_safe_copy"](
+            value, reviewer_safe=True),
+    )
+
+
+def known_field_paths(b: Mapping[str, Any]) -> frozenset[str]:
+    paths = {
+        "dns.question.name", "event.dataset", "event.module", "host.name",
+        "network.community_id", "process.name", "rule.id", "rule.name",
+        "rule.uuid", "suricata.flags", "source.ip", "destination.ip", "user.name",
+    }
+    for pack in b["INVESTIGATION_QUERY_PACK_DEFINITIONS"].values():
+        for field in pack.get("fields", []):
+            parts = str(field).lower().split(".")
+            for length in range(2, len(parts) + 1):
+                paths.add(".".join(parts[:length]))
+    return frozenset(paths)
+
+
+def observable_catalog(
+    b: Mapping[str, Any], prompt_package: dict[str, Any],
+) -> list[dict[str, str]]:
+    return b["_review_catalogs"]().observables(
+        prompt_package, b["_review_catalog_policy"](),
+        b["_review_catalog_dependencies"]())
+
+
+def taxonomy_catalog(
+    b: Mapping[str, Any], prompt_package: dict[str, Any],
+) -> list[str]:
+    return b["_review_catalogs"]().taxonomy(
+        prompt_package, b["_review_catalog_policy"](),
+        b["_review_catalog_dependencies"]())
+
+
+def artifact_catalog(
+    b: Mapping[str, Any], prompt_package: dict[str, Any],
+) -> list[str]:
+    return b["_review_catalogs"]().artifacts(
+        prompt_package, b["_review_catalog_policy"](),
+        b["_review_catalog_dependencies"]())
+
+
+def rule_shorthand_catalog(
+    b: Mapping[str, Any], prompt_package: dict[str, Any],
+) -> list[str]:
+    return b["_review_catalogs"]().rule_shorthands(
+        prompt_package, b["_review_catalog_policy"](),
+        b["_review_catalog_dependencies"]())
+
+
 def validation_failure(
     b: Mapping[str, Any], *, attempt: int, call_id: str, error: Exception,
     input_value: Any, response: dict[str, Any],

@@ -120,6 +120,11 @@ line ranges below remain historical navigation aids for the extraction ledger.
   request normalization and the destructive consumption/translation of legacy
   PCAP and live-OSQuery request fields. Backend policy remains in the existing
   query modules; live runner callables stay dynamically bound for compatibility.
+- `analysis.evidence.runtime_adapter` owns the concrete reference registry,
+  columnar/hosted/transport/traversal policy binding, owner-alias disclosure,
+  fixed-point hosted synchronization, result-bound references, contract
+  attachment, and response-reference validation. Review catalog policy and
+  collector-typed exemptions are bound by `analysis.review.runtime_adapter`.
 - Model roster normalization, exact route construction/parsing, assigned/live
   metadata, external-harness route handling, and reviewer model identity now
   live in `onion_sentinel.analysis.providers.routing`. The legacy runner keeps
