@@ -614,6 +614,15 @@ TShark, sample text, file metadata, and local query indexes have explicit caps;
 raw packet bodies and broker messages are never projected. Database queries,
 row access, and bounded JSON loading remain injected by the builder facade.
 
+`prompt_public_enrichment.py` owns bounded prompt-facing projection of cached
+public-enrichment results. It keeps small provider responses intact, replaces
+large responses with a digest-bound 16 KiB prefix, deduplicates provider
+records across grouped alerts, normalizes skipped/error status, and bounds
+records, indicators, and status lists. Verdict aggregation and model guidance
+explicitly treat enrichment as reputation and context rather than sole proof
+of compromise. Group-row access and JSON parsing remain injected by the
+builder facade.
+
 `prompt_response_contract.py` owns the model-visible instruction and response
 schema contract. Static grounding, factored verdict fields, hypothesis and
 memory shapes, governed query-request schema, and the incident-response report

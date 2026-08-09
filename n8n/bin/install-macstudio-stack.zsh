@@ -558,6 +558,7 @@ cp "$REPO_DIR/n8n/bin/prompt_investigation_query_context.py" "$STACK_DIR/bin/pro
 cp "$REPO_DIR/n8n/bin/prompt_package_compactor.py" "$STACK_DIR/bin/prompt_package_compactor.py"
 cp "$REPO_DIR/n8n/bin/prompt_package_view_model.py" "$STACK_DIR/bin/prompt_package_view_model.py"
 cp "$REPO_DIR/n8n/bin/prompt_pcap_evidence.py" "$STACK_DIR/bin/prompt_pcap_evidence.py"
+cp "$REPO_DIR/n8n/bin/prompt_public_enrichment.py" "$STACK_DIR/bin/prompt_public_enrichment.py"
 cp "$REPO_DIR/n8n/bin/prompt_response_contract.py" "$STACK_DIR/bin/prompt_response_contract.py"
 cp "$REPO_DIR/n8n/bin/collect-incident-evidence.py" "$STACK_DIR/bin/collect-incident-evidence.py"
 cp "$REPO_DIR/n8n/bin/install-investigation-query-runtime.py" "$STACK_DIR/bin/install-investigation-query-runtime.py"

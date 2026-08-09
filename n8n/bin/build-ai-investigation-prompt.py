@@ -70,6 +70,12 @@ from prompt_pcap_evidence import (
     compact_pcap_analysis as project_pcap_analysis,
     pcap_request_context as project_pcap_request_context,
 )
+from prompt_public_enrichment import (
+    PublicEnrichmentRequest,
+    PublicEnrichmentSources,
+    build_public_enrichment_context,
+    compact_public_enrichment_record as project_public_enrichment_record,
+)
 from prompt_correlation_context import (
     CorrelationContextSources,
     build_correlated_alert_context,
@@ -661,111 +667,29 @@ def compact_pcap_analysis(record: dict) -> dict:
 
 
 def compact_public_enrichment_record(record: dict) -> dict:
-    """Expose provider evidence under an explicit, deterministic prompt budget.
+    """Compatibility delegate for bounded provider evidence projection."""
+    return project_public_enrichment_record(record)
 
-    The complete accepted response remains in the enrichment cache.  Small
-    responses are supplied intact; large responses carry an exact digest and a
-    bounded JSON prefix so the model never mistakes a prompt projection for
-    the complete provider artifact.
-    """
-    compact = {
-        "source": record.get("source"),
-        "indicator": record.get("indicator"),
-        "indicator_type": record.get("indicator_type"),
-        "verdict": record.get("verdict"),
-        "confidence": record.get("confidence"),
-        "tags": record.get("tags") if isinstance(record.get("tags"), list) else [],
-        "first_seen": record.get("first_seen"),
-        "last_seen": record.get("last_seen"),
-        "cached_at": record.get("cached_at"),
-        "raw_response_sha256": record.get("raw_response_sha256"),
-        "raw_response_size_bytes": record.get("raw_response_size_bytes"),
-        "raw_response_complete": record.get("raw_response_complete"),
-    }
-    raw = record.get("raw_response")
-    serialized = json.dumps(
-        raw, sort_keys=True, separators=(",", ":"), default=str
+
+def _public_enrichment_sources() -> PublicEnrichmentSources:
+    return PublicEnrichmentSources(
+        row_value=sqlite_value,
+        alert_group_rows=alert_group_rows,
+        parse_json_object=parse_json_object,
     )
-    raw_bytes = serialized.encode("utf-8")
-    digest = hashlib.sha256(raw_bytes).hexdigest()
-    compact["provider_evidence"] = {
-        "response_sha256": record.get("raw_response_sha256") or digest,
-        "response_size_bytes": record.get("raw_response_size_bytes") or len(raw_bytes),
-        "cache_response_complete": record.get("raw_response_complete", True),
-        "prompt_projection_complete": len(raw_bytes) <= 16 * 1024,
-        **(
-            {"response": raw}
-            if len(raw_bytes) <= 16 * 1024
-            else {"response_json_prefix": raw_bytes[: 16 * 1024].decode("utf-8", "ignore")}
-        ),
-    }
-    return compact
 
 
 def public_enrichment_context(conn: sqlite3.Connection, selected: sqlite3.Row, limit: int, include_tests: bool) -> dict:
-    """Collect normalized public enrichment for the selected duplicate group."""
-    group_rows = alert_group_rows(
-        conn,
-        selected,
-        include_tests=include_tests,
-        extra_columns=("enrichment_json",),
-    )
-    records: list[dict] = []
-    skipped: list[dict] = []
-    errors: list[dict] = []
-    indicators: dict[str, list[str]] = {}
-    seen_records: set[tuple[str, str, str]] = set()
-
-    for item in group_rows:
-        bundle = parse_json_object(str(sqlite_value(item, "enrichment_json") or ""))
-        external = bundle.get("external_intel") if isinstance(bundle.get("external_intel"), dict) else bundle
-        for record in external.get("records", []) if isinstance(external.get("records"), list) else []:
-            if not isinstance(record, dict):
-                continue
-            compact = compact_public_enrichment_record(record)
-            key = (
-                str(compact.get("source") or ""),
-                str(compact.get("indicator_type") or ""),
-                str(compact.get("indicator") or ""),
-            )
-            if key in seen_records:
-                continue
-            seen_records.add(key)
-            records.append(compact)
-            if len(records) >= limit:
-                break
-        for item_list, target in ((external.get("skipped"), skipped), (external.get("errors"), errors)):
-            if isinstance(item_list, list):
-                for entry in item_list[:limit]:
-                    if isinstance(entry, dict):
-                        target.append({key: entry.get(key) for key in ("source", "reason", "indicator", "indicator_type") if key in entry})
-                    else:
-                        target.append({"reason": str(entry)})
-        raw_indicators = external.get("indicators") if isinstance(external.get("indicators"), dict) else {}
-        for key, value in raw_indicators.items():
-            if isinstance(value, list):
-                indicators[str(key)] = [str(item) for item in value[:limit]]
-        if len(records) >= limit:
-            break
-
-    verdict_counts: dict[str, int] = {}
-    for record in records:
-        verdict = str(record.get("verdict") or "unknown").lower()
-        verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
-
-    return {
-        "records": records,
-        "record_limit": limit,
-        "verdict_counts": verdict_counts,
-        "indicators": indicators,
-        "skipped": skipped[:limit],
-        "errors": errors[:limit],
-        "usage_guidance": (
-            "Use public enrichment records as reputation/context evidence, not as sole proof of compromise. "
-            "Mention malicious, suspicious, benign, scanner/noise, and unknown verdicts when they affect assessment, "
-            "false-positive reasoning, escalation, or SIEM tuning."
+    """Compatibility delegate for duplicate-group public enrichment."""
+    return build_public_enrichment_context(
+        _public_enrichment_sources(),
+        PublicEnrichmentRequest(
+            connection=conn,
+            selected=selected,
+            record_limit=limit,
+            include_tests=include_tests,
         ),
-    }
+    )
 
 
 def _pcap_evidence_sources() -> PcapEvidenceSources:

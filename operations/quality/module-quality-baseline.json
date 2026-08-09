@@ -16,7 +16,7 @@
       "max_lines": 997
     },
     "n8n/bin/build-ai-investigation-prompt.py": {
-      "max_lines": 1557
+      "max_lines": 1481
     },
     "n8n/bin/collect-software-inventory.py": {
       "max_lines": 1799
@@ -119,9 +119,6 @@
     },
     "n8n/bin/build-ai-investigation-prompt.py::exact_detection_group_rows": {
       "max_complexity": 19
-    },
-    "n8n/bin/build-ai-investigation-prompt.py::public_enrichment_context": {
-      "max_complexity": 25
     },
     "n8n/bin/check-ai-queue-consistency.py::main": {
       "max_complexity": 21,
@@ -875,5 +872,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "7bce228b1b5f6f57e5b0edf7c8b4c9fc11457188"
+  "source_release": "a1837045c1fb65bd9126a1623ae62a9d53aac498"
 }

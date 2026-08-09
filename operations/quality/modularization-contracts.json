@@ -168,6 +168,17 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_public_enrichment.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_public_enrichment.py",
+      "required_symbols": [
+        "PublicEnrichmentRequest",
+        "PublicEnrichmentSources",
+        "build_public_enrichment_context",
+        "compact_public_enrichment_record"
+      ]
+    },
+    {
       "path": "n8n/bin/auto-run-ai-analysis.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/auto-run-ai-analysis.py",
