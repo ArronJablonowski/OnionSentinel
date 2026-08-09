@@ -162,6 +162,16 @@ from cohort_artifact_io import (
     validate_digest as validate_artifact_digest,
     write_private_json as persist_private_json,
 )
+from cohort_storage_core import (
+    CohortStoragePolicy,
+    connect_read_only as open_cohort_database_read_only,
+    load_aliases as read_group_aliases,
+    require_columns as require_storage_columns,
+    resolve_alias as resolve_group_alias,
+    schema_fingerprint as calculate_schema_fingerprint,
+    table_columns as storage_table_columns,
+    table_exists as storage_table_exists,
+)
 
 
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -479,45 +489,19 @@ def _parse_timestamp(value: Any, label: str) -> dt.datetime:
 
 
 def connect_read_only(database_path: Path) -> sqlite3.Connection:
-    """Open the live SQLite database without creating or mutating any file."""
+    return open_cohort_database_read_only(database_path, _storage_policy())
 
-    path = database_path.expanduser()
-    if not path.exists() or not path.is_file():
-        raise CohortError(f"alert database not found: {path}")
-    resolved = path.resolve()
-    uri_path = urllib.parse.quote(str(resolved), safe="/")
-    try:
-        connection = sqlite3.connect(
-            f"file:{uri_path}?mode=ro",
-            uri=True,
-            timeout=5.0,
-        )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA query_only = ON")
-        connection.execute("PRAGMA busy_timeout = 5000")
-        if int(connection.execute("PRAGMA query_only").fetchone()[0]) != 1:
-            connection.close()
-            raise CohortError("SQLite query_only could not be enabled")
-        return connection
-    except sqlite3.Error as exc:
-        raise CohortError(f"could not open alert database read-only: {exc}") from exc
+
+def _storage_policy() -> CohortStoragePolicy:
+    return CohortStoragePolicy(error=CohortError, sha256_value=sha256_value)
 
 
 def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
-    row = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (table,),
-    ).fetchone()
-    return row is not None
+    return storage_table_exists(connection, table)
 
 
 def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
-    if not _table_exists(connection, table):
-        return set()
-    return {
-        str(row["name"])
-        for row in connection.execute(f'PRAGMA table_info("{table}")').fetchall()
-    }
+    return storage_table_columns(connection, table)
 
 
 def _require_columns(
@@ -525,65 +509,21 @@ def _require_columns(
     table: str,
     required: Iterable[str],
 ) -> set[str]:
-    columns = _table_columns(connection, table)
-    missing = set(required) - columns
-    if missing:
-        raise CohortError(
-            f"alert database schema is missing {table} columns: "
-            + ", ".join(sorted(missing))
-        )
-    return columns
+    return require_storage_columns(
+        connection, table, required, _storage_policy()
+    )
 
 
 def schema_fingerprint(connection: sqlite3.Connection) -> str:
-    rows = connection.execute(
-        """
-        SELECT type, name, tbl_name, COALESCE(sql, '') AS sql
-        FROM sqlite_master
-        WHERE type IN ('table', 'index')
-          AND name IN (
-            'alert_group_summary', 'alert_group_alias',
-            'incident_response_cases', 'incident_reanalysis_runs',
-            'incident_reanalysis_run_cases', 'durable_jobs',
-            'ai_analysis_runs', 'ai_second_opinion_runs'
-          )
-        ORDER BY type, name
-        """
-    ).fetchall()
-    return sha256_value([dict(row) for row in rows])
+    return calculate_schema_fingerprint(connection, _storage_policy())
 
 
 def load_aliases(connection: sqlite3.Connection) -> dict[str, str]:
-    _require_columns(
-        connection,
-        "alert_group_alias",
-        {"legacy_group_id", "stable_group_id"},
-    )
-    aliases: dict[str, str] = {}
-    for row in connection.execute(
-        """
-        SELECT legacy_group_id, stable_group_id
-        FROM alert_group_alias
-        ORDER BY legacy_group_id
-        """
-    ):
-        legacy = str(row["legacy_group_id"] or "").strip().lower()
-        stable = str(row["stable_group_id"] or "").strip().lower()
-        if not legacy or not stable:
-            raise CohortError("alert_group_alias contains a blank identity")
-        aliases[legacy] = stable
-    return aliases
+    return read_group_aliases(connection, _storage_policy())
 
 
 def resolve_alias(identity: str, aliases: Mapping[str, str]) -> str:
-    current = str(identity or "").strip().lower()
-    visited: set[str] = set()
-    while current in aliases:
-        if current in visited:
-            raise CohortError(f"cycle detected in alert group aliases at {current}")
-        visited.add(current)
-        current = str(aliases[current] or "").strip().lower()
-    return current
+    return resolve_group_alias(identity, aliases, _storage_policy())
 
 
 SUMMARY_EXPORT_COLUMNS = (

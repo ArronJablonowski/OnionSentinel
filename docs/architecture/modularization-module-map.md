@@ -796,6 +796,11 @@ response receipt hashing plus digest-bound, atomic, owner-only JSON artifact
 writes. Hash functions, digest patterns, bounds, and error types are injected;
 the composition service retains compatibility wrappers for existing callers.
 
+`operations/cohort_storage_core.py` owns existing-file SQLite admission in
+read-only/query-only mode, table and column inspection, schema fingerprinting,
+and cycle-safe alert-group alias resolution. The hash function and fail-closed
+error type are injected by the composition service.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

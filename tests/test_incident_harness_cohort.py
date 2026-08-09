@@ -41,6 +41,7 @@ import cohort_dispatch_identity  # noqa: E402
 import cohort_manifest_contract  # noqa: E402
 import cohort_private_input  # noqa: E402
 import cohort_artifact_io  # noqa: E402
+import cohort_storage_core  # noqa: E402
 
 
 class IncidentHarnessCohortTests(unittest.TestCase):
@@ -109,6 +110,18 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             cohort.persist_private_json,
             cohort_artifact_io.write_private_json,
         )
+
+    def test_runner_uses_extracted_storage_core(self) -> None:
+        self.assertIs(
+            cohort.open_cohort_database_read_only,
+            cohort_storage_core.connect_read_only,
+        )
+        self.assertIs(
+            cohort.calculate_schema_fingerprint,
+            cohort_storage_core.schema_fingerprint,
+        )
+        self.assertIs(cohort.read_group_aliases, cohort_storage_core.load_aliases)
+        self.assertIs(cohort.resolve_group_alias, cohort_storage_core.resolve_alias)
 
     def test_query_audit_projection_excludes_query_and_result_content(self) -> None:
         projected = cohort._bounded_query_audit_metadata(

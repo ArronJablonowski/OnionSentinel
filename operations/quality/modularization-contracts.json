@@ -16,6 +16,21 @@
       ]
     },
     {
+      "path": "operations/cohort_storage_core.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_storage_core.py",
+      "required_symbols": [
+        "CohortStoragePolicy",
+        "connect_read_only",
+        "table_exists",
+        "table_columns",
+        "require_columns",
+        "schema_fingerprint",
+        "load_aliases",
+        "resolve_alias"
+      ]
+    },
+    {
       "path": "operations/run-incident-harness-cohort.py",
       "deployment": "repository-only",
       "runtime_path": "operations/run-incident-harness-cohort.py",
