@@ -115,6 +115,13 @@ line ranges below remain historical navigation aids for the extraction ledger.
   `analysis.providers.runtime_adapter`. It resolves compatibility callables at
   invocation time and never reads provider credential stores or accepts shell
   fragments; the runner retains only lazy signature-compatible delegates.
+- Concrete Ollama, Codex, Hermes, OpenClaw, credential-artifact, inference-lock,
+  bounded-process, prompt-transport, and final provider-dispatch binding now
+  lives in the 331-line `analysis.providers.execution_adapter`. Provider policy
+  and observed-identity attestation remain in their existing package modules;
+  the adapter resolves runner ports at invocation time so controlled TMPDIR,
+  exact executable, private Hermes auth, hosted-evidence synchronization, and
+  test/operator patch seams retain their established behavior.
 - The bounded Ollama HTTP request, task selection, host-wide inference lock,
   best-effort unload, ordered enabled-model failover, and observed-model
   mismatch guard now live in `onion_sentinel.analysis.providers.ollama`.

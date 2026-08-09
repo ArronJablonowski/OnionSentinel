@@ -1020,6 +1020,12 @@ def _provider_settings_runtime_adapter():
     return runtime_adapter
 
 
+def _provider_execution_adapter():
+    _provider_routing()
+    from onion_sentinel.analysis.providers import execution_adapter
+    return execution_adapter
+
+
 def _reporting_incident():
     _provider_routing()
     from onion_sentinel.analysis.reporting import incident
@@ -3903,20 +3909,9 @@ def _ollama_request(
     *,
     system_prompt_file: Path | None = None,
 ) -> dict[str, Any]:
-    return _ollama_provider().request(
-        prompt_package,
-        args,
-        settings,
-        task,
+    return _provider_execution_adapter().ollama_request(
+        globals(), prompt_package, args, settings, task,
         system_prompt_file=system_prompt_file,
-        load_system_prompt=load_system_prompt,
-        read_bounded_json=read_bounded_json,
-        extract_json_object=extract_json_object,
-        urlopen=urllib.request.urlopen,
-        request_factory=urllib.request.Request,
-        transport_errors=(urllib.error.URLError, BoundedHttpError),
-        fallback_model=FALLBACK_OLLAMA_MODEL,
-        default_url=DEFAULT_OLLAMA_URL,
     )
 
 
@@ -3926,13 +3921,8 @@ def _unload_ollama_model(
     *,
     timeout: float,
 ) -> None:
-    _ollama_provider().unload_model(
-        settings,
-        model,
-        timeout=timeout,
-        urlopen=urllib.request.urlopen,
-        request_factory=urllib.request.Request,
-        default_url=DEFAULT_OLLAMA_URL,
+    _provider_execution_adapter().unload_ollama_model(
+        globals(), settings, model, timeout=timeout
     )
 
 
@@ -3945,15 +3935,10 @@ def _ollama_chat_for_model_unlocked(
     system_prompt_file: Path | None = None,
     independent_review: bool = False,
 ) -> dict[str, Any]:
-    return _ollama_provider().unlocked_chat(
-        prompt_package,
-        args,
-        settings,
-        model,
+    return _provider_execution_adapter().ollama_chat_unlocked(
+        globals(), prompt_package, args, settings, model,
         system_prompt_file=system_prompt_file,
         independent_review=independent_review,
-        safe_copy=model_safe_copy,
-        request_call=_ollama_request,
     )
 
 
@@ -3966,19 +3951,10 @@ def _ollama_chat_for_model(
     system_prompt_file: Path | None = None,
     independent_review: bool = False,
 ) -> dict[str, Any]:
-    return _ollama_provider().locked_chat(
-        prompt_package,
-        args,
-        settings,
-        model,
+    return _provider_execution_adapter().ollama_chat(
+        globals(), prompt_package, args, settings, model,
         system_prompt_file=system_prompt_file,
         independent_review=independent_review,
-        lock_path=DEFAULT_OLLAMA_INFERENCE_LOCK,
-        flock=fcntl.flock,
-        lock_exclusive=fcntl.LOCK_EX,
-        lock_unlock=fcntl.LOCK_UN,
-        unlocked_call=_ollama_chat_for_model_unlocked,
-        unload_call=_unload_ollama_model,
     )
 
 
@@ -4009,11 +3985,7 @@ STRUCTURED_BOOLEAN_KEYS = frozenset(
 
 
 def response_output_json_schema(template: dict[str, Any]) -> dict[str, Any]:
-    return _codex_provider().response_schema(
-        template,
-        structured_enums=STRUCTURED_ENUMS,
-        boolean_keys=STRUCTURED_BOOLEAN_KEYS,
-    )
+    return _provider_execution_adapter().response_schema(globals(), template)
 
 
 def canonical_cli_system_prompt_file(
@@ -4023,24 +3995,16 @@ def canonical_cli_system_prompt_file(
     system_prompt_file: Path | None = None,
     independent_review: bool = False,
 ) -> Path:
-    return _codex_provider().canonical_system_prompt_file(
-        prompt_package,
-        args,
+    return _provider_execution_adapter().canonical_system_prompt_file(
+        globals(), prompt_package, args,
         system_prompt_file=system_prompt_file,
         independent_review=independent_review,
-        roles=CYBER_SECURITY_AGENT_ROLES,
-        default_settings_file=DEFAULT_AI_SETTINGS_FILE,
-        default_system_prompt_file=DEFAULT_SYSTEM_PROMPT_FILE,
-        role_prompt_resolver=role_prompt_file,
-        reviewer_prompt_resolver=role_second_opinion_prompt_file,
     )
 
 
 def load_canonical_cli_system_prompt(path: Path, agent_role: str) -> str:
-    return _codex_provider().load_canonical_system_prompt(
-        path,
-        agent_role,
-        DEFAULT_MAX_SYSTEM_PROMPT_BYTES,
+    return _provider_execution_adapter().load_canonical_system_prompt(
+        globals(), path, agent_role
     )
 
 
@@ -4052,17 +4016,11 @@ def cli_analysis_payload(
     system_prompt_file: Path | None = None,
     independent_review: bool = False,
 ) -> dict[str, Any]:
-    return _codex_provider().analysis_payload(
-        prompt_package,
-        args,
+    return _provider_execution_adapter().cli_analysis_payload(
+        globals(), prompt_package, args,
         hosted=hosted,
         system_prompt_file=system_prompt_file,
         independent_review=independent_review,
-        roles=CYBER_SECURITY_AGENT_ROLES,
-        canonical_prompt_file=canonical_cli_system_prompt_file,
-        load_canonical_prompt=load_canonical_cli_system_prompt,
-        load_legacy_prompt=load_system_prompt,
-        safe_copy=model_safe_copy,
     )
 
 
@@ -4073,15 +4031,10 @@ def prepare_codex_cli_transport(
     system_prompt_file: Path | None = None,
     independent_review: bool = False,
 ) -> tuple[dict[str, Any], str]:
-    return _codex_provider().prepare_transport(
-        prompt_package,
-        args,
+    return _provider_execution_adapter().prepare_codex_transport(
+        globals(), prompt_package, args,
         system_prompt_file=system_prompt_file,
         independent_review=independent_review,
-        build_payload=cli_analysis_payload,
-        prompt_json_bytes=_investigation_prompt_json_bytes,
-        max_package_bytes=CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES,
-        max_stdin_bytes=CODEX_CLI_MAX_STDIN_BYTES,
     )
 
 
@@ -4095,27 +4048,12 @@ def cloud_cli_chat(
     system_prompt_file: Path | None = None,
     independent_review: bool = False,
 ) -> dict[str, Any]:
-    return _codex_provider().chat(
-        prompt_package,
-        args,
-        settings,
+    return _provider_execution_adapter().codex_chat(
+        globals(), prompt_package, args, settings,
         model=model,
         reasoning_effort=reasoning_effort,
         system_prompt_file=system_prompt_file,
         independent_review=independent_review,
-        resolve_executable=resolve_codex_cli,
-        model_pattern=CODEX_CLI_MODEL_PATTERN,
-        reasoning_efforts=CODEX_CLI_REASONING_EFFORTS,
-        prepare=prepare_codex_cli_transport,
-        schema_builder=response_output_json_schema,
-        run_command=run_bounded_command,
-        sanitized_env=sanitized_cli_harness_env,
-        process_error=BoundedProcessError,
-        summarize=summarize_codex_cli_failure,
-        read_bytes=read_bytes_bounded,
-        extract_json=extract_json_object,
-        max_stderr_bytes=DEFAULT_CLOUD_MAX_STDERR_BYTES,
-        controlled_tmpdir=_CONTROLLED_EVALUATION_TMPDIR,
     )
 
 
@@ -4124,7 +4062,9 @@ def sanitized_cli_harness_env(
     *,
     extra: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    return _cli_common_provider().sanitized_environment(executable, extra=extra)
+    return _provider_execution_adapter().sanitized_cli_environment(
+        globals(), executable, extra=extra
+    )
 
 
 def summarize_cli_harness_failure(
@@ -4132,10 +4072,8 @@ def summarize_cli_harness_failure(
     stderr: str,
     returncode: int,
 ) -> str:
-    return _cli_common_provider().summarize_harness_failure(
-        label,
-        stderr,
-        returncode,
+    return _provider_execution_adapter().summarize_cli_failure(
+        globals(), label, stderr, returncode
     )
 
 
@@ -4147,33 +4085,21 @@ def _load_bounded_regular_json(
     required_mode: int | None = None,
 ) -> dict[str, Any]:
     """Compatibility delegate for descriptor-verified provider artifacts."""
-    return _provider_artifacts().read_json_object(
-        path,
-        max_bytes=max_bytes,
-        label=label,
+    return _provider_execution_adapter().load_bounded_json(
+        globals(), path, max_bytes=max_bytes, label=label,
         required_mode=required_mode,
-        error_type=RuntimeArtifactError,
     )
 
 
 def _load_dedicated_hermes_auth(path: Path) -> dict[str, Any]:
-    return _hermes_provider().load_auth(
-        path,
-        read_json=_load_bounded_regular_json,
-        error_type=RuntimeArtifactError,
-        max_bytes=HERMES_MAX_AUTH_BYTES,
-    )
+    return _provider_execution_adapter().load_hermes_auth(globals(), path)
 
 
 def _write_dedicated_hermes_auth(
     path: Path,
     auth_store: dict[str, Any],
 ) -> None:
-    return _hermes_provider().write_auth(
-        path,
-        auth_store,
-        error_type=RuntimeArtifactError,
-    )
+    _provider_execution_adapter().write_hermes_auth(globals(), path, auth_store)
 
 
 def _verified_hermes_usage(
@@ -4181,12 +4107,8 @@ def _verified_hermes_usage(
     *,
     expected_model: str,
 ) -> dict[str, Any]:
-    return _hermes_provider().verified_usage(
-        path,
-        expected_model=expected_model,
-        read_json=_load_bounded_regular_json,
-        error_type=RuntimeArtifactError,
-        max_bytes=HERMES_MAX_USAGE_BYTES,
+    return _provider_execution_adapter().verify_hermes_usage(
+        globals(), path, expected_model=expected_model
     )
 
 
@@ -4200,40 +4122,12 @@ def hermes_agent_chat(
     system_prompt_file: Path | None = None,
     independent_review: bool = False,
 ) -> dict[str, Any]:
-    return _hermes_provider().chat(
-        prompt_package,
-        args,
-        settings,
+    return _provider_execution_adapter().hermes_chat(
+        globals(), prompt_package, args, settings,
         model=model,
         reasoning_effort=reasoning_effort,
         system_prompt_file=system_prompt_file,
         independent_review=independent_review,
-        boolean_setting=boolean_setting,
-        model_catalog=CODEX_CLI_MODEL_CATALOG,
-        required_effort=HERMES_AGENT_REASONING_EFFORT,
-        resolve_executable=lambda configured: resolve_cli_harness(
-            configured,
-            setting_key="hermes_agent_path",
-            basename="hermes",
-            label="Hermes Agent",
-        ),
-        build_payload=cli_analysis_payload,
-        auth_file=DEFAULT_HERMES_AUTH_FILE,
-        load_dedicated_auth=_load_dedicated_hermes_auth,
-        write_dedicated_auth=_write_dedicated_hermes_auth,
-        atomic_write_json=atomic_write_json,
-        run_command=run_bounded_command,
-        sanitized_env=sanitized_cli_harness_env,
-        process_error=BoundedProcessError,
-        artifact_error=RuntimeArtifactError,
-        summarize_failure=summarize_cli_harness_failure,
-        verify_usage=_verified_hermes_usage,
-        extract_json=extract_json_object,
-        max_prompt_bytes=HERMES_MAX_PROMPT_ARGUMENT_BYTES,
-        max_stderr_bytes=DEFAULT_CLOUD_MAX_STDERR_BYTES,
-        flock=fcntl.flock,
-        lock_exclusive=fcntl.LOCK_EX,
-        lock_unlock=fcntl.LOCK_UN,
     )
 
 
@@ -4247,30 +4141,12 @@ def _openclaw_infer_unlocked(
     system_prompt_file: Path | None = None,
     independent_review: bool = False,
 ) -> dict[str, Any]:
-    return _openclaw_provider().infer_unlocked(
-        prompt_package,
-        args,
-        settings,
+    return _provider_execution_adapter().openclaw_infer_unlocked(
+        globals(), prompt_package, args, settings,
         model=model,
         reasoning_effort=reasoning_effort,
         system_prompt_file=system_prompt_file,
         independent_review=independent_review,
-        validate=validate_isolated_openclaw_route,
-        resolve_executable=lambda configured: resolve_cli_harness(
-            configured,
-            setting_key="openclaw_path",
-            basename="openclaw",
-            label="OpenClaw",
-        ),
-        build_payload=cli_analysis_payload,
-        atomic_write_json=atomic_write_json,
-        run_command=run_bounded_command,
-        sanitized_env=sanitized_cli_harness_env,
-        process_error=BoundedProcessError,
-        summarize_failure=summarize_cli_harness_failure,
-        extract_json=extract_json_object,
-        max_prompt_bytes=OPENCLAW_MAX_PROMPT_ARGUMENT_BYTES,
-        max_stderr_bytes=DEFAULT_CLOUD_MAX_STDERR_BYTES,
     )
 
 
@@ -4284,24 +4160,12 @@ def openclaw_infer_chat(
     system_prompt_file: Path | None = None,
     independent_review: bool = False,
 ) -> dict[str, Any]:
-    return _openclaw_provider().locked_chat(
-        prompt_package,
-        args,
-        settings,
+    return _provider_execution_adapter().openclaw_chat(
+        globals(), prompt_package, args, settings,
         model=model,
         reasoning_effort=reasoning_effort,
         system_prompt_file=system_prompt_file,
         independent_review=independent_review,
-        boolean_setting=boolean_setting,
-        model_pattern=CLI_HARNESS_MODEL_PATTERN,
-        reasoning_efforts=CODEX_CLI_REASONING_EFFORTS,
-        validate=validate_isolated_openclaw_route,
-        lock_path=DEFAULT_OLLAMA_INFERENCE_LOCK,
-        flock=fcntl.flock,
-        lock_exclusive=fcntl.LOCK_EX,
-        lock_unlock=fcntl.LOCK_UN,
-        infer=_openclaw_infer_unlocked,
-        unload=_unload_ollama_model,
     )
 
 
@@ -4314,24 +4178,10 @@ def analyze_model_route(
     system_prompt_file: Path | None = None,
     independent_review: bool = False,
 ) -> dict[str, Any]:
-    return _provider_registry().dispatch(
-        route,
-        prompt_package,
-        args,
-        settings,
+    return _provider_execution_adapter().dispatch(
+        globals(), route, prompt_package, args, settings,
         system_prompt_file=system_prompt_file,
         independent_review=independent_review,
-        enabled_routes=enabled_agent_model_routes,
-        canonicalize=canonical_model_route,
-        is_hosted=model_route_is_hosted,
-        synchronize_hosted=synchronize_hosted_investigation_contract,
-        parse_codex=parse_codex_cli_route,
-        parse_harness=parse_cli_harness_route,
-        codex_adapter=cloud_cli_chat,
-        hermes_adapter=hermes_agent_chat,
-        openclaw_adapter=openclaw_infer_chat,
-        ollama_adapter=_ollama_chat_for_model,
-        attest=attest_model_route_response,
     )
 
 
