@@ -190,6 +190,16 @@
       ]
     },
     {
+      "path": "operations/trace_evaluation_skills.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/trace_evaluation_skills.py",
+      "required_symbols": [
+        "TraceSkillPolicy",
+        "legacy_skill_result",
+        "skill_selection_attestation_result"
+      ]
+    },
+    {
       "path": "operations/cohort_execution_models.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_execution_models.py",

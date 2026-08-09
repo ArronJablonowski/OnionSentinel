@@ -509,6 +509,13 @@ Ground truth, frozen evidence, model results, and unblinded comparison remain
 separate inputs. Shared contracts have one implementation; CLI wrappers do not
 copy validation logic.
 
+`operations/trace_evaluation_skills.py` owns trace-level extraction and strict
+validation of the content-free skill-selection attestation. It validates the
+started-event payload, bounded canonical skill identities, registry availability,
+and exact job-digest binding through an injected hashing port. The legacy trace
+evaluator remains the composition root and preserves pre-attestation trace
+compatibility.
+
 `operations/cohort_freezing.py` owns database-newest and exact-imported-row
 cohort freezing. Immutable policy and explicit source ports bind identity
 validation, read-only database snapshots, representative-alert custody,
