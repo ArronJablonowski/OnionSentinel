@@ -2210,6 +2210,12 @@ binding, and exact assigned/reviewer route parity live under
 model execution, and the frozen settings file, normalized runtime settings,
 and enabled-route roster must agree before Relay or model invocation.
 
+Frozen-evaluation reviewer precommit admission now lives under
+`onion_sentinel.evaluation.reviewer_gate`. It requires a distinct configured
+reviewer route, a one-repair-bounded attempt history, a recordable validated
+response, and an attestation bound to the current case and evidence hash before
+the result may cross the persistence boundary.
+
 Independent-review package construction, text/repetition policy, and
 fail-closed response validation live under `onion_sentinel.analysis.review`.
 The same package owns bounded shadow-adjudication package and validation

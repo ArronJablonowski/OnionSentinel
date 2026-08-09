@@ -2608,6 +2608,25 @@ def _evaluation_runtime_isolation():
     return runtime_isolation
 
 
+def _evaluation_reviewer_gate():
+    _provider_routing()
+    from onion_sentinel.evaluation import reviewer_gate
+    return reviewer_gate
+
+
+def _evaluation_reviewer_gate_dependencies():
+    module = _evaluation_reviewer_gate()
+    return module.Dependencies(
+        route_identity=model_route_identity,
+        route_is_hosted=model_route_is_hosted,
+        build_review_package=independent_reviewer_package,
+        validate_reviewer=validate_reviewer_response,
+        validate_response=validate_response,
+        validation_errors=(ReviewerValidationError, SystemExit, TypeError, ValueError),
+        gate_error=ControlledEvaluationReviewerGateError,
+    )
+
+
 def _evaluation_runtime_isolation_policy():
     module = _evaluation_runtime_isolation()
     return module.Policy(
@@ -6259,100 +6278,16 @@ def precommit_controlled_evaluation_reviewer_gate(
     Revalidate the single retained reviewer response and its bounded repair
     grammar before the caller records the decision in the harness ledger.
     """
-    second_opinion = (
-        response.get("_second_opinion")
-        if isinstance(response.get("_second_opinion"), dict)
-        else None
+    module = _evaluation_reviewer_gate()
+    return module.enforce(
+        prompt_package, response, settings, agent_role,
+        trigger_reason=trigger_reason,
+        freeze_enabled=freeze_enabled,
+        policy=module.Policy(
+            attestation_schema="onion-sentinel-independent-review-validation-v1",
+        ),
+        dependencies=_evaluation_reviewer_gate_dependencies(),
     )
-    reviewer_response = (
-        second_opinion.get("response")
-        if isinstance(second_opinion, dict)
-        and isinstance(second_opinion.get("response"), dict)
-        else None
-    )
-    if not freeze_enabled:
-        return reviewer_response
-    trigger = str(trigger_reason or "").strip()
-    if not trigger:
-        return reviewer_response
-
-    reviewer_route = str(
-        (settings.get("agent_second_opinion_models") or {}).get(agent_role)
-        or ""
-    ).strip()
-    if not reviewer_route:
-        return reviewer_response
-    primary_route = str(
-        (settings.get("agent_models") or {}).get(agent_role) or ""
-    ).strip()
-    if model_route_identity(primary_route, settings) == model_route_identity(
-        reviewer_route,
-        settings,
-    ):
-        return reviewer_response
-
-    def reject(reason: str) -> NoReturn:
-        raise ControlledEvaluationReviewerGateError(
-            "controlled evaluation reviewer precommit gate failed: "
-            f"{reason[:1000]}"
-        )
-
-    if second_opinion is None or reviewer_response is None:
-        status = (
-            str(second_opinion.get("status") or "missing")
-            if isinstance(second_opinion, dict)
-            else "missing"
-        )
-        error = (
-            str(second_opinion.get("error") or "").strip()
-            if isinstance(second_opinion, dict)
-            else ""
-        )
-        reject(
-            "the triggered independent reviewer produced no validated "
-            f"response (status={status}{'; error=' + error if error else ''})"
-        )
-
-    status = str(second_opinion.get("status") or "").strip().lower()
-    if status not in {"completed", "invalid"}:
-        reject(f"reviewer response has non-recordable status {status or 'missing'}")
-    attempts = second_opinion.get("attempts")
-    failures = second_opinion.get("validation_failures")
-    if (
-        isinstance(attempts, bool)
-        or attempts not in {1, 2}
-        or not isinstance(failures, list)
-        or len(failures) != attempts - 1
-    ):
-        reject("reviewer attempt history exceeds or violates the one-repair contract")
-
-    review_package = independent_reviewer_package(
-        prompt_package,
-        hosted=model_route_is_hosted(reviewer_route, settings),
-    )
-    try:
-        validated = validate_reviewer_response(
-            reviewer_response,
-            review_package,
-        )
-        validate_response(validated, review_package)
-    except (ReviewerValidationError, SystemExit, TypeError, ValueError) as exc:
-        reject(f"retained reviewer response is not recordable: {exc}")
-
-    attestation = reviewer_response.get("_review_contract_validation")
-    expected_contract = review_package["review_contract"]
-    if (
-        not isinstance(attestation, dict)
-        or attestation.get("schema")
-        != "onion-sentinel-independent-review-validation-v1"
-        or attestation.get("valid") is not True
-        or str(attestation.get("case_id") or "")
-        != str(expected_contract.get("case_id") or "")
-        or str(attestation.get("evidence_hash") or "")
-        != str(expected_contract.get("evidence_hash") or "")
-    ):
-        reject("reviewer validation attestation is missing or does not bind this case")
-    return reviewer_response
 
 
 def analyze_with_config(
