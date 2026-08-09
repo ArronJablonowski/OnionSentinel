@@ -132,6 +132,10 @@ from cohort_preflight import (
     validate_member_preflight as run_member_preflight,
     validate_representative_binding as prove_representative_binding,
 )
+from cohort_dispatch_identity import (
+    DispatchIdentityPolicy,
+    deterministic_dispatch_id as derive_dispatch_id,
+)
 
 
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -643,61 +647,22 @@ def deterministic_dispatch_id(
     manifest: Mapping[str, Any],
     member: Mapping[str, Any],
 ) -> str:
-    """Derive one replay-stable dispatch identity from the frozen plan."""
-
-    cohort_id = str(manifest.get("cohort_id") or "")
-    if not COHORT_ID_RE.fullmatch(cohort_id):
-        raise CohortError("cohort dispatch has an invalid cohort ID")
-    frozen_plan_sha256 = str(manifest.get("frozen_plan_sha256") or "")
-    if not SHA256_RE.fullmatch(frozen_plan_sha256):
-        raise CohortError("cohort dispatch has an invalid frozen plan digest")
-    dashboard_id = str(member.get("dashboard_group_id") or "")
-    stable_id = str(member.get("stable_group_id") or "")
-    representative_alert_id = str(
-        member.get("representative_alert_id") or ""
+    return derive_dispatch_id(
+        manifest,
+        member,
+        DispatchIdentityPolicy(
+            error=CohortError,
+            cohort_id_pattern=COHORT_ID_RE,
+            sha256_pattern=SHA256_RE,
+            dashboard_group_id_pattern=DASHBOARD_GROUP_ID_RE,
+            stable_group_id_pattern=STABLE_GROUP_ID_RE,
+            representative_alert_id_pattern=REPRESENTATIVE_ALERT_ID_RE,
+            dispatch_id_schema=DISPATCH_ID_SCHEMA,
+            member_stable_group_key=_member_stable_group_key,
+            sha256_value=sha256_value,
+            constant_time_equal=_constant_time_equal,
+        ),
     )
-    stable_group_key = _member_stable_group_key(member)
-    dispatch_kind = str((member.get("dispatch") or {}).get("kind") or "")
-    if not DASHBOARD_GROUP_ID_RE.fullmatch(dashboard_id):
-        raise CohortError("cohort dispatch has an invalid dashboard group ID")
-    if not STABLE_GROUP_ID_RE.fullmatch(stable_id):
-        raise CohortError("cohort dispatch has an invalid stable group ID")
-    if not REPRESENTATIVE_ALERT_ID_RE.fullmatch(representative_alert_id):
-        raise CohortError(
-            "cohort dispatch has an invalid frozen representative alert ID"
-        )
-    if dispatch_kind not in {"analyze", "escalate", "reanalyze"}:
-        raise CohortError(
-            f"cohort dispatch has unsupported kind: {dispatch_kind!r}"
-        )
-    try:
-        rank = int(member["rank"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise CohortError("cohort dispatch has an invalid member rank") from exc
-    if rank < 1:
-        raise CohortError("cohort dispatch has an invalid member rank")
-    dispatch_id = sha256_value(
-        {
-            "schema": DISPATCH_ID_SCHEMA,
-            "cohort_id": cohort_id,
-            "frozen_plan_sha256": frozen_plan_sha256,
-            "rank": rank,
-            "dashboard_group_id": dashboard_id,
-            "stable_group_id": stable_id,
-            "stable_group_key": stable_group_key,
-            "representative_alert_id": representative_alert_id,
-            "dispatch_kind": dispatch_kind,
-        }
-    )
-    existing = str((member.get("dispatch") or {}).get("dispatch_id") or "")
-    if existing and (
-        not SHA256_RE.fullmatch(existing)
-        or not _constant_time_equal(existing, dispatch_id)
-    ):
-        raise CohortError(
-            f"dispatch ID does not match frozen member rank {rank}"
-        )
-    return dispatch_id
 
 
 def _parse_timestamp(value: Any, label: str) -> dt.datetime:

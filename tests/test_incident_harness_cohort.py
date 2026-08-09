@@ -37,6 +37,7 @@ import cohort_query_audit_projection  # noqa: E402
 import cohort_execution_proof_service  # noqa: E402
 import cohort_analysis_metadata  # noqa: E402
 import cohort_preflight  # noqa: E402
+import cohort_dispatch_identity  # noqa: E402
 
 
 class IncidentHarnessCohortTests(unittest.TestCase):
@@ -70,6 +71,12 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         self.assertIs(
             cohort.run_member_preflight,
             cohort_preflight.validate_member_preflight,
+        )
+
+    def test_runner_uses_extracted_dispatch_identity_service(self) -> None:
+        self.assertIs(
+            cohort.derive_dispatch_id,
+            cohort_dispatch_identity.deterministic_dispatch_id,
         )
 
     def test_query_audit_projection_excludes_query_and_result_content(self) -> None:

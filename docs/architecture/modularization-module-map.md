@@ -769,6 +769,11 @@ Incident Responder pre-run-state validation. Database lookups and active-work
 queries remain injected by the cohort runner so the policy stays deterministic
 and independently testable.
 
+`operations/cohort_dispatch_identity.py` owns validation and deterministic
+derivation of replay-stable dispatch IDs from the frozen plan, exact member
+identity, stable-group key, rank, and dispatch kind. Cryptographic primitives
+and identity patterns remain injected by the cohort runner.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

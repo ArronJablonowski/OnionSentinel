@@ -37,6 +37,15 @@
       ]
     },
     {
+      "path": "operations/cohort_dispatch_identity.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_dispatch_identity.py",
+      "required_symbols": [
+        "DispatchIdentityPolicy",
+        "deterministic_dispatch_id"
+      ]
+    },
+    {
       "path": "operations/cohort_dispatch_readback.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_dispatch_readback.py",
