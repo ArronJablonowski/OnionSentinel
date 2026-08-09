@@ -153,6 +153,35 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         )
         cls.harness = sys.modules["onion_sentinel_harness"]
 
+    def test_security_onion_pivot_wrapper_forwards_isolated_paths(self) -> None:
+        collector = mock.Mock(return_value={"complete": True})
+        module = type(
+            "PivotCollector",
+            (),
+            {"collect_investigation_pivots": collector},
+        )()
+        config_path = Path("/private/evaluation/incident-evidence.json")
+        out_dir = Path("/private/evaluation/investigation-pivots")
+        with mock.patch.object(
+            self.runner,
+            "_load_pivot_collector",
+            return_value=module,
+        ):
+            result = self.runner.collect_security_onion_pivots(
+                {"queries": []},
+                {"case_id": "ir-test"},
+                config_path=config_path,
+                out_dir=out_dir,
+            )
+        self.assertTrue(result["complete"])
+        collector.assert_called_once_with(
+            {"queries": []},
+            {"case_id": "ir-test"},
+            config_path=config_path,
+            out_dir=out_dir,
+            persist=True,
+        )
+
     def test_runner_does_not_require_python310_zip_strict(self) -> None:
         tree = ast.parse(
             (BIN_DIR / "run-local-ai-analysis.py").read_text(
@@ -459,6 +488,32 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                 "size": 25,
                 "aggregation": "events",
             },
+        }
+
+    @staticmethod
+    def security_authorization_context() -> dict:
+        return {
+            "context_id": "context-test",
+            "case_id": "investigation-test",
+            "group_id": "group-test",
+            "actor_role": "incident_responder",
+            "anchor": {
+                "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                "id": "alert-1",
+            },
+            "anchor_time": "2026-07-24T18:30:00.000Z",
+            "time_envelope": {
+                "start": "2026-07-24T17:00:00.000Z",
+                "end": "2026-07-24T20:00:00.000Z",
+            },
+            "permitted_observables": {
+                "ips": ["192.0.2.10"],
+                "domains": [],
+                "hosts": [],
+                "users": [],
+            },
+            "discovered_observables": [],
+            "permitted_event_tuples": [],
         }
 
     @staticmethod
@@ -974,6 +1029,216 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                 round_number=1,
                 position=1,
             )
+
+    def test_normalizer_narrows_original_endpoint_plus_one_derived_peer(
+        self,
+    ) -> None:
+        request = self.elastic_request("derived-peer")
+        request["parameters"]["observables"]["ips"] = [
+            "192.0.2.10",
+            "198.51.100.20",
+        ]
+        authorization = self.security_authorization_context()
+        authorization["discovered_observables"] = [
+            {
+                "kind": "ips",
+                "value": "198.51.100.20",
+                "evidence_ref": "elastic:prior-query:hit-1",
+            }
+        ]
+
+        normalized = self.runner.normalize_investigation_query_request(
+            request,
+            round_number=1,
+            position=1,
+            authorization_context=authorization,
+        )
+
+        self.assertEqual(
+            normalized["parameters"]["observables"]["ips"],
+            ["198.51.100.20"],
+        )
+        audit = normalized["normalization"][
+            "derived_peer_scope_narrowing"
+        ]
+        self.assertTrue(audit["applied"])
+        self.assertEqual(audit["original_ip_count"], 2)
+        self.assertEqual(audit["retained_ip_count"], 1)
+        self.assertFalse(audit["scope_widening_allowed"])
+
+    def test_normalizer_rejects_untupled_multi_derived_peer_or(self) -> None:
+        authorization = self.security_authorization_context()
+        authorization["discovered_observables"] = [
+            {
+                "kind": "ips",
+                "value": "198.51.100.20",
+                "evidence_ref": "query:peer-one#source.ip",
+            },
+            {
+                "kind": "domains",
+                "value": "fleek.co",
+                "evidence_ref": "query:peer-two#dns.question.name",
+            },
+        ]
+        request = self.elastic_request("multi-derived-or")
+        request["parameters"]["observables"] = {
+            "ips": ["198.51.100.20"],
+            "domains": ["fleek.co"],
+            "hosts": [],
+            "users": [],
+        }
+
+        with self.assertRaisesRegex(
+            self.runner.InvestigationQueryError,
+            "may not OR multiple derived network peers",
+        ):
+            self.runner.normalize_investigation_query_request(
+                request,
+                round_number=2,
+                position=1,
+                authorization_context=authorization,
+            )
+
+    def test_measure_prevalence_requires_derived_or_role_aware_discriminator(
+        self,
+    ) -> None:
+        authorization = self.security_authorization_context()
+        original_only = self.elastic_request("broad-prevalence")
+        original_only["purpose"] = "measure_prevalence"
+
+        with self.assertRaisesRegex(
+            self.runner.InvestigationQueryError,
+            "may not target only an original endpoint",
+        ):
+            self.runner.normalize_investigation_query_request(
+                original_only,
+                round_number=2,
+                position=1,
+                authorization_context=authorization,
+            )
+
+        authorization["discovered_observables"] = [{
+            "kind": "domains",
+            "value": "fleek.co",
+            "evidence_ref": "query:dns-pivot#dns.question.name",
+        }]
+        derived = self.elastic_request("derived-prevalence")
+        derived["purpose"] = "measure_prevalence"
+        derived["parameters"]["pack"] = "dns_activity"
+        derived["parameters"]["observables"] = {
+            "ips": [],
+            "domains": ["FLEEK.CO."],
+            "hosts": [],
+            "users": [],
+        }
+        normalized = self.runner.normalize_investigation_query_request(
+            derived,
+            round_number=2,
+            position=2,
+            authorization_context=authorization,
+        )
+        self.assertEqual(
+            normalized["parameters"]["observables"]["domains"],
+            ["FLEEK.CO."],
+        )
+
+        sparse_tuple = self.elastic_request("sparse-tuple-prevalence")
+        sparse_tuple["purpose"] = "measure_prevalence"
+        sparse_tuple["parameters"]["event_tuple"] = {
+            "source_ip": "192.0.2.10",
+        }
+        authorization["permitted_event_tuples"] = [{
+            "event_tuple": {"source_ip": "192.0.2.10"},
+            "role_semantics": "event_native",
+            "source": "trusted_context",
+            "evidence_ref": "context:sparse-tuple",
+        }]
+        with self.assertRaisesRegex(
+            self.runner.InvestigationQueryError,
+            "may not target only an original endpoint",
+        ):
+            self.runner.normalize_investigation_query_request(
+                sparse_tuple,
+                round_number=2,
+                position=3,
+                authorization_context=authorization,
+            )
+
+        discriminating_tuple = self.elastic_request(
+            "rule-tuple-prevalence"
+        )
+        discriminating_tuple["purpose"] = "measure_prevalence"
+        discriminating_tuple["parameters"]["pack"] = "alert_context"
+        discriminating_tuple["parameters"]["event_tuple"] = {
+            "rule_id": "2029340",
+        }
+        authorization["permitted_event_tuples"].append({
+            "event_tuple": {"rule_id": "2029340"},
+            "role_semantics": "event_native",
+            "source": "trusted_context",
+            "evidence_ref": "context:rule-tuple",
+        })
+        accepted = self.runner.normalize_investigation_query_request(
+            discriminating_tuple,
+            round_number=2,
+            position=4,
+            authorization_context=authorization,
+        )
+        self.assertEqual(
+            accepted["parameters"]["event_tuple"],
+            {"rule_id": "2029340"},
+        )
+
+    def test_normalizer_does_not_narrow_two_original_endpoints_or_tuple(
+        self,
+    ) -> None:
+        original_pair = self.elastic_request("original-pair")
+        original_pair["parameters"]["observables"]["ips"] = [
+            "192.0.2.10",
+            "198.51.100.20",
+        ]
+        authorization = {
+            "permitted_observables": {
+                "ips": ["192.0.2.10", "198.51.100.20"],
+                "domains": [],
+                "hosts": [],
+                "users": [],
+            }
+        }
+        normalized = self.runner.normalize_investigation_query_request(
+            original_pair,
+            round_number=1,
+            position=1,
+            authorization_context=authorization,
+        )
+        self.assertEqual(
+            normalized["parameters"]["observables"]["ips"],
+            ["192.0.2.10", "198.51.100.20"],
+        )
+        self.assertNotIn("normalization", normalized)
+
+        role_aware = self.elastic_request("role-aware-pair")
+        role_aware["parameters"]["observables"]["ips"] = [
+            "192.0.2.10",
+            "198.51.100.20",
+        ]
+        role_aware["parameters"]["event_tuple"] = {
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+        }
+        normalized_tuple = self.runner.normalize_investigation_query_request(
+            role_aware,
+            round_number=1,
+            position=1,
+        )
+        self.assertEqual(
+            normalized_tuple["parameters"]["observables"]["ips"],
+            ["192.0.2.10", "198.51.100.20"],
+        )
+        self.assertNotIn(
+            "derived_peer_scope_narrowing",
+            normalized_tuple.get("normalization", {}),
+        )
 
     def test_normalizer_projects_only_provenance_verified_pack_tuple_fields(
         self,
@@ -1640,19 +1905,9 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
 
     def test_mixed_batch_uses_injected_read_only_brokers(self) -> None:
         prompt_package = {
-            "_local_investigation_query_context": {
-                "case_id": "investigation-test",
-                "anchor": {
-                    "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
-                    "id": "alert-1",
-                },
-                "permitted_observables": {
-                    "ips": ["192.0.2.10"],
-                    "domains": [],
-                    "hosts": [],
-                    "users": [],
-                },
-            },
+            "_local_investigation_query_context": (
+                self.security_authorization_context()
+            ),
             "pcap_evidence": {
                 "parsed_evidence": [
                     {
@@ -2089,6 +2344,8 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
     def test_contract_rejection_gets_one_non_widening_repair_batch(
         self,
     ) -> None:
+        events: list[tuple] = []
+        harness = RecordingHarness(events)
         route = "codex-cli:gpt-5.5:medium"
         prompt_package = {
             "investigation_query_capability": {
@@ -2141,6 +2398,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             object(),
             {"agent_models": {"soc-analyst": route}},
             "soc-analyst",
+            harness_runtime=harness,
             model_executor=model_executor,
             query_executor=query_executor,
         )
@@ -2176,6 +2434,14 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         self.assertEqual(
             audit["query_planning_repair"]["candidates"][0]["trigger"],
             "contract_rejection",
+        )
+        self.assertIn(
+            ("model_call", "primary-followup-1", False),
+            events,
+        )
+        self.assertNotIn(
+            ("model_call", "primary-followup-2", False),
+            events,
         )
 
     def test_malformed_observables_get_trusted_non_widening_repair(
@@ -4875,7 +5141,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         )
         second = {
             **self.elastic_request("renamed"),
-            "purpose": "measure_prevalence",
+            "purpose": "identify_related_activity",
         }
 
         response = self.runner.apply_investigation_query_loop(
@@ -6896,6 +7162,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
 
     def test_discovered_observables_match_contract_and_never_exceed_shared_cap(self) -> None:
         query_digest = "a" * 64
+        result_digest = "c" * 64
         hits = [
             {
                 "id": f"hit-{index}",
@@ -6919,6 +7186,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             "trusted_query_audit": [{
                 "query_id": "q1",
                 "query_digest": query_digest,
+                "result_digest": result_digest,
                 "status": "ok",
             }],
             "evidence": {
@@ -6926,6 +7194,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                 "results": [{
                     "query_id": "q1",
                     "query_digest": query_digest,
+                    "result_digest": result_digest,
                     "status": "ok",
                     "hits": hits,
                 }],
@@ -6944,8 +7213,9 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         self.assertNotIn("bad+host", {item["value"] for item in discovered})
         self.assertNotIn("bad+user", {item["value"] for item in discovered})
 
-    def test_discovery_refs_bind_exact_hits_and_zero_hit_filters_never_promote(self) -> None:
+    def test_discovery_refs_use_registered_result_reference_and_zero_hit_filters_never_promote(self) -> None:
         query_digest = "c" * 64
+        result_digest = "e" * 64
         security = {
             "backend": "security_onion",
             "status": "ok",
@@ -6953,6 +7223,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             "trusted_query_audit": [{
                 "query_id": "exact-q",
                 "query_digest": query_digest,
+                "result_digest": result_digest,
                 "status": "ok",
             }],
             "evidence": {
@@ -6960,6 +7231,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                 "results": [{
                     "query_id": "exact-q",
                     "query_digest": query_digest,
+                    "result_digest": result_digest,
                     "status": "ok",
                     "hits": [
                         {"id": "hit-one", "index": "index-one",
@@ -6972,10 +7244,16 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         }
         discovered = self.runner._validated_discovered_observables([security])
         refs = {item["value"]: item["evidence_ref"] for item in discovered}
-        self.assertNotEqual(refs["192.0.2.1"], refs["192.0.2.2"])
-        self.assertIn("hit-one", refs["192.0.2.1"])
-        self.assertIn("index-one", refs["192.0.2.1"])
-        self.assertIn("source.ip", refs["192.0.2.1"])
+        canonical_ref = f"query:{query_digest}:{result_digest}"
+        self.assertEqual(refs["192.0.2.1"], canonical_ref)
+        self.assertEqual(refs["192.0.2.2"], canonical_ref)
+
+        mismatched = copy.deepcopy(security)
+        mismatched["evidence"]["results"][0]["result_digest"] = "f" * 64
+        self.assertEqual(
+            self.runner._validated_discovered_observables([mismatched]),
+            [],
+        )
 
         forged_filter = {
             "backend": "pcap_zeek",
@@ -7002,6 +7280,168 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         self.assertEqual(
             self.runner._validated_discovered_observables([forged_filter]),
             [],
+        )
+
+    def test_visible_discovery_catalog_projects_only_new_network_observables(
+        self,
+    ) -> None:
+        context = self.security_authorization_context()
+        context["permitted_observables"]["domains"] = ["original.example"]
+        context["discovered_observables"] = [
+            {
+                "kind": "ips",
+                "value": "192.0.2.10",
+                "evidence_ref": "query:original-ip#source.ip",
+            },
+            {
+                "kind": "domains",
+                "value": "ORIGINAL.EXAMPLE.",
+                "evidence_ref": "query:original-domain#dns.question.name",
+            },
+            {
+                "kind": "ips",
+                "value": "2001:0DB8:0:0:0:0:0:25",
+                "evidence_ref": "query:dns-answer#dns.resolved_ip",
+            },
+            {
+                "kind": "domains",
+                "value": "FLEEK.CO.",
+                "evidence_ref": "query:dns-question#dns.question.name",
+            },
+            {
+                "kind": "hosts",
+                "value": "endpoint-a",
+                "evidence_ref": "query:host#host.name",
+            },
+        ]
+
+        catalog = self.runner.discovered_network_observables_catalog(context)
+
+        self.assertEqual(
+            catalog,
+            [
+                {
+                    "kind": "domains",
+                    "value": "fleek.co",
+                    "evidence_ref": "query:dns-question#dns.question.name",
+                },
+                {
+                    "kind": "ips",
+                    "value": "2001:db8::25",
+                    "evidence_ref": "query:dns-answer#dns.resolved_ip",
+                },
+            ],
+        )
+        serialized = json.dumps(catalog, sort_keys=True)
+        self.assertNotIn("192.0.2.10", serialized)
+        self.assertNotIn("original.example", serialized)
+        self.assertNotIn("endpoint-a", serialized)
+
+    def test_loop_publishes_discovered_network_catalog_before_follow_up(
+        self,
+    ) -> None:
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": (
+                self.security_authorization_context()
+            ),
+        }
+        query_digest = "a" * 64
+        result_digest = "c" * 64
+        seen_catalogs: list[list[dict[str, str]]] = []
+
+        def model_executor(_route, package, _args, _settings):
+            catalog = copy.deepcopy(
+                package["investigation_query_capability"][
+                    "discovered_network_observables"
+                ]
+            )
+            seen_catalogs.append(catalog)
+            citeable_refs = {
+                item["ref"]
+                for item in package["evidence_reference_contract"][
+                    "references"
+                ]
+            }
+            self.assertTrue(catalog)
+            self.assertTrue(
+                all(
+                    item["evidence_ref"] in citeable_refs
+                    for item in catalog
+                )
+            )
+            self.assertIn(
+                "Target one listed derived peer per un-tupled query",
+                package["investigation_follow_up"]["instruction"],
+            )
+            return {"summary": "Bounded follow-up complete."}
+
+        query_executor = mock.Mock(return_value={
+            "schema": self.runner.INVESTIGATION_QUERY_RESULT_SCHEMA,
+            "round": 1,
+            "requests": [self.elastic_request("dns-discovery")],
+            "results": [{
+                "backend": "security_onion",
+                "status": "ok",
+                "security_onion_response_digest": "b" * 64,
+                "trusted_query_audit": [{
+                    "query_id": "dns-discovery",
+                    "query_digest": query_digest,
+                    "result_digest": result_digest,
+                    "status": "ok",
+                }],
+                "evidence": {
+                    "controls_valid": True,
+                    "results": [{
+                        "query_id": "dns-discovery",
+                        "query_digest": query_digest,
+                        "result_digest": result_digest,
+                        "status": "ok",
+                        "hits": [{
+                            "id": "hit-fleek",
+                            "index": "logs-zeek.dns",
+                            "source": {
+                                "source": {"ip": "192.0.2.10"},
+                                "dns": {
+                                    "question": {"name": "fleek.co"},
+                                    "resolved_ip": ["169.150.249.167"],
+                                },
+                            },
+                        }],
+                    }],
+                },
+            }],
+            "audit": [],
+        })
+
+        self.runner.apply_investigation_query_loop(
+            prompt_package,
+            {"investigation_query_requests": [
+                self.elastic_request("dns-discovery")
+            ]},
+            object(),
+            {"agent_models": {"soc-analyst": "codex-cli:gpt-5.5:medium"}},
+            "soc-analyst",
+            model_executor=model_executor,
+            query_executor=query_executor,
+        )
+
+        self.assertEqual(len(seen_catalogs), 1)
+        values = {
+            (item["kind"], item["value"])
+            for item in seen_catalogs[0]
+        }
+        self.assertEqual(
+            values,
+            {("domains", "fleek.co"), ("ips", "169.150.249.167")},
+        )
+        self.assertNotIn(("ips", "192.0.2.10"), values)
+        self.assertNotIn(
+            "_local_investigation_query_context",
+            self.runner.model_safe_copy(prompt_package),
         )
 
     def test_enabled_osquery_capability_enables_top_level_loop(self) -> None:
@@ -7176,9 +7616,9 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
 
         result = self.runner.execute_investigation_query_batch(
             {
-                "_local_investigation_query_context": {
-                    "case_id": "investigation-test",
-                }
+                "_local_investigation_query_context": (
+                    self.security_authorization_context()
+                )
             },
             [request],
             round_number=1,
@@ -7198,7 +7638,11 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         )
 
         result = self.runner.execute_investigation_query_batch(
-            {"_local_investigation_query_context": {"case_id": "investigation-test"}},
+            {
+                "_local_investigation_query_context": (
+                    self.security_authorization_context()
+                )
+            },
             [request],
             round_number=1,
             security_onion_executor=mock.Mock(

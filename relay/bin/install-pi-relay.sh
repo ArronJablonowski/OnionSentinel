@@ -42,6 +42,7 @@ install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay.py" /opt/so-ale
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/alert_outbox.py" /opt/so-alert-relay/app/alert_outbox.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/alert_delivery.py" /opt/so-alert-relay/app/alert_delivery.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/process_io.py" /opt/so-alert-relay/app/process_io.py
+install -o soalert -g soalert -m 0644 "$REPO_DIR/n8n/bin/authorization_aggregate_contract.py" /opt/so-alert-relay/app/authorization_aggregate_contract.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/incident_evidence_broker.py" /opt/so-alert-relay/app/incident_evidence_broker.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/live_osquery_broker.py" /opt/so-alert-relay/app/live_osquery_broker.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract.py" /opt/so-alert-relay/app/live_osquery_contract.py

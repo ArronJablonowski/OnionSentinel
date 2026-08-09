@@ -4040,16 +4040,11 @@ class ControlledDashboardTests(unittest.TestCase):
         self.root = Path(self.temporary.name).resolve()
         self.home = self.root / "home"
         self.dashboard_root = self.root / "runtime-dashboard"
-        self.alert_db = (
-            self.home
-            / "n8n-local"
-            / "alert_store_data"
-            / "alerts.sqlite3"
-        )
-        self.alert_db.parent.mkdir(parents=True, mode=0o700)
+        self.dashboard_root.mkdir(mode=0o700)
+        self.alert_db = self.dashboard_root / "data" / "alerts.sqlite3"
+        self.alert_db.parent.mkdir(mode=0o700)
         self.alert_db.write_bytes(b"controlled-dashboard-health-sentinel")
         self.alert_db.chmod(0o600)
-        self.dashboard_root.mkdir(mode=0o700)
         (self.dashboard_root / "index.html").write_text(
             "<!doctype html><title>controlled evaluation</title>",
             encoding="utf-8",
@@ -4140,6 +4135,7 @@ class ControlledDashboardTests(unittest.TestCase):
             "SOC_ALERT_STORE_API_URL": (
                 f"http://127.0.0.1:{self.alert_store_port}"
             ),
+            "SOC_ALERT_STORE_DB": str(self.alert_db),
         }
         self.process = subprocess.Popen(
             [
@@ -4499,6 +4495,34 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
                 "ONION_SENTINEL_EVALUATION_TOKEN",
                 os.environ,
             )
+
+    def test_controlled_enrichment_never_reads_production_credential(
+        self,
+    ) -> None:
+        package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"enrichment": {"enabled": True}},
+            }
+        }
+        with mock.patch.object(
+            self.runner,
+            "_runtime_env_value",
+            side_effect=AssertionError("production credential was read"),
+        ):
+            config = self.runner.prepare_investigation_enrichment_context(
+                package,
+                "incident-responder",
+                "http://127.0.0.1:18787",
+                controlled_evaluation=True,
+            )
+        self.assertFalse(config["enabled"])
+        self.assertEqual(config["token"], "")
+        self.assertFalse(
+            package["investigation_query_capability"]["backends"][
+                "enrichment"
+            ]["enabled"]
+        )
 
     def test_controlled_lease_is_removed_from_process_environment_before_models(
         self,
@@ -4922,13 +4946,44 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
             settings = runtime / "ai-model-settings.json"
             harness_policy = runtime / "investigation-harness-policy.json"
             detection_playbooks = runtime / "detection-playbooks.json"
-            for path in (settings, harness_policy, detection_playbooks):
+            incident_evidence_config = runtime / "incident-evidence.json"
+            live_osquery_config = runtime / "live-osquery.json"
+            adjudicator_prompt = runtime / "disagreement-adjudicator.md"
+            shared_memory = runtime / "shared-agent-memory.md"
+            asset_inventory = runtime / "asset-inventory.json"
+            database = runtime / "alerts.sqlite3"
+            for path in (
+                settings,
+                harness_policy,
+                detection_playbooks,
+                incident_evidence_config,
+                live_osquery_config,
+                adjudicator_prompt,
+                shared_memory,
+                asset_inventory,
+                database,
+            ):
                 path.write_text("{}\n", encoding="utf-8")
                 path.chmod(0o600)
+            rollups = runtime / "rollups"
+            pcap_analysis = runtime / "pcap-analysis"
+            agent_memory = runtime / "agent-memory"
+            for path in (rollups, pcap_analysis, agent_memory):
+                path.mkdir(mode=0o700)
             args = SimpleNamespace(
+                db=database,
                 prompt_dir=runtime / "prompts",
                 analysis_dir=runtime / "analysis",
+                pcap_analysis_dir=pcap_analysis,
                 incident_evidence_dir=runtime / "incident-evidence",
+                investigation_pivot_dir=runtime / "investigation-pivots",
+                incident_evidence_config=incident_evidence_config,
+                live_osquery_config=live_osquery_config,
+                disagreement_adjudicator_prompt_file=adjudicator_prompt,
+                rollup_dir=rollups,
+                agent_memory_dir=agent_memory,
+                shared_memory_file=shared_memory,
+                asset_inventory_file=asset_inventory,
                 lock_file=runtime / "worker.lock",
                 wake_file=runtime / "worker.wake",
                 portal_wake_file=runtime / "dashboard.wake",

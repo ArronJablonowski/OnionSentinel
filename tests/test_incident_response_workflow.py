@@ -632,6 +632,62 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn("conflicts with the explicit verdict factors", payload["error"])
         contradictory_post.assert_not_called()
 
+    def test_unknown_intent_authorized_activity_projects_to_informational(self) -> None:
+        factors = {
+            "event_status": "observed",
+            "detection_validity": "unknown",
+            "activity_disposition": "authorized_benign",
+            "handling": "no_action",
+            "duplicate_of": None,
+        }
+
+        self.assertEqual(
+            self.portal._soc_derive_legacy_detection_outcome(factors),
+            "informational_no_action",
+        )
+        self.assertEqual(
+            self.portal._soc_adjudication_verdict_contradictions(
+                "informational_no_action",
+                factors,
+            ),
+            [],
+        )
+
+        with mock.patch.object(
+            self.portal,
+            "alert_store_post_json",
+            return_value={"ok": True, "adjudication_id": "adj-authorized-unit"},
+        ) as post:
+            status, payload = self.portal.soc_alert_adjudication_response(
+                "a" * 12,
+                {
+                    "outcome_override": "informational_no_action",
+                    "confidence": "high",
+                    "rationale": "Observed activity is authorized; rule intent is unresolved.",
+                    "reviewer": "qa-analyst",
+                    **factors,
+                },
+            )
+
+        self.assertEqual(status, 201)
+        self.assertTrue(payload["ok"])
+        _, request = post.call_args.args
+        self.assertEqual(request["detection_validity"], "unknown")
+        self.assertEqual(request["activity_disposition"], "authorized_benign")
+        self.assertEqual(request["outcome_override"], "informational_no_action")
+
+        contradictions = self.portal._soc_adjudication_verdict_contradictions(
+            "true_positive_authorized_benign",
+            factors,
+        )
+        self.assertEqual(
+            contradictions,
+            [
+                "factored verdict derives informational_no_action, not "
+                "true_positive_authorized_benign"
+            ],
+        )
+
     def test_portal_review_routes_require_same_origin_json_marker(self) -> None:
         source = PORTAL_PATH.read_text(encoding="utf-8")
 

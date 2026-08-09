@@ -54,6 +54,63 @@ class IncidentHarnessCohortTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_dashboard_post_json_sends_controlled_evaluation_token(self) -> None:
+        captured: dict[str, object] = {}
+
+        class Response:
+            status = 202
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def read(_limit: int) -> bytes:
+                return b'{"ok":true}'
+
+        def urlopen(request, *, timeout):
+            captured["headers"] = dict(request.header_items())
+            captured["timeout"] = timeout
+            return Response()
+
+        token = "e" * 64
+        with mock.patch.object(
+            cohort.urllib.request,
+            "urlopen",
+            side_effect=urlopen,
+        ):
+            result = cohort.dashboard_post_json(
+                "http://127.0.0.1:18766/api/soc-incidents/ir-test/reanalyze",
+                {"reason": "controlled rehearsal"},
+                timeout=7.5,
+                evaluation_token=token,
+            )
+
+        headers = {
+            str(key).lower(): value
+            for key, value in dict(captured["headers"]).items()
+        }
+        self.assertEqual(
+            headers["x-onion-sentinel-evaluation-token"],
+            token,
+        )
+        self.assertEqual(captured["timeout"], 7.5)
+        self.assertEqual(result.status, 202)
+
+    def test_dashboard_post_json_rejects_malformed_evaluation_token(self) -> None:
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "exactly 64 lowercase hex",
+        ):
+            cohort.dashboard_post_json(
+                "http://127.0.0.1:18766/api/soc-incidents/ir-test/reanalyze",
+                {"reason": "controlled rehearsal"},
+                timeout=7.5,
+                evaluation_token="not-a-token",
+            )
+
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
 
@@ -1487,6 +1544,48 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 base_url="http://127.0.0.1:8766",
                 poster=mismatched,
             )
+
+    def test_queue_rejects_unrelated_processing_ai_job_before_dispatch(
+        self,
+    ) -> None:
+        self._freeze(count=1)
+        connection = self._connect()
+        connection.execute(
+            """
+            INSERT INTO durable_jobs (
+              job_type, dedupe_key, payload_json, status, attempt_count,
+              max_attempts, next_attempt_at, requested_at, updated_at
+            ) VALUES (
+              'incident_response_analysis', ?, '{}', 'processing', 1,
+              12, '2026-07-25T12:02:00Z', '2026-07-25T12:02:00Z',
+              '2026-07-25T12:02:00Z'
+            )
+            """,
+            ("f" * 20,),
+        )
+        connection.commit()
+        connection.close()
+
+        def forbidden(_url, _payload):
+            raise AssertionError("quiescence failure must precede dispatch")
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "quiescent database snapshot",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                poster=forbidden,
+            )
+
+        manifest = cohort.load_private_manifest(self.manifest_path)
+        self.assertEqual(manifest["state"], "frozen")
+        self.assertEqual(
+            manifest["members"][0]["dispatch"]["state"],
+            "unattempted",
+        )
 
     def test_queue_rejects_mismatched_response_stable_group_key(self) -> None:
         self._freeze(count=1)

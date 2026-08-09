@@ -17,6 +17,12 @@ import json
 import re
 from typing import Any
 
+from authorization_aggregate_contract import (
+    AuthorizationAggregateContractError,
+    validate_authorization_aggregate_request,
+    validate_authorization_aggregate_response,
+)
+
 
 INCIDENT_EVIDENCE_CONTRACT = "onion-sentinel-incident-evidence-v2"
 LEGACY_INCIDENT_EVIDENCE_CONTRACT = "onion-sentinel-incident-evidence-v1"
@@ -677,6 +683,53 @@ def validate_incident_evidence_artifact(artifact: object) -> dict[str, Any]:
         raise IncidentEvidenceContractError("response observables do not match the request")
     request_anchor = _validate_anchor(request.get("anchor")) if schema == INCIDENT_EVIDENCE_CONTRACT else None
     request_size = request.get("size")
+    authorization_aggregate_request = request.get("authorization_aggregate")
+    authorization_aggregate_response = response.get("authorization_aggregate")
+    authorization_aggregate_valid = True
+    if authorization_aggregate_request is not None:
+        if schema != INCIDENT_EVIDENCE_CONTRACT:
+            raise IncidentEvidenceContractError(
+                "authorization aggregate requires incident evidence v2"
+            )
+        if authorization_aggregate_response is None:
+            raise IncidentEvidenceContractError(
+                "authorization aggregate response is missing"
+            )
+        try:
+            validated_aggregate_request = validate_authorization_aggregate_request(
+                authorization_aggregate_request
+            )
+            validated_aggregate_response = validate_authorization_aggregate_response(
+                authorization_aggregate_response,
+                validated_aggregate_request,
+            )
+        except AuthorizationAggregateContractError as exc:
+            raise IncidentEvidenceContractError(
+                f"authorization aggregate failed validation: {exc}"
+            ) from exc
+        canonical_alert_id = (
+            f"{request_anchor['index']}:{request_anchor['id']}"
+            if request_anchor is not None
+            else ""
+        )
+        artifact_alert_id = str(artifact_map.get("alert_id") or "").strip()
+        if (
+            validated_aggregate_request["selected_alert_id"]
+            != canonical_alert_id
+            or validated_aggregate_request["selected_alert_id"]
+            != artifact_alert_id
+        ):
+            raise IncidentEvidenceContractError(
+                "authorization aggregate selected alert identity does not match "
+                "the incident artifact and collector-owned anchor"
+            )
+        authorization_aggregate_valid = (
+            validated_aggregate_response.get("complete") is True
+        )
+    elif authorization_aggregate_response is not None:
+        raise IncidentEvidenceContractError(
+            "unsolicited authorization aggregate response is not permitted"
+        )
     if schema == INCIDENT_EVIDENCE_CONTRACT:
         if (
             isinstance(request_size, bool)
@@ -745,8 +798,10 @@ def validate_incident_evidence_artifact(artifact: object) -> dict[str, Any]:
         statuses.extend(osquery_statuses)
         controls_valid = _validate_controls(request_anchor, response)
         query_execution_valid = all(elastic_semantic_results)
-        coverage_valid = query_execution_valid and all(
-            status == "ok" for status in osquery_statuses
+        coverage_valid = (
+            query_execution_valid
+            and all(status == "ok" for status in osquery_statuses)
+            and authorization_aggregate_valid
         )
         expected_complete = controls_valid and coverage_valid
         validity = _require_mapping(response.get("semantic_validity"), "semantic validity")
@@ -762,6 +817,13 @@ def validate_incident_evidence_artifact(artifact: object) -> dict[str, Any]:
                 raise IncidentEvidenceContractError(
                     f"semantic validity {key} flag is inconsistent"
                 )
+        if authorization_aggregate_request is not None and (
+            validity.get("authorization_aggregate_valid")
+            is not authorization_aggregate_valid
+        ):
+            raise IncidentEvidenceContractError(
+                "semantic validity authorization aggregate flag is inconsistent"
+            )
         reasons = validity.get("reasons")
         if (
             not isinstance(reasons, list)

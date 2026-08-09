@@ -28,6 +28,24 @@ import time
 from pathlib import Path
 
 
+for _contract_dir in (
+    Path(__file__).resolve().parents[2] / "n8n" / "bin",
+    Path("/usr/local/lib/onion-sentinel"),
+):
+    if _contract_dir.is_dir() and str(_contract_dir) not in sys.path:
+        sys.path.insert(0, str(_contract_dir))
+
+from authorization_aggregate_contract import (  # noqa: E402
+    AUTHORIZATION_AGGREGATE_INDEX_SCOPE,
+    AuthorizationAggregateContractError,
+    authorization_aggregate_query_endpoint,
+    bind_authorization_aggregate_partition_result,
+    build_authorization_aggregate_query_dsl,
+    build_authorization_aggregate_response,
+    validate_authorization_aggregate_request,
+)
+
+
 MAX_REQUEST_BYTES = 16 * 1024
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 MAX_STDERR_BYTES = 256 * 1024
@@ -567,7 +585,15 @@ def validated_anchor(value: object) -> dict[str, str] | None:
 
 def validated_request(
     data: dict,
-) -> tuple[list[str], list[str], list[dict], dict[str, list[str]], int, dict[str, str] | None]:
+) -> tuple[
+    list[str],
+    list[str],
+    list[dict],
+    dict[str, list[str]],
+    int,
+    dict[str, str] | None,
+    dict | None,
+]:
     packs = data.get("packs") or list(PACKS)
     if not isinstance(packs, list) or not packs or len(packs) > len(PACKS):
         fail("packs must be a non-empty bounded list")
@@ -627,7 +653,33 @@ def validated_request(
     if size < 1 or size > MAX_HITS:
         fail(f"size must be between 1 and {MAX_HITS}")
     anchor = validated_anchor(data.get("anchor"))
-    return packs, osquery_packs, clean_windows, clean_observables, size, anchor
+    authorization_aggregate = data.get("authorization_aggregate")
+    if authorization_aggregate is not None:
+        try:
+            authorization_aggregate = validate_authorization_aggregate_request(
+                authorization_aggregate
+            )
+        except AuthorizationAggregateContractError as exc:
+            fail(f"invalid authorization aggregate request: {exc}")
+        canonical_alert_id = (
+            f"{anchor['index']}:{anchor['id']}"
+            if anchor is not None
+            else ""
+        )
+        if authorization_aggregate["selected_alert_id"] != canonical_alert_id:
+            fail(
+                "authorization aggregate selected alert does not match the "
+                "collector-owned request anchor"
+            )
+    return (
+        packs,
+        osquery_packs,
+        clean_windows,
+        clean_observables,
+        size,
+        anchor,
+        authorization_aggregate,
+    )
 
 
 def require_exact_keys(
@@ -1309,7 +1361,20 @@ def canonical_digest(value: object) -> str:
 
 
 def search_audit(body: dict, index_scope: list[str]) -> dict:
-    endpoint = query_endpoint(index_scope)
+    aggregate_terms = (
+        ((body.get("aggs") or {}).get("by_source_port") or {}).get("terms")
+        if isinstance(body.get("aggs"), dict)
+        else None
+    )
+    endpoint = (
+        authorization_aggregate_query_endpoint()
+        if (
+            index_scope == AUTHORIZATION_AGGREGATE_INDEX_SCOPE
+            and isinstance(aggregate_terms, dict)
+            and aggregate_terms.get("field") == "source.port"
+        )
+        else query_endpoint(index_scope)
+    )
     return {
         "query_digest": canonical_digest(body),
         "execution_digest": canonical_digest({
@@ -1384,6 +1449,46 @@ def parse_shards(value: object) -> dict:
         if isinstance(item, dict)
     ]
     return parsed
+
+
+def parse_source_port_aggregation(value: object) -> list[dict[str, int]]:
+    """Parse the one fixed count aggregation without exposing raw buckets."""
+    if not isinstance(value, dict) or set(value) != {"by_source_port"}:
+        raise ValueError("Elasticsearch source-port aggregation root is invalid")
+    aggregate = value["by_source_port"]
+    if not isinstance(aggregate, dict) or set(aggregate) != {
+        "doc_count_error_upper_bound",
+        "sum_other_doc_count",
+        "buckets",
+    }:
+        raise ValueError("Elasticsearch source-port aggregation metadata is invalid")
+    if aggregate["doc_count_error_upper_bound"] != 0 or aggregate["sum_other_doc_count"] != 0:
+        raise ValueError("Elasticsearch source-port aggregation is not exact")
+    buckets = aggregate["buckets"]
+    if not isinstance(buckets, list) or len(buckets) > 100:
+        raise ValueError("Elasticsearch source-port aggregation is out of bounds")
+    normalized = []
+    for bucket in buckets:
+        if not isinstance(bucket, dict) or set(bucket) != {"key", "doc_count"}:
+            raise ValueError("Elasticsearch source-port bucket fields are invalid")
+        key = bucket["key"]
+        count = bucket["doc_count"]
+        if (
+            isinstance(key, bool)
+            or not isinstance(key, int)
+            or key < 1
+            or key > 65535
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 1
+        ):
+            raise ValueError("Elasticsearch source-port bucket is invalid")
+        normalized.append({"source_port": key, "exact_count": count})
+    if normalized != sorted(normalized, key=lambda item: item["source_port"]) or len({
+        item["source_port"] for item in normalized
+    }) != len(normalized):
+        raise ValueError("Elasticsearch source-port buckets are not unique and ordered")
+    return normalized
 
 
 def execute_search(body: dict, index_scope: list[str]) -> dict:
@@ -1577,6 +1682,22 @@ def execute_search(body: dict, index_scope: list[str]) -> dict:
             shards=shards,
             error="Elasticsearch hits.total metadata is invalid",
         )
+    source_port_buckets = None
+    if body.get("aggs") is not None:
+        try:
+            source_port_buckets = parse_source_port_aggregation(
+                parsed.get("aggregations")
+            )
+        except ValueError as exc:
+            return empty_search_result(
+                body,
+                index_scope,
+                "invalid_response",
+                duration_ms,
+                took_ms=took_ms,
+                shards=shards,
+                error=str(exc),
+            )
     return {
         **audit,
         "status": "ok",
@@ -1590,6 +1711,11 @@ def execute_search(body: dict, index_scope: list[str]) -> dict:
         "took_ms": took_ms,
         "shards": shards,
         "hits": hits,
+        **(
+            {"source_port_buckets": source_port_buckets}
+            if source_port_buckets is not None
+            else {}
+        ),
     }
 
 
@@ -1608,6 +1734,27 @@ def execute_pack(pack_name: str, window: dict, observables: dict[str, list[str]]
         ]}},
     }
     return {"pack": pack_name, **execute_search(body, pack["indices"])}
+
+
+def execute_authorization_aggregate(request: dict) -> dict:
+    """Execute exact stored-policy counts without returning event bodies."""
+    partition_results = []
+    for partition in request["partitions"]:
+        body = build_authorization_aggregate_query_dsl(request, partition)
+        result = execute_search(body, AUTHORIZATION_AGGREGATE_INDEX_SCOPE)
+        result.setdefault("source_port_buckets", [])
+        if result.get("status") == "ok":
+            # ``size: 0`` deliberately omits all matching event bodies.  Its
+            # exact tracked total is not a truncated event sample.
+            result["truncated"] = result.get("total_hits_relation") != "eq"
+        partition_results.append(
+            bind_authorization_aggregate_partition_result(
+                request,
+                partition,
+                result,
+            )
+        )
+    return build_authorization_aggregate_response(request, partition_results)
 
 
 def pivot_query_dsl(query: dict) -> dict:
@@ -2062,7 +2209,12 @@ def execute_controls(anchor: dict[str, str] | None) -> dict:
     }
 
 
-def semantic_validity(results: list[dict], osquery_results: list[dict], controls: dict) -> dict:
+def semantic_validity(
+    results: list[dict],
+    osquery_results: list[dict],
+    controls: dict,
+    authorization_aggregate: dict | None = None,
+) -> dict:
     query_execution_valid = all(
         result.get("status") == "ok" and result.get("semantic_valid") is True
         for result in results
@@ -2072,7 +2224,15 @@ def semantic_validity(results: list[dict], osquery_results: list[dict], controls
         (controls.get(name) or {}).get("passed") is True
         for name in ("positive_anchor", "negative_filter")
     )
-    coverage_valid = query_execution_valid and osquery_valid
+    authorization_aggregate_valid = (
+        authorization_aggregate is None
+        or authorization_aggregate.get("complete") is True
+    )
+    coverage_valid = (
+        query_execution_valid
+        and osquery_valid
+        and authorization_aggregate_valid
+    )
     semantic_valid = controls_valid and coverage_valid
     reasons = []
     if not controls_valid:
@@ -2081,7 +2241,11 @@ def semantic_validity(results: list[dict], osquery_results: list[dict], controls
         reasons.append("one or more Elasticsearch packs failed semantic validation")
     if not osquery_valid:
         reasons.append("one or more fixed local OSquery packs failed")
-    return {
+    if not authorization_aggregate_valid:
+        reasons.append(
+            "one or more authorized-activity aggregate partitions failed"
+        )
+    validity = {
         "transport_valid": True,
         "controls_valid": controls_valid,
         "query_execution_valid": query_execution_valid,
@@ -2089,6 +2253,9 @@ def semantic_validity(results: list[dict], osquery_results: list[dict], controls
         "semantic_valid": semantic_valid,
         "reasons": reasons,
     }
+    if authorization_aggregate is not None:
+        validity["authorization_aggregate_valid"] = authorization_aggregate_valid
+    return validity
 
 
 def pivot_semantic_validity(results: list[dict], controls: dict) -> dict:
@@ -2327,7 +2494,15 @@ def main() -> int:
     binary = osquery_binary()
     if binary is None:
         fail("managed Elastic Agent osqueryd is unavailable", 3)
-    packs, osquery_packs, windows, observables, size, anchor = validated_request(request_data)
+    (
+        packs,
+        osquery_packs,
+        windows,
+        observables,
+        size,
+        anchor,
+        authorization_aggregate_request,
+    ) = validated_request(request_data)
     results = []
     for window_index, window in enumerate(windows):
         for pack_name in packs:
@@ -2346,8 +2521,18 @@ def main() -> int:
         execute_osquery_pack(binary, pack_name)
         for pack_name in osquery_packs
     ]
+    authorization_aggregate = (
+        execute_authorization_aggregate(authorization_aggregate_request)
+        if authorization_aggregate_request is not None
+        else None
+    )
     controls = execute_controls(anchor)
-    validity = semantic_validity(results, osquery_results, controls)
+    validity = semantic_validity(
+        results,
+        osquery_results,
+        controls,
+        authorization_aggregate,
+    )
     complete = validity["semantic_valid"]
     response = {
         # A failed evidence pack is an explicit investigative gap, not a
@@ -2365,6 +2550,8 @@ def main() -> int:
         "controls": controls,
         "semantic_validity": validity,
     }
+    if authorization_aggregate is not None:
+        response["authorization_aggregate"] = authorization_aggregate
     output = json.dumps(response, separators=(",", ":"), sort_keys=True).encode()
     if len(output) > MAX_OUTPUT_BYTES:
         fail("bounded evidence response exceeded the output contract", 4)

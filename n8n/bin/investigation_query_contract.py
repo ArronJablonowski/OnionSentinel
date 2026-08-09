@@ -51,6 +51,27 @@ ALLOWED_ACTOR_ROLES = {
     "cyber_threat_intel",
     "threat_hunter",
 }
+AUTHORIZATION_CONTEXT_ALLOWED_KEYS = frozenset({
+    "context_id",
+    "case_id",
+    "group_id",
+    "actor_role",
+    "anchor",
+    "anchor_time",
+    "time_envelope",
+    "permitted_observables",
+    "discovered_observables",
+    "permitted_event_tuples",
+})
+AUTHORIZATION_CONTEXT_REQUIRED_KEYS = frozenset({
+    "context_id",
+    "case_id",
+    "actor_role",
+    "anchor",
+    "anchor_time",
+    "time_envelope",
+    "permitted_observables",
+})
 ALLOWED_STATUSES = {"ok", "timeout", "output_limit", "error", "invalid_response"}
 ALLOWED_ROLE_SEMANTICS = {
     "event_native",
@@ -642,15 +663,8 @@ def _normalize_authorization_context(value: object) -> dict[str, Any]:
     context = _require_mapping(value, "authorization context")
     _require_exact_keys(
         context,
-        allowed={
-            "context_id", "case_id", "group_id", "actor_role", "anchor",
-            "anchor_time", "time_envelope", "permitted_observables",
-            "discovered_observables", "permitted_event_tuples",
-        },
-        required={
-            "context_id", "case_id", "actor_role", "anchor", "anchor_time",
-            "time_envelope", "permitted_observables",
-        },
+        allowed=AUTHORIZATION_CONTEXT_ALLOWED_KEYS,
+        required=AUTHORIZATION_CONTEXT_REQUIRED_KEYS,
         label="authorization context",
     )
     envelope, envelope_start, envelope_end = _normalize_window(
@@ -724,6 +738,31 @@ def _normalize_authorization_context(value: object) -> dict[str, Any]:
     normalized["_envelope_start"] = envelope_start
     normalized["_envelope_end"] = envelope_end
     return normalized
+
+
+def project_investigation_authorization_context(
+    value: object,
+) -> dict[str, Any]:
+    """Return the canonical, transport-safe authorization context.
+
+    Local orchestration context can contain enrichment-only indicators and
+    other private runtime state.  Neither the Security Onion broker nor the
+    contract preflight may receive those fields.  Validation happens before
+    projection is returned so callers fail closed when a required field is
+    absent or malformed.
+    """
+    context = _require_mapping(value, "authorization context")
+    projected = {
+        key: context[key]
+        for key in AUTHORIZATION_CONTEXT_ALLOWED_KEYS
+        if key in context
+    }
+    normalized = _normalize_authorization_context(projected)
+    return {
+        key: normalized[key]
+        for key in AUTHORIZATION_CONTEXT_ALLOWED_KEYS
+        if key in normalized
+    }
 
 
 def _observable_authorizations(context: dict[str, Any]) -> dict[tuple[str, str], dict[str, str]]:

@@ -25,6 +25,10 @@ BIN_DIR = Path(__file__).resolve().parent
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 from bounded_process import BoundedProcessError, run_bounded_command
+from authorization_aggregate_contract import (
+    AuthorizationAggregateContractError,
+    build_authorization_aggregate_request,
+)
 from incident_evidence_contract import (
     INCIDENT_EVIDENCE_CONTRACT,
     OSQUERY_PACKS,
@@ -58,6 +62,110 @@ ALERT_INDEX_RE = re.compile(
     r"|\.ds-logs-(?:suricata\.alerts|detections\.alerts)-so-\d{4}\.\d{2}\.\d{2}-\d{6}"
     r")$"
 )
+
+
+def selected_authorization_aggregate_request(
+    conn: sqlite3.Connection,
+    selected: sqlite3.Row,
+    anchor: dict[str, str] | None,
+) -> dict | None:
+    """Build the optional count request from trusted campaign state only.
+
+    The selected alert must itself be a durable campaign member.  Exact query
+    selectors come only from the campaign's stored ``authorization_json``;
+    alert text, model output, and caller-supplied query fields are never used.
+    Missing campaign tables or membership simply mean that this optional
+    evidence is unavailable.  Malformed existing campaign state fails closed.
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT member.alert_id, member.observed_at,
+                   campaign.campaign_id, campaign.policy_id,
+                   campaign.bucket_start, campaign.bucket_end,
+                   campaign.authorization_json
+            FROM authorized_activity_campaign_members AS member
+            JOIN authorized_activity_campaigns AS campaign
+              ON campaign.campaign_id = member.campaign_id
+            WHERE member.alert_id = ?
+            ORDER BY campaign.bucket_start DESC
+            LIMIT 2
+            """,
+            [selected["alert_id"]],
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return None
+        raise
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise RuntimeError(
+            "selected alert has ambiguous authorized-activity campaign membership"
+        )
+    campaign = rows[0]
+    canonical_alert_id = (
+        f"{anchor['index']}:{anchor['id']}"
+        if isinstance(anchor, dict)
+        and set(anchor) == {"index", "id"}
+        else ""
+    )
+    if str(campaign["alert_id"] or "") != canonical_alert_id:
+        raise RuntimeError(
+            "selected campaign membership is not bound to the collector-owned alert anchor"
+        )
+    try:
+        policy = json.loads(str(campaign["authorization_json"] or "{}"))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "selected campaign stored operator policy is invalid JSON"
+        ) from exc
+    if not isinstance(policy, dict) or policy.get("status") != "operator_authorized":
+        raise RuntimeError(
+            "selected campaign lacks stored operator-authorized policy evidence"
+        )
+    if str(policy.get("policy_id") or "") != str(campaign["policy_id"] or ""):
+        raise RuntimeError(
+            "selected campaign policy identity does not match stored authorization"
+        )
+    selectors = {
+        key: policy.get(key, [])
+        for key in (
+            "source_ips",
+            "destination_ips",
+            "rule_ids",
+            "source_ports",
+            "destination_ports",
+            "destination_port_ranges",
+            "transport_protocols",
+        )
+    }
+    # This optional aggregate is specifically a complete policy-port audit.
+    # Policies without exact source-port selectors continue through the
+    # existing incident-evidence path without an aggregate rather than
+    # weakening the query to an unbounded source-port breakdown.
+    if not selectors["source_ports"]:
+        return None
+    try:
+        return build_authorization_aggregate_request(
+            selected_alert_id=campaign["alert_id"],
+            campaign_id=campaign["campaign_id"],
+            policy_id=campaign["policy_id"],
+            membership_observed_at=campaign["observed_at"],
+            campaign_window={
+                "start": campaign["bucket_start"],
+                "end": campaign["bucket_end"],
+            },
+            authorization_window={
+                "start": policy.get("authorization_start"),
+                "end": policy.get("authorization_end"),
+            },
+            selectors=selectors,
+        )
+    except AuthorizationAggregateContractError as exc:
+        raise RuntimeError(
+            f"selected campaign cannot authorize a bounded aggregate: {exc}"
+        ) from exc
 
 
 def parse_args() -> argparse.Namespace:
@@ -454,13 +562,16 @@ def main() -> int:
     conn.row_factory = sqlite3.Row
     try:
         selected, grouped = selected_group(conn, args.alert_id)
+        anchor = representative_alert_anchor(selected)
+        authorization_aggregate = selected_authorization_aggregate_request(
+            conn, selected, anchor
+        )
     finally:
         conn.close()
     exact_observables = observables(grouped)
     if not any(exact_observables.values()):
         raise RuntimeError("no validated exact observables were available for restricted evidence queries")
     windows, coverage_note = evidence_windows(grouped)
-    anchor = representative_alert_anchor(selected)
     request = {
         "packs": [
             "alert_context",
@@ -475,6 +586,8 @@ def main() -> int:
         "size": args.size,
         "anchor": anchor,
     }
+    if authorization_aggregate is not None:
+        request["authorization_aggregate"] = authorization_aggregate
     key = Path(os.path.expandvars(os.path.expanduser(str(config["ssh_key"]))))
     known_hosts = Path(os.path.expandvars(os.path.expanduser(str(config["known_hosts"]))))
     command = [

@@ -15,6 +15,7 @@ import datetime as dt
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import shutil
@@ -35,7 +36,13 @@ from pcap_lifecycle import analysis_completed, delete_request_artifacts
 from disk_capacity import require_runtime_capacity
 from bounded_http import BoundedHttpError, read_bounded_json
 from bounded_process import BoundedProcessError, run_bounded_command, run_bounded_command_to_file
-from pcap_analysis_core import BoundedTopCounter, CoverageTracker, DeterministicReservoir, sanitize_evidence_text
+from pcap_analysis_core import (
+    BoundedTopCounter,
+    CoverageTracker,
+    DeterministicReservoir,
+    sanitize_evidence_text,
+    sanitize_evidence_value,
+)
 from pcap_tool_runtime import run_isolated_command, stream_isolated_lines
 from detection_validation import (
     extract_rule_context,
@@ -78,6 +85,10 @@ ICMP_PAIR_STATE_LIMIT = max(128, int(os.environ.get("PCAP_ICMP_PAIR_STATE_LIMIT"
 QUERY_INDEX_LIMIT = max(
     SUMMARY_LIMIT,
     min(HEAVY_HITTER_CAPACITY, int(os.environ.get("PCAP_QUERY_INDEX_LIMIT", "96"))),
+)
+REQUEST_RELEVANT_QUERY_INDEX_LIMIT = max(
+    1,
+    min(16, QUERY_INDEX_LIMIT),
 )
 ICMP_ABNORMAL_MIN_FRAME_BYTES = max(
     64,
@@ -622,11 +633,56 @@ def _timestamp_epoch(value: object) -> float | None:
         return None
     if parsed.tzinfo is None:
         return None
-    return parsed.timestamp()
+    try:
+        epoch = parsed.timestamp()
+    except (OverflowError, OSError, ValueError):
+        return None
+    return epoch if math.isfinite(epoch) else None
 
 
-def icmp_evidence_scope(request: dict[str, Any]) -> dict[str, Any]:
-    """Build the bounded endpoint/time scope used for alert-associated ICMP."""
+def _finite_epoch(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        epoch = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return _timestamp_epoch(value)
+    return epoch if math.isfinite(epoch) else None
+
+
+def _strict_port(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        port = value
+    elif isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        port = int(value)
+    else:
+        text = str(value or "").strip()
+        if not re.fullmatch(r"[0-9]{1,5}", text):
+            return None
+        port = int(text)
+    return port if 0 <= port <= 65535 else None
+
+
+def _selection_window_seconds(value: object) -> int:
+    """Return a finite, integral capture window within the configured cap."""
+    if isinstance(value, bool):
+        requested = 120
+    elif isinstance(value, int):
+        requested = value
+    elif isinstance(value, float):
+        requested = int(value) if math.isfinite(value) and value.is_integer() else 120
+    else:
+        text = str(value or "").strip()
+        requested = int(text) if re.fullmatch(r"[0-9]+", text) else 120
+    return max(30, min(MAX_SELECTION_WINDOW_SECONDS, requested))
+
+
+def pcap_evidence_scope(request: dict[str, Any]) -> dict[str, Any]:
+    """Build the trusted endpoint/tuple/time scope for request pinning."""
     source_ip = sanitize_evidence_text(request.get("source_ip"), 64)
     destination_ip = sanitize_evidence_text(request.get("destination_ip"), 64)
     try:
@@ -638,31 +694,242 @@ def icmp_evidence_scope(request: dict[str, Any]) -> dict[str, Any]:
     except ValueError:
         destination_ip = ""
 
-    first_epoch = _timestamp_epoch(request.get("first_seen"))
-    last_epoch = _timestamp_epoch(request.get("last_seen"))
+    point_timestamp = request.get("event_timestamp") or request.get("timestamp")
+    first_epoch = _finite_epoch(request.get("first_seen") or point_timestamp)
+    last_epoch = _finite_epoch(request.get("last_seen") or point_timestamp)
     start_epoch: float | None = None
     end_epoch: float | None = None
+    selection_anchor_epoch: float | None = None
     if first_epoch is not None and last_epoch is not None:
         first_epoch, last_epoch = sorted((first_epoch, last_epoch))
-        try:
-            requested_window = int(request.get("max_window_seconds") or 120)
-        except (TypeError, ValueError):
-            requested_window = 120
-        window_seconds = max(30, min(MAX_SELECTION_WINDOW_SECONDS, requested_window))
-        duration = max(0, int(last_epoch - first_epoch))
+        window_seconds = _selection_window_seconds(
+            request.get("max_window_seconds")
+        )
+        duration = max(0.0, last_epoch - first_epoch)
         if duration > window_seconds:
             start_epoch, end_epoch = last_epoch - window_seconds, last_epoch
+            selection_anchor_epoch = last_epoch
         else:
-            padding = max(0, (window_seconds - duration) // 2)
+            padding = max(0.0, (window_seconds - duration) / 2.0)
             start_epoch, end_epoch = first_epoch - padding, last_epoch + padding
+            selection_anchor_epoch = (first_epoch + last_epoch) / 2.0
+    else:
+        request_epoch = first_epoch if first_epoch is not None else last_epoch
+        if request_epoch is not None:
+            window_seconds = _selection_window_seconds(
+                request.get("max_window_seconds")
+            )
+            half_window = window_seconds / 2.0
+            start_epoch = request_epoch - half_window
+            end_epoch = request_epoch + half_window
+            selection_anchor_epoch = request_epoch
     return {
         "selected_alert_id": sanitize_evidence_text(request.get("alert_id"), 256),
         "source_ip": source_ip,
+        "source_port": _strict_port(request.get("source_port")),
         "destination_ip": destination_ip,
+        "destination_port": _strict_port(request.get("destination_port")),
+        "transport": sanitize_evidence_text(
+            request.get("transport_protocol")
+            or request.get("transport"),
+            16,
+        ).lower(),
         "window_start_epoch": start_epoch,
         "window_end_epoch": end_epoch,
+        "selection_anchor_epoch": selection_anchor_epoch,
         "window_basis": "bounded-pcap-request-window" if start_epoch is not None else "unavailable",
     }
+
+
+def icmp_evidence_scope(request: dict[str, Any]) -> dict[str, Any]:
+    """Compatibility alias for the generalized trusted PCAP request scope."""
+    return pcap_evidence_scope(request)
+
+
+def _normalized_scope_ip(value: object) -> str:
+    try:
+        return str(ipaddress.ip_address(str(value or "").strip()))
+    except ValueError:
+        return ""
+
+
+def _pcap_record_matches_request_scope(
+    record: dict[str, Any],
+    scope: dict[str, Any],
+) -> bool:
+    """Match one payload-free fact to the exact trusted capture request."""
+    return _pcap_record_request_match(record, scope) is not None
+
+
+def _pcap_record_request_match(
+    record: dict[str, Any],
+    scope: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return deterministic match metadata for one exact request fact."""
+    requested_source = _normalized_scope_ip(scope.get("source_ip"))
+    requested_destination = _normalized_scope_ip(
+        scope.get("destination_ip")
+    )
+    record_source = _normalized_scope_ip(record.get("source_ip"))
+    record_destination = _normalized_scope_ip(record.get("destination_ip"))
+    if not all((
+        requested_source,
+        requested_destination,
+        record_source,
+        record_destination,
+    )):
+        return None
+    if (
+        record_source == requested_source
+        and record_destination == requested_destination
+    ):
+        direction = 0
+        expected_source_port = _strict_port(scope.get("source_port"))
+        expected_destination_port = _strict_port(
+            scope.get("destination_port")
+        )
+    elif (
+        record_source == requested_destination
+        and record_destination == requested_source
+    ):
+        direction = 1
+        expected_source_port = _strict_port(scope.get("destination_port"))
+        expected_destination_port = _strict_port(scope.get("source_port"))
+    else:
+        return None
+    for field, expected in (
+        ("source_port", expected_source_port),
+        ("destination_port", expected_destination_port),
+    ):
+        if expected is not None and _strict_port(record.get(field)) != expected:
+            return None
+    requested_transport = str(scope.get("transport") or "").strip().lower()
+    record_transport = str(record.get("transport") or "").strip().lower()
+    if not record_transport:
+        record_protocol = str(record.get("protocol") or "").strip().lower()
+        if record_protocol in {"icmp", "icmpv6", "ipv6-icmp"}:
+            record_transport = (
+                "icmpv6" if record_protocol in {"icmpv6", "ipv6-icmp"}
+                else "icmp"
+            )
+    if requested_transport and record_transport and record_transport != requested_transport:
+        return None
+    timestamp = _finite_epoch(
+        record.get("timestamp_epoch")
+        if record.get("timestamp_epoch") is not None
+        else record.get("timestamp")
+    )
+    start_epoch = _finite_epoch(scope.get("window_start_epoch"))
+    end_epoch = _finite_epoch(scope.get("window_end_epoch"))
+    if timestamp is None or start_epoch is None or end_epoch is None:
+        return None
+    start_epoch, end_epoch = sorted((start_epoch, end_epoch))
+    if not start_epoch <= timestamp <= end_epoch:
+        return None
+    anchor_epoch = _finite_epoch(scope.get("selection_anchor_epoch"))
+    if anchor_epoch is None:
+        anchor_epoch = (start_epoch + end_epoch) / 2.0
+    return {
+        "distance_seconds": abs(timestamp - anchor_epoch),
+        "direction": direction,
+        "transport_scope_status": (
+            "confirmed"
+            if not requested_transport or record_transport == requested_transport
+            else "unconfirmed"
+        ),
+    }
+
+
+class BoundedRelevantRecords:
+    """Keep the deterministic alert-nearest exact-scope records."""
+
+    def __init__(self, limit: int, request_scope: dict[str, Any]) -> None:
+        if limit <= 0:
+            raise ValueError("relevant record limit must be positive")
+        self.limit = limit
+        self.request_scope = request_scope
+        self.seen = 0
+        self._records: dict[
+            str,
+            tuple[tuple[float, int, str], dict[str, Any]],
+        ] = {}
+
+    def add(self, raw: dict[str, Any]) -> bool:
+        match = _pcap_record_request_match(raw, self.request_scope)
+        if match is None:
+            return False
+        self.seen += 1
+        record = sanitize_evidence_value(raw, max_chars=512, max_items=64)
+        if not isinstance(record, dict):
+            return False
+        record["transport_scope_status"] = match[
+            "transport_scope_status"
+        ]
+        identity = json.dumps(
+            record,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        key = (
+            float(match["distance_seconds"]),
+            int(match["direction"]),
+            digest,
+        )
+        current = self._records.get(identity)
+        if current is None or key < current[0]:
+            self._records[identity] = (key, record)
+        if len(self._records) > self.limit:
+            worst_identity = max(
+                self._records,
+                key=lambda item: self._records[item][0],
+            )
+            del self._records[worst_identity]
+        return True
+
+    def records(self) -> list[dict[str, Any]]:
+        return [
+            record
+            for _key, record in sorted(
+                self._records.values(),
+                key=lambda item: item[0],
+            )
+        ]
+
+
+def _merge_request_relevant_records(
+    relevant: list[dict[str, Any]],
+    sampled: list[dict[str, Any]],
+    limit: int = QUERY_INDEX_LIMIT,
+) -> list[dict[str, Any]]:
+    """Deduplicate pinned facts ahead of the general bounded reservoir."""
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in [*relevant, *sampled]:
+        if not isinstance(raw, dict):
+            continue
+        record = sanitize_evidence_value(raw, max_chars=512, max_items=64)
+        if not isinstance(record, dict):
+            continue
+        identity_record = dict(record)
+        # Pinning metadata describes selection confidence, not a distinct
+        # packet/log fact. Ignore it for deduplication while retaining the
+        # richer relevant copy that is merged first.
+        identity_record.pop("transport_scope_status", None)
+        identity = json.dumps(
+            identity_record,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        output.append(record)
+        if len(output) >= max(0, limit):
+            break
+    return output
 
 
 def _icmp_scope_match(
@@ -928,6 +1195,7 @@ ZEEK_QUERY_FIELDS = {
         "id.resp_h": "destination_ip",
         "id.orig_p": "source_port",
         "id.resp_p": "destination_port",
+        "proto": "transport",
         "version": "version",
         "cipher": "cipher",
         "curve": "curve",
@@ -945,6 +1213,7 @@ ZEEK_QUERY_FIELDS = {
         "id.resp_h": "destination_ip",
         "id.orig_p": "source_port",
         "id.resp_p": "destination_port",
+        "proto": "transport",
         "method": "method",
         "host": "host",
         "uri": "uri",
@@ -962,6 +1231,7 @@ ZEEK_QUERY_FIELDS = {
         "conn_uids": "uid",
         "tx_hosts": "source_ip",
         "rx_hosts": "destination_ip",
+        "proto": "transport",
         "source": "source_name",
         "mime_type": "mime_type",
         "filename": "filename",
@@ -980,6 +1250,7 @@ ZEEK_QUERY_FIELDS = {
         "id.resp_h": "destination_ip",
         "id.orig_p": "source_port",
         "id.resp_p": "destination_port",
+        "proto": "transport",
         "note": "note",
         "msg": "message",
         "sub": "sub",
@@ -995,6 +1266,7 @@ ZEEK_QUERY_FIELDS = {
         "id.resp_h": "destination_ip",
         "id.orig_p": "source_port",
         "id.resp_p": "destination_port",
+        "proto": "transport",
         "name": "name",
         "addl": "additional",
         "notice": "notice",
@@ -1019,6 +1291,8 @@ def aggregate_zeek_log(
     coverage: CoverageTracker,
     query_sample: DeterministicReservoir | None = None,
     log_type: str = "",
+    relevant_query_sample: BoundedRelevantRecords | None = None,
+    request_scope: dict[str, Any] | None = None,
 ) -> None:
     """Read every Zeek record while keeping only bounded heavy-hitter state."""
     with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -1039,11 +1313,22 @@ def aggregate_zeek_log(
                     continue
             coverage.observe(timestamp=parsed.get("ts"), length=packet_bytes, decoded=True)
             counter.add(parsed.get(field) for field in fields)
-            if query_sample is not None and log_type in ZEEK_QUERY_FIELDS:
-                query_sample.add(project_zeek_query_record(parsed, log_type))
+            if log_type in ZEEK_QUERY_FIELDS and (
+                query_sample is not None
+                or relevant_query_sample is not None
+            ):
+                projected = project_zeek_query_record(parsed, log_type)
+                if query_sample is not None:
+                    query_sample.add(projected)
+                if relevant_query_sample is not None:
+                    relevant_query_sample.add(projected)
 
 
-def run_zeek(pcap_files: list[Path], work_dir: Path) -> dict[str, Any]:
+def run_zeek(
+    pcap_files: list[Path],
+    work_dir: Path,
+    selected_scope: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     zeek = tool_path("ZEEK_BIN", "zeek")
     if not zeek:
         return {"available": False, "reason": "zeek executable not found on PATH or ZEEK_BIN"}
@@ -1061,7 +1346,15 @@ def run_zeek(pcap_files: list[Path], work_dir: Path) -> dict[str, Any]:
     }
     counters = {key: BoundedTopCounter(HEAVY_HITTER_CAPACITY) for key in log_names}
     coverage = {key: CoverageTracker() for key in log_names}
+    request_scope = selected_scope if isinstance(selected_scope, dict) else {}
     query_samples = {key: DeterministicReservoir(QUERY_INDEX_LIMIT) for key in log_names}
+    relevant_query_samples = {
+        key: BoundedRelevantRecords(
+            REQUEST_RELEVANT_QUERY_INDEX_LIMIT,
+            request_scope,
+        )
+        for key in log_names
+    }
     files_processed = 0
 
     for index, pcap in enumerate(pcap_files):
@@ -1086,6 +1379,8 @@ def run_zeek(pcap_files: list[Path], work_dir: Path) -> dict[str, Any]:
                         coverage[log_key],
                         query_samples[log_key],
                         log_key,
+                        relevant_query_samples[log_key],
+                        request_scope,
                     )
             if result["ok"]:
                 files_processed += 1
@@ -1093,6 +1388,13 @@ def run_zeek(pcap_files: list[Path], work_dir: Path) -> dict[str, Any]:
             shutil.rmtree(capture_dir, ignore_errors=True)
     record_counts = {key: coverage[key].total_records for key in log_names}
     valid_timestamps = [item for item in coverage.values() if item.first_timestamp is not None]
+    merged_query_samples = {
+        key: _merge_request_relevant_records(
+            relevant_query_samples[key].records(),
+            query_samples[key].records(),
+        )
+        for key in log_names
+    }
     return {
         "available": True,
         "commands": commands,
@@ -1109,10 +1411,23 @@ def run_zeek(pcap_files: list[Path], work_dir: Path) -> dict[str, Any]:
         "sampling": {
             "strategy": "full-stream-bounded-heavy-hitters",
             "heavy_hitter_capacity_per_log": HEAVY_HITTER_CAPACITY,
-            "query_index_strategy": "deterministic-reservoir-per-log",
+            "query_index_strategy": (
+                "request-relevant-pins-then-deterministic-reservoir-per-log"
+            ),
             "query_index_limit_per_log": QUERY_INDEX_LIMIT,
+            "request_relevant_limit_per_log": (
+                REQUEST_RELEVANT_QUERY_INDEX_LIMIT
+            ),
+            "request_relevant_records": {
+                key: len(relevant_query_samples[key].records())
+                for key in log_names
+            },
+            "request_relevant_records_seen": {
+                key: relevant_query_samples[key].seen
+                for key in log_names
+            },
             "query_index_records": {
-                key: len(query_samples[key].records())
+                key: len(merged_query_samples[key])
                 for key in log_names
             },
             "records_truncated_before_aggregation": {key: False for key in log_names},
@@ -1129,13 +1444,13 @@ def run_zeek(pcap_files: list[Path], work_dir: Path) -> dict[str, Any]:
         # queries. It is stripped before either the initial local prompt or any
         # hosted-model request is assembled.
         "_local_query_index": {
-            "connections": query_samples["conn"].records(),
-            "dns": query_samples["dns"].records(),
-            "tls": query_samples["tls"].records(),
-            "http": query_samples["http"].records(),
-            "files": query_samples["files"].records(),
-            "notices": query_samples["notice"].records(),
-            "weird": query_samples["weird"].records(),
+            "connections": merged_query_samples["conn"],
+            "dns": merged_query_samples["dns"],
+            "tls": merged_query_samples["tls"],
+            "http": merged_query_samples["http"],
+            "files": merged_query_samples["files"],
+            "notices": merged_query_samples["notice"],
+            "weird": merged_query_samples["weird"],
         },
     }
 
@@ -1172,11 +1487,36 @@ def run_tshark(
     commands: list[dict[str, Any]] = []
     coverage = CoverageTracker()
     per_file: list[dict[str, Any]] = []
+    scope = selected_scope if isinstance(selected_scope, dict) else {}
     reservoir = DeterministicReservoir(TSHARK_SAMPLE_LIMIT)
     dns_record_samples = DeterministicReservoir(QUERY_INDEX_LIMIT)
     tls_record_samples = DeterministicReservoir(QUERY_INDEX_LIMIT)
     http_record_samples = DeterministicReservoir(QUERY_INDEX_LIMIT)
     icmp_fact_samples = DeterministicReservoir(QUERY_INDEX_LIMIT)
+    relevant_packet_samples = BoundedRelevantRecords(
+        REQUEST_RELEVANT_QUERY_INDEX_LIMIT,
+        scope,
+    )
+    relevant_connection_samples = BoundedRelevantRecords(
+        REQUEST_RELEVANT_QUERY_INDEX_LIMIT,
+        scope,
+    )
+    relevant_dns_record_samples = BoundedRelevantRecords(
+        REQUEST_RELEVANT_QUERY_INDEX_LIMIT,
+        scope,
+    )
+    relevant_tls_record_samples = BoundedRelevantRecords(
+        REQUEST_RELEVANT_QUERY_INDEX_LIMIT,
+        scope,
+    )
+    relevant_http_record_samples = BoundedRelevantRecords(
+        REQUEST_RELEVANT_QUERY_INDEX_LIMIT,
+        scope,
+    )
+    relevant_icmp_fact_samples = BoundedRelevantRecords(
+        REQUEST_RELEVANT_QUERY_INDEX_LIMIT,
+        scope,
+    )
     protocols = BoundedTopCounter(128)
     conversations = BoundedTopCounter(HEAVY_HITTER_CAPACITY)
     dns_queries = BoundedTopCounter(HEAVY_HITTER_CAPACITY)
@@ -1221,7 +1561,6 @@ def run_tshark(
     icmp_excluded_missing_timestamp = 0
     icmp_abnormal_count = 0
     icmp_max_frame_bytes = 0
-    scope = selected_scope if isinstance(selected_scope, dict) else {}
     endpoint_filter_applied = bool(scope.get("source_ip") or scope.get("destination_ip"))
     endpoint_pair_complete = bool(scope.get("source_ip") and scope.get("destination_ip"))
     time_filter_applied = isinstance(scope.get("window_start_epoch"), (int, float)) and isinstance(
@@ -1462,15 +1801,48 @@ def run_tshark(
                 "http_user_agents": user_agent_facts,
                 **icmp_fact,
             }
+            request_relevant = _pcap_record_matches_request_scope(
+                packet_fact,
+                scope,
+            )
             reservoir.add(packet_fact)
+            if request_relevant:
+                relevant_packet_samples.add(packet_fact)
+                relevant_connection_samples.add({
+                    key: packet_fact[key]
+                    for key in (
+                        "source",
+                        "record_type",
+                        "frame_number",
+                        "timestamp_epoch",
+                        "source_ip",
+                        "destination_ip",
+                        "source_port",
+                        "destination_port",
+                        "transport",
+                        "protocol",
+                    )
+                })
             if query_values or answer_values or query_type_values or rcode_values:
-                dns_record_samples.add({**packet_fact, "record_type": "dns"})
+                dns_record = {**packet_fact, "record_type": "dns"}
+                dns_record_samples.add(dns_record)
+                if request_relevant:
+                    relevant_dns_record_samples.add(dns_record)
             if tls_sni_values or tls_version_facts or row["protocol"].upper().startswith(("TLS", "SSL")):
-                tls_record_samples.add({**packet_fact, "record_type": "tls"})
+                tls_record = {**packet_fact, "record_type": "tls"}
+                tls_record_samples.add(tls_record)
+                if request_relevant:
+                    relevant_tls_record_samples.add(tls_record)
             if http_host_values or http_uri_values or user_agent_facts or row["protocol"].upper().startswith("HTTP"):
-                http_record_samples.add({**packet_fact, "record_type": "http"})
+                http_record = {**packet_fact, "record_type": "http"}
+                http_record_samples.add(http_record)
+                if request_relevant:
+                    relevant_http_record_samples.add(http_record)
             if icmp_fact:
-                icmp_fact_samples.add({**packet_fact, "record_type": "icmp"})
+                icmp_record = {**packet_fact, "record_type": "icmp"}
+                icmp_fact_samples.add(icmp_record)
+                if request_relevant:
+                    relevant_icmp_fact_samples.add(icmp_record)
 
         command = [
             tshark, "-n", "-r", str(pcap), "-T", "fields",
@@ -1490,7 +1862,11 @@ def run_tshark(
         if result.get("ok"):
             files_processed += 1
         per_file.append({"pcap": pcap.name, **file_coverage.as_dict(), "ok": bool(result.get("ok"))})
-    packet_samples = reservoir.records()
+    packet_samples = _merge_request_relevant_records(
+        relevant_packet_samples.records(),
+        reservoir.records(),
+        TSHARK_SAMPLE_LIMIT,
+    )
     top_protocols = protocols.most_common(("protocol",), SUMMARY_LIMIT)
     top_conversations = conversations.most_common(
         ("source_ip", "destination_ip", "source_port", "destination_port", "transport", "protocol"),
@@ -1513,6 +1889,36 @@ def run_tshark(
         "observations": tls_version_observation_count,
         "versions": tls_versions.most_common(("source", "raw_version", "version"), SUMMARY_LIMIT),
     }
+    query_index_connections = _merge_request_relevant_records(
+        relevant_connection_samples.records(),
+        conversations.most_common(
+            (
+                "source_ip",
+                "destination_ip",
+                "source_port",
+                "destination_port",
+                "transport",
+                "protocol",
+            ),
+            QUERY_INDEX_LIMIT,
+        ),
+    )
+    query_index_dns_records = _merge_request_relevant_records(
+        relevant_dns_record_samples.records(),
+        dns_record_samples.records(),
+    )
+    query_index_tls_records = _merge_request_relevant_records(
+        relevant_tls_record_samples.records(),
+        tls_record_samples.records(),
+    )
+    query_index_http_records = _merge_request_relevant_records(
+        relevant_http_record_samples.records(),
+        http_record_samples.records(),
+    )
+    query_index_icmp_facts = _merge_request_relevant_records(
+        relevant_icmp_fact_samples.records(),
+        icmp_fact_samples.records(),
+    )
     if endpoint_pair_complete and time_filter_applied:
         association = "selected-alert-endpoints-and-request-window"
     elif endpoint_filter_applied or time_filter_applied:
@@ -1634,13 +2040,34 @@ def run_tshark(
             "sample_limit": TSHARK_SAMPLE_LIMIT,
             "packets_seen": reservoir.seen,
             "packets_sampled": len(packet_samples),
-            "query_index_strategy": "deterministic-protocol-reservoirs",
+            "query_index_strategy": (
+                "request-relevant-pins-then-deterministic-protocol-reservoirs"
+            ),
             "query_index_limit_per_protocol": QUERY_INDEX_LIMIT,
+            "request_relevant_limit_per_protocol": (
+                REQUEST_RELEVANT_QUERY_INDEX_LIMIT
+            ),
+            "request_relevant_records": {
+                "packet": len(relevant_packet_samples.records()),
+                "connections": len(relevant_connection_samples.records()),
+                "dns": len(relevant_dns_record_samples.records()),
+                "tls": len(relevant_tls_record_samples.records()),
+                "http": len(relevant_http_record_samples.records()),
+                "icmp": len(relevant_icmp_fact_samples.records()),
+            },
+            "request_relevant_records_seen": {
+                "packet": relevant_packet_samples.seen,
+                "connections": relevant_connection_samples.seen,
+                "dns": relevant_dns_record_samples.seen,
+                "tls": relevant_tls_record_samples.seen,
+                "http": relevant_http_record_samples.seen,
+                "icmp": relevant_icmp_fact_samples.seen,
+            },
             "query_index_records": {
-                "dns": len(dns_record_samples.records()),
-                "tls": len(tls_record_samples.records()),
-                "http": len(http_record_samples.records()),
-                "icmp": len(icmp_fact_samples.records()),
+                "dns": len(query_index_dns_records),
+                "tls": len(query_index_tls_records),
+                "http": len(query_index_http_records),
+                "icmp": len(query_index_icmp_facts),
             },
         },
         "protocol_counts": top_protocols,
@@ -1653,24 +2080,21 @@ def run_tshark(
         "geoip": geoip,
         "packet_samples": packet_samples,
         "_local_query_index": {
-            "connections": conversations.most_common(
-                ("source_ip", "destination_ip", "source_port", "destination_port", "transport", "protocol"),
-                QUERY_INDEX_LIMIT,
-            ),
+            "connections": query_index_connections,
             "protocols": protocols.most_common(("protocol",), QUERY_INDEX_LIMIT),
             "packet_samples": packet_samples,
             "packet_facts": packet_samples,
             "dns": dns_queries.most_common(("query",), QUERY_INDEX_LIMIT),
-            "dns_records": dns_record_samples.records(),
-            "tls_records": tls_record_samples.records(),
-            "http_records": http_record_samples.records(),
+            "dns_records": query_index_dns_records,
+            "tls_records": query_index_tls_records,
+            "http_records": query_index_http_records,
             "user_agents": user_agents.most_common(("http_version", "user_agent"), QUERY_INDEX_LIMIT),
             "tls_versions": tls_versions.most_common(("source", "raw_version", "version"), QUERY_INDEX_LIMIT),
             "icmp_anomalies": icmp_anomalies.most_common(
                 ("family", "type", "code", "source_ip", "destination_ip", "frame_bytes"),
                 QUERY_INDEX_LIMIT,
             ),
-            "icmp_facts": icmp_fact_samples.records(),
+            "icmp_facts": query_index_icmp_facts,
             "icmp_semantics": icmp_semantics,
             "geoip": geoip.get("records", [])[:QUERY_INDEX_LIMIT],
         },
@@ -1868,18 +2292,27 @@ def process_one(request: dict[str, Any], args: argparse.Namespace, direct_pcap: 
             for path in pcap_files
             if path.exists()
         ]
-        zeek = run_zeek(pcap_files, work_dir) if pcap_files else {"available": False, "reason": artifact_state}
+        selected_scope = pcap_evidence_scope(request)
+        zeek = run_zeek(
+            pcap_files,
+            work_dir,
+            selected_scope,
+        ) if pcap_files else {"available": False, "reason": artifact_state}
         settings_path = Path(getattr(args, "ai_settings", DEFAULT_AI_SETTINGS))
         tshark = run_tshark(
             pcap_files,
             configured_maxmind_db_paths(settings_path),
             markers,
-            icmp_evidence_scope(request),
+            selected_scope,
         ) if pcap_files else {"available": False, "reason": artifact_state}
         analysis = {
             "analysis_type": "soc-pcap-analysis",
             "generated_at": project_now(),
             "request": request,
+            # Local-only request selection metadata lets downstream compaction
+            # preserve the exact capture window chosen by this worker. The
+            # model transport strips all `_local_*` keys.
+            "_local_request_scope": selected_scope,
             "detection_context": {
                 "policy_status": str(playbook_policy.get("status") or "not_evaluated")[:80],
                 "policy_fail_closed": bool(playbook_policy.get("fail_closed", True)),

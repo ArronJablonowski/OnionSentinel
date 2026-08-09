@@ -261,7 +261,10 @@ class InvestigationQueryRuntimeInstallTests(unittest.TestCase):
                     )
                 module.run_command = fake_run
                 args = SimpleNamespace(
+                    db=runtime / "alerts.sqlite3",
                     prompt_dir=runtime,
+                    pcap_analysis_dir=runtime / "pcap-analysis",
+                    analysis_dir=runtime / "ai-analysis",
                     ai_settings_file=runtime / "ai_model_settings.json",
                     related_limit=8,
                     correlation_limit=8,

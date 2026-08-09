@@ -30,7 +30,11 @@ BIN_DIR = Path(__file__).resolve().parent
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 from disk_capacity import require_runtime_capacity
-from agent_memory import role_prompt_file, role_second_opinion_prompt_file
+from agent_memory import (
+    role_memory_file,
+    role_prompt_file,
+    role_second_opinion_prompt_file,
+)
 from bounded_http import BoundedHttpError, read_bounded_json
 from bounded_process import BoundedProcessError, run_bounded_command
 
@@ -42,6 +46,22 @@ DEFAULT_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-analysis"
 DEFAULT_PCAP_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "pcap-analysis"
 DEFAULT_INCIDENT_EVIDENCE_DIR = HOME / "n8n-local" / "soc-alerts" / "incident-evidence"
 DEFAULT_INCIDENT_EVIDENCE_CONFIG = HOME / "n8n-local" / "config" / "incident-evidence.json"
+DEFAULT_ROLLUP_DIR = HOME / "n8n-local" / "soc-alerts" / "daily-rollups"
+DEFAULT_AGENT_MEMORY_DIR = HOME / "n8n-local" / "soc-alerts" / "agent-memory"
+DEFAULT_SHARED_AGENT_MEMORY_FILE = DEFAULT_AGENT_MEMORY_DIR / "shared-agent-memory.md"
+DEFAULT_ASSET_INVENTORY_FILE = (
+    HOME / "n8n-local" / "config" / "asset_inventory.database-export.json"
+)
+DEFAULT_LIVE_OSQUERY_CONFIG = HOME / "n8n-local" / "config" / "live-osquery.json"
+DEFAULT_INVESTIGATION_PIVOT_DIR = (
+    HOME / "n8n-local" / "soc-alerts" / "investigation-pivots"
+)
+DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT_FILE = (
+    HOME
+    / "n8n-local"
+    / "config"
+    / "disagreement_adjudicator_system_prompt.md"
+)
 DEFAULT_AI_SETTINGS = HOME / "n8n-local" / "config" / "ai_model_settings.json"
 DEFAULT_INVESTIGATION_HARNESS_POLICY = (
     HOME / "n8n-local" / "config" / "investigation_harness_policy.json"
@@ -247,16 +267,28 @@ def controlled_evaluation_runtime(
         args.lock_file,
         args.wake_file,
         args.portal_wake_file,
+        args.investigation_pivot_dir,
     )
     runtime_read_paths = (
         args.ai_settings_file,
         args.investigation_harness_policy,
         args.detection_playbooks,
+        args.incident_evidence_config,
+        args.live_osquery_config,
+        args.disagreement_adjudicator_prompt_file,
         *(
             (args.investigation_skills,)
             if hasattr(args, "investigation_skills")
             else ()
         ),
+    )
+    frozen_snapshot_paths = (
+        args.db,
+        args.rollup_dir,
+        args.pcap_analysis_dir,
+        args.agent_memory_dir,
+        args.shared_memory_file,
+        args.asset_inventory_file,
     )
     try:
         alert_store_origin = urlparse(args.alert_store_url)
@@ -345,6 +377,28 @@ def controlled_evaluation_runtime(
             raise SystemExit(
                 "controlled evaluation runtime configuration must be "
                 "owner-private regular files"
+            )
+    for candidate in frozen_snapshot_paths:
+        candidate = candidate.expanduser()
+        try:
+            candidate_metadata = candidate.lstat()
+            resolved_candidate = candidate.resolve(strict=True)
+            resolved_candidate.relative_to(resolved_root)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            raise SystemExit(
+                "controlled evaluation frozen data must stay inside its "
+                "runtime directory"
+            ) from exc
+        if (
+            not candidate.is_absolute()
+            or candidate.is_symlink()
+            or not (candidate.is_file() or candidate.is_dir())
+            or candidate_metadata.st_uid != os.getuid()
+            or stat.S_IMODE(candidate_metadata.st_mode) & 0o077
+        ):
+            raise SystemExit(
+                "controlled evaluation frozen data must be owner-private "
+                "regular files or directories"
             )
     return resolved_root
 
@@ -1421,6 +1475,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pcap-analysis-dir", type=Path, default=DEFAULT_PCAP_ANALYSIS_DIR, help="Parsed PCAP evidence directory")
     parser.add_argument("--incident-evidence-dir", type=Path, default=DEFAULT_INCIDENT_EVIDENCE_DIR, help="Restricted Security Onion incident evidence directory")
     parser.add_argument("--incident-evidence-config", type=Path, default=DEFAULT_INCIDENT_EVIDENCE_CONFIG, help="Restricted relay evidence transport config")
+    parser.add_argument("--rollup-dir", type=Path, default=DEFAULT_ROLLUP_DIR, help="Frozen daily rollup directory passed to the prompt builder")
+    parser.add_argument("--agent-memory-dir", type=Path, default=DEFAULT_AGENT_MEMORY_DIR, help="Frozen per-role agent-memory directory")
+    parser.add_argument("--shared-memory-file", type=Path, default=DEFAULT_SHARED_AGENT_MEMORY_FILE, help="Frozen shared agent-memory file")
+    parser.add_argument("--asset-inventory-file", type=Path, default=DEFAULT_ASSET_INVENTORY_FILE, help="Frozen asset-inventory export passed to the prompt builder")
+    parser.add_argument("--live-osquery-config", type=Path, default=DEFAULT_LIVE_OSQUERY_CONFIG, help="Live OSQuery capability and artifact-isolation configuration")
+    parser.add_argument("--disagreement-adjudicator-prompt-file", type=Path, default=DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT_FILE, help="Bounded disagreement adjudicator system prompt")
+    parser.add_argument("--investigation-pivot-dir", type=Path, default=DEFAULT_INVESTIGATION_PIVOT_DIR, help="Collector-validated Elastic/OQL pivot artifact directory")
     parser.add_argument("--ai-settings-file", type=Path, default=DEFAULT_AI_SETTINGS, help="AI model routing settings JSON")
     parser.add_argument(
         "--investigation-harness-policy",
@@ -3164,6 +3225,10 @@ def build_prompt(
     cmd = [
         sys.executable,
         str(builder),
+        "--db",
+        str(args.db),
+        "--rollup-dir",
+        str(getattr(args, "rollup_dir", DEFAULT_ROLLUP_DIR)),
         "--alert-id",
         alert_id,
         "--out-dir",
@@ -3184,6 +3249,39 @@ def build_prompt(
         str(role_prompt_file(config_dir, agent_role)),
         "--second-opinion-prompt-file",
         str(role_second_opinion_prompt_file(config_dir, agent_role)),
+        "--agent-memory-file",
+        str(
+            role_memory_file(
+                Path(
+                    getattr(
+                        args,
+                        "agent_memory_dir",
+                        DEFAULT_AGENT_MEMORY_DIR,
+                    )
+                ),
+                agent_role,
+            )
+        ),
+        "--shared-memory-file",
+        str(
+            getattr(
+                args,
+                "shared_memory_file",
+                DEFAULT_SHARED_AGENT_MEMORY_FILE,
+            )
+        ),
+        "--pcap-analysis-dir",
+        str(args.pcap_analysis_dir),
+        "--analysis-dir",
+        str(args.analysis_dir),
+        "--asset-inventory-file",
+        str(
+            getattr(
+                args,
+                "asset_inventory_file",
+                DEFAULT_ASSET_INVENTORY_FILE,
+            )
+        ),
         "--detection-playbooks",
         str(
             getattr(
@@ -3268,6 +3366,38 @@ def analysis_command(
                 args,
                 "investigation_harness_policy",
                 DEFAULT_INVESTIGATION_HARNESS_POLICY,
+            )
+        ),
+        "--live-osquery-config",
+        str(
+            getattr(
+                args,
+                "live_osquery_config",
+                DEFAULT_LIVE_OSQUERY_CONFIG,
+            )
+        ),
+        "--disagreement-adjudicator-prompt-file",
+        str(
+            getattr(
+                args,
+                "disagreement_adjudicator_prompt_file",
+                DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT_FILE,
+            )
+        ),
+        "--incident-evidence-config",
+        str(
+            getattr(
+                args,
+                "incident_evidence_config",
+                DEFAULT_INCIDENT_EVIDENCE_CONFIG,
+            )
+        ),
+        "--investigation-pivot-dir",
+        str(
+            getattr(
+                args,
+                "investigation_pivot_dir",
+                DEFAULT_INVESTIGATION_PIVOT_DIR,
             )
         ),
     ]

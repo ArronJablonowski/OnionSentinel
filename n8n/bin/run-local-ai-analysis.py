@@ -56,6 +56,51 @@ from investigation_query_contract import (  # noqa: E402
     canonical_digest as investigation_query_canonical_digest,
     pack_event_tuple_fields,
 )
+try:
+    from investigation_query_contract import (  # noqa: E402
+        project_investigation_authorization_context,
+    )
+except ImportError:  # pragma: no cover - exercised through the v1 runtime test
+    _COMPAT_V1_AUTHORIZATION_CONTEXT_ALLOWED_KEYS = frozenset({
+        "context_id",
+        "case_id",
+        "group_id",
+        "actor_role",
+        "anchor",
+        "time_envelope",
+        "permitted_observables",
+        "discovered_observables",
+        "permitted_event_tuples",
+    })
+    _COMPAT_V1_AUTHORIZATION_CONTEXT_REQUIRED_KEYS = frozenset({
+        "context_id",
+        "case_id",
+        "actor_role",
+        "anchor",
+        "time_envelope",
+        "permitted_observables",
+    })
+
+    def project_investigation_authorization_context(
+        value: object,
+    ) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise InvestigationQueryContractError(
+                "authorization context must be an object"
+            )
+        missing = _COMPAT_V1_AUTHORIZATION_CONTEXT_REQUIRED_KEYS.difference(
+            value
+        )
+        if missing:
+            raise InvestigationQueryContractError(
+                "authorization context is missing required fields: "
+                + ", ".join(sorted(missing))
+            )
+        return {
+            key: copy.deepcopy(value[key])
+            for key in _COMPAT_V1_AUTHORIZATION_CONTEXT_ALLOWED_KEYS
+            if key in value
+        }
 try:  # The pinned compatibility-v1 runtime predates role-aware semantics.
     from investigation_query_contract import (  # noqa: E402
         PACK_ROLE_MODE,
@@ -125,6 +170,12 @@ from onion_sentinel_harness import (  # noqa: E402
 HOME = Path.home()
 DEFAULT_PROMPT_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-prompts"
 DEFAULT_OUT_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-analysis"
+DEFAULT_INCIDENT_EVIDENCE_CONFIG = (
+    HOME / "n8n-local" / "config" / "incident-evidence.json"
+)
+DEFAULT_INVESTIGATION_PIVOT_DIR = (
+    HOME / "n8n-local" / "soc-alerts" / "investigation-pivots"
+)
 DEFAULT_LLM_LOG_DIR = HOME / "n8n-local" / "soc-alerts" / "llm-analysis-logs"
 DEFAULT_LLM_LOG_FILE = DEFAULT_LLM_LOG_DIR / "llm-analysis-log.jsonl"
 DEFAULT_LLM_CURRENT_FILE = DEFAULT_LLM_LOG_DIR / "current-analysis.json"
@@ -571,6 +622,24 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_INVESTIGATION_HARNESS_DB,
         help="Owner-only durable investigation harness event store",
+    )
+    parser.add_argument(
+        "--live-osquery-config",
+        type=Path,
+        default=DEFAULT_LIVE_OSQUERY_CONFIG_FILE,
+        help="Live OSQuery capability and artifact-isolation configuration",
+    )
+    parser.add_argument(
+        "--incident-evidence-config",
+        type=Path,
+        default=DEFAULT_INCIDENT_EVIDENCE_CONFIG,
+        help="Restricted Relay transport configuration for Security Onion pivots",
+    )
+    parser.add_argument(
+        "--investigation-pivot-dir",
+        type=Path,
+        default=DEFAULT_INVESTIGATION_PIVOT_DIR,
+        help="Directory for collector-validated Elastic/OQL pivot artifacts",
     )
     parser.add_argument("--analysis-mode", choices=("ollama", "cloud", "hybrid"), help="Override configured analysis mode")
     parser.add_argument(
@@ -1963,6 +2032,36 @@ def controlled_evaluation_output_dir(
         raise SystemExit(
             "controlled evaluation out_dir must stay inside its runtime "
             "directory"
+        )
+    return resolved
+
+
+def controlled_evaluation_config_file(
+    config_file: Path,
+    runtime_root: Path,
+) -> Path:
+    """Require controlled runtime configuration to be a private local file."""
+    candidate = config_file.expanduser()
+    try:
+        metadata = candidate.lstat()
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(runtime_root)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise SystemExit(
+            "controlled evaluation configuration must stay inside its "
+            "runtime directory"
+        ) from exc
+    if (
+        not candidate.is_absolute()
+        or resolved != candidate
+        or candidate.is_symlink()
+        or not candidate.is_file()
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        raise SystemExit(
+            "controlled evaluation configuration must be an owner-private "
+            "regular file"
         )
     return resolved
 
@@ -4990,6 +5089,123 @@ def project_investigation_parameters(
     )
 
 
+def _canonical_investigation_network_observable(
+    kind: str,
+    value: Any,
+) -> str:
+    """Canonicalize one IP/domain without turning prompt data into authority."""
+    text = _query_text(value, 255).strip().rstrip(".")
+    if kind == "ips":
+        import ipaddress
+
+        try:
+            return str(ipaddress.ip_address(text))
+        except ValueError:
+            return ""
+    if kind == "domains" and INVESTIGATION_SAFE_DOMAIN_RE.fullmatch(text):
+        return text.lower()
+    return ""
+
+
+def _authorization_network_scope(
+    authorization_context: Any,
+) -> tuple[dict[str, set[str]], list[dict[str, str]]]:
+    """Return canonical collector-owned network scope, failing closed.
+
+    The context projector is the same boundary used before a Security Onion
+    broker call.  Reusing it here prevents the model-visible discovery catalog
+    from being populated from malformed or private local runtime state.
+    """
+    empty = {"ips": set(), "domains": set()}
+    try:
+        projected = project_investigation_authorization_context(
+            authorization_context
+        )
+    except (InvestigationQueryContractError, KeyError, TypeError, ValueError):
+        return empty, []
+    originals = {"ips": set(), "domains": set()}
+    permitted = projected.get("permitted_observables")
+    if isinstance(permitted, dict):
+        for kind in originals:
+            values = permitted.get(kind)
+            for value in values if isinstance(values, list) else []:
+                canonical = _canonical_investigation_network_observable(
+                    kind,
+                    value,
+                )
+                if canonical:
+                    originals[kind].add(canonical)
+    discoveries = projected.get("discovered_observables")
+    discovery_items = discoveries if isinstance(discoveries, list) else []
+    return (
+        originals,
+        [
+            item
+            for item in discovery_items
+            if isinstance(item, dict)
+        ][:MAX_DISCOVERED_OBSERVABLES],
+    )
+
+
+def discovered_network_observables_catalog(
+    authorization_context: Any,
+) -> list[dict[str, str]]:
+    """Project bounded, provenance-bound *new* IP/domain pivots for the model."""
+    originals, discoveries = _authorization_network_scope(
+        authorization_context
+    )
+    by_observable: dict[tuple[str, str], str] = {}
+    for item in discoveries:
+        kind = str(item.get("kind") or "").strip()
+        if kind not in {"ips", "domains"}:
+            continue
+        value = _canonical_investigation_network_observable(
+            kind,
+            item.get("value"),
+        )
+        evidence_ref = str(item.get("evidence_ref") or "").strip()
+        if (
+            not value
+            or value in originals[kind]
+            or not evidence_ref
+            or len(evidence_ref) > 256
+            or not re.fullmatch(r"[A-Za-z0-9_.:@/+=#-]{1,256}", evidence_ref)
+        ):
+            continue
+        key = (kind, value)
+        current = by_observable.get(key)
+        if current is None or evidence_ref < current:
+            # Preserve the exact collector-issued reference. Lexical selection
+            # only makes duplicate evidence deterministic; it never rewrites it.
+            by_observable[key] = evidence_ref
+    return [
+        {"kind": kind, "value": value, "evidence_ref": evidence_ref}
+        for (kind, value), evidence_ref in sorted(by_observable.items())
+    ][:MAX_DISCOVERED_OBSERVABLES]
+
+
+def _event_tuple_is_prevalence_discriminator(
+    event_tuple: Any,
+) -> bool:
+    """Require a trusted tuple that is narrower than an endpoint-only count."""
+    if not isinstance(event_tuple, dict):
+        return False
+    if event_tuple.get("rule_id") or event_tuple.get("community_id"):
+        return True
+    return bool(
+        event_tuple.get("source_ip")
+        and event_tuple.get("destination_ip")
+        and (
+            event_tuple.get("source_port") is not None
+            or event_tuple.get("destination_port") is not None
+        )
+        and (
+            event_tuple.get("transport")
+            or event_tuple.get("protocol")
+        )
+    )
+
+
 def normalize_investigation_query_request(
     raw: Any,
     *,
@@ -5027,6 +5243,7 @@ def normalize_investigation_query_request(
 
     normalized_parameters: dict[str, Any]
     event_tuple_projection_audit: dict[str, Any] | None = None
+    derived_peer_scope_audit: dict[str, Any] | None = None
     if backend in {"elastic", "oql"}:
         if purpose not in INVESTIGATION_SECURITY_ONION_PURPOSES:
             raise InvestigationQueryError(
@@ -5070,6 +5287,70 @@ def normalize_investigation_query_request(
             raise InvestigationQueryError(
                 "elastic/oql request may use at most 8 total observables"
             )
+        original_network, projected_discoveries = (
+            _authorization_network_scope(authorization_context)
+        )
+        scope_available = bool(
+            original_network["ips"]
+            or original_network["domains"]
+            or projected_discoveries
+        )
+        requested_network = {
+            (kind, canonical)
+            for kind in ("ips", "domains")
+            for value in normalized_observables[kind]
+            for canonical in [
+                _canonical_investigation_network_observable(kind, value)
+            ]
+            if canonical
+        }
+        derived_network = {
+            (kind, value)
+            for kind, value in requested_network
+            if value not in original_network[kind]
+        }
+        has_event_tuple = "event_tuple" in parameters
+        if not has_event_tuple and scope_available and len(derived_network) > 1:
+            raise InvestigationQueryError(
+                "an un-tupled elastic/oql query may not OR multiple derived "
+                "network peers; request one provenance-bound peer per query "
+                "or supply one trusted role-aware event_tuple"
+            )
+        # A common pivot shape combines the original internal endpoint with
+        # one IP newly derived from DNS/TLS evidence. Without a trusted event
+        # tuple, the v2 broker compiles those IPs as ``either value in any IP
+        # field`` and can return nearly all endpoint telemetry. Retain only
+        # the newly derived peer in this unambiguous case. This is a strict
+        # subset of the model's authorized scope and remains compatible with
+        # the deployed read-only wrapper contract.
+        derived_ip_values = sorted(
+            value for kind, value in derived_network if kind == "ips"
+        )
+        if (
+            not has_event_tuple
+            and len(normalized_observables["ips"]) > 1
+            and len(derived_ip_values) == 1
+            and any(
+                _canonical_investigation_network_observable("ips", item)
+                in original_network["ips"]
+                for item in normalized_observables["ips"]
+            )
+        ):
+            original_count = len(normalized_observables["ips"])
+            normalized_observables["ips"] = derived_ip_values
+            derived_peer_scope_audit = {
+                "schema": (
+                    "onion-sentinel-derived-peer-scope-narrowing-v1"
+                ),
+                "applied": True,
+                "reason": (
+                    "one newly derived peer was combined with original "
+                    "endpoint IPs without a trusted event tuple"
+                ),
+                "original_ip_count": original_count,
+                "retained_ip_count": 1,
+                "scope_widening_allowed": False,
+            }
         normalized_parameters = {
             "pack": pack,
             "window": window,
@@ -5086,6 +5367,33 @@ def normalize_investigation_query_request(
                 pack=pack,
                 authorization_context=authorization_context,
             )
+        if purpose == "measure_prevalence":
+            discovered_ips = {
+                _canonical_investigation_network_observable(
+                    "ips",
+                    item.get("value"),
+                )
+                for item in projected_discoveries
+                if str(item.get("kind") or "").strip() == "ips"
+            }
+            has_prevalence_subject = bool(
+                normalized_observables["domains"]
+                or normalized_observables["hosts"]
+                or normalized_observables["users"]
+                or any(
+                    _canonical_investigation_network_observable("ips", item)
+                    in discovered_ips
+                    for item in normalized_observables["ips"]
+                )
+                or _event_tuple_is_prevalence_discriminator(
+                    normalized_parameters.get("event_tuple")
+                )
+            )
+            if not has_prevalence_subject:
+                raise InvestigationQueryError(
+                    "measure_prevalence may not target only an original endpoint "
+                    "without a derived observable or trusted role-aware discriminator"
+                )
     elif backend == "osquery":
         target_alias = _query_text(parameters.get("target_alias"), 64)
         query = _query_text(parameters.get("query"), 4096)
@@ -5187,6 +5495,10 @@ def normalize_investigation_query_request(
         normalization["event_tuple_projection"] = (
             event_tuple_projection_audit
         )
+    if derived_peer_scope_audit is not None:
+        normalization["derived_peer_scope_narrowing"] = (
+            derived_peer_scope_audit
+        )
     normalized = {
         "query_id": query_id,
         "backend": backend,
@@ -5266,12 +5578,17 @@ def _load_pivot_collector() -> Any:
 def collect_security_onion_pivots(
     proposal: dict[str, Any],
     authorization_context: dict[str, Any],
+    *,
+    config_path: Path = DEFAULT_INCIDENT_EVIDENCE_CONFIG,
+    out_dir: Path = DEFAULT_INVESTIGATION_PIVOT_DIR,
 ) -> dict[str, Any]:
     """Invoke the restricted broker without giving a model transport access."""
     module = _load_pivot_collector()
     return module.collect_investigation_pivots(
         proposal,
         authorization_context,
+        config_path=config_path,
+        out_dir=out_dir,
         persist=True,
     )
 
@@ -5893,8 +6210,17 @@ def prepare_investigation_enrichment_context(
     prompt_package: dict[str, Any],
     agent_role: str,
     alert_store_url: str,
+    *,
+    controlled_evaluation: bool = False,
 ) -> dict[str, Any]:
-    token = _runtime_env_value("N8N_POST_COMMIT_TOKEN")
+    # A controlled rehearsal has no enrichment mutation route and must never
+    # load a production credential merely to discover that the route is
+    # unavailable. Security Onion/Relay evidence remains separately read-only.
+    token = (
+        ""
+        if controlled_evaluation
+        else _runtime_env_value("N8N_POST_COMMIT_TOKEN")
+    )
     enabled = agent_role in {"soc-analyst", "incident-responder"} and len(token) >= 32
     config = {
         "enabled": enabled,
@@ -6051,24 +6377,22 @@ def execute_investigation_query_batch(
     security_requests = [
         request for request in requests if request["backend"] in {"elastic", "oql"}
     ]
+    security_authorization_context: dict[str, Any] = {}
+    security_authorization_error = ""
+    if security_requests:
+        try:
+            security_authorization_context = (
+                project_investigation_authorization_context(
+                    authorization_context
+                )
+            )
+        except InvestigationQueryContractError as exc:
+            security_authorization_error = (
+                "Security Onion query authorization context is invalid: "
+                f"{str(exc)[:700]}"
+            )
     admitted_security: list[dict[str, Any]] = []
     security_observables: set[tuple[str, str]] = set()
-    can_preflight_security = all(
-        key in authorization_context
-        for key in (
-            "context_id",
-            "case_id",
-            "actor_role",
-            "anchor",
-            *(
-                ["anchor_time"]
-                if INVESTIGATION_QUERY_V2
-                else []
-            ),
-            "time_envelope",
-            "permitted_observables",
-        )
-    )
     for request_index, request in enumerate(security_requests, 1):
         request_observables = {
             (kind, value)
@@ -6080,7 +6404,9 @@ def execute_investigation_query_batch(
             reason = "at most four Security Onion Elastic/OQL queries are allowed per round"
         elif len(security_observables.union(request_observables)) > 24:
             reason = "Security Onion query batch exceeds 24 distinct observables"
-        elif can_preflight_security:
+        elif security_authorization_error:
+            reason = security_authorization_error
+        else:
             preflight_proposal = {
                 "query_contract": INVESTIGATION_QUERY_CONTRACT,
                 "batch_id": f"preflight-r{round_number}-q{request_index}",
@@ -6105,7 +6431,7 @@ def execute_investigation_query_batch(
             try:
                 authorize_investigation_query_request(
                     preflight_proposal,
-                    authorization_context,
+                    security_authorization_context,
                 )
             except InvestigationQueryContractError as exc:
                 reason = (
@@ -6129,7 +6455,7 @@ def execute_investigation_query_batch(
     security_requests = admitted_security
     if security_requests:
         batch_id = (
-            f"{_query_text(authorization_context.get('case_id'), 80) or 'investigation'}"
+            f"{_query_text(security_authorization_context.get('case_id'), 80) or 'investigation'}"
             f"-r{round_number}-{os.urandom(8).hex()}"
         )
         proposal = {
@@ -6155,7 +6481,10 @@ def execute_investigation_query_batch(
             ],
         }
         try:
-            artifact = security_onion_executor(proposal, authorization_context)
+            artifact = security_onion_executor(
+                proposal,
+                security_authorization_context,
+            )
             model_evidence = (
                 artifact.get("model_evidence")
                 if isinstance(artifact, dict)
@@ -6628,15 +6957,31 @@ def _validated_discovered_observables(
         "user.name", "user.id", "related.user", "username", "user_name",
     }
 
-    def visit(item: Any, evidence_base: str, path: tuple[str, ...] = ()) -> None:
+    def visit(
+        item: Any,
+        evidence_base: str,
+        path: tuple[str, ...] = (),
+        *,
+        exact_reference: bool = False,
+    ) -> None:
         if len(discovered) >= limit:
             return
         if isinstance(item, dict):
             for key, child in list(item.items())[:128]:
-                visit(child, evidence_base, (*path, str(key).lower()))
+                visit(
+                    child,
+                    evidence_base,
+                    (*path, str(key).lower()),
+                    exact_reference=exact_reference,
+                )
         elif isinstance(item, list):
             for child in item[:200]:
-                visit(child, evidence_base, path)
+                visit(
+                    child,
+                    evidence_base,
+                    path,
+                    exact_reference=exact_reference,
+                )
         else:
             fields = {
                 ".".join(path[-count:])
@@ -6678,7 +7023,12 @@ def _validated_discovered_observables(
                     "kind": kind,
                     "value": text,
                     "evidence_ref": (
-                        f"{evidence_base}#{_evidence_ref_component(field_path, 72)}"
+                        evidence_base
+                        if exact_reference
+                        else (
+                            f"{evidence_base}#"
+                            f"{_evidence_ref_component(field_path, 72)}"
+                        )
                     )[:256],
                 }
             )
@@ -6728,26 +7078,34 @@ def _validated_discovered_observables(
                     audit.get("query_digest") if isinstance(audit, dict) else "",
                     64,
                 )
+                result_digest = _query_text(
+                    audit.get("result_digest") if isinstance(audit, dict) else "",
+                    64,
+                )
+                query_reference, _ = result_bound_query_reference(
+                    query_digest,
+                    result_digest,
+                )
                 if (
                     not isinstance(audit, dict)
                     or not re.fullmatch(r"[a-f0-9]{64}", query_digest)
+                    or not re.fullmatch(r"[a-f0-9]{64}", result_digest)
                     or query_result.get("query_digest") != query_digest
+                    or query_result.get("result_digest") != result_digest
+                    or not query_reference
                 ):
                     continue
                 hits = query_result.get("hits")
                 if not isinstance(hits, list):
                     continue
-                for hit_index, hit in enumerate(hits[:200]):
+                for hit in hits[:200]:
                     if not isinstance(hit, dict) or not isinstance(hit.get("source"), dict):
                         continue
-                    evidence_base = (
-                        f"so:{response_digest[:20]}:"
-                        f"{_evidence_ref_component(query_id, 32)}:{query_digest[:20]}:"
-                        f"{_evidence_ref_component(hit.get('index'), 32)}:"
-                        f"{_evidence_ref_component(hit.get('id'), 32)}:"
-                        f"hit-{hit_index}"
+                    visit(
+                        hit["source"],
+                        query_reference,
+                        exact_reference=True,
                     )
-                    visit(hit["source"], evidence_base)
         elif backend == "pcap_zeek":
             records = evidence.get("records")
             query_id = _query_text(result.get("query_id"), 128)
@@ -6765,24 +7123,14 @@ def _validated_discovered_observables(
                 or not re.fullmatch(r"[a-f0-9]{64}", result_digest)
             ):
                 continue
-            for record_index, record in enumerate(records[:200]):
+            for record in records[:200]:
                 if not isinstance(record, dict):
                     continue
-                record_digest = hashlib.sha256(
-                    json.dumps(
-                        record,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        default=str,
-                    ).encode("utf-8")
-                ).hexdigest()
-                evidence_base = (
-                    f"pcap:{_evidence_ref_component(source_ref, 32)}:"
-                    f"{_evidence_ref_component(query_id, 32)}:"
-                    f"{query_digest[:16]}:{result_digest[:16]}:"
-                    f"record-{record_index}-{record_digest[:16]}"
+                visit(
+                    record,
+                    source_ref,
+                    exact_reference=True,
                 )
-                visit(record, evidence_base)
     return discovered
 
 
@@ -8886,6 +9234,40 @@ def deterministic_incident_pivot_requests(
 
     trusted_entry = min(trusted_entries, key=trusted_entry_rank)
     trusted_tuple = trusted_entry["event_tuple"]
+
+    def zeek_entry_rank(entry: dict[str, Any]) -> tuple[int, int, str]:
+        candidate = entry["event_tuple"]
+        anchor_community_id = str(
+            trusted_tuple.get("community_id") or ""
+        ).strip()
+        candidate_community_id = str(
+            candidate.get("community_id") or ""
+        ).strip()
+        return (
+            0
+            if (
+                anchor_community_id
+                and candidate_community_id == anchor_community_id
+            )
+            else 1,
+            0
+            if str(entry.get("source") or "").strip()
+            == "trusted_authorization_reverse_flow"
+            else 1,
+            investigation_query_canonical_digest(entry),
+        )
+
+    zeek_entries = [
+        entry
+        for entry in trusted_entries
+        if str(entry.get("role_semantics") or "").strip()
+        == "zeek_originator_responder"
+    ]
+    zeek_trusted_entry = (
+        min(zeek_entries, key=zeek_entry_rank)
+        if zeek_entries
+        else None
+    )
     deployed_rule = (
         rule_context.get("deployed_rule")
         if isinstance(rule_context.get("deployed_rule"), dict)
@@ -8992,15 +9374,22 @@ def deterministic_incident_pivot_requests(
     for pack in packs:
         if pack not in advertised_packs:
             continue
+        role_mode = PACK_ROLE_MODE.get(pack)
+        pack_trusted_entry = (
+            zeek_trusted_entry
+            if role_mode == "zeek_originator_responder"
+            and zeek_trusted_entry is not None
+            else trusted_entry
+        )
+        pack_trusted_tuple = pack_trusted_entry["event_tuple"]
         allowed_tuple_fields = pack_event_tuple_fields(pack)
         event_tuple = {
             key: value
-            for key, value in trusted_tuple.items()
+            for key, value in pack_trusted_tuple.items()
             if key in allowed_tuple_fields and value not in (None, "")
         }
-        role_mode = PACK_ROLE_MODE.get(pack)
         role_semantics = str(
-            trusted_entry.get("role_semantics") or ""
+            pack_trusted_entry.get("role_semantics") or ""
         ).strip()
         if (
             role_mode == "cross_sensor"
@@ -9065,7 +9454,39 @@ def apply_investigation_query_loop(
             model_settings,
         )
     )
-    query_executor = query_executor or execute_investigation_query_batch
+    if query_executor is None:
+        def query_executor(
+            package: dict[str, Any],
+            query_requests: list[dict[str, Any]],
+            **query_kwargs: Any,
+        ) -> dict[str, Any]:
+            return execute_investigation_query_batch(
+                package,
+                query_requests,
+                security_onion_executor=(
+                    lambda proposal, authorization: (
+                        collect_security_onion_pivots(
+                            proposal,
+                            authorization,
+                            config_path=Path(
+                                getattr(
+                                    args,
+                                    "incident_evidence_config",
+                                    DEFAULT_INCIDENT_EVIDENCE_CONFIG,
+                                )
+                            ),
+                            out_dir=Path(
+                                getattr(
+                                    args,
+                                    "investigation_pivot_dir",
+                                    DEFAULT_INVESTIGATION_PIVOT_DIR,
+                                )
+                            ),
+                        )
+                    )
+                ),
+                **query_kwargs,
+            )
     route = canonical_model_route((settings.get("agent_models") or {}).get(agent_role))
     response = primary_response
     rounds: list[dict[str, Any]] = []
@@ -9084,6 +9505,7 @@ def apply_investigation_query_loop(
     query_planning_repair_candidates: list[dict[str, Any]] = []
     query_planning_repair_not_attempted_reason = ""
     pending_repair_scopes: dict[str, dict[str, Any]] = {}
+    primary_followup_model_call_number = 0
     effective_max_rounds = MAX_INVESTIGATION_QUERY_ROUNDS
     effective_max_queries = MAX_INVESTIGATION_QUERIES_TOTAL
 
@@ -9588,6 +10010,13 @@ def apply_investigation_query_loop(
                     existing.append(item)
                     known.add((item["kind"], item["value"]))
             local_context["discovered_observables"] = existing
+            capability = prompt_package.get(
+                "investigation_query_capability"
+            )
+            if isinstance(capability, dict):
+                capability["discovered_network_observables"] = (
+                    discovered_network_observables_catalog(local_context)
+                )
 
         remaining_rounds = (
             0
@@ -9711,7 +10140,14 @@ def apply_investigation_query_loop(
                     "hypotheses and the final conclusion. Request another "
                     "narrow investigation_query_requests batch only if a "
                     "material discriminator remains and both budgets are "
-                    "positive."
+                    "positive. investigation_query_capability."
+                    "discovered_network_observables lists only "
+                    "new provenance-bound IP/domain pivots and their exact "
+                    "evidence_ref. Target one listed derived peer per un-tupled "
+                    "query; never OR multiple derived peers. A "
+                    "measure_prevalence query must target a listed derived "
+                    "observable or include a trusted role-aware discriminator, "
+                    "not only the original endpoint."
                 )
             ),
         }
@@ -9739,15 +10175,18 @@ def apply_investigation_query_loop(
             if harness_runtime is not None
             else None
         )
+        # Query rounds and model invocations are separate budgets. A
+        # deterministic, collector-owned repair can consume a query round
+        # without invoking a model. Number only real model calls here so the
+        # closed harness grammar cannot acquire an unexplained gap such as a
+        # first call named ``primary-followup-2``.
+        primary_followup_model_call_number += 1
         model_call_id = (
-            "primary-query-planning-repair-1"
-            if repair_scheduled
-            else f"primary-followup-{round_number}"
+            f"primary-followup-{primary_followup_model_call_number}"
         )
         model_call_purpose = (
-            "primary query-planning repair 1 of 1"
-            if repair_scheduled
-            else f"primary investigation follow-up round {round_number}"
+            "primary investigation follow-up round "
+            f"{primary_followup_model_call_number}"
         )
         observe_harness(
             lambda: harness_runtime.preflight_model_call(
@@ -13078,6 +13517,43 @@ def persist_postcommit_memory_writeback(
     return receipt, receipt_path
 
 
+def requested_automation_controls(
+    response: dict[str, Any],
+) -> dict[str, bool]:
+    """Record which controls the model actually requested before a gate mutates it."""
+    handling = str(response.get("handling") or "").strip().lower()
+    outcome = normalized_detection_outcome(response.get("detection_outcome"))
+    tuning = str(
+        response.get("tuning_recommendation") or ""
+    ).strip().lower()
+    memory_candidates = response.get("memory_candidates")
+    return {
+        "automatic_closure": bool(
+            handling == "no_action"
+            and outcome in CONSEQUENTIAL_CLOSURE_OUTCOMES
+        ),
+        "containment": handling == "contain",
+        "tuning": tuning in CONTROL_TUNING_VALUES,
+        "memory_writeback": bool(
+            isinstance(memory_candidates, list) and memory_candidates
+        ),
+    }
+
+
+def set_review_status(
+    response: dict[str, Any],
+    legacy_status: str,
+    *,
+    review_status: str,
+    automation_status: str,
+) -> dict[str, Any]:
+    """Publish additive review/automation state while retaining the legacy field."""
+    response["final_disposition_status"] = legacy_status
+    response["review_status"] = review_status
+    response["automation_status"] = automation_status
+    return response
+
+
 def apply_review_required_gate(
     response: dict[str, Any],
     *,
@@ -13085,7 +13561,13 @@ def apply_review_required_gate(
     reason: str,
 ) -> dict[str, Any]:
     """Block consequential automation when a required review is unavailable."""
-    response["final_disposition_status"] = status
+    requested_controls = requested_automation_controls(response)
+    set_review_status(
+        response,
+        status,
+        review_status=status,
+        automation_status="blocked",
+    )
     try:
         score = float(response.get("confidence_score"))
     except (TypeError, ValueError):
@@ -13105,6 +13587,10 @@ def apply_review_required_gate(
         dict(response.get("_automation_controls"))
         if isinstance(response.get("_automation_controls"), dict)
         else {}
+    )
+    controls.setdefault(
+        "requested_controls",
+        requested_controls,
     )
     controls.update(
         {
@@ -13151,8 +13637,12 @@ def apply_review_completed_automation_gate(
     reason: str,
 ) -> dict[str, Any]:
     """Block controls without mislabeling a valid uncertain review as failed."""
-    response["final_disposition_status"] = (
-        "review_completed_not_authorized"
+    requested_controls = requested_automation_controls(response)
+    set_review_status(
+        response,
+        "review_completed_not_authorized",
+        review_status="completed",
+        automation_status="blocked",
     )
     if str(response.get("handling") or "").strip().lower() == "contain":
         response["handling"] = "investigate"
@@ -13167,6 +13657,10 @@ def apply_review_completed_automation_gate(
         dict(response.get("_automation_controls"))
         if isinstance(response.get("_automation_controls"), dict)
         else {}
+    )
+    controls.setdefault(
+        "requested_controls",
+        requested_controls,
     )
     controls.update(
         {
@@ -13201,7 +13695,12 @@ def apply_saved_response_review_gate(
     primary_response["_analysis_input_mode"] = SAVED_RESPONSE_INPUT_MODE
     trigger = second_opinion_trigger(primary_response, prompt_package)
     if not trigger:
-        primary_response["final_disposition_status"] = "primary_not_reviewed"
+        set_review_status(
+            primary_response,
+            "primary_not_reviewed",
+            review_status="not_requested",
+            automation_status="not_requested",
+        )
         return primary_response
 
     reason = (
@@ -13254,7 +13753,12 @@ def apply_configured_second_opinion(
     primary_response.pop("_disagreement_adjudication", None)
     trigger = second_opinion_trigger(primary_response, prompt_package)
     if not trigger:
-        primary_response["final_disposition_status"] = "primary_not_reviewed"
+        set_review_status(
+            primary_response,
+            "primary_not_reviewed",
+            review_status="not_requested",
+            automation_status="not_requested",
+        )
         notify_analysis_phase(phase_callback, "post_processing")
         return primary_response
     route = str((settings.get("agent_second_opinion_models") or {}).get(agent_role) or "").strip()
@@ -13472,6 +13976,9 @@ def apply_configured_second_opinion(
             "automation_authorization": automation_authorization,
         }
         if comparison["material_disagreement"]:
+            requested_controls = requested_automation_controls(
+                primary_response
+            )
             # The adjudicator receives both completed positions only after the
             # blind reviewer has finished. Its shadow result is durable audit
             # context; it never rewrites either position or relaxes the human
@@ -13494,7 +14001,12 @@ def apply_configured_second_opinion(
                 secondary,
                 comparison,
             )
-            primary_response["final_disposition_status"] = "disputed_pending_human"
+            set_review_status(
+                primary_response,
+                "disputed_pending_human",
+                review_status="disputed_pending_human",
+                automation_status="blocked",
+            )
             primary_response["tuning_recommendation"] = "needs_more_data"
             primary_response["tuning_reason"] = (
                 "Automatic tuning is blocked because the primary and independent reviewer "
@@ -13503,6 +14015,7 @@ def apply_configured_second_opinion(
             primary_response["recommended_tuning_actions"] = []
             primary_response["memory_candidates"] = []
             primary_response["_automation_controls"] = {
+                "requested_controls": requested_controls,
                 "automatic_closure_blocked": True,
                 "containment_blocked": True,
                 "tuning_blocked": True,
@@ -13516,9 +14029,31 @@ def apply_configured_second_opinion(
                 reason=automation_authorization["reason"],
             )
         elif comparison["agreement"] == "agreement":
-            primary_response["final_disposition_status"] = "corroborated"
+            set_review_status(
+                primary_response,
+                "corroborated",
+                review_status="completed",
+                automation_status=(
+                    "authorized"
+                    if automation_authorization[
+                        "consequential_automation_requested"
+                    ]
+                    else "not_requested"
+                ),
+            )
         else:
-            primary_response["final_disposition_status"] = "primary_with_advisory_disagreement"
+            set_review_status(
+                primary_response,
+                "primary_with_advisory_disagreement",
+                review_status="completed_with_advisory_disagreement",
+                automation_status=(
+                    "authorized"
+                    if automation_authorization[
+                        "consequential_automation_requested"
+                    ]
+                    else "not_requested"
+                ),
+            )
         if not automation_authorization["memory_writeback_authorized"]:
             controls = (
                 dict(primary_response.get("_automation_controls"))
@@ -13964,6 +14499,17 @@ def derive_legacy_detection_outcome(factors: dict[str, Any]) -> str:
         return "false_positive_logic_rule"
     if validity == "intel_error":
         return "false_positive_bad_intel_ioc"
+    if (
+        validity == "unknown"
+        and event_status == "observed"
+        and disposition == "authorized_benign"
+        and handling == "no_action"
+    ):
+        # The legacy outcome is a lossy compatibility projection.  Do not
+        # claim matched rule intent merely because operator authorization is
+        # independently established; the orthogonal factored fields remain
+        # authoritative.
+        return "informational_no_action"
     if validity == "matched_intent" and event_status == "observed":
         if disposition == "malicious":
             return "true_positive_malicious"
@@ -14036,7 +14582,20 @@ def normalize_factored_verdict(response: dict[str, Any]) -> dict[str, Any]:
     derived_outcome = derive_legacy_detection_outcome(factors)
     contradictions: list[str] = []
     warnings: list[str] = []
-    if supplied_fields and derived_outcome != canonical_legacy:
+    authorized_unknown_projection = bool(
+        supplied_fields
+        and canonical_legacy == "true_positive_authorized_benign"
+        and derived_outcome == "informational_no_action"
+        and factors["event_status"] == "observed"
+        and factors["detection_validity"] == "unknown"
+        and factors["activity_disposition"] == "authorized_benign"
+        and factors["handling"] == "no_action"
+    )
+    if authorized_unknown_projection:
+        warnings.append(
+            "legacy_projection_preserves_unknown_detection_validity"
+        )
+    elif supplied_fields and derived_outcome != canonical_legacy:
         contradictions.append(
             f"factored verdict derives {derived_outcome}, but model supplied {canonical_legacy}"
         )
@@ -14659,6 +15218,223 @@ def _has_structured_authorization_evidence(
     if not isinstance(prompt_package, dict):
         return False
     raw = prompt_package.get("authorization_evidence")
+    # The alert-store campaign schema is produced only after the selected
+    # alert has matched a bounded operator policy. Recognize that native
+    # schema directly, while requiring the selected alert to be present in
+    # the campaign membership supplied to the model. This prevents familiar
+    # software, vendor context, or a nearby authorized campaign from being
+    # promoted into authorization for a different alert.
+    if isinstance(raw, dict) and raw.get("status") == "operator_authorized":
+        authorization = (
+            raw.get("authorization")
+            if isinstance(raw.get("authorization"), dict)
+            else {}
+        )
+        alert = (
+            prompt_package.get("alert")
+            if isinstance(prompt_package.get("alert"), dict)
+            else {}
+        )
+        selected_alert_id = str(alert.get("alert_id") or "").strip()
+        observations = (
+            raw.get("observations")
+            if isinstance(raw.get("observations"), list)
+            else []
+        )
+        selected_is_member = bool(selected_alert_id) and (
+            str(raw.get("selected_alert_id") or "").strip()
+            == selected_alert_id
+            or any(
+                isinstance(item, dict)
+                and str(item.get("alert_id") or "").strip()
+                == selected_alert_id
+                for item in observations[:500]
+            )
+        )
+        policy_id = str(raw.get("policy_id") or "").strip()
+
+        raw_subset = (
+            alert.get("raw_alert_subset")
+            if isinstance(alert.get("raw_alert_subset"), dict)
+            else {}
+        )
+        raw_source = (
+            raw_subset.get("source")
+            if isinstance(raw_subset.get("source"), dict)
+            else {}
+        )
+        raw_destination = (
+            raw_subset.get("destination")
+            if isinstance(raw_subset.get("destination"), dict)
+            else {}
+        )
+        raw_network = (
+            raw_subset.get("network")
+            if isinstance(raw_subset.get("network"), dict)
+            else {}
+        )
+        rule_context = (
+            alert.get("rule_context")
+            if isinstance(alert.get("rule_context"), dict)
+            else {}
+        )
+
+        def string_selector_matches(
+            key: str,
+            actual: Any,
+            *,
+            lower: bool = False,
+        ) -> bool:
+            values = authorization.get(key)
+            if not isinstance(values, list):
+                return False
+            normalized = {
+                str(item).strip().lower() if lower else str(item).strip()
+                for item in values
+                if str(item).strip()
+            }
+            if not normalized:
+                return True
+            candidate = str(actual or "").strip()
+            if lower:
+                candidate = candidate.lower()
+            return bool(candidate) and candidate in normalized
+
+        def port_selector_matches(
+            exact_key: str,
+            range_key: str,
+            actual: Any,
+        ) -> bool:
+            exact = authorization.get(exact_key)
+            ranges = authorization.get(range_key)
+            if exact is None:
+                exact = []
+            if ranges is None:
+                ranges = []
+            if not isinstance(exact, list) or not isinstance(ranges, list):
+                return False
+            if isinstance(actual, bool):
+                return not exact and not ranges
+            try:
+                port = int(actual)
+            except (TypeError, ValueError):
+                return not exact and not ranges
+            exact_ports = {
+                int(item)
+                for item in exact
+                if not isinstance(item, bool)
+                and str(item).strip().isdigit()
+            }
+            normalized_ranges: list[tuple[int, int]] = []
+            for item in ranges:
+                if (
+                    not isinstance(item, list)
+                    or len(item) != 2
+                    or any(isinstance(value, bool) for value in item)
+                ):
+                    return False
+                try:
+                    start, end = int(item[0]), int(item[1])
+                except (TypeError, ValueError):
+                    return False
+                if not 0 <= start <= end <= 65535:
+                    return False
+                normalized_ranges.append((start, end))
+            if not exact_ports and not normalized_ranges:
+                return True
+            return port in exact_ports or any(
+                start <= port <= end
+                for start, end in normalized_ranges
+            )
+
+        try:
+            observed_at = _query_utc(
+                re.sub(
+                    r"\s+",
+                    " ",
+                    str(
+                        alert.get("timestamp")
+                        or raw_subset.get("@timestamp")
+                        or ""
+                    ).strip(),
+                ),
+                "authorized activity alert timestamp",
+            )
+            authorized_start = _query_utc(
+                re.sub(
+                    r"\s+",
+                    " ",
+                    str(authorization.get("authorization_start") or "").strip(),
+                ),
+                "authorized activity start",
+            )
+            authorized_end = _query_utc(
+                re.sub(
+                    r"\s+",
+                    " ",
+                    str(authorization.get("authorization_end") or "").strip(),
+                ),
+                "authorized activity end",
+            )
+            time_matches = authorized_start <= observed_at <= authorized_end
+        except InvestigationQueryError:
+            time_matches = False
+
+        source_ip = alert.get("source_ip") or raw_source.get("ip")
+        destination_ip = (
+            alert.get("destination_ip") or raw_destination.get("ip")
+        )
+        source_port = alert.get("source_port") or raw_source.get("port")
+        destination_port = (
+            alert.get("destination_port") or raw_destination.get("port")
+        )
+        transport = (
+            alert.get("transport_protocol") or raw_network.get("transport")
+        )
+        rule_id = (
+            alert.get("rule_id")
+            or rule_context.get("record_rule_id")
+            or rule_context.get("sid")
+        )
+        exact_scope_matches = (
+            string_selector_matches("source_ips", source_ip)
+            and string_selector_matches(
+                "destination_ips",
+                destination_ip,
+            )
+            and port_selector_matches(
+                "source_ports",
+                "source_port_ranges",
+                source_port,
+            )
+            and port_selector_matches(
+                "destination_ports",
+                "destination_port_ranges",
+                destination_port,
+            )
+            and string_selector_matches(
+                "transport_protocols",
+                transport,
+                lower=True,
+            )
+            and string_selector_matches("rule_ids", rule_id)
+            and time_matches
+        )
+        if (
+            selected_is_member
+            and exact_scope_matches
+            and bool(str(raw.get("campaign_id") or "").strip())
+            and policy_id
+            and str(authorization.get("policy_id") or "").strip()
+            == policy_id
+            and authorization.get("status") == "operator_authorized"
+            and str(authorization.get("authorized_by") or "")
+            .strip()
+            .lower()
+            == "operator"
+            and bool(str(authorization.get("provenance") or "").strip())
+        ):
+            return True
     if isinstance(raw, dict):
         entries = raw.get("entries")
         if not isinstance(entries, list):
@@ -15421,6 +16197,19 @@ def reconcile_incident_response_report(
         if isinstance(response.get("_automation_controls"), dict)
         else {}
     )
+    requested_controls = (
+        automation_controls.get("requested_controls")
+        if isinstance(
+            automation_controls.get("requested_controls"),
+            dict,
+        )
+        else None
+    )
+    containment_was_requested = (
+        bool(requested_controls.get("containment"))
+        if requested_controls is not None
+        else True
+    )
     reconciliation_reason = ""
     if guard.get("override_applied"):
         reconciliation_reason = "deterministic evidence guard changed the model verdict"
@@ -15432,7 +16221,10 @@ def reconcile_incident_response_report(
         "review_required_"
     ):
         reconciliation_reason = "the required independent review was unavailable or invalid"
-    elif automation_controls.get("containment_blocked"):
+    elif (
+        automation_controls.get("containment_blocked")
+        and containment_was_requested
+    ):
         reconciliation_reason = "runtime safety controls blocked model-authored containment"
 
     if reconciliation_reason:
@@ -15752,12 +16544,14 @@ def incident_live_osquery_audit(prompt_package: dict[str, Any]) -> dict[str, Any
 def prepare_live_osquery_context(
     prompt_package: dict[str, Any],
     agent_role: str,
+    config_file: Path | None = None,
 ) -> dict[str, Any] | None:
     """Expose a model-safe capability descriptor without exposing transport secrets."""
     if agent_role not in {"soc-analyst", "incident-responder"}:
         return None
-    if DEFAULT_LIVE_OSQUERY_CONFIG_FILE.is_file():
-        config = load_live_osquery_config(DEFAULT_LIVE_OSQUERY_CONFIG_FILE)
+    config_file = config_file or DEFAULT_LIVE_OSQUERY_CONFIG_FILE
+    if config_file.is_file():
+        config = load_live_osquery_config(config_file)
     else:
         config = {
             "enabled": False,
@@ -16033,6 +16827,26 @@ def markdown_list(items: list[str]) -> str:
     return "\n".join(f"- {item}" for item in items)
 
 
+def markdown_code_block(language: str, value: Any) -> list[str]:
+    """Render a code block whose fence cannot be closed by its content."""
+    content = str(value)
+    longest_backtick_run = max(
+        (len(match.group(0)) for match in re.finditer(r"`+", content)),
+        default=0,
+    )
+    fence = "`" * max(3, longest_backtick_run + 1)
+    return [f"{fence}{language}", content, fence]
+
+
+def markdown_inline_text(value: Any, maximum: int = 1000) -> str:
+    """Return one escaped Markdown line for model- or evidence-derived text."""
+    text = " ".join(_query_text(value, maximum).split())
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    for character in "\\`*_{}[]()#+-.!|":
+        text = text.replace(character, f"\\{character}")
+    return text
+
+
 def render_incident_response_markdown(response: dict[str, Any]) -> list[str]:
     report = response.get("incident_response_report")
     if not isinstance(report, dict):
@@ -16110,7 +16924,8 @@ def render_incident_query_audit_markdown(response: dict[str, Any]) -> list[str]:
     lines = [
         "## Security Onion Query Audit",
         "",
-        f"- **Trusted source:** {audit.get('trusted_source', 'n/a')}",
+        "- **Trusted source:** "
+        f"{markdown_inline_text(audit.get('trusted_source'), 240) or 'n/a'}",
         f"- **Read only:** {audit.get('read_only', True)}",
         f"- **Complete:** {audit.get('complete', False)}",
         f"- **Partial:** {audit.get('partial', True)}",
@@ -16123,27 +16938,33 @@ def render_incident_query_audit_markdown(response: dict[str, Any]) -> list[str]:
     for index, query in enumerate(queries, 1):
         if not isinstance(query, dict):
             continue
+        pack = markdown_inline_text(query.get("pack"), 120) or "evidence pack"
         lines.extend([
-            f"### Query {index}: {query.get('pack') or 'evidence pack'}",
+            f"### Query {index}: {pack}",
             "",
-            f"- **Status:** {query.get('status') or 'unknown'}",
+            "- **Status:** "
+            f"{markdown_inline_text(query.get('status'), 40) or 'unknown'}",
             f"- **Digest:** `{query.get('query_digest') or 'n/a'}`",
             f"- **Window:** {query.get('window', {}).get('start', '')} to {query.get('window', {}).get('end', '')}",
             f"- **Hits:** {query.get('total_hits', 0)} total; {query.get('returned_hits', 0)} returned",
             "",
             "#### KQL (analyst-readable equivalent)",
             "",
-            "```kql",
-            str(query.get("kql_equivalent") or "n/a"),
-            "```",
+        ])
+        lines.extend(markdown_code_block(
+            "kql",
+            query.get("kql_equivalent") or "n/a",
+        ))
+        lines.extend([
             "",
             "#### Elasticsearch Query DSL (exact executed request)",
             "",
-            "```json",
-            json.dumps(query.get("query_dsl") or {}, indent=2, sort_keys=True),
-            "```",
-            "",
         ])
+        lines.extend(markdown_code_block(
+            "json",
+            json.dumps(query.get("query_dsl") or {}, indent=2, sort_keys=True),
+        ))
+        lines.append("")
     return lines
 
 
@@ -16154,7 +16975,8 @@ def render_incident_osquery_audit_markdown(response: dict[str, Any]) -> list[str
     lines = [
         "## Security Onion Appliance OSQuery Snapshot Audit",
         "",
-        f"- **Trusted source:** {audit.get('trusted_source', 'n/a')}",
+        "- **Trusted source:** "
+        f"{markdown_inline_text(audit.get('trusted_source'), 240) or 'n/a'}",
         f"- **Read only:** {audit.get('read_only', True)}",
         "",
     ]
@@ -16165,11 +16987,14 @@ def render_incident_osquery_audit_markdown(response: dict[str, Any]) -> list[str
     for index, query in enumerate(queries, 1):
         if not isinstance(query, dict):
             continue
+        pack = markdown_inline_text(query.get("pack"), 120) or "reviewed pack"
         lines.extend([
-            f"### OSquery {index}: {query.get('pack') or 'reviewed pack'}",
+            f"### OSquery {index}: {pack}",
             "",
-            f"- **Target:** {query.get('target') or 'n/a'}",
-            f"- **Status:** {query.get('status') or 'unknown'}",
+            "- **Target:** "
+            f"{markdown_inline_text(query.get('target'), 120) or 'n/a'}",
+            "- **Status:** "
+            f"{markdown_inline_text(query.get('status'), 40) or 'unknown'}",
             f"- **Digest:** `{query.get('query_digest') or 'n/a'}`",
             f"- **Rows:** {query.get('total_rows', 0)} total; {query.get('returned_rows', 0)} returned",
             f"- **Collector-owned alert bindings:** {query.get('support_binding_count', 0)}",
@@ -16177,23 +17002,29 @@ def render_incident_osquery_audit_markdown(response: dict[str, Any]) -> list[str
             "",
             "#### OSquery SQL (exact executed command)",
             "",
-            "```sql",
-            str(query.get("query") or "n/a"),
-            "```",
-            "",
         ])
+        lines.extend(markdown_code_block(
+            "sql",
+            query.get("query") or "n/a",
+        ))
+        lines.append("")
         rows = query.get("rows_preview") if isinstance(query.get("rows_preview"), list) else []
         if rows:
             lines.extend([
                 "#### Bounded Result Preview",
                 "",
-                "```json",
+            ])
+            lines.extend(markdown_code_block(
+                "json",
                 json.dumps(rows, indent=2, sort_keys=True),
-                "```",
+            ))
+            lines.append("")
+        if query.get("error"):
+            lines.extend([
+                "- **Error:** "
+                f"{markdown_inline_text(query.get('error'), 1000)}",
                 "",
             ])
-        if query.get("error"):
-            lines.extend([f"- **Error:** {query.get('error')}", ""])
     return lines
 
 
@@ -16204,7 +17035,8 @@ def render_incident_live_osquery_audit_markdown(response: dict[str, Any]) -> lis
     lines = [
         "## Endpoint Live OSQuery Audit",
         "",
-        f"- **Trusted source:** {audit.get('trusted_source', 'n/a')}",
+        "- **Trusted source:** "
+        f"{markdown_inline_text(audit.get('trusted_source'), 240) or 'n/a'}",
         f"- **Endpoint SQL read only:** {audit.get('endpoint_read_only', audit.get('read_only', True))}",
         f"- **Security Onion control-plane write status:** {audit.get('control_plane_write_status', 'confirmed' if audit.get('control_plane_writes', True) else 'none')}",
         f"- **Attempted batches:** {audit.get('batches', 0)}",
@@ -16219,7 +17051,11 @@ def render_incident_live_osquery_audit_markdown(response: dict[str, Any]) -> lis
             "",
         ])
     if audit.get("error"):
-        lines.extend([f"- **Collection note:** {audit.get('error')}", ""])
+        lines.extend([
+            "- **Collection note:** "
+            f"{markdown_inline_text(audit.get('error'), 1000)}",
+            "",
+        ])
     queries = audit.get("queries") if isinstance(audit.get("queries"), list) else []
     if not queries:
         lines.append("No endpoint live OSQuery batch was executed for this investigation.")
@@ -16227,39 +17063,233 @@ def render_incident_live_osquery_audit_markdown(response: dict[str, Any]) -> lis
     for index, query in enumerate(queries, 1):
         if not isinstance(query, dict):
             continue
+        target_alias = (
+            markdown_inline_text(query.get("target_alias"), 120)
+            or "configured endpoint"
+        )
         lines.extend([
-            f"### Endpoint Query {index}: {query.get('target_alias') or 'configured endpoint'}",
+            f"### Endpoint Query {index}: {target_alias}",
             "",
-            f"- **Purpose:** {query.get('purpose') or 'n/a'}",
-            f"- **Status:** {query.get('status') or 'unknown'}",
+            "- **Purpose:** "
+            f"{markdown_inline_text(query.get('purpose'), 500) or 'n/a'}",
+            "- **Status:** "
+            f"{markdown_inline_text(query.get('status'), 40) or 'unknown'}",
             f"- **Digest:** `{query.get('query_digest') or 'n/a'}`",
             f"- **Rows:** {query.get('total_rows', 0)} total; {query.get('returned_rows', 0)} returned",
             f"- **Duration:** {query.get('duration_ms', 0)} ms",
             "",
             "#### OSQuery SQL (exact executed live query)",
             "",
-            "```sql",
-            str(query.get("query") or "n/a"),
-            "```",
-            "",
         ])
+        lines.extend(markdown_code_block(
+            "sql",
+            query.get("query") or "n/a",
+        ))
+        lines.append("")
         rows = query.get("rows_preview") if isinstance(query.get("rows_preview"), list) else []
         if rows:
             lines.extend([
                 "#### Bounded Result Preview",
                 "",
-                "```json",
-                json.dumps(rows, indent=2, sort_keys=True),
-                "```",
-                "",
             ])
+            lines.extend(markdown_code_block(
+                "json",
+                json.dumps(rows, indent=2, sort_keys=True),
+            ))
+            lines.append("")
         if query.get("rows_preview_truncated"):
             lines.extend([
                 "Result preview truncated by the per-query or report-wide audit bound.",
                 "",
             ])
         if query.get("error"):
-            lines.extend([f"- **Error:** {query.get('error')}", ""])
+            lines.extend([
+                "- **Error:** "
+                f"{markdown_inline_text(query.get('error'), 1000)}",
+                "",
+            ])
+    return lines
+
+
+def render_investigation_query_audit_markdown(
+    response: dict[str, Any],
+) -> list[str]:
+    """Render only broker/collector-authored iterative query audit records."""
+    audit = response.get("_investigation_query_audit")
+    if not isinstance(audit, dict):
+        return []
+    lines = [
+        "## Interactive Investigation Query Audit",
+        "",
+        f"- **Query contract:** `{_query_text(audit.get('query_contract'), 160) or 'n/a'}`",
+        f"- **Provider neutral:** {bool(audit.get('provider_neutral'))}",
+        f"- **Model route:** `{_query_text(audit.get('model_route'), 240) or 'n/a'}`",
+        f"- **Rounds completed:** {audit.get('rounds_completed', 0)}",
+        f"- **Queries admitted:** {audit.get('queries_admitted', 0)}",
+        "- **Requests ignored or over budget:** "
+        f"{audit.get('requests_ignored_or_over_budget', 0)}",
+        f"- **Read only:** {bool(audit.get('read_only'))}",
+        "- **All tool-call bindings read only:** "
+        f"{bool(audit.get('all_tool_call_bindings_read_only'))}",
+        f"- **Complete:** {bool(audit.get('complete'))}",
+        "",
+    ]
+    rounds = audit.get("rounds") if isinstance(audit.get("rounds"), list) else []
+    rendered = 0
+    for round_record in rounds[:MAX_INVESTIGATION_QUERY_ROUNDS]:
+        if not isinstance(round_record, dict):
+            continue
+        round_number = (
+            markdown_inline_text(round_record.get("round"), 20) or "n/a"
+        )
+        trusted_queries = (
+            round_record.get("trusted_queries")
+            if isinstance(round_record.get("trusted_queries"), list)
+            else []
+        )
+        for query in trusted_queries[:MAX_INVESTIGATION_QUERIES_PER_ROUND]:
+            if not isinstance(query, dict):
+                continue
+            rendered += 1
+            backend = _query_text(
+                query.get("backend") or query.get("dialect"),
+                40,
+            ).lower() or "unknown"
+            subject = markdown_inline_text(
+                query.get("pack")
+                or query.get("target_alias")
+                or query.get("operation")
+                or query.get("query_id"),
+                120,
+            ) or "query"
+            lines.extend([
+                f"### Pivot {rendered} (round {round_number}): "
+                f"{backend.upper()} - {subject}",
+                "",
+                f"- **Query ID:** `{_query_text(query.get('query_id'), 80) or 'n/a'}`",
+                "- **Purpose:** "
+                f"{markdown_inline_text(query.get('purpose'), 500) or 'n/a'}",
+                "- **Status:** "
+                f"{markdown_inline_text(query.get('status'), 40) or 'unknown'}",
+            ])
+            for label, key in (
+                ("Execution backend", "execution_backend"),
+                ("Execution semantics", "semantics"),
+                ("Match semantics", "match_semantics"),
+            ):
+                value = markdown_inline_text(query.get(key), 240)
+                if value:
+                    lines.append(f"- **{label}:** {value}")
+            window = query.get("window")
+            if isinstance(window, dict):
+                lines.append(
+                    "- **Window:** "
+                    f"{_query_text(window.get('start'), 80) or 'n/a'} to "
+                    f"{_query_text(window.get('end'), 80) or 'n/a'}"
+                )
+            for label, key in (
+                ("Query digest", "query_digest"),
+                ("Result digest", "result_digest"),
+                ("Evidence reference", "evidence_ref"),
+            ):
+                value = _query_text(query.get(key), 256)
+                if value:
+                    lines.append(f"- **{label}:** `{value}`")
+            counts = [
+                f"{label}={markdown_inline_text(query[key], 80)}"
+                for label, key in (
+                    ("total hits", "total_hits"),
+                    ("returned hits", "returned_hits"),
+                    ("total rows", "total_rows"),
+                    ("returned rows", "returned_rows"),
+                    ("candidates scanned", "candidate_records_scanned"),
+                    ("records returned", "records_returned"),
+                )
+                if key in query and query.get(key) is not None
+            ]
+            if counts:
+                lines.append(f"- **Counts:** {'; '.join(counts)}")
+            truncation_flags = [
+                key
+                for key in (
+                    "truncated",
+                    "result_truncated",
+                    "index_scan_truncated",
+                    "timed_out",
+                    "audit_truncated",
+                )
+                if query.get(key) is True
+            ]
+            if truncation_flags:
+                lines.append(
+                    "- **Bounded-result flags:** "
+                    + ", ".join(truncation_flags)
+                )
+            error = markdown_inline_text(query.get("error"), 1000)
+            if error:
+                lines.append(f"- **Error:** {error}")
+            lines.append("")
+
+            oql = _query_text(query.get("oql_equivalent"), 64 * 1024)
+            if oql:
+                lines.extend([
+                    "#### OQL (analyst-readable equivalent)",
+                    "",
+                ])
+                lines.extend(markdown_code_block("oql", oql))
+                lines.append("")
+            kql = _query_text(query.get("kql_equivalent"), 64 * 1024)
+            if kql:
+                lines.extend([
+                    "#### KQL (analyst-readable equivalent)",
+                    "",
+                ])
+                lines.extend(markdown_code_block("kql", kql))
+                lines.append("")
+            query_dsl = query.get("query_dsl")
+            if isinstance(query_dsl, (dict, list)):
+                lines.extend([
+                    "#### Elasticsearch Query DSL (exact executed request)",
+                    "",
+                ])
+                lines.extend(markdown_code_block(
+                    "json",
+                    json.dumps(query_dsl, indent=2, sort_keys=True),
+                ))
+                lines.append("")
+            live_sql = _query_text(query.get("query"), 64 * 1024)
+            if live_sql and backend == "osquery":
+                lines.extend([
+                    "#### OSQuery SQL (exact executed live query)",
+                    "",
+                ])
+                lines.extend(markdown_code_block("sql", live_sql))
+                lines.append("")
+            if backend == "pcap_zeek":
+                structured_request = {
+                    key: query[key]
+                    for key in ("operation", "filters", "indicator", "limit")
+                    if key in query
+                }
+                if structured_request:
+                    lines.extend([
+                        "#### PCAP/Zeek request (exact structured request)",
+                        "",
+                    ])
+                    lines.extend(markdown_code_block(
+                        "json",
+                        json.dumps(
+                            structured_request,
+                            indent=2,
+                            sort_keys=True,
+                        ),
+                    ))
+                    lines.append("")
+    if not rendered:
+        lines.append(
+            "No broker- or collector-authorized iterative queries were recorded."
+        )
+        lines.append("")
     return lines
 
 
@@ -16361,6 +17391,7 @@ def render_markdown(prompt_package: dict[str, Any], response: dict[str, Any], ge
     lines.extend(render_incident_query_audit_markdown(response))
     lines.extend(render_incident_osquery_audit_markdown(response))
     lines.extend(render_incident_live_osquery_audit_markdown(response))
+    lines.extend(render_investigation_query_audit_markdown(response))
     lines.extend([
         "## BLUF",
         "",
@@ -16558,6 +17589,25 @@ def main() -> int:
             args.out_dir,
             evaluation_runtime_dir,
         )
+        for field in (
+            "ai_settings_file",
+            "investigation_harness_policy",
+            "live_osquery_config",
+            "disagreement_adjudicator_prompt_file",
+            "incident_evidence_config",
+        ):
+            setattr(
+                args,
+                field,
+                controlled_evaluation_config_file(
+                    Path(getattr(args, field)),
+                    evaluation_runtime_dir,
+                ),
+            )
+        args.investigation_pivot_dir = controlled_evaluation_output_dir(
+            args.investigation_pivot_dir,
+            evaluation_runtime_dir,
+        )
     consume_controlled_evaluation_token(controlled_evaluation)
     controlled_result_identity = controlled_evaluation_result_identity(
         controlled_evaluation,
@@ -16697,11 +17747,22 @@ def main() -> int:
             validate_incident_evidence_artifact(prompt_package.get("incident_response_evidence"))
 
         settings = effective_ai_settings(args)
-        live_osquery_config = prepare_live_osquery_context(prompt_package, agent_role)
+        live_osquery_config = prepare_live_osquery_context(
+            prompt_package,
+            agent_role,
+            Path(
+                getattr(
+                    args,
+                    "live_osquery_config",
+                    DEFAULT_LIVE_OSQUERY_CONFIG_FILE,
+                )
+            ),
+        )
         enrichment_config = prepare_investigation_enrichment_context(
             prompt_package,
             agent_role,
             args.alert_store_url,
+            controlled_evaluation=controlled_evaluation,
         )
         attach_evidence_reference_contract(prompt_package)
         enabled_routes = enabled_agent_model_routes(settings)

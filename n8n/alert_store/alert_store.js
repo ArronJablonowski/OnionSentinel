@@ -482,6 +482,14 @@ function deriveAnalystLegacyOutcome(factors) {
   if (validity === 'parser_error') return 'false_positive_data_parser';
   if (validity === 'logic_error') return 'false_positive_logic_rule';
   if (validity === 'intel_error') return 'false_positive_bad_intel_ioc';
+  if (
+    eventStatus === 'observed'
+    && validity === 'unknown'
+    && disposition === 'authorized_benign'
+    && handling === 'no_action'
+  ) {
+    return 'informational_no_action';
+  }
   if (validity === 'matched_intent' && eventStatus === 'observed') {
     if (disposition === 'malicious') return 'true_positive_malicious';
     if (disposition === 'suspicious') return 'true_positive_suspicious';

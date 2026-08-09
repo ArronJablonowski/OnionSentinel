@@ -10,8 +10,10 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import heapq
 import ipaddress
 import json
+import math
 import os
 import re
 import sqlite3
@@ -95,6 +97,9 @@ INVESTIGATION_QUERY_V2 = (
 INVESTIGATION_QUERY_MAX_ROUNDS = 3
 INVESTIGATION_QUERY_MAX_TOTAL = 12
 INVESTIGATION_QUERY_MAX_PER_ROUND = 4
+AUTHORIZED_TLS_REVERSE_FLOW_POLICY_ID = (
+    "authorized-tls-scan-responses-10-77-7-222"
+)
 INVESTIGATION_QUERY_PACKS = (
     "alert_context",
     "network_flow",
@@ -811,11 +816,352 @@ def latest_rollup(rollup_dir: Path, limit_bytes: int) -> dict:
     return {"path": str(latest), "content": data.decode("utf-8", errors="replace")}
 
 
+def _pcap_scalar_port(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        port = value
+    elif isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        port = int(value)
+    else:
+        text = str(value or "").strip()
+        if not re.fullmatch(r"[0-9]{1,5}", text):
+            return None
+        port = int(text)
+    return port if 0 <= port <= 65535 else None
+
+
+def _pcap_scalar_ip(value: object) -> str:
+    try:
+        return str(ipaddress.ip_address(str(value or "").strip()))
+    except ValueError:
+        return ""
+
+
+def _pcap_timestamp_epoch(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        epoch = float(value)
+    except (TypeError, ValueError, OverflowError):
+        parsed = parse_project_datetime(value)
+        if parsed is None:
+            return None
+        try:
+            epoch = parsed.timestamp()
+        except (OverflowError, OSError, ValueError):
+            return None
+        return epoch if math.isfinite(epoch) else None
+    return epoch if math.isfinite(epoch) else None
+
+
+def _pcap_window_seconds(value: object) -> int:
+    if isinstance(value, bool):
+        requested = 120
+    elif isinstance(value, int):
+        requested = value
+    elif isinstance(value, float):
+        requested = int(value) if math.isfinite(value) and value.is_integer() else 120
+    else:
+        text = str(value or "").strip()
+        requested = int(text) if re.fullmatch(r"[0-9]+", text) else 120
+    return max(30, min(86400, requested))
+
+
+def _pcap_request_scope(
+    request: dict,
+    collector_scope: dict | None = None,
+) -> dict[str, object]:
+    first_epoch = _pcap_timestamp_epoch(
+        request.get("first_seen")
+        or request.get("event_timestamp")
+        or request.get("timestamp")
+    )
+    last_epoch = _pcap_timestamp_epoch(
+        request.get("last_seen")
+        or request.get("event_timestamp")
+        or request.get("timestamp")
+    )
+    window_seconds = _pcap_window_seconds(request.get("max_window_seconds"))
+    window_start_epoch: float | None = None
+    window_end_epoch: float | None = None
+    selection_anchor_epoch: float | None = None
+    if first_epoch is not None and last_epoch is not None:
+        first_epoch, last_epoch = sorted((first_epoch, last_epoch))
+        duration = max(0.0, last_epoch - first_epoch)
+        if duration > window_seconds:
+            window_start_epoch = last_epoch - window_seconds
+            window_end_epoch = last_epoch
+            selection_anchor_epoch = last_epoch
+        else:
+            padding = max(0.0, (window_seconds - duration) / 2.0)
+            window_start_epoch = first_epoch - padding
+            window_end_epoch = last_epoch + padding
+            selection_anchor_epoch = (first_epoch + last_epoch) / 2.0
+    else:
+        request_epoch = first_epoch if first_epoch is not None else last_epoch
+        if request_epoch is not None:
+            half_window = window_seconds / 2.0
+            window_start_epoch = request_epoch - half_window
+            window_end_epoch = request_epoch + half_window
+            selection_anchor_epoch = request_epoch
+    scope: dict[str, object] = {
+        "source_ip": _pcap_scalar_ip(request.get("source_ip")),
+        "source_port": _pcap_scalar_port(request.get("source_port")),
+        "destination_ip": _pcap_scalar_ip(request.get("destination_ip")),
+        "destination_port": _pcap_scalar_port(request.get("destination_port")),
+        "transport": str(
+            request.get("transport_protocol")
+            or request.get("transport")
+            or ""
+        ).strip().lower(),
+        "protocol": str(
+            request.get("network_protocol")
+            or request.get("protocol")
+            or ""
+        ).strip().lower(),
+        "request_timestamp_epoch": selection_anchor_epoch,
+        "selection_anchor_epoch": selection_anchor_epoch,
+        "window_start_epoch": window_start_epoch,
+        "window_end_epoch": window_end_epoch,
+        "window_basis": (
+            "bounded-pcap-request-window"
+            if window_start_epoch is not None
+            else "unavailable"
+        ),
+        "max_window_seconds": window_seconds,
+    }
+    if not isinstance(collector_scope, dict):
+        return scope
+
+    collector_start = _pcap_timestamp_epoch(
+        collector_scope.get("window_start_epoch")
+    )
+    collector_end = _pcap_timestamp_epoch(
+        collector_scope.get("window_end_epoch")
+    )
+    collector_anchor = _pcap_timestamp_epoch(
+        collector_scope.get("selection_anchor_epoch")
+    )
+    collector_source = _pcap_scalar_ip(collector_scope.get("source_ip"))
+    collector_destination = _pcap_scalar_ip(
+        collector_scope.get("destination_ip")
+    )
+    collector_transport = str(
+        collector_scope.get("transport") or ""
+    ).strip().lower()
+    endpoints_match = bool(
+        scope["source_ip"]
+        and scope["destination_ip"]
+        and collector_source == scope["source_ip"]
+        and collector_destination == scope["destination_ip"]
+    )
+    ports_match = all(
+        expected is None or observed == expected
+        for expected, observed in (
+            (
+                scope["source_port"],
+                _pcap_scalar_port(collector_scope.get("source_port")),
+            ),
+            (
+                scope["destination_port"],
+                _pcap_scalar_port(collector_scope.get("destination_port")),
+            ),
+        )
+    )
+    transport_matches = bool(
+        not scope["transport"] or collector_transport == scope["transport"]
+    )
+    window_valid = bool(
+        collector_start is not None
+        and collector_end is not None
+        and collector_anchor is not None
+        and collector_start <= collector_anchor <= collector_end
+        and 30 <= collector_end - collector_start <= 86400
+    )
+    if endpoints_match and ports_match and transport_matches and window_valid:
+        scope.update({
+            "window_start_epoch": collector_start,
+            "window_end_epoch": collector_end,
+            "selection_anchor_epoch": collector_anchor,
+            "request_timestamp_epoch": collector_anchor,
+            "window_basis": "bounded-pcap-request-window",
+            "max_window_seconds": max(
+                30,
+                int(math.ceil(collector_end - collector_start)),
+            ),
+        })
+    return scope
+
+
+def _pcap_record_relevance_key(
+    item: dict,
+    request_scope: dict,
+    original_position: int,
+) -> tuple[int, float, int, int]:
+    """Rank exact request traffic before capture-wide reservoir samples."""
+    requested_source = _pcap_scalar_ip(request_scope.get("source_ip"))
+    requested_destination = _pcap_scalar_ip(
+        request_scope.get("destination_ip")
+    )
+    record_source = _pcap_scalar_ip(item.get("source_ip"))
+    record_destination = _pcap_scalar_ip(item.get("destination_ip"))
+    if not (
+        requested_source
+        and requested_destination
+        and record_source
+        and record_destination
+    ):
+        return (5, math.inf, 0, original_position)
+
+    if (
+        record_source == requested_source
+        and record_destination == requested_destination
+    ):
+        direction = 0
+        expected_source_port = _pcap_scalar_port(
+            request_scope.get("source_port")
+        )
+        expected_destination_port = _pcap_scalar_port(
+            request_scope.get("destination_port")
+        )
+    elif (
+        record_source == requested_destination
+        and record_destination == requested_source
+    ):
+        # A response packet/record represents the same requested flow with
+        # its endpoint tuple reversed (for example, a DNS response).
+        direction = 1
+        expected_source_port = _pcap_scalar_port(
+            request_scope.get("destination_port")
+        )
+        expected_destination_port = _pcap_scalar_port(
+            request_scope.get("source_port")
+        )
+    else:
+        return (5, math.inf, 0, original_position)
+
+    requested_transport = str(request_scope.get("transport") or "").lower()
+    record_transport = str(
+        item.get("transport") or item.get("transport_protocol") or ""
+    ).strip().lower()
+    if not record_transport:
+        record_protocol = str(item.get("protocol") or "").strip().lower()
+        if record_protocol in {"icmp", "icmpv6", "ipv6-icmp"}:
+            record_transport = (
+                "icmpv6"
+                if record_protocol in {"icmpv6", "ipv6-icmp"}
+                else "icmp"
+            )
+    transport_conflicts = bool(
+        requested_transport
+        and record_transport
+        and record_transport != requested_transport
+    )
+    transport_confirmed = bool(
+        not requested_transport or record_transport == requested_transport
+    )
+    expected_ports = (
+        ("source_port", expected_source_port),
+        ("destination_port", expected_destination_port),
+    )
+    ports_match = True
+    for field, expected in expected_ports:
+        if expected is None:
+            continue
+        observed = _pcap_scalar_port(item.get(field))
+        if observed is None or observed != expected:
+            ports_match = False
+    complete_tuple_match = ports_match and not transport_conflicts
+
+    record_epoch = _pcap_timestamp_epoch(
+        item.get("timestamp_epoch")
+        if item.get("timestamp_epoch") is not None
+        else item.get("timestamp")
+        if item.get("timestamp") is not None
+        else item.get("ts")
+    )
+    window_start = _pcap_timestamp_epoch(
+        request_scope.get("window_start_epoch")
+    )
+    window_end = _pcap_timestamp_epoch(
+        request_scope.get("window_end_epoch")
+    )
+    if (
+        record_epoch is not None
+        and window_start is not None
+        and window_end is not None
+    ):
+        window_start, window_end = sorted((window_start, window_end))
+        is_close = window_start <= record_epoch <= window_end
+        selection_anchor = _pcap_timestamp_epoch(
+            request_scope.get("selection_anchor_epoch")
+        )
+        if selection_anchor is None:
+            selection_anchor = (window_start + window_end) / 2.0
+        distance = abs(record_epoch - selection_anchor)
+    else:
+        request_epoch = _pcap_timestamp_epoch(
+            request_scope.get("request_timestamp_epoch")
+        )
+        distance = (
+            abs(record_epoch - request_epoch)
+            if record_epoch is not None and request_epoch is not None
+            else math.inf
+        )
+        close_window = _pcap_window_seconds(
+            request_scope.get("max_window_seconds")
+        )
+        is_close = distance <= close_window
+
+    if complete_tuple_match and transport_confirmed and is_close:
+        relevance = 0
+    elif complete_tuple_match and is_close:
+        relevance = 1
+    elif is_close:
+        relevance = 2
+    elif complete_tuple_match:
+        relevance = 3
+    else:
+        relevance = 4
+    return (relevance, distance, direction, original_position)
+
+
+def _prioritize_pcap_query_records(
+    values: Iterable[dict],
+    request_scope: dict,
+    limit: int,
+) -> list[dict]:
+    if limit <= 0:
+        return []
+    ranked = heapq.nsmallest(
+        limit,
+        (
+            (
+                _pcap_record_relevance_key(item, request_scope, position),
+                item,
+            )
+            for position, item in enumerate(values)
+            if isinstance(item, dict)
+        ),
+        key=lambda entry: entry[0],
+    )
+    return [item for _, item in ranked]
+
+
 def compact_pcap_analysis(record: dict) -> dict:
     """Keep PCAP evidence prompt-safe by including summaries, not packet bodies."""
     zeek = record.get("zeek") if isinstance(record.get("zeek"), dict) else {}
     tshark = record.get("tshark") if isinstance(record.get("tshark"), dict) else {}
     request = record.get("request") if isinstance(record.get("request"), dict) else {}
+    collector_scope = (
+        record.get("_local_request_scope")
+        if isinstance(record.get("_local_request_scope"), dict)
+        else None
+    )
+    request_scope = _pcap_request_scope(request, collector_scope)
     local_query_index: dict[str, list] = {}
     for parser in (zeek, tshark):
         index = parser.get("_local_query_index") if isinstance(parser.get("_local_query_index"), dict) else {}
@@ -824,7 +1170,12 @@ def compact_pcap_analysis(record: dict) -> dict:
                 continue
             current = local_query_index.setdefault(str(operation), [])
             current.extend(item for item in values if isinstance(item, dict))
-            del current[192:]
+    for operation, values in local_query_index.items():
+        local_query_index[operation] = _prioritize_pcap_query_records(
+            values,
+            request_scope,
+            192,
+        )
     return {
         "analysis_artifact": record.get("_analysis_path"),
         "evidence_relationship": record.get("_evidence_relationship"),
@@ -832,6 +1183,10 @@ def compact_pcap_analysis(record: dict) -> dict:
         "request_id": request.get("request_id"),
         "alert_id": request.get("alert_id"),
         "group_id": request.get("group_id"),
+        # Local-only selection metadata used to retain alert-relevant records
+        # through later prompt-budget compaction. The runner strips every
+        # `_local_*` field before any model transport.
+        "_local_request_scope": request_scope,
         "artifact_state": record.get("artifact_state"),
         "coverage": record.get("coverage") if isinstance(record.get("coverage"), dict) else {},
         "evidence_security": record.get("evidence_security") if isinstance(record.get("evidence_security"), dict) else {},
@@ -1278,6 +1633,7 @@ def authorized_activity_context(
     )
     return {
         "status": "operator_authorized",
+        "selected_alert_id": selected["alert_id"],
         "campaign_id": campaign["campaign_id"],
         "policy_id": campaign["policy_id"],
         "representative_alert_id": campaign["representative_alert_id"],
@@ -2183,12 +2539,329 @@ def asset_observables_and_events(group_rows: list[sqlite3.Row]) -> tuple[list[di
     return observables, events
 
 
+def _trusted_authorization_reverse_flow_tuple(
+    selected: sqlite3.Row,
+    authorization_evidence: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return the one reviewed Suricata-response tuple in Zeek role order.
+
+    This is deliberately not a generic ephemeral-port heuristic.  The role
+    reversal is enabled only for the exact operator-owned TLS scan-response
+    policy and only after the selected Suricata member, native five-tuple,
+    transport, rule, dataset, and authorization window all agree.
+    """
+    if not isinstance(authorization_evidence, dict):
+        return None
+    alert = parse_alert_json(
+        str(sqlite_value(selected, "alert_json") or "")
+    )
+    raw_event = parse_json_object(
+        str(sqlite_value(selected, "raw_event_json") or "")
+    )
+    original_event = raw_event.get("event_data")
+    dataset_values = {
+        str(value).strip().lower()
+        for value in (
+            sqlite_value(selected, "event_dataset"),
+            _nested_alert_value(alert, "event.dataset"),
+            _nested_alert_value(raw_event, "event.dataset"),
+            (
+                _nested_alert_value(original_event, "event.dataset")
+                if isinstance(original_event, dict)
+                else None
+            ),
+        )
+        if str(value or "").strip()
+    }
+    if dataset_values != {"suricata.alert"}:
+        return None
+
+    selected_alert_id = str(
+        sqlite_value(selected, "alert_id") or ""
+    ).strip()
+    if (
+        not selected_alert_id
+        or authorization_evidence.get("status") != "operator_authorized"
+        or str(authorization_evidence.get("selected_alert_id") or "").strip()
+        != selected_alert_id
+        or str(authorization_evidence.get("policy_id") or "").strip()
+        != AUTHORIZED_TLS_REVERSE_FLOW_POLICY_ID
+    ):
+        return None
+    observations = authorization_evidence.get("observations")
+    if not isinstance(observations, list) or not any(
+        isinstance(item, dict)
+        and str(item.get("alert_id") or "").strip() == selected_alert_id
+        for item in observations
+    ):
+        return None
+
+    authorization = authorization_evidence.get("authorization")
+    if not isinstance(authorization, dict):
+        return None
+
+    def normalized_strings(value: object) -> list[str] | None:
+        if not isinstance(value, list):
+            return None
+        return [str(item).strip().lower() for item in value]
+
+    def normalized_ports(value: object) -> list[int] | None:
+        if not isinstance(value, list):
+            return None
+        try:
+            ports = [int(item) for item in value]
+        except (TypeError, ValueError):
+            return None
+        return ports if all(0 <= item <= 65535 for item in ports) else None
+
+    destination_ranges = authorization.get("destination_port_ranges")
+    try:
+        normalized_ranges = [
+            [int(item[0]), int(item[1])]
+            for item in destination_ranges
+            if isinstance(item, list) and len(item) == 2
+        ]
+    except (TypeError, ValueError):
+        return None
+    if (
+        authorization.get("status") != "operator_authorized"
+        or str(authorization.get("policy_id") or "").strip()
+        != AUTHORIZED_TLS_REVERSE_FLOW_POLICY_ID
+        or normalized_strings(authorization.get("source_ips")) != []
+        or normalized_strings(authorization.get("destination_ips"))
+        != ["10.77.7.222"]
+        or sorted(normalized_ports(authorization.get("source_ports")) or [])
+        != [443, 8443]
+        or len(authorization.get("source_ports") or []) != 2
+        or normalized_ports(authorization.get("destination_ports")) != []
+        or normalized_ranges != [[49152, 65535]]
+        or len(destination_ranges or []) != 1
+        or normalized_strings(authorization.get("transport_protocols"))
+        != ["tcp"]
+        or normalized_strings(authorization.get("rule_ids"))
+        != ["2029340"]
+    ):
+        return None
+
+    selected_time = (
+        parse_project_datetime(sqlite_value(selected, "timestamp"))
+        or parse_project_datetime(sqlite_value(selected, "last_seen"))
+        or parse_project_datetime(sqlite_value(selected, "first_seen"))
+    )
+    authorization_start = parse_project_datetime(
+        authorization.get("authorization_start")
+    )
+    authorization_end = parse_project_datetime(
+        authorization.get("authorization_end")
+    )
+    campaign_window = authorization_evidence.get("campaign_window")
+    campaign_start = (
+        parse_project_datetime(campaign_window.get("start"))
+        if isinstance(campaign_window, dict)
+        else None
+    )
+    campaign_end = (
+        parse_project_datetime(campaign_window.get("end"))
+        if isinstance(campaign_window, dict)
+        else None
+    )
+    if (
+        selected_time is None
+        or authorization_start is None
+        or authorization_end is None
+        or campaign_start is None
+        or campaign_end is None
+        or not authorization_start <= selected_time <= authorization_end
+        or not campaign_start <= selected_time < campaign_end
+    ):
+        return None
+
+    source_documents = [alert, raw_event]
+    if isinstance(original_event, dict):
+        source_documents.append(original_event)
+
+    def consistent_value(
+        values: Iterable[object],
+        normalizer,
+    ) -> tuple[bool, object | None]:
+        present = [
+            value
+            for value in values
+            if value not in (None, "")
+        ]
+        if not present:
+            return True, None
+        normalized: list[object] = []
+        for value in present:
+            try:
+                item = normalizer(value)
+            except (TypeError, ValueError):
+                return False, None
+            if item in (None, ""):
+                return False, None
+            normalized.append(item)
+        if any(item != normalized[0] for item in normalized[1:]):
+            return False, None
+        return True, normalized[0]
+
+    def canonical_ip(value: object) -> str:
+        return str(ipaddress.ip_address(str(value).strip()))
+
+    def canonical_port(value: object) -> int:
+        if isinstance(value, bool):
+            raise ValueError("boolean is not a port")
+        text = str(value).strip()
+        if not re.fullmatch(r"[0-9]{1,5}", text):
+            raise ValueError("port is not a canonical integer")
+        port = int(text)
+        if not 0 <= port <= 65535:
+            raise ValueError("port is out of range")
+        return port
+
+    def canonical_transport(value: object) -> str:
+        text = str(value).strip().lower()
+        if not INVESTIGATION_EVENT_TUPLE_ATOM_RE.fullmatch(text):
+            raise ValueError("transport is invalid")
+        return text
+
+    def canonical_rule_id(value: object) -> str:
+        text = str(value).strip().lower()
+        if not INVESTIGATION_EVENT_TUPLE_ATOM_RE.fullmatch(text):
+            raise ValueError("rule ID is invalid")
+        return text
+
+    def canonical_community_id(value: object) -> str:
+        text = str(value).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_:+/=-]{1,256}", text):
+            raise ValueError("Community ID is invalid")
+        return text
+
+    representations = {
+        "source_ip": (
+            [sqlite_value(selected, "source_ip")]
+            + [
+                _nested_alert_value(document, "source.ip")
+                for document in source_documents
+            ],
+            canonical_ip,
+        ),
+        "destination_ip": (
+            [sqlite_value(selected, "destination_ip")]
+            + [
+                _nested_alert_value(document, "destination.ip")
+                for document in source_documents
+            ],
+            canonical_ip,
+        ),
+        "source_port": (
+            [sqlite_value(selected, "source_port")]
+            + [
+                _nested_alert_value(document, "source.port")
+                for document in source_documents
+            ],
+            canonical_port,
+        ),
+        "destination_port": (
+            [sqlite_value(selected, "destination_port")]
+            + [
+                _nested_alert_value(document, "destination.port")
+                for document in source_documents
+            ],
+            canonical_port,
+        ),
+        "transport": (
+            [sqlite_value(selected, "transport_protocol")]
+            + [
+                _nested_alert_value(document, "network.transport")
+                for document in source_documents
+            ],
+            canonical_transport,
+        ),
+        "rule_id": (
+            [sqlite_value(selected, "rule_id")]
+            + [
+                value
+                for document in source_documents
+                for value in (
+                    document.get("rule_id"),
+                    _nested_alert_value(document, "rule.id"),
+                    document.get("signature_id"),
+                    _nested_alert_value(
+                        document,
+                        "suricata.eve.alert.signature_id",
+                    ),
+                )
+            ],
+            canonical_rule_id,
+        ),
+        "community_id": (
+            [sqlite_value(selected, "community_id")]
+            + [
+                _nested_alert_value(document, "network.community_id")
+                for document in source_documents
+            ],
+            canonical_community_id,
+        ),
+    }
+    canonical: dict[str, object | None] = {}
+    for field, (values, normalizer) in representations.items():
+        consistent, value = consistent_value(values, normalizer)
+        if not consistent:
+            return None
+        canonical[field] = value
+    source_ip = canonical["source_ip"]
+    destination_ip = canonical["destination_ip"]
+    source_port = canonical["source_port"]
+    destination_port = canonical["destination_port"]
+    transport = canonical["transport"]
+    rule_id = canonical["rule_id"]
+    if (
+        destination_ip != "10.77.7.222"
+        or source_port not in {443, 8443}
+        or not 49152 <= destination_port <= 65535
+        or transport != "tcp"
+        or rule_id != "2029340"
+    ):
+        return None
+
+    reverse_tuple: dict[str, Any] = {
+        "source_ip": destination_ip,
+        "destination_ip": source_ip,
+        "source_port": destination_port,
+        "destination_port": source_port,
+        "transport": transport,
+    }
+    community_id = canonical["community_id"]
+    if community_id not in (None, ""):
+        reverse_tuple["community_id"] = community_id
+
+    digest_payload = {
+        "authorization_evidence": authorization_evidence,
+        "event_tuple": reverse_tuple,
+        "selected_alert_id": selected_alert_id,
+    }
+    evidence_digest = hashlib.sha256(
+        json.dumps(
+            digest_payload,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:20]
+    return {
+        "event_tuple": reverse_tuple,
+        "role_semantics": "zeek_originator_responder",
+        "source": "trusted_authorization_reverse_flow",
+        "evidence_ref": f"authorization:reverse-flow:{evidence_digest}",
+    }
+
+
 def investigation_query_context(
     selected: sqlite3.Row,
     group_rows: list[sqlite3.Row],
     group_id: str,
     actor_role: str,
     pcap_available: bool,
+    authorization_evidence: dict[str, Any] | None = None,
 ) -> tuple[dict, dict]:
     """Build the model capability and the hidden broker authorization context.
 
@@ -2433,6 +3106,20 @@ def investigation_query_context(
     if selected_time is None:
         selected_time = max(times) if times else dt.datetime.now(dt.timezone.utc)
     selected_time = selected_time.astimezone(dt.timezone.utc)
+    reverse_flow = _trusted_authorization_reverse_flow_tuple(
+        selected,
+        authorization_evidence,
+    )
+    if (
+        reverse_flow is not None
+        and not any(
+            item["event_tuple"] == reverse_flow["event_tuple"]
+            and item["role_semantics"] == reverse_flow["role_semantics"]
+            for item in permitted_event_tuples
+        )
+        and len(permitted_event_tuples) < 32
+    ):
+        permitted_event_tuples.append(reverse_flow)
     # A recurring duplicate group can span months. Authorization is centered
     # on this alert rather than the whole group, while each brokered query is
     # independently capped to a 24-hour window.
@@ -2914,6 +3601,7 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             isinstance(pcap_context.get("parsed_evidence"), list)
             and pcap_context.get("parsed_evidence")
         ),
+        authorization_evidence,
     )
     investigation_local_context["permitted_enrichment_indicators"] = {
         "ip": list(enrichment_context.get("indicators", {}).get("public_ips", [])),
@@ -3156,6 +3844,7 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             "For every Security Onion conclusion, cite the evidence pack and query_digest that supports it.",
             "The kql_equivalent is an analyst-readable representation; query_dsl is the exact request that executed. Never rewrite either as if it executed.",
             "When an Elastic result has prompt_projection metadata, only its deterministic hit prefix was retained. Use source counts and source_hits_sha256 as omission provenance, and never treat omitted hits as evidence that activity was absent.",
+            "When authorization_aggregate is present, it is a deterministic count-only query over the complete stored operator-policy selector set and authorization window. Use only complete merged exact_count and bucket counts, cite selector_digest plus the relevant partition query_digest, and never infer event contents because no event bodies were returned.",
             "The incident_response_evidence osquery_results collection contains fixed, reviewed, read-only snapshots of the Security Onion appliance itself. It is baseline appliance evidence, not endpoint live-host evidence.",
             "Never claim that an appliance OSQuery command ran unless its exact SQL, target, status, and digest are present in osquery_results. A non-ok status is an evidence gap, not proof that the queried condition was absent.",
             "When an OSQuery result has prompt_projection metadata, only its deterministic row prefix was retained. Use source counts and source_rows_sha256 as omission provenance, and never treat omitted rows as evidence that a value was absent.",
@@ -3206,6 +3895,7 @@ def incident_prompt_immutable_query_provenance(incident: dict) -> dict:
         return {
             "elastic_results": [],
             "osquery_results": [],
+            "authorization_aggregate": None,
         }
 
     elastic_mutable = {
@@ -3315,6 +4005,7 @@ def incident_prompt_immutable_query_provenance(incident: dict) -> dict:
         ]
         if isinstance(osquery_results, list)
         else [],
+        "authorization_aggregate": response.get("authorization_aggregate"),
     }
 
 
@@ -3552,9 +4243,27 @@ def compact_package_to_budget(package: dict, max_bytes: int) -> tuple[dict, str]
                     tshark["packet_samples"] = tshark["packet_samples"][:8]
                 local_index = evidence.get("_local_query_index") if isinstance(evidence, dict) else None
                 if isinstance(local_index, dict):
+                    request_scope = (
+                        evidence.get("_local_request_scope")
+                        if isinstance(
+                            evidence.get("_local_request_scope"),
+                            dict,
+                        )
+                        else {}
+                    )
                     for operation, values in local_index.items():
                         if isinstance(values, list):
-                            local_index[operation] = values[:32]
+                            local_index[operation] = (
+                                _prioritize_pcap_query_records(
+                                    [
+                                        item
+                                        for item in values
+                                        if isinstance(item, dict)
+                                    ],
+                                    request_scope,
+                                    32,
+                                )
+                            )
         steps.append("pcap_evidence")
     if isinstance(incident, dict):
         response = incident.get("security_onion_response")

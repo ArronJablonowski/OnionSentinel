@@ -32,6 +32,10 @@ core = load_module("pcap_analysis_core_hardening", "pcap_analysis_core.py")
 queries = load_module("pcap_evidence_query_hardening", "pcap_evidence_query.py")
 runtime = load_module("pcap_tool_runtime_hardening", "pcap_tool_runtime.py")
 worker = load_module("process_pcap_evidence_hardening", "process-pcap-evidence.py")
+builder = load_module(
+    "build_ai_investigation_prompt_pcap_hardening",
+    "build-ai-investigation-prompt.py",
+)
 runner = load_module("run_local_ai_analysis_hardening", "run-local-ai-analysis.py")
 
 
@@ -167,6 +171,214 @@ class PcapAnalysisHardeningTest(unittest.TestCase):
             {item["query"] for item in counter.most_common(("query",), 20)},
         )
 
+    def test_zeek_pins_alert_nearest_dns_after_general_reservoir_and_prompt_limits(self) -> None:
+        request = {
+            "request_id": "request-pinned-zeek",
+            "source_ip": "192.0.2.10",
+            "source_port": 53000,
+            "destination_ip": "198.51.100.53",
+            "destination_port": 53,
+            "transport_protocol": "udp",
+            "first_seen": "2026-07-24T18:00:00Z",
+            "last_seen": "2026-07-24T18:00:00Z",
+            "max_window_seconds": 120,
+        }
+        scope = worker.pcap_evidence_scope(request)
+        anchor = scope["selection_anchor_epoch"]
+        rows = [
+            {
+                "ts": anchor + (index % 50) / 10,
+                "id.orig_h": request["source_ip"],
+                "id.resp_h": request["destination_ip"],
+                "id.orig_p": 40000 + index,
+                "id.resp_p": 53,
+                "proto": "udp",
+                "query": f"decoy-{index}.example",
+            }
+            for index in range(180)
+        ]
+        rows.extend(
+            {
+                "ts": anchor + offset,
+                "id.orig_h": request["source_ip"],
+                "id.resp_h": request["destination_ip"],
+                "id.orig_p": request["source_port"],
+                "id.resp_p": request["destination_port"],
+                "proto": "udp",
+                "query": f"exact-{offset}.example",
+            }
+            for offset in range(20, 0, -1)
+        )
+        rows.append({
+            "ts": anchor,
+            "id.orig_h": request["source_ip"],
+            "id.resp_h": request["destination_ip"],
+            "id.orig_p": request["source_port"],
+            "id.resp_p": request["destination_port"],
+            "proto": "udp",
+            "query": "alert-nearest-late.example",
+        })
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            capture = root / "evidence.pcap"
+            capture.write_bytes(b"fixture")
+
+            def run_command(_command, *, cwd, **_kwargs):
+                (cwd / "dns.log").write_text(
+                    "\n".join(json.dumps(item) for item in rows) + "\n",
+                    encoding="utf-8",
+                )
+                return {
+                    "ok": True,
+                    "returncode": 0,
+                    "stderr": "",
+                    "command": _command,
+                }
+
+            with (
+                mock.patch.object(worker, "tool_path", return_value="/usr/bin/zeek"),
+                mock.patch.object(worker, "run_command", side_effect=run_command),
+            ):
+                processed = worker.run_zeek([capture], root, scope)
+
+        merged = processed["_local_query_index"]["dns"]
+        self.assertEqual(processed["record_counts"]["dns"], len(rows))
+        self.assertEqual(
+            processed["sampling"]["request_relevant_records"]["dns"],
+            worker.REQUEST_RELEVANT_QUERY_INDEX_LIMIT,
+        )
+        self.assertEqual(
+            processed["sampling"]["request_relevant_records_seen"]["dns"],
+            21,
+        )
+        self.assertLessEqual(len(merged), worker.QUERY_INDEX_LIMIT)
+        self.assertEqual(merged[0]["query"], "alert-nearest-late.example")
+        self.assertTrue(
+            all(
+                item["source_port"] == 53000
+                for item in merged[:worker.REQUEST_RELEVANT_QUERY_INDEX_LIMIT]
+            )
+        )
+
+        compact = builder.compact_pcap_analysis({
+            "request": request,
+            "_local_request_scope": scope,
+            "zeek": processed,
+        })
+        package = {
+            "prior_analyses": [
+                {"id": index, "content": "x" * 1000}
+                for index in range(100)
+            ],
+            "pcap_evidence": {"parsed_evidence": [compact]},
+        }
+        compacted, _ = builder.compact_package_to_budget(package, 50_000)
+        retained = compacted["pcap_evidence"]["parsed_evidence"][0][
+            "_local_query_index"
+        ]["dns"]
+        self.assertEqual(len(retained), 32)
+        self.assertEqual(retained[0]["query"], "alert-nearest-late.example")
+        self.assertEqual(retained[0]["transport_scope_status"], "confirmed")
+
+    def test_request_scope_match_requires_ports_and_time_but_allows_unknown_transport(self) -> None:
+        request = {
+            "source_ip": "192.0.2.10",
+            "source_port": 51000,
+            "destination_ip": "198.51.100.20",
+            "destination_port": 443,
+            "transport_protocol": "tcp",
+            "first_seen": "2026-07-24T18:00:00Z",
+            "last_seen": "2026-07-24T18:00:00Z",
+            "max_window_seconds": 7200,
+        }
+        scope = worker.pcap_evidence_scope(request)
+        anchor = scope["selection_anchor_epoch"]
+        missing_transport = {
+            "record_type": "tls",
+            "timestamp_epoch": anchor,
+            "source_ip": request["source_ip"],
+            "source_port": request["source_port"],
+            "destination_ip": request["destination_ip"],
+            "destination_port": request["destination_port"],
+            "sni": "fixture.example",
+        }
+
+        match = worker._pcap_record_request_match(missing_transport, scope)
+        self.assertIsNotNone(match)
+        self.assertEqual(match["transport_scope_status"], "unconfirmed")
+        self.assertIsNone(worker._pcap_record_request_match(
+            {**missing_transport, "destination_port": 8443},
+            scope,
+        ))
+        self.assertIsNone(worker._pcap_record_request_match(
+            {**missing_transport, "timestamp_epoch": scope["window_end_epoch"] + 1},
+            scope,
+        ))
+        self.assertIsNone(worker._pcap_record_request_match(
+            {**missing_transport, "transport": "udp"},
+            scope,
+        ))
+        reverse = {
+            **missing_transport,
+            "source_ip": request["destination_ip"],
+            "source_port": request["destination_port"],
+            "destination_ip": request["source_ip"],
+            "destination_port": request["source_port"],
+        }
+        self.assertEqual(
+            worker._pcap_record_request_match(reverse, scope)["direction"],
+            1,
+        )
+
+    def test_request_scope_scalar_validation_and_long_configured_window(self) -> None:
+        request = {
+            "source_ip": "192.0.2.10",
+            "source_port": True,
+            "destination_ip": "198.51.100.20",
+            "destination_port": float("inf"),
+            "transport_protocol": "tcp",
+            "first_seen": "2026-07-24T00:00:00Z",
+            "last_seen": "2026-07-24T10:00:00Z",
+            "max_window_seconds": 7200,
+        }
+
+        scope = worker.pcap_evidence_scope(request)
+        compact_scope = builder._pcap_request_scope(request, scope)
+
+        self.assertIsNone(scope["source_port"])
+        self.assertIsNone(scope["destination_port"])
+        self.assertEqual(
+            scope["window_end_epoch"] - scope["window_start_epoch"],
+            7200,
+        )
+        self.assertEqual(scope["selection_anchor_epoch"], scope["window_end_epoch"])
+        self.assertEqual(compact_scope["window_start_epoch"], scope["window_start_epoch"])
+        self.assertEqual(compact_scope["selection_anchor_epoch"], scope["selection_anchor_epoch"])
+        self.assertIsNone(builder._pcap_scalar_port(1.5))
+        self.assertIsNone(builder._pcap_scalar_port(float("inf")))
+        self.assertIsNone(builder._pcap_timestamp_epoch(float("inf")))
+
+    def test_relevant_merge_deduplicates_pin_only_transport_metadata(self) -> None:
+        fact = {
+            "source": "zeek",
+            "record_type": "tls",
+            "timestamp_epoch": 100.0,
+            "source_ip": "192.0.2.10",
+            "source_port": 51000,
+            "destination_ip": "198.51.100.20",
+            "destination_port": 443,
+            "sni": "fixture.example",
+        }
+
+        merged = worker._merge_request_relevant_records(
+            [{**fact, "transport_scope_status": "unconfirmed"}],
+            [fact],
+        )
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["transport_scope_status"], "unconfirmed")
+
     def test_tshark_streams_every_packet_from_every_capture(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             captures = [Path(temp_name) / "one.pcap", Path(temp_name) / "two.pcap"]
@@ -197,6 +409,115 @@ class PcapAnalysisHardeningTest(unittest.TestCase):
         self.assertTrue(result["coverage"]["complete"])
         self.assertEqual(result["sampling"]["packets_seen"], 2500)
         self.assertEqual(result["sampling"]["packets_sampled"], worker.TSHARK_SAMPLE_LIMIT)
+
+    def test_tshark_pins_late_exact_dns_beyond_general_query_limit(self) -> None:
+        field_names = (
+            "frame_number", "timestamp_epoch", "frame_length", "protocol",
+            "ipv4_src", "ipv6_src", "ipv4_dst", "ipv6_dst",
+            "tcp_srcport", "tcp_dstport", "udp_srcport", "udp_dstport",
+            "dns_query", "dns_query_type", "dns_rcode", "dns_answer_ipv4", "dns_answer_ipv6", "dns_cname",
+            "tls_sni", "tls_handshake_version", "tls_supported_version", "tls_record_version",
+            "http_host", "http_uri", "http_user_agent", "http2_user_agent",
+            "icmp_type", "icmp_code", "icmpv6_type", "icmpv6_code",
+            "icmp_identifier", "icmp_sequence", "data_length", "data_payload",
+        )
+
+        def packet(**values):
+            return "\t".join(str(values.get(name, "")) for name in field_names)
+
+        request = {
+            "source_ip": "192.0.2.10",
+            "source_port": 53000,
+            "destination_ip": "198.51.100.53",
+            "destination_port": 53,
+            "transport_protocol": "udp",
+            "first_seen": "2026-07-24T18:00:00Z",
+            "last_seen": "2026-07-24T18:00:00Z",
+            "max_window_seconds": 120,
+        }
+        scope = worker.pcap_evidence_scope(request)
+        anchor = scope["selection_anchor_epoch"]
+        with tempfile.TemporaryDirectory() as temp_name:
+            capture = Path(temp_name) / "evidence.pcap"
+            capture.write_bytes(b"fixture")
+
+            def stream(command, on_line, **_kwargs):
+                frame = 0
+                for index in range(180):
+                    frame += 1
+                    on_line(packet(
+                        frame_number=frame,
+                        timestamp_epoch=anchor + (index % 50) / 10,
+                        frame_length=96,
+                        protocol="DNS",
+                        ipv4_src=request["source_ip"],
+                        ipv4_dst=request["destination_ip"],
+                        udp_srcport=40000 + index,
+                        udp_dstport=53,
+                        dns_query=f"decoy-{index}.example",
+                        dns_query_type=1,
+                        dns_rcode=0,
+                    ))
+                for offset in range(20, 0, -1):
+                    frame += 1
+                    on_line(packet(
+                        frame_number=frame,
+                        timestamp_epoch=anchor + offset,
+                        frame_length=96,
+                        protocol="DNS",
+                        ipv4_src=request["source_ip"],
+                        ipv4_dst=request["destination_ip"],
+                        udp_srcport=request["source_port"],
+                        udp_dstport=request["destination_port"],
+                        dns_query=f"exact-{offset}.example",
+                        dns_query_type=1,
+                        dns_rcode=0,
+                    ))
+                frame += 1
+                on_line(packet(
+                    frame_number=frame,
+                    timestamp_epoch=anchor,
+                    frame_length=96,
+                    protocol="DNS",
+                    ipv4_src=request["source_ip"],
+                    ipv4_dst=request["destination_ip"],
+                    udp_srcport=request["source_port"],
+                    udp_dstport=request["destination_port"],
+                    dns_query="alert-nearest-late.example",
+                    dns_query_type=1,
+                    dns_rcode=0,
+                ))
+                return {
+                    "ok": True,
+                    "returncode": 0,
+                    "stderr": "",
+                    "command": command,
+                    "line_count": frame,
+                    "stream_bytes": 1,
+                }
+
+            with (
+                mock.patch.object(worker, "tool_path", return_value="/usr/bin/tshark"),
+                mock.patch.object(worker, "stream_isolated_lines", side_effect=stream),
+            ):
+                result = worker.run_tshark(
+                    [capture],
+                    Path(temp_name) / "missing.mmdb",
+                    selected_scope=scope,
+                )
+
+        records = result["_local_query_index"]["dns_records"]
+        self.assertEqual(
+            result["sampling"]["request_relevant_records"]["dns"],
+            worker.REQUEST_RELEVANT_QUERY_INDEX_LIMIT,
+        )
+        self.assertEqual(
+            result["sampling"]["request_relevant_records_seen"]["dns"],
+            21,
+        )
+        self.assertLessEqual(len(records), worker.QUERY_INDEX_LIMIT)
+        self.assertEqual(records[0]["dns_query"], "alert-nearest-late.example")
+        self.assertEqual(records[0]["transport_scope_status"], "confirmed")
 
     def test_tshark_collects_dns_user_agents_tls_and_abnormal_icmp_in_one_pass(self) -> None:
         field_names = (
@@ -526,6 +847,11 @@ class PcapAnalysisHardeningTest(unittest.TestCase):
                         "icmp_anomalies": [{"count": 1, "frame_bytes": 512}],
                         "user_agents": [{"count": 2, "user_agent": "browser/1"}],
                         "tls_versions": [{"count": 3, "version": "TLS 1.3"}],
+                        "tls_records": [{
+                            "source_ip": "192.0.2.10",
+                            "destination_ip": "198.51.100.20",
+                            "transport_scope_status": "unconfirmed",
+                        }],
                         "geoip": [{"ip": "8.8.8.8", "country_iso_code": "US"}],
                     }
                 }
@@ -543,6 +869,14 @@ class PcapAnalysisHardeningTest(unittest.TestCase):
         )
 
         self.assertEqual([len(item["records"]) for item in result["results"]], [1, 1, 1, 1])
+        tls_result = queries.query_derived_pcap_evidence(
+            context,
+            [{"operation": "tls", "limit": 2}],
+        )
+        self.assertEqual(
+            tls_result["results"][0]["records"][0]["transport_scope_status"],
+            "unconfirmed",
+        )
 
     def test_hosted_transport_removes_packet_samples_and_local_capabilities(self) -> None:
         package = {

@@ -303,6 +303,135 @@ class PromptEvidenceHardeningTests(unittest.TestCase):
         self.assertFalse(compact["tshark"]["icmp_semantics"]["raw_payloads_included"])
         self.assertEqual(compact["detection_context"]["rule"]["sid"], "999999")
 
+    def test_compact_pcap_pins_late_exact_fleek_dns_event_before_truncation(self):
+        request_epoch = 1785627574.978117
+        decoys = [
+            {
+                "source": "zeek",
+                "record_type": "dns",
+                "timestamp_epoch": request_epoch + (index / 1000),
+                "source_ip": "10.77.7.222",
+                "destination_ip": "10.77.7.1",
+                "source_port": 40000 + index,
+                "destination_port": 53,
+                "transport": "udp",
+                "query": f"decoy-{index}.example",
+            }
+            for index in range(40)
+        ]
+        exact_query = {
+            "source": "zeek",
+            "record_type": "dns",
+            "timestamp_epoch": request_epoch,
+            "source_ip": "10.77.7.222",
+            "destination_ip": "10.77.7.1",
+            "source_port": 58567,
+            "destination_port": 53,
+            "transport": "udp",
+            "query": "fleek.co",
+        }
+        exact_response = {
+            "source": "tshark",
+            "record_type": "dns",
+            "timestamp_epoch": request_epoch + 0.012,
+            "source_ip": "10.77.7.1",
+            "destination_ip": "10.77.7.222",
+            "source_port": 53,
+            "destination_port": 58567,
+            "transport": "udp",
+            "dns_query": "fleek.co",
+        }
+        compact = builder.compact_pcap_analysis(
+            {
+                "request": {
+                    "request_id": "fleek-pcap-fixture",
+                    "first_seen": "2026-08-01  17:39:34.978-06:00",
+                    "last_seen": "2026-08-01  17:39:34.978-06:00",
+                    "source_ip": "10.77.7.222",
+                    "source_port": 58567,
+                    "destination_ip": "10.77.7.1",
+                    "destination_port": 53,
+                    "transport_protocol": "udp",
+                    "max_window_seconds": 120,
+                },
+                "zeek": {
+                    "_local_query_index": {
+                        "dns": [*decoys, exact_query, exact_response],
+                    }
+                },
+            }
+        )
+
+        prioritized = compact["_local_query_index"]["dns"]
+        self.assertEqual(prioritized[0], exact_query)
+        self.assertEqual(prioritized[1], exact_response)
+
+        package = {
+            "prior_analyses": [
+                {"id": index, "content": "x" * 1000}
+                for index in range(100)
+            ],
+            "pcap_evidence": {"parsed_evidence": [compact]},
+        }
+        compacted, output = builder.compact_package_to_budget(
+            package,
+            50_000,
+        )
+
+        self.assertLessEqual(len(output.encode("utf-8")), 50_000)
+        retained = compacted["pcap_evidence"]["parsed_evidence"][0][
+            "_local_query_index"
+        ]["dns"]
+        self.assertEqual(len(retained), 32)
+        self.assertEqual(retained[0], exact_query)
+        self.assertEqual(retained[1], exact_response)
+        self.assertNotIn("decoy-39.example", {item.get("query") for item in retained})
+
+    def test_pcap_relevance_uses_trailing_capture_window_for_long_group(self):
+        request = {
+            "first_seen": "2026-08-01T00:00:00Z",
+            "last_seen": "2026-08-01T10:00:00Z",
+            "source_ip": "10.77.7.222",
+            "source_port": 58567,
+            "destination_ip": "10.77.7.1",
+            "destination_port": 53,
+            "transport_protocol": "udp",
+            "max_window_seconds": 120,
+        }
+        last_epoch = builder._pcap_timestamp_epoch(request["last_seen"])
+        self.assertIsNotNone(last_epoch)
+        scope = builder._pcap_request_scope(request)
+        self.assertEqual(scope["window_start_epoch"], last_epoch - 120)
+        self.assertEqual(scope["window_end_epoch"], last_epoch)
+        self.assertEqual(scope["request_timestamp_epoch"], last_epoch)
+        self.assertEqual(scope["selection_anchor_epoch"], last_epoch)
+        self.assertEqual(scope["window_basis"], "bounded-pcap-request-window")
+
+        raw_group_midpoint = last_epoch - (5 * 60 * 60)
+        capture_near_alert = {
+            "timestamp_epoch": last_epoch - 5,
+            "source_ip": "10.77.7.222",
+            "source_port": 58567,
+            "destination_ip": "10.77.7.1",
+            "destination_port": 53,
+            "transport": "udp",
+            "query": "alert-window.example",
+        }
+        grouped_midpoint_decoy = {
+            **capture_near_alert,
+            "timestamp_epoch": raw_group_midpoint,
+            "query": "group-midpoint.example",
+        }
+
+        prioritized = builder._prioritize_pcap_query_records(
+            [grouped_midpoint_decoy, capture_near_alert],
+            scope,
+            2,
+        )
+
+        self.assertEqual(prioritized[0], capture_near_alert)
+        self.assertEqual(prioritized[1], grouped_midpoint_decoy)
+
     def test_prompt_budget_uses_lossless_compact_json_before_reducing_evidence(self):
         package = {
             "instructions": ["bounded-evidence"] * 20_000,

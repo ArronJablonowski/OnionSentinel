@@ -15,6 +15,19 @@ import ipaddress
 import re
 from pathlib import Path
 
+APP_DIR = Path(__file__).resolve().parent
+for _contract_dir in (
+    APP_DIR,
+    Path(__file__).resolve().parents[2] / "n8n" / "bin",
+):
+    if _contract_dir.is_dir() and str(_contract_dir) not in sys.path:
+        sys.path.insert(0, str(_contract_dir))
+
+from authorization_aggregate_contract import (  # noqa: E402
+    AuthorizationAggregateContractError,
+    validate_authorization_aggregate_request,
+    validate_authorization_aggregate_response,
+)
 from process_io import BoundedProcessError, run_bounded_command
 
 
@@ -113,6 +126,47 @@ UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
     re.IGNORECASE,
 )
+
+
+def validate_incident_authorization_aggregate_request(
+    request: dict,
+) -> dict | None:
+    """Revalidate the optional stored-policy request before the second hop."""
+    value = request.get("authorization_aggregate")
+    if value is None:
+        return None
+    validated = validate_authorization_aggregate_request(value)
+    anchor = request.get("anchor")
+    if (
+        not isinstance(anchor, dict)
+        or set(anchor) != {"index", "id"}
+        or validated["selected_alert_id"]
+        != f"{str(anchor['index']).strip()}:{str(anchor['id']).strip()}"
+    ):
+        raise AuthorizationAggregateContractError(
+            "authorization aggregate selected alert does not match request anchor"
+        )
+    return validated
+
+
+def validate_incident_authorization_aggregate_response(
+    response: dict,
+    request: dict,
+) -> None:
+    """Reject response substitution or aggregate provenance drift at the Relay."""
+    authorized = validate_incident_authorization_aggregate_request(request)
+    returned = response.get("authorization_aggregate")
+    if authorized is None:
+        if returned is not None:
+            raise AuthorizationAggregateContractError(
+                "unsolicited authorization aggregate response"
+            )
+        return
+    if returned is None:
+        raise AuthorizationAggregateContractError(
+            "authorization aggregate response is missing"
+        )
+    validate_authorization_aggregate_response(returned, authorized)
 
 
 def _parse_dhcp_timestamp(value: object) -> dt.datetime:
@@ -502,6 +556,16 @@ def main() -> int:
                 {"ok": False, "error": f"invalid software inventory request: {exc}"},
                 2,
             )
+    try:
+        validate_incident_authorization_aggregate_request(request)
+    except AuthorizationAggregateContractError:
+        return emit(
+            {
+                "ok": False,
+                "error": "invalid incident authorization aggregate request",
+            },
+            2,
+        )
     config_path = Path(os.environ.get("ONION_SENTINEL_INCIDENT_EVIDENCE_CONFIG", DEFAULT_CONFIG))
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -539,6 +603,16 @@ def main() -> int:
         return emit({"ok": False, "error": f"invalid Security Onion evidence response: {exc}"}, 4)
     if not isinstance(response, dict):
         return emit({"ok": False, "error": "Security Onion evidence response root was not an object"}, 4)
+    try:
+        validate_incident_authorization_aggregate_response(response, request)
+    except AuthorizationAggregateContractError:
+        return emit(
+            {
+                "ok": False,
+                "error": "Security Onion authorization aggregate response failed contract validation",
+            },
+            4,
+        )
     if is_dhcp_request and response.get("contract") != DHCP_DISCOVERY_CONTRACT:
         return emit({"ok": False, "error": "Security Onion DHCP response failed contract validation"}, 4)
     if is_software_request:

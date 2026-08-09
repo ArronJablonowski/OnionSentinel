@@ -401,6 +401,7 @@ cp "$REPO_DIR/n8n/bin/query-security-onion.py" "$STACK_DIR/bin/query-security-on
 cp "$REPO_DIR/n8n/bin/promote-dhcp-asset.py" "$STACK_DIR/bin/promote-dhcp-asset.py"
 cp "$REPO_DIR/n8n/bin/migrate-assets-to-postgres.py" "$STACK_DIR/bin/migrate-assets-to-postgres.py"
 cp "$REPO_DIR/n8n/bin/incident_evidence_contract.py" "$STACK_DIR/bin/incident_evidence_contract.py"
+cp "$REPO_DIR/n8n/bin/authorization_aggregate_contract.py" "$STACK_DIR/bin/authorization_aggregate_contract.py"
 cp "$REPO_DIR/n8n/bin/collect-incident-evidence.py" "$STACK_DIR/bin/collect-incident-evidence.py"
 cp "$REPO_DIR/n8n/bin/install-investigation-query-runtime.py" "$STACK_DIR/bin/install-investigation-query-runtime.py"
 # The Security Onion forced command and these three Mac files are one exact

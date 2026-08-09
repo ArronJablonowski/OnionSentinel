@@ -4748,6 +4748,204 @@ class AiModelRoutingTests(unittest.TestCase):
             "Runtime verdict checks found a material contradiction.",
         )
 
+    def test_authorized_activity_with_unknown_rule_intent_uses_safe_legacy_projection(
+        self,
+    ) -> None:
+        factors = {
+            "event_status": "observed",
+            "detection_validity": "unknown",
+            "activity_disposition": "authorized_benign",
+            "handling": "no_action",
+            "duplicate_of": None,
+        }
+
+        self.assertEqual(
+            self.runner.derive_legacy_detection_outcome(factors),
+            "informational_no_action",
+        )
+
+        prompt = self.complete_incident_prompt(
+            authorization_evidence={
+                "entries": [{
+                    "authorized": True,
+                    "source": "approved_change",
+                    "evidence_ref": "change:CHG-1234",
+                }],
+            },
+        )
+        response = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.92,
+                detection_outcome="true_positive_authorized_benign",
+                **factors,
+                incident_response_report=self.complete_incident_report(
+                    evidence_gaps=[],
+                ),
+            ),
+            prompt,
+        )
+
+        self.assertEqual(
+            response["detection_outcome"],
+            "informational_no_action",
+        )
+        for key, value in factors.items():
+            self.assertEqual(response[key], value)
+        validation = response["_verdict_validation"]
+        self.assertFalse(validation["material_contradiction"])
+        self.assertEqual(validation["contradictions"], [])
+        self.assertIn(
+            "legacy_projection_preserves_unknown_detection_validity",
+            validation["warnings"],
+        )
+        self.assertEqual(response["confidence"], "high")
+        self.assertEqual(response["confidence_score"], 0.92)
+        self.assertNotIn(
+            "material_verdict_contradiction",
+            response["_confidence_calibration"]["limiters"],
+        )
+        self.assertFalse(
+            response["_incident_response_report_validation"][
+                "narrative_reconciled"
+            ]
+        )
+
+    def test_unknown_rule_intent_caps_authorized_activity_without_false_contradiction(
+        self,
+    ) -> None:
+        prompt = self.complete_incident_prompt(
+            detection_validation={
+                "event_status": "observed",
+                "rule_intent_match": "unknown",
+            },
+            authorization_evidence={
+                "entries": [{
+                    "authorized": True,
+                    "source": "operator_assertion",
+                    "evidence_ref": "operator:authorized-test",
+                }],
+            },
+        )
+        response = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.94,
+                detection_outcome="true_positive_authorized_benign",
+                event_status="observed",
+                detection_validity="unknown",
+                activity_disposition="authorized_benign",
+                handling="no_action",
+                duplicate_of=None,
+                incident_response_report=self.complete_incident_report(
+                    evidence_gaps=[],
+                ),
+            ),
+            prompt,
+        )
+
+        self.assertEqual(response["detection_outcome"], "informational_no_action")
+        self.assertEqual(response["confidence"], "medium")
+        self.assertEqual(response["confidence_score"], 0.79)
+        limiters = response["_confidence_calibration"]["limiters"]
+        self.assertIn(
+            "deterministic_rule_intent_unknown_for_consequential_conclusion",
+            limiters,
+        )
+        self.assertNotIn("material_verdict_contradiction", limiters)
+
+    def test_completed_review_blocks_only_requested_controls_in_report_reconciliation(
+        self,
+    ) -> None:
+        prompt = self.complete_incident_prompt(
+            authorization_evidence={
+                "entries": [{
+                    "authorized": True,
+                    "source": "policy_exception",
+                    "evidence_ref": "policy:authorized-test",
+                }],
+            },
+        )
+        response = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.9,
+                detection_outcome="true_positive_authorized_benign",
+                event_status="observed",
+                detection_validity="unknown",
+                activity_disposition="authorized_benign",
+                handling="no_action",
+                duplicate_of=None,
+                incident_response_report=self.complete_incident_report(
+                    evidence_gaps=[],
+                ),
+            ),
+            prompt,
+        )
+        original_bluf = response["incident_response_report"]["executive_bluf"]
+
+        self.runner.apply_review_completed_automation_gate(
+            response,
+            reason="reviewer confidence remained below the automation threshold",
+        )
+        self.runner.reconcile_incident_response_report(response, prompt)
+
+        self.assertEqual(
+            response["final_disposition_status"],
+            "review_completed_not_authorized",
+        )
+        self.assertEqual(response["review_status"], "completed")
+        self.assertEqual(response["automation_status"], "blocked")
+        self.assertFalse(
+            response["_automation_controls"]["requested_controls"][
+                "containment"
+            ]
+        )
+        self.assertEqual(
+            response["incident_response_report"]["executive_bluf"],
+            original_bluf,
+        )
+        self.assertFalse(
+            response["_incident_response_report_validation"][
+                "narrative_reconciled"
+            ]
+        )
+
+        containment = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.9,
+                detection_outcome="true_positive_malicious",
+                event_status="observed",
+                detection_validity="matched_intent",
+                activity_disposition="malicious",
+                handling="contain",
+                duplicate_of=None,
+                incident_response_report=self.complete_incident_report(
+                    evidence_gaps=[],
+                ),
+            ),
+            self.complete_incident_prompt(),
+        )
+        self.runner.apply_review_completed_automation_gate(
+            containment,
+            reason="reviewer did not authorize containment",
+        )
+        self.runner.reconcile_incident_response_report(
+            containment,
+            self.complete_incident_prompt(),
+        )
+        self.assertTrue(
+            containment["_automation_controls"]["requested_controls"][
+                "containment"
+            ]
+        )
+        self.assertTrue(
+            containment["_incident_response_report_validation"][
+                "narrative_reconciled"
+            ]
+        )
+
     def test_confidence_calibration_uses_evidence_caps(self) -> None:
         uncited = self.runner.validate_response(self.complete_response(
             confidence="high",
@@ -5659,6 +5857,182 @@ class AiModelRoutingTests(unittest.TestCase):
         )
         self.assertEqual(response["handling"], "no_action")
         self.assertFalse(
+            response["_authorization_evidence_guard"]["override_applied"]
+        )
+
+    def test_incident_responder_accepts_selected_alert_campaign_authorization(
+        self,
+    ) -> None:
+        selected_alert_id = "logs-suricata.alerts-so:authorized-alert"
+        response = self.runner.apply_authorized_benign_evidence_guard(
+            self.complete_response(
+                detection_outcome="true_positive_authorized_benign",
+                event_status="observed",
+                detection_validity="matched_intent",
+                activity_disposition="authorized_benign",
+                handling="no_action",
+            ),
+            {
+                "agent_role": "incident-responder",
+                "alert": {
+                    "alert_id": selected_alert_id,
+                    "timestamp": "2026-07-31T22:31:13.715Z",
+                    "source_ip": "208.70.182.111",
+                    "source_port": 443,
+                    "destination_ip": "10.77.7.222",
+                    "destination_port": 57749,
+                    "transport_protocol": "tcp",
+                    "rule_id": "2029340",
+                },
+                "authorization_evidence": {
+                    "status": "operator_authorized",
+                    "selected_alert_id": selected_alert_id,
+                    "campaign_id": "campaign-authorized-scan",
+                    "policy_id": "policy-authorized-scan",
+                    "authorization": {
+                        "status": "operator_authorized",
+                        "authorized_by": "operator",
+                        "policy_id": "policy-authorized-scan",
+                        "provenance": "operator-confirmed-scan",
+                        "authorization_start": "2026-07-31T22:15:00Z",
+                        "authorization_end": "2026-08-05T05:59:59Z",
+                        "source_ips": [],
+                        "destination_ips": ["10.77.7.222"],
+                        "source_ports": [443, 8443],
+                        "destination_ports": [],
+                        "destination_port_ranges": [[49152, 65535]],
+                        "transport_protocols": ["tcp"],
+                        "rule_ids": ["2029340"],
+                    },
+                    "observations": [
+                        {"alert_id": selected_alert_id},
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(
+            response["detection_outcome"],
+            "true_positive_authorized_benign",
+        )
+        self.assertEqual(
+            response["activity_disposition"],
+            "authorized_benign",
+        )
+        self.assertEqual(response["handling"], "no_action")
+        self.assertFalse(
+            response["_authorization_evidence_guard"]["override_applied"]
+        )
+
+    def test_incident_responder_rejects_other_campaign_member_authorization(
+        self,
+    ) -> None:
+        response = self.runner.apply_authorized_benign_evidence_guard(
+            self.complete_response(
+                detection_outcome="true_positive_authorized_benign",
+                event_status="observed",
+                detection_validity="matched_intent",
+                activity_disposition="authorized_benign",
+                handling="no_action",
+            ),
+            {
+                "agent_role": "incident-responder",
+                "alert": {
+                    "alert_id": "selected-alert",
+                    "timestamp": "2026-07-31T22:31:13.715Z",
+                    "source_ip": "208.70.182.111",
+                    "source_port": 443,
+                    "destination_ip": "10.77.7.222",
+                    "destination_port": 57749,
+                    "transport_protocol": "tcp",
+                    "rule_id": "2029340",
+                },
+                "authorization_evidence": {
+                    "status": "operator_authorized",
+                    "campaign_id": "campaign-authorized-scan",
+                    "policy_id": "policy-authorized-scan",
+                    "authorization": {
+                        "status": "operator_authorized",
+                        "authorized_by": "operator",
+                        "policy_id": "policy-authorized-scan",
+                        "provenance": "operator-confirmed-scan",
+                        "authorization_start": "2026-07-31T22:15:00Z",
+                        "authorization_end": "2026-08-05T05:59:59Z",
+                        "source_ips": [],
+                        "destination_ips": ["10.77.7.222"],
+                        "source_ports": [443, 8443],
+                        "source_port_ranges": [],
+                        "destination_ports": [],
+                        "destination_port_ranges": [[49152, 65535]],
+                        "transport_protocols": ["tcp"],
+                        "rule_ids": ["2029340"],
+                    },
+                    "observations": [
+                        {"alert_id": "different-alert"},
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response["detection_outcome"], "inconclusive")
+        self.assertEqual(response["activity_disposition"], "benign")
+        self.assertTrue(
+            response["_authorization_evidence_guard"]["override_applied"]
+        )
+
+    def test_incident_responder_rejects_out_of_scope_campaign_tuple(
+        self,
+    ) -> None:
+        selected_alert_id = "logs-suricata.alerts-so:out-of-scope"
+        response = self.runner.apply_authorized_benign_evidence_guard(
+            self.complete_response(
+                detection_outcome="true_positive_authorized_benign",
+                event_status="observed",
+                detection_validity="matched_intent",
+                activity_disposition="authorized_benign",
+                handling="no_action",
+            ),
+            {
+                "agent_role": "incident-responder",
+                "alert": {
+                    "alert_id": selected_alert_id,
+                    "timestamp": "2026-07-31T22:31:13.715Z",
+                    "source_ip": "208.70.182.111",
+                    "source_port": 80,
+                    "destination_ip": "10.77.7.222",
+                    "destination_port": 57749,
+                    "transport_protocol": "tcp",
+                    "rule_id": "2029340",
+                },
+                "authorization_evidence": {
+                    "status": "operator_authorized",
+                    "selected_alert_id": selected_alert_id,
+                    "campaign_id": "campaign-authorized-scan",
+                    "policy_id": "policy-authorized-scan",
+                    "authorization": {
+                        "status": "operator_authorized",
+                        "authorized_by": "operator",
+                        "policy_id": "policy-authorized-scan",
+                        "provenance": "operator-confirmed-scan",
+                        "authorization_start": "2026-07-31T22:15:00Z",
+                        "authorization_end": "2026-08-05T05:59:59Z",
+                        "source_ips": [],
+                        "destination_ips": ["10.77.7.222"],
+                        "source_ports": [443, 8443],
+                        "source_port_ranges": [],
+                        "destination_ports": [],
+                        "destination_port_ranges": [[49152, 65535]],
+                        "transport_protocols": ["tcp"],
+                        "rule_ids": ["2029340"],
+                    },
+                    "observations": [{"alert_id": selected_alert_id}],
+                },
+            },
+        )
+
+        self.assertEqual(response["detection_outcome"], "inconclusive")
+        self.assertEqual(response["activity_disposition"], "benign")
+        self.assertTrue(
             response["_authorization_evidence_guard"]["override_applied"]
         )
 

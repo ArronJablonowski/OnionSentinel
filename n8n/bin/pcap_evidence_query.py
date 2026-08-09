@@ -139,6 +139,7 @@ FLOW_FILTERS = {
     "destination_port",
     "port",
     "transport",
+    "transport_scope_status",
     "protocol",
     "start_epoch",
     "end_epoch",
@@ -301,6 +302,7 @@ BASE_OUTPUT_FIELDS = {
     "source_port",
     "destination_port",
     "transport",
+    "transport_scope_status",
     "protocol",
 }
 OUTPUT_FIELDS_BY_OPERATION = {

@@ -1925,6 +1925,47 @@ def validate_frozen_cohort(
         connection.close()
 
 
+def validate_controlled_queue_is_quiescent(database_path: Path) -> None:
+    """Reject a frozen clone that still records an active AI worker lease.
+
+    The controlled alert-store permits only one exact unowned claim.  A
+    production snapshot can legitimately contain an unrelated processing row,
+    but that transient state has no worker behind it in the isolated clone and
+    would make every rehearsal member fail closed after dispatch.  Detect the
+    condition before the first request so the cohort remains wholly
+    unattempted and can be rebuilt from a quiescent snapshot.
+    """
+
+    connection = connect_read_only(database_path)
+    try:
+        rows = connection.execute(
+            """
+            SELECT id, job_type, dedupe_key
+            FROM durable_jobs
+            WHERE status = 'processing'
+              AND job_type IN (
+                'ai_analysis',
+                'incident_response_analysis'
+              )
+            ORDER BY id ASC
+            LIMIT 3
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+    if not rows:
+        return
+    identities = ", ".join(
+        f"{str(row['job_type'])}:{int(row['id'])}:"
+        f"{str(row['dedupe_key'])}"
+        for row in rows
+    )
+    raise CohortError(
+        "controlled queue requires a quiescent database snapshot with zero "
+        f"pre-existing processing AI/IR jobs; found {identities}"
+    )
+
+
 def validate_loopback_base_url(value: str) -> str:
     parsed = urllib.parse.urlsplit(str(value or "").strip())
     if (
@@ -1963,22 +2004,31 @@ def dashboard_post_json(
     payload: Mapping[str, Any],
     *,
     timeout: float,
+    evaluation_token: str = "",
 ) -> HttpResult:
+    token = str(evaluation_token or "").strip()
+    if token and not SHA256_RE.fullmatch(token):
+        raise CohortError(
+            "controlled evaluation token must be exactly 64 lowercase hex characters"
+        )
     body = canonical_bytes(payload)
     origin = urllib.parse.urlunsplit(
         (*urllib.parse.urlsplit(url)[:2], "", "", "")
     )
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Origin": origin,
+        "Sec-Fetch-Site": "same-origin",
+        "X-Onion-Sentinel-Request": "dashboard",
+    }
+    if token:
+        headers["X-Onion-Sentinel-Evaluation-Token"] = token
     request = urllib.request.Request(
         url,
         data=body,
         method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Origin": origin,
-            "Sec-Fetch-Site": "same-origin",
-            "X-Onion-Sentinel-Request": "dashboard",
-        },
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -2622,6 +2672,7 @@ def queue_cohort(
     timeout: float = 15.0,
     dry_run: bool = False,
     poster: Poster | None = None,
+    evaluation_token: str | None = None,
 ) -> dict[str, Any]:
     manifest = load_private_manifest(manifest_path)
     base_url = validate_loopback_base_url(base_url)
@@ -2637,6 +2688,7 @@ def queue_cohort(
             "ambiguous dispatch; refusing to send another request"
         )
     validate_frozen_cohort(database_path, manifest)
+    validate_controlled_queue_is_quiescent(database_path)
     dispatch_ids = [
         deterministic_dispatch_id(manifest, member)
         for member in manifest["members"]
@@ -2645,13 +2697,27 @@ def queue_cohort(
         raise CohortError("cohort members derived duplicate dispatch IDs")
     if dry_run:
         return manifest
+    token = str(
+        os.environ.get("ONION_SENTINEL_EVALUATION_TOKEN", "")
+        if evaluation_token is None
+        else evaluation_token
+    ).strip()
+    if token and not SHA256_RE.fullmatch(token):
+        raise CohortError(
+            "controlled evaluation token must be exactly 64 lowercase hex characters"
+        )
     for member, dispatch_id in zip(manifest["members"], dispatch_ids):
         member["dispatch"]["dispatch_id"] = dispatch_id
 
     def do_post(url: str, payload: Mapping[str, Any]) -> HttpResult:
         if poster is not None:
             return poster(url, payload)
-        return dashboard_post_json(url, payload, timeout=timeout)
+        return dashboard_post_json(
+            url,
+            payload,
+            timeout=timeout,
+            evaluation_token=token,
+        )
 
     manifest["state"] = "queueing"
     manifest["queue_started_at"] = utc_now()

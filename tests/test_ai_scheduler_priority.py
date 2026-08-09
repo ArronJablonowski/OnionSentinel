@@ -593,12 +593,13 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             controlled_runtime.parent.chmod(0o700)
             controlled_runtime.chmod(0o700)
         worker_root = controlled_runtime if controlled_evaluation else root
-        db_path = root / "alerts.sqlite3"
+        db_path = worker_root / "alerts.sqlite3"
         disk_conn = sqlite3.connect(db_path)
         try:
             self.conn.backup(disk_conn)
         finally:
             disk_conn.close()
+        db_path.chmod(0o600)
 
         settings_path = worker_root / "ai_model_settings.json"
         settings_path.write_text(
@@ -616,13 +617,49 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         detection_playbooks_path = worker_root / "detection_playbooks.json"
         detection_playbooks_path.write_text("{}\n", encoding="utf-8")
         detection_playbooks_path.chmod(0o600)
+        incident_evidence_config = worker_root / "incident-evidence.json"
+        incident_evidence_config.write_text("{}\n", encoding="utf-8")
+        incident_evidence_config.chmod(0o600)
+        live_osquery_config = worker_root / "live-osquery.json"
+        live_osquery_config.write_text(
+            '{"schema":"onion-sentinel-live-osquery-v1","enabled":false}\n',
+            encoding="utf-8",
+        )
+        live_osquery_config.chmod(0o600)
+        adjudicator_prompt = worker_root / "disagreement-adjudicator.md"
+        adjudicator_prompt.write_text(
+            "You are an independent adjudicator.\n",
+            encoding="utf-8",
+        )
+        adjudicator_prompt.chmod(0o600)
+        shared_memory_file = worker_root / "agent-memory" / "shared-agent-memory.md"
+        asset_inventory_file = worker_root / "asset-inventory.json"
+        for directory in (
+            worker_root / "rollups",
+            worker_root / "pcap-analysis",
+            worker_root / "agent-memory",
+        ):
+            directory.mkdir(mode=0o700, exist_ok=True)
+        for path, content in (
+            (shared_memory_file, "# Shared memory\n"),
+            (asset_inventory_file, "{}\n"),
+        ):
+            path.write_text(content, encoding="utf-8")
+            path.chmod(0o600)
         args = SimpleNamespace(
             db=db_path,
             prompt_dir=worker_root / "prompts",
             analysis_dir=worker_root / "analysis",
             pcap_analysis_dir=worker_root / "pcap-analysis",
             incident_evidence_dir=worker_root / "incident-evidence",
-            incident_evidence_config=root / "incident-evidence.json",
+            investigation_pivot_dir=worker_root / "investigation-pivots",
+            incident_evidence_config=incident_evidence_config,
+            live_osquery_config=live_osquery_config,
+            disagreement_adjudicator_prompt_file=adjudicator_prompt,
+            rollup_dir=worker_root / "rollups",
+            agent_memory_dir=worker_root / "agent-memory",
+            shared_memory_file=shared_memory_file,
+            asset_inventory_file=asset_inventory_file,
             ai_settings_file=settings_path,
             investigation_harness_policy=harness_policy_path,
             detection_playbooks=detection_playbooks_path,
@@ -1727,12 +1764,20 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             encoding="utf-8",
         )
         args = SimpleNamespace(
+            db=Path(self.tempdir.name) / "alerts.sqlite3",
             prompt_dir=Path(self.tempdir.name) / "prompts",
+            rollup_dir=Path(self.tempdir.name) / "rollups",
             related_limit=8,
             correlation_limit=8,
             correlation_min_score=15,
             include_tests=False,
             analysis_dir=Path(self.tempdir.name) / "analysis",
+            pcap_analysis_dir=Path(self.tempdir.name) / "pcap-analysis",
+            agent_memory_dir=Path(self.tempdir.name) / "agent-memory",
+            shared_memory_file=(
+                Path(self.tempdir.name) / "agent-memory" / "shared-agent-memory.md"
+            ),
+            asset_inventory_file=Path(self.tempdir.name) / "asset-inventory.json",
             timeout=600,
             max_prompt_bytes=1024 * 1024,
             alert_store_url="http://127.0.0.1:8787",
@@ -1792,6 +1837,22 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                 builder_command.index("--detection-playbooks") + 1
             ],
             str(args.detection_playbooks),
+        )
+        self.assertEqual(
+            builder_command[builder_command.index("--db") + 1],
+            str(args.db),
+        )
+        self.assertEqual(
+            builder_command[
+                builder_command.index("--pcap-analysis-dir") + 1
+            ],
+            str(args.pcap_analysis_dir),
+        )
+        self.assertEqual(
+            builder_command[
+                builder_command.index("--agent-memory-file") + 1
+            ],
+            str(args.agent_memory_dir / "soc-analyst-memory.md"),
         )
         prompt_path.write_bytes(
             b"x"
@@ -1900,12 +1961,19 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         prompt_path.parent.mkdir()
         prompt_path.write_text("{}", encoding="utf-8")
         args = SimpleNamespace(
+            db=root / "alerts.sqlite3",
             prompt_dir=prompt_path.parent,
+            rollup_dir=root / "rollups",
             related_limit=8,
             correlation_limit=8,
             correlation_min_score=15,
             max_prompt_bytes=1024 * 1024,
             ai_settings_file=settings_path,
+            analysis_dir=root / "analysis",
+            pcap_analysis_dir=root / "pcap-analysis",
+            agent_memory_dir=root / "agent-memory",
+            shared_memory_file=root / "agent-memory" / "shared-agent-memory.md",
+            asset_inventory_file=root / "asset-inventory.json",
             detection_playbooks=root / "detection-playbooks.json",
             include_tests=False,
         )

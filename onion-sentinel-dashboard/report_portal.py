@@ -65,7 +65,12 @@ SCAN_ROOTS = [
 LAST_UPDATED_FILE = HOME / "report_portal" / ".last_updated"
 MACOS_UPDATE_STATUS_FILE = HOME / "report_portal" / ".macos_update_status.json"
 SOC_ALERT_STATUS_FILE = HOME / "report_portal" / ".soc_alert_status.json"
-SOC_ALERT_STORE_DB = HOME / "n8n-local" / "alert_store_data" / "alerts.sqlite3"
+SOC_ALERT_STORE_DB = Path(
+    os.environ.get(
+        "SOC_ALERT_STORE_DB",
+        HOME / "n8n-local" / "alert_store_data" / "alerts.sqlite3",
+    )
+)
 SOC_ALERT_STORE_API_URL = os.environ.get("SOC_ALERT_STORE_API_URL", "http://127.0.0.1:8787").rstrip("/")
 SOC_ALERT_STORE_DIRECT_WRITE_ALLOWED = (
     str(os.environ.get("SOC_ALERT_STORE_DIRECT_WRITE_ALLOWED") or "").strip()
@@ -10720,6 +10725,13 @@ def _soc_derive_legacy_detection_outcome(
         return "false_positive_logic_rule"
     if validity == "intel_error":
         return "false_positive_bad_intel_ioc"
+    if (
+        event_status == "observed"
+        and validity == "unknown"
+        and disposition == "authorized_benign"
+        and handling == "no_action"
+    ):
+        return "informational_no_action"
     if validity == "matched_intent" and event_status == "observed":
         if disposition == "malicious":
             return "true_positive_malicious"

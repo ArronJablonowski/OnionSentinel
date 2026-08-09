@@ -915,9 +915,18 @@ def main() -> None:
         try:
             dashboard_metadata = dashboard_root.lstat()
             resolved_dashboard_root = dashboard_root.resolve(strict=True)
+            alert_database = runtime.SOC_ALERT_STORE_DB.expanduser()
+            alert_database_metadata = alert_database.lstat()
+            resolved_alert_database = alert_database.resolve(strict=True)
+            resolved_alert_database.relative_to(resolved_dashboard_root)
         except OSError as exc:
             raise SystemExit(
                 f"controlled evaluation dashboard root is unsafe: {exc}"
+            ) from exc
+        except ValueError as exc:
+            raise SystemExit(
+                "controlled evaluation alert database must stay inside the "
+                "dashboard runtime"
             ) from exc
         alert_store_origin = urlparse(runtime.SOC_ALERT_STORE_API_URL)
         if (
@@ -933,11 +942,20 @@ def main() -> None:
             or resolved_dashboard_root != dashboard_root
             or dashboard_root.is_symlink()
             or not dashboard_root.is_dir()
+            or not alert_database.is_absolute()
+            or resolved_alert_database != alert_database
+            or alert_database.is_symlink()
+            or not alert_database.is_file()
             or (
                 hasattr(os, "getuid")
                 and dashboard_metadata.st_uid != os.getuid()
             )
+            or (
+                hasattr(os, "getuid")
+                and alert_database_metadata.st_uid != os.getuid()
+            )
             or dashboard_metadata.st_mode & 0o022
+            or alert_database_metadata.st_mode & 0o077
             or alert_store_origin.scheme != "http"
             or alert_store_origin.hostname != "127.0.0.1"
             or alert_store_origin.port is None
@@ -951,7 +969,8 @@ def main() -> None:
         ):
             raise SystemExit(
                 "controlled evaluation requires owner-only runtime content, "
-                "loopback listeners, and an exact release ID"
+                "an isolated alert database, loopback listeners, and an "
+                "exact release ID"
             )
     configure_runtime_paths(args.dashboard_root)
     if not CONTROLLED_EVALUATION_MODE:
