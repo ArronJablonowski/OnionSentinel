@@ -19,17 +19,17 @@ function createDurableJobRecovery({
   })) {
     if (typeof value !== 'function') throw new TypeError(`${name} must be a function`);
   }
-  if (!durableJobs || typeof durableJobs.recoverExpired !== 'function') {
-    throw new TypeError('durableJobs.recoverExpired must be a function');
-  }
+  if (typeof durableJobs !== 'function') throw new TypeError('durableJobs must be a function');
   let active = false;
 
   async function recover() {
     if (active) return;
+    const queue = durableJobs();
+    if (!queue || typeof queue.recoverExpired !== 'function') return;
     active = true;
     try {
       const summary = await withWriteGate(() => withTransaction(async () => {
-        const recovered = await durableJobs.recoverExpired();
+        const recovered = await queue.recoverExpired();
         recovered.reanalysis_attempts = await reconcileIncidentAttempts();
         if (recovered.job_types?.ai_analysis || recovered.job_types?.incident_response_analysis) {
           recovered.authorized_activity = await reconcileAuthorizedActivity();

@@ -10,11 +10,11 @@ function harness(summary, {attempts = 0, authorized = {reconciled: 1}} = {}) {
   const blocked = new Promise((resolve) => { release = resolve; });
   let blockRecovery = false;
   const owner = createDurableJobRecovery({
-    durableJobs: {recoverExpired: async () => {
+    durableJobs: () => ({recoverExpired: async () => {
       calls.push('recover');
       if (blockRecovery) await blocked;
       return structuredClone(summary);
-    }},
+    }}),
     withWriteGate: async (task) => { calls.push('gate'); return task(); },
     withTransaction: async (task) => { calls.push('transaction'); return task(); },
     reconcileIncidentAttempts: async () => { calls.push('attempts'); return attempts; },
@@ -68,7 +68,7 @@ test('reentrancy guard drops an overlapping scheduler tick and resets afterward'
 test('failure releases the reentrancy guard for the next recovery tick', async () => {
   let attempts = 0;
   const owner = createDurableJobRecovery({
-    durableJobs: {recoverExpired: async () => { attempts += 1; throw new Error('failed'); }},
+    durableJobs: () => ({recoverExpired: async () => { attempts += 1; throw new Error('failed'); }}),
     withWriteGate: (task) => task(), withTransaction: (task) => task(),
     reconcileIncidentAttempts: async () => 0, reconcileAuthorizedActivity: async () => ({}),
     nowUtc: () => '', warn: () => {}, signalAiWorkers: async () => {},

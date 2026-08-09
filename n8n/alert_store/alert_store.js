@@ -39,6 +39,7 @@ const {createHealthService} = require('./services/health_service');
 const {createAiAnalysisAcceptance} = require('./services/ai_analysis_acceptance');
 const {createControlledJobTransition} = require('./services/controlled_job_transition');
 const {createControlledResultAdmission} = require('./services/controlled_result_admission');
+const {createDurableJobRecovery} = require('./services/durable_job_recovery');
 const {createIncidentAnalysisCompletion} = require('./services/incident_analysis_completion');
 const {createIncidentReanalysisBindingService} = require('./services/incident_reanalysis_binding');
 const {createHealthRoutes} = require('./routes/health_routes');
@@ -1088,7 +1089,6 @@ const enrichmentScheduler = createProviderScheduler({
 });
 let enrichmentDrainActive = false;
 let n8nPostCommitDrainActive = false;
-let durableJobRecoveryActive = false;
 let durableJobs;
 let postgresShadowOutbox;
 let postgresShadowProjector;
@@ -3914,34 +3914,7 @@ async function transitionDurableJobStatus(
 }
 
 async function recoverExpiredDurableJobs() {
-  if (durableJobRecoveryActive || !durableJobs) return;
-  durableJobRecoveryActive = true;
-  try {
-    const summary = await withSqliteWriteGate(() => withImmediateTransaction(async () => {
-      const recovered = await durableJobs.recoverExpired();
-      recovered.reanalysis_attempts = await reconcileRecoveredIncidentReanalysisAttempts();
-      if (
-        recovered.job_types?.ai_analysis
-        || recovered.job_types?.incident_response_analysis
-      ) {
-        // A lease can expire after the startup campaign pass (for example,
-        // when a controlled deployment interrupts a worker). Reapply campaign
-        // admission before signaling workers so a recovered duplicate cannot
-        // escape the same coalescing policy that governs new work.
-        recovered.authorized_activity = await reconcileAuthorizedActivityBacklog();
-      }
-      return recovered;
-    }));
-    if (!summary.recovered && !summary.failed && !summary.reanalysis_attempts) return;
-    console.warn(`${nowUtc()} durable job lease recovery: ${JSON.stringify(summary)}`);
-    if (summary.job_types.ai_analysis || summary.job_types.incident_response_analysis) {
-      void signalAiWorkers('ai-lease-recovered');
-    }
-    if (summary.job_types.public_enrichment) void drainEnrichmentJobs();
-    if (summary.job_types.n8n_post_commit) void drainN8nPostCommitJobs();
-  } finally {
-    durableJobRecoveryActive = false;
-  }
+  return durableJobRecovery.recover();
 }
 
 const cohortIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$/;
@@ -7981,6 +7954,18 @@ const controlledResultAdmissionAuthority = createControlledResultAdmission({
   runtimeReleaseId: runtimeReleaseIdValue,
   incidentReanalysisAttemptId,
   retireLease: controlledJobTransitionAuthority.retireLease,
+});
+const durableJobRecovery = createDurableJobRecovery({
+  durableJobs: () => durableJobs,
+  withWriteGate: withSqliteWriteGate,
+  withTransaction: withImmediateTransaction,
+  reconcileIncidentAttempts: reconcileRecoveredIncidentReanalysisAttempts,
+  reconcileAuthorizedActivity: reconcileAuthorizedActivityBacklog,
+  nowUtc,
+  warn: (...args) => console.warn(...args),
+  signalAiWorkers,
+  drainEnrichmentJobs,
+  drainPostCommitJobs: drainN8nPostCommitJobs,
 });
 
 async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppression, campaign = null) {
