@@ -1616,6 +1616,25 @@ def _reporting_incident():
     return incident
 
 
+def _reporting_live_osquery():
+    _provider_routing()
+    from onion_sentinel.analysis.reporting import live_osquery
+    return live_osquery
+
+
+def _reporting_live_osquery_policy():
+    return _reporting_live_osquery().Policy(
+        support_schema="onion-sentinel-live-osquery-support-v1",
+    )
+
+
+def _reporting_live_osquery_dependencies():
+    return _reporting_live_osquery().Dependencies(
+        bounded_text=bounded_text,
+        safe_nonnegative_int=safe_nonnegative_int,
+    )
+
+
 def _reporting_markdown():
     _provider_routing()
     from onion_sentinel.analysis.reporting import markdown
@@ -2088,6 +2107,32 @@ def _query_endpoint():
     _provider_routing()
     from onion_sentinel.analysis.query import endpoint
     return endpoint
+
+
+def _query_live_endpoint():
+    _provider_routing()
+    from onion_sentinel.analysis.query import live_endpoint
+    return live_endpoint
+
+
+def _query_live_endpoint_policy():
+    return _query_live_endpoint().Policy(
+        schema=LIVE_OSQUERY_SCHEMA,
+        support_schema="onion-sentinel-live-osquery-support-v1",
+        maximum_rounds=MAX_INVESTIGATION_QUERY_ROUNDS,
+        maximum_queries=MAX_INVESTIGATION_QUERIES_TOTAL,
+    )
+
+
+def _query_live_endpoint_dependencies():
+    return _query_live_endpoint().Dependencies(
+        text=_query_text,
+        normalize_query=normalize_live_osquery_query,
+        now=project_now,
+        client_error=LiveOsqueryClientError,
+    )
+
+
 def _query_derived_policy():
     module = _query_derived()
     return module.Policy(
@@ -4569,62 +4614,8 @@ def _derived_evidence_source_digest(pcap_context: dict[str, Any]) -> str:
 def _trusted_live_osquery_case_observables(
     prompt_package: dict[str, Any],
 ) -> dict[str, set[str]]:
-    """Return only collector-owned observables authorized for this case."""
-    import ipaddress
-
-    values: dict[str, set[str]] = {
-        "ips": set(),
-        "hosts": set(),
-        "domains": set(),
-        "users": set(),
-        "ports": set(),
-    }
-    local = prompt_package.get("_local_investigation_query_context")
-    if not isinstance(local, dict):
-        return values
-    permitted = local.get("permitted_observables")
-    if isinstance(permitted, dict):
-        for key in ("ips", "hosts", "domains", "users"):
-            raw_values = permitted.get(key)
-            for raw in raw_values if isinstance(raw_values, list) else []:
-                text = str(raw or "").strip().rstrip(".")
-                if not text:
-                    continue
-                if key == "ips":
-                    try:
-                        text = str(ipaddress.ip_address(text))
-                    except ValueError:
-                        continue
-                else:
-                    text = text.lower()
-                values[key].add(text)
-    tuples = local.get("permitted_event_tuples")
-    for entry in tuples if isinstance(tuples, list) else []:
-        event_tuple = (
-            entry.get("event_tuple")
-            if isinstance(entry, dict)
-            else None
-        )
-        if not isinstance(event_tuple, dict):
-            continue
-        for field in ("source_ip", "destination_ip"):
-            try:
-                values["ips"].add(
-                    str(ipaddress.ip_address(str(event_tuple.get(field)).strip()))
-                )
-            except ValueError:
-                pass
-        for field in ("source_port", "destination_port"):
-            raw_port = event_tuple.get(field)
-            if isinstance(raw_port, bool) or raw_port in (None, ""):
-                continue
-            try:
-                port = int(raw_port)
-            except (TypeError, ValueError):
-                continue
-            if 0 <= port <= 65535:
-                values["ports"].add(str(port))
-    return values
+    """Compatibility delegate for collector-owned case observables."""
+    return _query_live_endpoint().authorized_observables(prompt_package)
 
 
 def _live_osquery_target_bound_to_case(
@@ -4632,26 +4623,12 @@ def _live_osquery_target_bound_to_case(
     target_alias: Any,
     config: dict[str, Any],
 ) -> bool:
-    """Require the opaque target alias to match this alert's trusted asset."""
-    alias = _query_text(target_alias, 64).lower()
-    bindings = config.get("target_bindings")
-    binding = bindings.get(alias) if isinstance(bindings, dict) else None
-    if not isinstance(binding, dict):
-        return False
-    observables = _trusted_live_osquery_case_observables(prompt_package)
-    bound_ips = {
-        str(item).strip()
-        for item in binding.get("ips", [])
-        if str(item).strip()
-    }
-    bound_hosts = {
-        str(item).strip().lower().rstrip(".")
-        for item in binding.get("hosts", [])
-        if str(item).strip()
-    }
-    return bool(
-        bound_ips.intersection(observables["ips"])
-        or bound_hosts.intersection(observables["hosts"])
+    """Compatibility delegate for trusted target binding."""
+    return _query_live_endpoint().target_bound(
+        prompt_package,
+        target_alias,
+        config,
+        dependencies=_query_live_endpoint_dependencies(),
     )
 
 
@@ -4660,86 +4637,14 @@ def _live_osquery_support_bindings(
     result: dict[str, Any],
     config: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Bind positive rows to trusted case observables without copying values."""
-    if not _live_osquery_target_bound_to_case(
+    """Compatibility delegate for positive endpoint evidence bindings."""
+    return _query_live_endpoint().support_bindings(
         prompt_package,
-        result.get("target_alias"),
+        result,
         config,
-    ):
-        return []
-    query = str(result.get("query") or "")
-    match = re.search(
-        r"\bfrom\s+([A-Za-z_][A-Za-z0-9_]*)",
-        query,
-        re.IGNORECASE,
+        policy=_query_live_endpoint_policy(),
+        dependencies=_query_live_endpoint_dependencies(),
     )
-    table = match.group(1).lower() if match else ""
-    column_kinds = {
-        "remote_address": "ips",
-        "local_address": "ips",
-        "address": "ips",
-        "source_ip": "ips",
-        "destination_ip": "ips",
-        "remote_port": "ports",
-        "local_port": "ports",
-        "port": "ports",
-        "hostname": "hosts",
-        "host": "hosts",
-        "domain": "domains",
-        "query": "domains",
-        "username": "users",
-        "user": "users",
-    }
-    table_kinds = {
-        "process_open_sockets": {"ips", "ports"},
-        "listening_ports": {"ips", "ports"},
-        "logged_in_users": {"users"},
-        "users": {"users"},
-    }
-    permitted_kinds = table_kinds.get(table, set())
-    if not permitted_kinds:
-        return []
-    observables = _trusted_live_osquery_case_observables(prompt_package)
-    bindings: list[dict[str, Any]] = []
-    rows = result.get("rows")
-    for row_index, row in enumerate(rows if isinstance(rows, list) else []):
-        if not isinstance(row, dict):
-            continue
-        for raw_column, raw_value in row.items():
-            column = str(raw_column or "").strip().lower()
-            kind = column_kinds.get(column)
-            if kind not in permitted_kinds:
-                continue
-            value = str(raw_value or "").strip().rstrip(".")
-            if kind in {"hosts", "domains", "users"}:
-                value = value.lower()
-            if value not in observables[kind]:
-                continue
-            bindings.append(
-                {
-                    "schema": "onion-sentinel-live-osquery-support-v1",
-                    "target_alias": _query_text(
-                        result.get("target_alias"),
-                        64,
-                    ),
-                    "query_digest": _query_text(
-                        result.get("query_digest"),
-                        64,
-                    ),
-                    "table": table,
-                    "row_index": row_index,
-                    "column": column,
-                    "observable_kind": kind[:-1],
-                    "observable_digest": hashlib.sha256(
-                        f"{kind}\0{value}".encode("utf-8")
-                    ).hexdigest(),
-                    "source": "trusted-investigation-context",
-                    "temporal_scope": "collection_snapshot",
-                }
-            )
-            if len(bindings) >= 16:
-                return bindings
-    return bindings
 
 
 def _append_live_osquery_audit_batch(
@@ -4754,119 +4659,32 @@ def _append_live_osquery_audit_batch(
     control_plane_write_status: str,
     collection_error: str = "",
 ) -> None:
-    """Append one runtime-owned endpoint attempt to the private final audit."""
-    key = "_live_osquery_evidence_accumulator"
-    current = prompt_package.get(key)
-    if current is None:
-        current = {
-            "schema": LIVE_OSQUERY_SCHEMA,
-            "case_id": case_id,
-            "generated_at": "",
-            "read_only": True,
-            "control_plane_writes": False,
-            "control_plane_write_status": "none",
-            "complete": True,
-            "partial": False,
-            "collection_error": "",
-            "batches": [],
-            "results": [],
-        }
-        prompt_package[key] = current
-    if (
-        not isinstance(current, dict)
-        or current.get("schema") != LIVE_OSQUERY_SCHEMA
-        or current.get("case_id") != case_id
-        or current.get("read_only") is not True
-        or not isinstance(current.get("batches"), list)
-        or not isinstance(current.get("results"), list)
-    ):
-        raise LiveOsqueryClientError(
-            "existing live OSQuery evidence accumulator is invalid"
-        )
-    if len(current["batches"]) >= MAX_INVESTIGATION_QUERY_ROUNDS:
-        raise LiveOsqueryClientError(
-            "live OSQuery evidence accumulator exceeded the round limit"
-        )
-    batch_results = copy.deepcopy(results)
-    if (
-        len(current["results"]) + len(batch_results)
-        > MAX_INVESTIGATION_QUERIES_TOTAL
-    ):
-        raise LiveOsqueryClientError(
-            "live OSQuery evidence accumulator exceeded the query limit"
-        )
-    result_start = len(current["results"])
-    current["results"].extend(batch_results)
-    current["batches"].append(
-        {
-            "batch": len(current["batches"]) + 1,
-            "generated_at": _query_text(generated_at, 100),
-            "complete": complete is True,
-            "partial": partial is True,
-            "validated": validated is True,
-            "collection_error": _query_text(collection_error, 1000),
-            "result_start": result_start,
-            "result_count": len(batch_results),
-        }
+    """Compatibility delegate for the private endpoint evidence accumulator."""
+    _query_live_endpoint().append_batch(
+        prompt_package,
+        case_id=case_id,
+        generated_at=generated_at,
+        results=results,
+        complete=complete,
+        partial=partial,
+        validated=validated,
+        control_plane_write_status=control_plane_write_status,
+        collection_error=collection_error,
+        policy=_query_live_endpoint_policy(),
+        dependencies=_query_live_endpoint_dependencies(),
     )
-    current["generated_at"] = _query_text(generated_at, 100)
-    if control_plane_write_status not in {"none", "possible", "confirmed"}:
-        raise LiveOsqueryClientError(
-            "invalid live OSQuery control-plane write status"
-        )
-    current_status = str(
-        current.get("control_plane_write_status") or "none"
-    )
-    status_rank = {"none": 0, "possible": 1, "confirmed": 2}
-    if status_rank[control_plane_write_status] > status_rank.get(
-        current_status,
-        0,
-    ):
-        current["control_plane_write_status"] = control_plane_write_status
-    current["control_plane_writes"] = (
-        current.get("control_plane_write_status") != "none"
-    )
-    current["complete"] = all(
-        item.get("complete") is True and item.get("validated") is True
-        for item in current["batches"]
-        if isinstance(item, dict)
-    )
-    current["partial"] = not current["complete"]
-    errors = [
-        _query_text(item.get("collection_error"), 1000)
-        for item in current["batches"]
-        if isinstance(item, dict) and item.get("collection_error")
-    ]
-    current["collection_error"] = "; ".join(errors)[-2000:]
 
 
 def accumulate_live_osquery_evidence(
     prompt_package: dict[str, Any],
     evidence: dict[str, Any],
 ) -> None:
-    """Retain a collector-validated endpoint evidence batch for the final audit."""
-    if (
-        evidence.get("schema") != LIVE_OSQUERY_SCHEMA
-        or evidence.get("read_only") is not True
-        or not isinstance(evidence.get("results"), list)
-    ):
-        raise LiveOsqueryClientError(
-            "live OSQuery evidence accumulator received an invalid artifact"
-        )
-    case_id = _query_text(evidence.get("case_id"), 160)
-    if not case_id:
-        raise LiveOsqueryClientError(
-            "live OSQuery evidence accumulator received no case identity"
-        )
-    _append_live_osquery_audit_batch(
+    """Compatibility delegate for collector-validated endpoint evidence."""
+    _query_live_endpoint().accumulate_evidence(
         prompt_package,
-        case_id=case_id,
-        generated_at=_query_text(evidence.get("generated_at"), 100),
-        results=evidence["results"],
-        complete=evidence.get("complete") is True,
-        partial=evidence.get("partial") is True,
-        validated=True,
-        control_plane_write_status="confirmed",
+        evidence,
+        policy=_query_live_endpoint_policy(),
+        dependencies=_query_live_endpoint_dependencies(),
     )
 
 
@@ -4878,36 +4696,15 @@ def accumulate_live_osquery_failure(
     error: str,
     dispatch_possible: bool,
 ) -> None:
-    """Record an attempted collector batch that failed before validation."""
-    failure_results: list[dict[str, Any]] = []
-    for request in requests:
-        query = normalize_live_osquery_query(request.get("query"))
-        failure_results.append(
-            {
-                "target_alias": _query_text(request.get("target_alias"), 64),
-                "query": query,
-                "purpose": _query_text(request.get("purpose"), 500),
-                "query_digest": hashlib.sha256(query.encode("utf-8")).hexdigest(),
-                "status": "error",
-                "rows": [],
-                "total_rows": 0,
-                "truncated": False,
-                "duration_ms": 0,
-                "error": _query_text(error, 1000),
-            }
-        )
-    _append_live_osquery_audit_batch(
+    """Compatibility delegate for failed endpoint collection attempts."""
+    _query_live_endpoint().accumulate_failure(
         prompt_package,
         case_id=case_id,
-        generated_at=project_now(),
-        results=failure_results,
-        complete=False,
-        partial=True,
-        validated=False,
-        control_plane_write_status=(
-            "possible" if dispatch_possible else "none"
-        ),
-        collection_error=error,
+        requests=requests,
+        error=error,
+        dispatch_possible=dispatch_possible,
+        policy=_query_live_endpoint_policy(),
+        dependencies=_query_live_endpoint_dependencies(),
     )
 
 
@@ -7838,131 +7635,12 @@ def incident_osquery_audit(prompt_package: dict[str, Any]) -> dict[str, Any]:
 
 
 def incident_live_osquery_audit(prompt_package: dict[str, Any]) -> dict[str, Any]:
-    """Copy endpoint live-query provenance from the validated collector artifact."""
-    evidence = prompt_package.get("_live_osquery_evidence_accumulator")
-    if not isinstance(evidence, dict):
-        evidence = prompt_package.get("live_osquery_evidence")
-    if not isinstance(evidence, dict):
-        return {
-            "trusted_source": "restricted-elastic-osquery-manager-wrapper",
-            "complete": False,
-            "read_only": True,
-            "queries": [],
-            "error": "No endpoint live-host OSQuery batch was requested.",
-        }
-    queries: list[dict[str, Any]] = []
-    preview_rows_remaining = 100
-    preview_bytes_remaining = 256 * 1024
-    preview_truncated = False
-    for result in evidence.get("results", []) if isinstance(evidence.get("results"), list) else []:
-        if not isinstance(result, dict):
-            continue
-        rows: list[dict[str, str]] = []
-        source_rows = (
-            result.get("rows")
-            if isinstance(result.get("rows"), list)
-            else []
-        )
-        query_preview_truncated = False
-        for raw_row in source_rows:
-            if not isinstance(raw_row, dict):
-                continue
-            bounded_row = {
-                bounded_text(key, 128): bounded_text(value, 2000)
-                for key, value in list(raw_row.items())[:64]
-            }
-            row_bytes = len(
-                json.dumps(
-                    bounded_row,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            )
-            if (
-                len(rows) >= 25
-                or preview_rows_remaining <= 0
-                or row_bytes > preview_bytes_remaining
-            ):
-                query_preview_truncated = True
-                preview_truncated = True
-                break
-            rows.append(bounded_row)
-            preview_rows_remaining -= 1
-            preview_bytes_remaining -= row_bytes
-        if len(rows) < len(source_rows):
-            query_preview_truncated = True
-            preview_truncated = True
-        support_bindings = (
-            result.get("support_bindings")
-            if isinstance(result.get("support_bindings"), list)
-            else []
-        )
-        queries.append({
-            "target_alias": bounded_text(result.get("target_alias"), 64),
-            "status": bounded_text(result.get("status"), 40),
-            "purpose": bounded_text(result.get("purpose"), 500),
-            "query_digest": bounded_text(result.get("query_digest"), 128),
-            "query": bounded_text(result.get("query"), 4096),
-            "total_rows": safe_nonnegative_int(result.get("total_rows")),
-            "returned_rows": len(
-                result.get("rows")
-                if isinstance(result.get("rows"), list)
-                else []
-            ),
-            "truncated": bool(result.get("truncated")),
-            "duration_ms": safe_nonnegative_int(result.get("duration_ms")),
-            "rows_preview": rows,
-            "rows_preview_truncated": query_preview_truncated,
-            "support_binding_count": len(
-                [
-                    item
-                    for item in support_bindings
-                    if isinstance(item, dict)
-                    and item.get("schema")
-                    == "onion-sentinel-live-osquery-support-v1"
-                ]
-            ),
-            "error": bounded_text(result.get("error"), 1000),
-        })
-    batches = (
-        evidence.get("batches")
-        if isinstance(evidence.get("batches"), list)
-        else []
+    """Compatibility delegate for bounded endpoint audit projection."""
+    return _reporting_live_osquery().audit(
+        prompt_package,
+        policy=_reporting_live_osquery_policy(),
+        dependencies=_reporting_live_osquery_dependencies(),
     )
-    return {
-        "trusted_source": "restricted-elastic-osquery-manager-wrapper",
-        "generated_at": bounded_text(evidence.get("generated_at"), 100),
-        "complete": bool(evidence.get("complete")),
-        "read_only": bool(evidence.get("read_only", True)),
-        "query_contract": bounded_text(evidence.get("schema"), 200),
-        "endpoint_read_only": bool(evidence.get("read_only", True)),
-        "control_plane_writes": bool(
-            evidence.get("control_plane_writes", True)
-        ),
-        "control_plane_write_status": bounded_text(
-            evidence.get("control_plane_write_status")
-            or (
-                "confirmed"
-                if evidence.get("control_plane_writes", True)
-                else "none"
-            ),
-            20,
-        ),
-        "batches": len(batches),
-        "validated_batches": sum(
-            1
-            for item in batches
-            if isinstance(item, dict) and item.get("validated") is True
-        ),
-        "failed_batches": sum(
-            1
-            for item in batches
-            if isinstance(item, dict) and item.get("validated") is not True
-        ),
-        "preview_truncated": preview_truncated,
-        "queries": queries,
-        "error": bounded_text(evidence.get("collection_error"), 1000),
-    }
 
 
 def prepare_live_osquery_context(

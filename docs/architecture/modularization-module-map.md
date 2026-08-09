@@ -186,6 +186,14 @@ line ranges below remain historical navigation aids for the extraction ledger.
   `analysis.query.derived`.
 - Bounded target selection and read-only SELECT validation for live endpoint
   OSQuery requests now live in `analysis.query.endpoint`.
+- Collector-owned observable authorization, opaque target-to-case binding,
+  positive row support digests, and bounded multi-round endpoint evidence
+  custody now live in `analysis.query.live_endpoint`. The query boundary never
+  renders reports or exposes the underlying authorized observable in a support
+  binding.
+- Bounded public live-OSQuery audit and row-preview projection now live in
+  `analysis.reporting.live_osquery`. This reporting boundary cannot authorize
+  a target, dispatch a query, or mutate the private evidence accumulator.
 - Exact request envelopes, backend identity, deterministic query-ID fallback,
   backend parameter projection, and cross-backend drop audit now live in
   `analysis.query.request`.
