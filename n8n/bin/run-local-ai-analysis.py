@@ -2186,6 +2186,17 @@ def _query_derived_dependencies():
     )
 
 
+def _query_derived_integrity_policy():
+    return _query_derived().IntegrityPolicy(contract=PCAP_QUERY_CONTRACT)
+
+
+def _query_derived_integrity_dependencies():
+    return _query_derived().IntegrityDependencies(
+        text=_query_text,
+        error_type=InvestigationQueryError,
+    )
+
+
 def _query_event_tuple_dependencies():
     module = _query_event_tuple()
     return module.Dependencies(
@@ -4133,120 +4144,20 @@ def validate_derived_query_evidence(
     expected_requests: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Bind each derived result to the exact normalized request and digests."""
-    if not isinstance(value, dict) or value.get("schema") != PCAP_QUERY_CONTRACT:
-        raise InvestigationQueryError("derived PCAP/Zeek result schema is invalid")
-    executed = value.get("executed")
-    results = value.get("results")
-    if (
-        not isinstance(executed, list)
-        or not isinstance(results, list)
-        or len(executed) != len(expected_requests)
-        or len(results) != len(expected_requests)
-    ):
-        raise InvestigationQueryError(
-            "derived PCAP/Zeek result count does not match the request"
-        )
-    for index, expected in enumerate(expected_requests):
-        if executed[index] != expected:
-            raise InvestigationQueryError(
-                "derived PCAP/Zeek executed query does not match the normalized request"
-            )
-        result = results[index]
-        if not isinstance(result, dict) or result.get("query") != expected:
-            raise InvestigationQueryError(
-                "derived PCAP/Zeek result query does not match the normalized request"
-            )
-        records = result.get("records")
-        if not isinstance(records, list):
-            raise InvestigationQueryError("derived PCAP/Zeek records must be an array")
-        query_digest = hashlib.sha256(
-            json.dumps(
-                {"contract": PCAP_QUERY_CONTRACT, "request": expected},
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
-        result_digest = hashlib.sha256(
-            json.dumps(
-                records,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
-        if (
-            result.get("query_digest") != query_digest
-            or result.get("result_digest") != result_digest
-        ):
-            raise InvestigationQueryError(
-                "derived PCAP/Zeek query or result digest is invalid"
-            )
-        if not isinstance(result.get("audit"), dict):
-            raise InvestigationQueryError("derived PCAP/Zeek audit is missing")
-    return value
+    return _query_derived().validate_evidence(
+        value, expected_requests,
+        policy=_query_derived_integrity_policy(),
+        dependencies=_query_derived_integrity_dependencies(),
+    )
 
 
 def _derived_evidence_source_digest(pcap_context: dict[str, Any]) -> str:
     """Bind a pivot to the capture artifacts represented by the local index."""
-    parsed = (
-        pcap_context.get("parsed_evidence")
-        if isinstance(pcap_context.get("parsed_evidence"), list)
-        else []
+    return _query_derived().source_digest(
+        pcap_context,
+        policy=_query_derived_integrity_policy(),
+        dependencies=_query_derived_integrity_dependencies(),
     )
-    identities: list[dict[str, Any]] = []
-    for record in parsed[:20]:
-        if not isinstance(record, dict):
-            continue
-        artifacts = [
-            {
-                "name": _query_text(item.get("name"), 255),
-                "sha256": _query_text(item.get("sha256"), 64),
-                "size_bytes": item.get("size_bytes"),
-            }
-            for item in (
-                record.get("pcap_files")
-                if isinstance(record.get("pcap_files"), list)
-                else []
-            )[:20]
-            if isinstance(item, dict)
-            and re.fullmatch(r"[a-f0-9]{64}", _query_text(item.get("sha256"), 64))
-        ]
-        if not artifacts:
-            continue
-        identities.append(
-            {
-                "artifacts": sorted(
-                    artifacts,
-                    key=lambda item: (
-                        item["sha256"],
-                        item["name"],
-                        str(item["size_bytes"]),
-                    ),
-                ),
-                "request_id": _query_text(record.get("request_id"), 160),
-                "group_id": _query_text(record.get("group_id"), 160),
-                "generated_at": _query_text(record.get("generated_at"), 100),
-            }
-        )
-    if not identities:
-        raise InvestigationQueryError(
-            "derived PCAP/Zeek evidence has no capture-bound artifact identity"
-        )
-    identities.sort(
-        key=lambda item: json.dumps(
-            item,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
-    )
-    return hashlib.sha256(
-        json.dumps(
-            identities,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()
 
 
 def _trusted_live_osquery_case_observables(

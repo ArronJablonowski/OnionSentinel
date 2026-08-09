@@ -194,7 +194,8 @@ line ranges below remain historical navigation aids for the extraction ledger.
 - Exact public-enrichment indicators and their trusted original/discovered
   evidence authorization now live in `analysis.query.enrichment`.
 - Operation allowlisting, exact scalar filter bounds, provider filter
-  normalization, and result limits for PCAP/Zeek-derived evidence now live in
+  normalization, result limits, request/result digest validation, and
+  capture-artifact source binding for PCAP/Zeek-derived evidence now live in
   `analysis.query.derived`.
 - Bounded target selection and read-only SELECT validation for live endpoint
   OSQuery requests now live in `analysis.query.endpoint`.
