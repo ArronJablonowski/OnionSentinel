@@ -85,6 +85,7 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/lib/analyst_review_policy.js" \
     "$ALERT_STORE_STAGE_DIR/lib/enrichment_policy.js" \
     "$ALERT_STORE_STAGE_DIR/lib/controlled_job_identity.js" \
+    "$ALERT_STORE_STAGE_DIR/lib/controlled_retirement_identity.js" \
     "$ALERT_STORE_STAGE_DIR/lib/pcap_policy.js" \
     "$ALERT_STORE_STAGE_DIR/lib/request_authorization.js" \
     "$ALERT_STORE_STAGE_DIR/repositories/health_repository.js" \

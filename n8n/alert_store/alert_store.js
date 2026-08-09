@@ -28,6 +28,7 @@ const {createRouteRegistry} = require('./lib/route_registry');
 const {createRequestDispatcher} = require('./lib/http_dispatch');
 const {createRequestAuthorization} = require('./lib/request_authorization');
 const {createControlledJobIdentity} = require('./lib/controlled_job_identity');
+const controlledRetirementDefinitions = require('./lib/controlled_retirement_identity');
 const {createInventoryService} = require('./services/inventory_service');
 const {createInventoryRoutes} = require('./routes/inventory_routes');
 const {createHealthRepository} = require('./repositories/health_repository');
@@ -3637,58 +3638,11 @@ const controlledRoutePattern = /^codex-cli:(?:gpt-5\.5|gpt-5\.6-(?:sol|terra|lun
 function controlledRouteModelIdentity(route) {
   return String(route || '').split(':').slice(0, -1).join(':');
 }
-const controlledRetirementSchema =
-  'onion-sentinel-controlled-evaluation-retirement-v1';
-const controlledRetirementReceiptSchema =
-  'onion-sentinel-controlled-evaluation-retirement-receipt-v1';
-const controlledRetirementEventType = 'controlled_evaluation_retired';
-const controlledRetirementReceiptFields = Object.freeze([
-  'case_agent_status',
-  'idempotent',
-  'identity',
-  'job_after_sha256',
-  'job_before_sha256',
-  'lineage_after_sha256',
-  'lineage_before_sha256',
-  'model_invocations',
-  'ok',
-  'receipt_sha256',
-  'retired_at',
-  'retirement_id',
-  'schema',
-  'security_onion_access',
-  'security_onion_writes_allowed',
-  'skip_reason',
-  'status',
-  'target_after',
-  'target_before',
-  'worker_wake_signaled',
-]);
-const controlledRetirementRequestFields = Object.freeze([
-  'absent_dispatch_ids',
-  'case_id',
-  'cohort_id',
-  'cohort_size',
-  'completed_dispatch_ids',
-  'dispatch_id',
-  'expected_attempt_count',
-  'expected_attempt_id',
-  'expected_job_payload_sha256',
-  'expected_prior_analysis_id',
-  'failure_attestation_sha256',
-  'job_id',
-  'manifest_sha256',
-  'member_rank',
-  'reanalysis_run_id',
-  'reason',
-  'replacement_release_id',
-  'representative_alert_id',
-  'retired_release_id',
-  'schema',
-  'stable_group_id',
-  'stable_group_key',
-  'start_sha256',
-]);
+const controlledRetirementSchema = controlledRetirementDefinitions.RETIREMENT_SCHEMA;
+const controlledRetirementReceiptSchema = controlledRetirementDefinitions.RECEIPT_SCHEMA;
+const controlledRetirementEventType = controlledRetirementDefinitions.EVENT_TYPE;
+const controlledRetirementReceiptFields = controlledRetirementDefinitions.RECEIPT_FIELDS;
+const controlledRetirementRequestFields = controlledRetirementDefinitions.REQUEST_FIELDS;
 
 function requestHasOwnField(payload, field) {
   return Boolean(
@@ -3713,212 +3667,23 @@ function controlledRuntimeReleaseId() {
 }
 
 function controlledRetirementConflict(message, statusCode = 409) {
-  const error = new Error(message);
-  error.statusCode = statusCode;
-  return error;
+  return controlledRetirementIdentityOwner.conflict(message, statusCode);
 }
 
 function controlledRetirementCanonicalJsonText(value) {
-  const canonicalize = (item) => {
-    if (
-      item === null
-      || typeof item === 'string'
-      || typeof item === 'boolean'
-    ) {
-      return item;
-    }
-    if (typeof item === 'number') {
-      if (!Number.isFinite(item)) {
-        throw controlledRetirementConflict(
-          'controlled evaluation retirement JSON is not finite',
-        );
-      }
-      return item;
-    }
-    if (Array.isArray(item)) {
-      return item.map((entry) => canonicalize(entry));
-    }
-    if (item && typeof item === 'object') {
-      return Object.fromEntries(
-        Object.keys(item).sort().map(
-          (key) => [key, canonicalize(item[key])],
-        ),
-      );
-    }
-    throw controlledRetirementConflict(
-      'controlled evaluation retirement JSON contains an unsupported value',
-    );
-  };
-  return JSON.stringify(canonicalize(value));
+  return controlledRetirementIdentityOwner.canonicalJsonText(value);
 }
 
 function controlledRetirementSha256(value) {
-  return crypto
-    .createHash('sha256')
-    .update(controlledRetirementCanonicalJsonText(value), 'utf8')
-    .digest('hex');
+  return controlledRetirementIdentityOwner.sha256(value);
 }
 
 function controlledRetirementRawSha256(value) {
-  return crypto
-    .createHash('sha256')
-    .update(String(value), 'utf8')
-    .digest('hex');
+  return controlledRetirementIdentityOwner.rawSha256(value);
 }
 
 function controlledRetirementIdentity(payload) {
-  if (!controlledEvaluationMode) {
-    throw controlledRetirementConflict(
-      'controlled evaluation retirement is unavailable in production mode',
-      403,
-    );
-  }
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw controlledRetirementConflict(
-      'controlled evaluation retirement request is invalid',
-    );
-  }
-  const suppliedFields = Object.keys(payload).sort();
-  if (
-    suppliedFields.length !== controlledRetirementRequestFields.length
-    || suppliedFields.some(
-      (field, index) => field !== controlledRetirementRequestFields[index],
-    )
-  ) {
-    throw controlledRetirementConflict(
-      'controlled evaluation retirement request fields are not exact',
-    );
-  }
-  const jobId = payload.job_id;
-  const memberRank = payload.member_rank;
-  const cohortSize = payload.cohort_size;
-  const expectedAttemptCount = payload.expected_attempt_count;
-  const caseId = validIncidentCaseId(payload.case_id);
-  const cohortId = payload.cohort_id;
-  const dispatchId = payload.dispatch_id;
-  const expectedAttemptId = payload.expected_attempt_id;
-  const expectedJobPayloadSha256 = payload.expected_job_payload_sha256;
-  const expectedPriorAnalysisId = payload.expected_prior_analysis_id;
-  const failureAttestationSha256 = payload.failure_attestation_sha256;
-  const manifestSha256 = payload.manifest_sha256;
-  const reanalysisRunId = payload.reanalysis_run_id;
-  const replacementReleaseId = payload.replacement_release_id;
-  const representativeAlertId = payload.representative_alert_id;
-  const retiredReleaseId = payload.retired_release_id;
-  const stableGroupId = payload.stable_group_id;
-  const stableGroupKeyValue = payload.stable_group_key;
-  const startSha256 = payload.start_sha256;
-  const reason = safeString(payload.reason, 500);
-  const analysisIdPattern = /^[A-Za-z0-9._:@=-]{1,160}$/;
-  const completedDispatchIds = Array.isArray(
-    payload.completed_dispatch_ids,
-  ) ? [...payload.completed_dispatch_ids] : null;
-  const absentDispatchIds = Array.isArray(
-    payload.absent_dispatch_ids,
-  ) ? [...payload.absent_dispatch_ids] : null;
-  const orderedDispatchIds = (
-    completedDispatchIds && absentDispatchIds
-  ) ? [
-    ...completedDispatchIds,
-    dispatchId,
-    ...absentDispatchIds,
-  ] : [];
-  const exactStringFields = [
-    cohortId,
-    dispatchId,
-    expectedAttemptId,
-    expectedJobPayloadSha256,
-    expectedPriorAnalysisId,
-    failureAttestationSha256,
-    manifestSha256,
-    reanalysisRunId,
-    replacementReleaseId,
-    representativeAlertId,
-    retiredReleaseId,
-    stableGroupId,
-    stableGroupKeyValue,
-    startSha256,
-  ];
-  if (
-    payload.schema !== controlledRetirementSchema
-    || exactStringFields.some((value) => typeof value !== 'string')
-    || typeof jobId !== 'number'
-    || !Number.isSafeInteger(jobId)
-    || jobId < 1
-    || typeof memberRank !== 'number'
-    || !Number.isSafeInteger(memberRank)
-    || memberRank < 1
-    || typeof cohortSize !== 'number'
-    || !Number.isSafeInteger(cohortSize)
-    || cohortSize < 1
-    || cohortSize > 100
-    || memberRank > cohortSize
-    || !completedDispatchIds
-    || completedDispatchIds.length !== memberRank - 1
-    || !absentDispatchIds
-    || absentDispatchIds.length !== cohortSize - memberRank
-    || orderedDispatchIds.some(
-      (value) => (
-        typeof value !== 'string'
-        || !dispatchIdPattern.test(value)
-      ),
-    )
-    || new Set(orderedDispatchIds).size !== cohortSize
-    || typeof expectedAttemptCount !== 'number'
-    || expectedAttemptCount !== 1
-    || !caseId
-    || payload.case_id !== caseId
-    || !cohortIdPattern.test(cohortId)
-    || !dispatchIdPattern.test(dispatchId)
-    || !/^ira-[a-f0-9]{40}$/.test(expectedAttemptId)
-    || !dispatchIdPattern.test(expectedJobPayloadSha256)
-    || (
-      expectedPriorAnalysisId !== ''
-      && !analysisIdPattern.test(expectedPriorAnalysisId)
-    )
-    || !dispatchIdPattern.test(failureAttestationSha256)
-    || !dispatchIdPattern.test(manifestSha256)
-    || !/^irr-[a-z0-9-]{1,64}$/.test(reanalysisRunId)
-    || !releaseIdPattern.test(replacementReleaseId)
-    || replacementReleaseId !== controlledRuntimeReleaseId()
-    || !representativeAlertIdPattern.test(representativeAlertId)
-    || !releaseIdPattern.test(retiredReleaseId)
-    || !stableGroupIdPattern.test(stableGroupId)
-    || !validPinnedStableGroupKey(stableGroupKeyValue)
-    || !dispatchIdPattern.test(startSha256)
-    || typeof payload.reason !== 'string'
-    || payload.reason !== reason
-    || reason.length < 10
-  ) {
-    throw controlledRetirementConflict(
-      'controlled evaluation retirement identity is invalid',
-    );
-  }
-  return {
-    schema: controlledRetirementSchema,
-    absent_dispatch_ids: absentDispatchIds,
-    case_id: caseId,
-    cohort_id: cohortId,
-    cohort_size: cohortSize,
-    completed_dispatch_ids: completedDispatchIds,
-    dispatch_id: dispatchId,
-    expected_attempt_count: expectedAttemptCount,
-    expected_attempt_id: expectedAttemptId,
-    expected_job_payload_sha256: expectedJobPayloadSha256,
-    expected_prior_analysis_id: expectedPriorAnalysisId,
-    failure_attestation_sha256: failureAttestationSha256,
-    job_id: jobId,
-    manifest_sha256: manifestSha256,
-    member_rank: memberRank,
-    reason,
-    reanalysis_run_id: reanalysisRunId,
-    replacement_release_id: replacementReleaseId,
-    representative_alert_id: representativeAlertId,
-    retired_release_id: retiredReleaseId,
-    stable_group_id: stableGroupId,
-    stable_group_key: stableGroupKeyValue,
-    start_sha256: startSha256,
-  };
+  return controlledRetirementIdentityOwner.normalize(payload);
 }
 
 function controlledRetirementJobProjection(row) {
@@ -7698,6 +7463,20 @@ const durableJobTransitionExecutor = createDurableJobTransitionExecutor({
   updateIncidentReanalysisProgress,
   signalAiWorkers,
 });
+const controlledRetirementIdentityOwner = (
+  controlledRetirementDefinitions.createControlledRetirementIdentity({
+    controlledEvaluationMode,
+    safeString,
+    validIncidentCaseId,
+    cohortIdPattern,
+    dispatchIdPattern,
+    releaseIdPattern,
+    representativeAlertIdPattern,
+    stableGroupIdPattern,
+    validPinnedStableGroupKey,
+    controlledRuntimeReleaseId,
+  })
+);
 
 async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppression, campaign = null) {
   if (!inserted) return {status: 'skipped_duplicate'};
