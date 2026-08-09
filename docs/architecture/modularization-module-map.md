@@ -628,6 +628,12 @@ its own. Exact-group selection failures stop playbook and asset processing, and
 only exact selected rows are admitted to packet validation, asset resolution,
 and subsequent query planning.
 
+`prompt_detection_facade.py` owns configured query-context policy and runtime
+sources plus exact-detection, asset-observable, role-task, and model-policy
+adapters. It binds immutable policy to the pure query/detection modules and
+reuses the evidence facade's alert-group and parsing ports. The legacy builder
+re-exports these entry points without retaining their dependency assembly.
+
 `prompt_evidence_admission.py` owns governed admission of exact-row query
 context, public-enrichment indicators, agent memory, correlation context, and
 restricted Incident Responder evidence. It binds query authorization to the

@@ -30,6 +30,8 @@ def top_level_symbols(path: Path) -> set[str]:
             )
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             symbols.add(node.target.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            symbols.update(alias.asname or alias.name for alias in node.names)
     return symbols
 
 

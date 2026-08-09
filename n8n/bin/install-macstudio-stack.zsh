@@ -558,6 +558,7 @@ cp "$REPO_DIR/n8n/bin/prompt_builder_policy.py" "$STACK_DIR/bin/prompt_builder_p
 cp "$REPO_DIR/n8n/bin/prompt_correlation_context.py" "$STACK_DIR/bin/prompt_correlation_context.py"
 cp "$REPO_DIR/n8n/bin/prompt_correlation_facts.py" "$STACK_DIR/bin/prompt_correlation_facts.py"
 cp "$REPO_DIR/n8n/bin/prompt_detection_context.py" "$STACK_DIR/bin/prompt_detection_context.py"
+cp "$REPO_DIR/n8n/bin/prompt_detection_facade.py" "$STACK_DIR/bin/prompt_detection_facade.py"
 cp "$REPO_DIR/n8n/bin/prompt_evidence_admission.py" "$STACK_DIR/bin/prompt_evidence_admission.py"
 cp "$REPO_DIR/n8n/bin/prompt_evidence_facade.py" "$STACK_DIR/bin/prompt_evidence_facade.py"
 cp "$REPO_DIR/n8n/bin/prompt_evidence_snapshot.py" "$STACK_DIR/bin/prompt_evidence_snapshot.py"

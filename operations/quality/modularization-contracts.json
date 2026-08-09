@@ -169,6 +169,19 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_detection_facade.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_detection_facade.py",
+      "required_symbols": [
+        "agent_task",
+        "asset_observables_and_events",
+        "exact_detection_group_rows",
+        "investigation_query_context",
+        "investigation_query_context_policy",
+        "model_policy"
+      ]
+    },
+    {
       "path": "n8n/bin/prompt_evidence_admission.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_evidence_admission.py",
