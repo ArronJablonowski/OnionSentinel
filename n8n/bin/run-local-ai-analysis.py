@@ -2380,6 +2380,12 @@ def _conclusion_response():
     return response
 
 
+def _conclusion_correlation():
+    _provider_routing()
+    from onion_sentinel.analysis.conclusions import correlation
+    return correlation
+
+
 def _conclusion_scope():
     _provider_routing()
     from onion_sentinel.analysis.conclusions import scope
@@ -6093,53 +6099,11 @@ def coerce_list(value: Any) -> list[str]:
 
 
 def normalize_correlation_assessment(value: Any) -> dict[str, Any]:
-    assessment = value if isinstance(value, dict) else {}
-    related_groups = []
-    for item in (
-        assessment.get("related_groups", [])[:20]
-        if isinstance(assessment.get("related_groups"), list)
-        else []
-    ):
-        if isinstance(item, str):
-            group_id, reason = item, ""
-        elif isinstance(item, dict):
-            group_id, reason = item.get("group_id"), item.get("reason")
-        else:
-            continue
-        group_id = str(group_id or "").strip().lower()[:64]
-        if group_id:
-            related_groups.append({"group_id": group_id, "reason": str(reason or "")[:1000]})
-    confidence = str(assessment.get("confidence") or "low").lower()
-    if confidence not in CONFIDENCE_VALUES:
-        confidence = "low"
-    unique_group_ids = sorted(
-        {item["group_id"] for item in related_groups if item.get("group_id")}
+    """Compatibility delegate for bounded correlation assessment policy."""
+    return _conclusion_correlation().normalize(
+        value,
+        confidence_values=frozenset(CONFIDENCE_VALUES),
     )
-    episode_id = (
-        "episode-"
-        + hashlib.sha256(
-            json.dumps(
-                unique_group_ids,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()[:20]
-        if unique_group_ids
-        else ""
-    )
-    return {
-        "correlation_found": bool(assessment.get("correlation_found")) and bool(related_groups),
-        "confidence": confidence,
-        "episode_id": episode_id,
-        "episode_basis": [
-            f"related_group:{group_id}" for group_id in unique_group_ids
-        ],
-        "related_groups": related_groups[:20],
-        "shared_evidence": coerce_list(assessment.get("shared_evidence"))[:20],
-        "contradicting_evidence": coerce_list(assessment.get("contradicting_evidence"))[:20],
-        "attack_chain_hypothesis": str(assessment.get("attack_chain_hypothesis") or "")[:4000],
-        "recommended_pivots": coerce_list(assessment.get("recommended_pivots"))[:20],
-    }
 
 
 def bounded_text(value: Any, limit: int = 8000) -> str:

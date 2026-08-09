@@ -2257,6 +2257,9 @@ handling, closed-vocabulary checks, factored verdict normalization, every
 authorization/evidence/tuning guard, scope disposition, confidence
 calibration, and final report reconciliation. Runtime-specific policies and
 guard implementations remain injected, making ordering directly testable.
+Model-supplied correlation group admission, bounded evidence and pivot fields,
+confidence repair, and deterministic episode identity now live in
+`analysis.conclusions.correlation`.
 Collector-owned rule-intent reconciliation is isolated in the same package,
 with endpoint trust, verdict normalization, and bounded-text policy injected
 from their authoritative runtime owners.

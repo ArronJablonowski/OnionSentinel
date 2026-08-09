@@ -3057,6 +3057,7 @@
         "onion_sentinel.analysis.query.execution.security_onion",
         "onion_sentinel.analysis.query.execution.batch",
         "onion_sentinel.analysis.conclusions.confidence",
+        "onion_sentinel.analysis.conclusions.correlation",
         "onion_sentinel.analysis.conclusions.authorization",
         "onion_sentinel.analysis.conclusions.authorization_evidence",
         "onion_sentinel.analysis.conclusions.evidence_guard",
