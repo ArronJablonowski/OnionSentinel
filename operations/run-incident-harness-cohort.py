@@ -51,6 +51,12 @@ from cohort_freezing import (
     freeze_cohort as run_freeze_cohort,
     freeze_cohort_from_rows as run_freeze_cohort_from_rows,
 )
+from cohort_dispatch_contract import (
+    CohortDispatchContract,
+    request_for_member as build_dispatch_request,
+    validate_dispatch_job_payload as validate_job_payload,
+    validate_success_response as validate_dispatch_response,
+)
 from cohort_http import (
     CohortHttpPolicy,
     HttpResult,
@@ -1767,104 +1773,28 @@ def dashboard_post_json(
     )
 
 
+def _cohort_dispatch_contract() -> CohortDispatchContract:
+    return CohortDispatchContract(
+        cohort_error=CohortError,
+        ambiguous_dispatch_error=AmbiguousDispatchError,
+        case_id_pattern=CASE_ID_RE,
+        run_id_pattern=RUN_ID_RE,
+        validate_release_id=validate_release_id,
+        member_stable_group_key=_member_stable_group_key,
+        deterministic_dispatch_id=deterministic_dispatch_id,
+        sha256_value=sha256_value,
+    )
+
+
 def _request_for_member(
     base_url: str,
     manifest: Mapping[str, Any],
     member: Mapping[str, Any],
 ) -> tuple[str, dict[str, Any]]:
-    cohort_id = str(manifest["cohort_id"])
-    dispatch_id = deterministic_dispatch_id(manifest, member)
-    reason = f"[cohort:{cohort_id}] {manifest['reason']}"[:1000]
-    requested_by = f"harness-cohort:{cohort_id}"[:100]
-    release_id = validate_release_id(
-        (manifest.get("execution_contract") or {}).get(
-            "expected_release_id"
-        ),
+    """Compatibility adapter for frozen dispatch request construction."""
+    return build_dispatch_request(
+        _cohort_dispatch_contract(), base_url, manifest, member
     )
-    contract = manifest["execution_contract"]
-    expected_assigned_route = str(contract["expected_assigned_route"])
-    expected_reviewer_route = str(contract["expected_reviewer_route"])
-    reviewer_required = contract["reviewer_required"]
-    stable_group_key = _member_stable_group_key(member)
-    dispatch_kind = str((member.get("dispatch") or {}).get("kind") or "")
-    if dispatch_kind == "escalate":
-        path = (
-            "/api/soc-alerts/"
-            + urllib.parse.quote(str(member["dashboard_group_id"]), safe="")
-            + "/escalate"
-        )
-        payload = {
-            "reason": reason,
-            "requested_by": requested_by,
-            "related_limit": 500,
-            "pcap_analysis_limit": 25,
-            "stable_group_id": str(member["stable_group_id"]),
-            "stable_group_key": stable_group_key,
-            "representative_alert_id": str(
-                member["representative_alert_id"]
-            ),
-            "cohort_id": cohort_id,
-            "dispatch_id": dispatch_id,
-            "release_id": release_id,
-            "expected_assigned_route": expected_assigned_route,
-            "expected_reviewer_route": expected_reviewer_route,
-            "reviewer_required": reviewer_required,
-        }
-    elif dispatch_kind == "analyze":
-        path = (
-            "/api/soc-alerts/"
-            + urllib.parse.quote(str(member["dashboard_group_id"]), safe="")
-            + "/analyze"
-        )
-        payload = {
-            "reason": reason,
-            "requested_by": requested_by,
-            "related_limit": 500,
-            "pcap_analysis_limit": 25,
-            "stable_group_id": str(member["stable_group_id"]),
-            "stable_group_key": stable_group_key,
-            "representative_alert_id": str(
-                member["representative_alert_id"]
-            ),
-            "cohort_id": cohort_id,
-            "dispatch_id": dispatch_id,
-            "release_id": release_id,
-            "expected_assigned_route": expected_assigned_route,
-            "expected_reviewer_route": expected_reviewer_route,
-            "reviewer_required": reviewer_required,
-        }
-    elif dispatch_kind == "reanalyze":
-        case_id = str(
-            ((member.get("pre_state") or {}).get("incident_case") or {}).get(
-                "case_id"
-            )
-            or ""
-        )
-        if not CASE_ID_RE.fullmatch(case_id):
-            raise CohortError(f"invalid frozen incident case ID: {case_id!r}")
-        path = (
-            "/api/soc-incidents/"
-            + urllib.parse.quote(case_id, safe="")
-            + "/reanalyze"
-        )
-        payload = {
-            "reason": reason,
-            "requested_by": requested_by,
-            "stable_group_id": str(member["stable_group_id"]),
-            "stable_group_key": stable_group_key,
-            "representative_alert_id": str(
-                member["representative_alert_id"]
-            ),
-            "cohort_id": cohort_id,
-            "dispatch_id": dispatch_id,
-            "release_id": release_id,
-            "expected_assigned_route": expected_assigned_route,
-            "expected_reviewer_route": expected_reviewer_route,
-            "reviewer_required": reviewer_required,
-        }
-    else:
-        raise CohortError(f"unsupported dispatch kind: {dispatch_kind!r}")
-    return base_url + path, payload
 
 
 def _validate_success_response(
@@ -1872,133 +1802,10 @@ def _validate_success_response(
     member: Mapping[str, Any],
     result: HttpResult,
 ) -> dict[str, Any]:
-    if result.status != 202:
-        if 400 <= result.status < 500 and result.status not in {408, 425}:
-            raise CohortError(
-                f"dashboard rejected request with HTTP {result.status}"
-            )
-        raise AmbiguousDispatchError(
-            f"dashboard returned ambiguous HTTP {result.status}"
-        )
-    payload = result.payload
-    if not isinstance(payload, dict) or payload.get("ok") is not True:
-        raise AmbiguousDispatchError(
-            "dashboard returned an invalid success response"
-        )
-    kind = str((member.get("dispatch") or {}).get("kind") or "")
-    accepted: dict[str, Any] = {
-        "http_status": result.status,
-        "response_sha256": result.body_sha256,
-    }
-    contract = manifest["execution_contract"]
-    route_identity = {
-        "expected_assigned_route": contract["expected_assigned_route"],
-        "expected_reviewer_route": contract["expected_reviewer_route"],
-        "reviewer_required": contract["reviewer_required"],
-    }
-    if kind == "escalate":
-        expected = {
-            "group_id": member["dashboard_group_id"],
-            "queue_group_id": member["stable_group_id"],
-            "stable_group_id": member["stable_group_id"],
-            "stable_group_key": _member_stable_group_key(member),
-            "representative_alert_id": member["representative_alert_id"],
-            "cohort_id": manifest["cohort_id"],
-            "dispatch_id": deterministic_dispatch_id(manifest, member),
-            "release_id": manifest["execution_contract"][
-                "expected_release_id"
-            ],
-            **route_identity,
-        }
-        if any(payload.get(key) != value for key, value in expected.items()):
-            raise AmbiguousDispatchError(
-                "escalation response identity did not match the frozen member"
-            )
-        case_id = str(payload.get("case_id") or "")
-        if not CASE_ID_RE.fullmatch(case_id):
-            raise AmbiguousDispatchError(
-                "escalation response did not contain a valid case ID"
-            )
-        accepted.update(
-            {
-                **expected,
-                "case_id": case_id,
-                "requested_at": str(payload.get("requested_at") or ""),
-            }
-        )
-    elif kind == "analyze":
-        expected = {
-            "group_id": member["dashboard_group_id"],
-            "queue_group_id": member["stable_group_id"],
-            "stable_group_id": member["stable_group_id"],
-            "stable_group_key": _member_stable_group_key(member),
-            "representative_alert_id": member["representative_alert_id"],
-            "cohort_id": manifest["cohort_id"],
-            "dispatch_id": deterministic_dispatch_id(manifest, member),
-            "release_id": manifest["execution_contract"][
-                "expected_release_id"
-            ],
-            **route_identity,
-        }
-        if any(payload.get(key) != value for key, value in expected.items()):
-            raise AmbiguousDispatchError(
-                "SOC analysis response identity did not match the frozen member"
-            )
-        requested_at = str(payload.get("requested_at") or "")
-        if not requested_at:
-            raise AmbiguousDispatchError(
-                "SOC analysis response did not include requested_at"
-            )
-        accepted.update({**expected, "requested_at": requested_at})
-    elif kind == "reanalyze":
-        expected = {
-            "stable_group_id": member["stable_group_id"],
-            "stable_group_key": _member_stable_group_key(member),
-            "representative_alert_id": member["representative_alert_id"],
-            "cohort_id": manifest["cohort_id"],
-            "dispatch_id": deterministic_dispatch_id(manifest, member),
-            "release_id": manifest["execution_contract"][
-                "expected_release_id"
-            ],
-            **route_identity,
-        }
-        if any(payload.get(key) != value for key, value in expected.items()):
-            raise AmbiguousDispatchError(
-                "reanalysis response identity did not match the frozen member"
-            )
-        run_id = str(payload.get("run_id") or "")
-        try:
-            total_count = int(payload.get("total_count") or 0)
-        except (TypeError, ValueError) as exc:
-            raise AmbiguousDispatchError(
-                "reanalysis response has an invalid case count"
-            ) from exc
-        if (
-            not RUN_ID_RE.fullmatch(run_id)
-            or str(payload.get("scope") or "") != "single_case"
-            or total_count != 1
-        ):
-            raise AmbiguousDispatchError(
-                "reanalysis response did not identify one exact single-case run"
-            )
-        case_id = str(
-            ((member.get("pre_state") or {}).get("incident_case") or {}).get(
-                "case_id"
-            )
-            or ""
-        )
-        accepted.update(
-            {
-                **expected,
-                "run_id": run_id,
-                "case_id": case_id,
-                "run_status": str(payload.get("status") or ""),
-                "created_at": str(payload.get("created_at") or ""),
-            }
-        )
-    else:
-        raise CohortError(f"unsupported dispatch kind: {kind!r}")
-    return accepted
+    """Compatibility adapter for dashboard acceptance validation."""
+    return validate_dispatch_response(
+        _cohort_dispatch_contract(), manifest, member, result
+    )
 
 
 def _validate_dispatch_job_payload(
@@ -2010,62 +1817,16 @@ def _validate_dispatch_job_payload(
     expected_case_id: str = "",
     expected_reanalysis_run_id: str = "",
 ) -> dict[str, Any]:
-    raw_payload = job.get("payload_json")
-    try:
-        payload = json.loads(str(raw_payload))
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise AmbiguousDispatchError(
-            "durable job payload is not valid JSON"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise AmbiguousDispatchError(
-            "durable job payload is not a JSON object"
-        )
-
-    cohort_present = bool(str(payload.get("cohort_id") or ""))
-    dispatch_present = bool(str(payload.get("dispatch_id") or ""))
-    if cohort_present != dispatch_present:
-        raise AmbiguousDispatchError(
-            "durable job cohort_id and dispatch_id must be present together"
-        )
-    expected = {
-        "alert_id": member["representative_alert_id"],
-        "representative_alert_id": member["representative_alert_id"],
-        "group_id": member["stable_group_id"],
-        "stable_group_id": member["stable_group_id"],
-        "stable_group_key": _member_stable_group_key(member),
-        "dashboard_group_id": member["dashboard_group_id"],
-        "cohort_id": manifest["cohort_id"],
-        "dispatch_id": deterministic_dispatch_id(manifest, member),
-        "release_id": manifest["execution_contract"]["expected_release_id"],
-        "expected_assigned_route": manifest["execution_contract"][
-            "expected_assigned_route"
-        ],
-        "expected_reviewer_route": manifest["execution_contract"][
-            "expected_reviewer_route"
-        ],
-        "reviewer_required": manifest["execution_contract"][
-            "reviewer_required"
-        ],
-        "agent_role": manifest["agent_role"],
-    }
-    if expected_case_id:
-        expected["case_id"] = expected_case_id
-    if expected_reanalysis_run_id:
-        expected["reanalysis_run_id"] = expected_reanalysis_run_id
-    if any(payload.get(key) != value for key, value in expected.items()):
-        raise AmbiguousDispatchError(
-            "durable job payload identity did not match the frozen member"
-        )
-    if payload.get("manual_reanalysis") is not manual_reanalysis:
-        raise AmbiguousDispatchError(
-            "durable job manual_reanalysis did not match the dispatch kind"
-        )
-    return {
-        **expected,
-        "manual_reanalysis": manual_reanalysis,
-        "payload_sha256": sha256_value(payload),
-    }
+    """Compatibility adapter for durable dispatch payload validation."""
+    return validate_job_payload(
+        _cohort_dispatch_contract(),
+        manifest,
+        member,
+        job,
+        manual_reanalysis=manual_reanalysis,
+        expected_case_id=expected_case_id,
+        expected_reanalysis_run_id=expected_reanalysis_run_id,
+    )
 
 
 def _verify_dispatch_readback(

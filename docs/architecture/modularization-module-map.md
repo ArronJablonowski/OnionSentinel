@@ -522,6 +522,12 @@ response-body receipts. Error classes, byte limits, token syntax, and canonical
 request serialization are injected by the cohort composition root so transport
 cannot silently broaden campaign authority.
 
+`operations/cohort_dispatch_contract.py` owns deterministic request projection,
+dashboard acceptance validation, and durable-job payload identity checks for
+analyze, escalate, and single-case reanalysis dispatches. It is transport- and
+database-free; the composition root supplies stable-group identity, dispatch
+digests, release validation, and fail-closed error types.
+
 `prompt_incident_evidence_projection.py` owns the model-facing, in-memory
 projection of already-validated incident evidence. It applies deterministic
 prefix limits to Elastic hits and OSQuery rows, records source and retained
