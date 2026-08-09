@@ -1349,94 +1349,38 @@ def build_llm_log_record(
     error: str = "",
     runtime_observation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    alert_summary = prompt_alert_summary(prompt_package) if prompt_package else {}
-    agent_role = str(prompt_package.get("agent_role") or "soc-analyst")
-    enabled_routes = enabled_agent_model_routes(settings)
-    model_route = canonical_model_route(
-        (settings.get("agent_models") or {}).get(agent_role),
-        enabled_routes,
+    """Compatibility delegate for the pure operational run-log projection."""
+    module = _reporting_run_log()
+    resources = module.Resources(
+        gpu_celsius=resource_monitor.max_gpu_celsius,
+        gpu_percent=resource_monitor.max_gpu_percent,
+        cpu_celsius=resource_monitor.max_cpu_celsius,
+        soc_celsius=resource_monitor.max_soc_celsius,
+        memory_percent=resource_monitor.max_memory_percent,
+        power_watts=resource_monitor.max_power_watts,
+        cpu_percent=resource_monitor.max_cpu_percent,
+        note=resource_monitor.note,
     )
-    assigned_model, assigned_model_path, assigned_mode = assigned_model_metadata(
-        settings,
-        agent_role,
+    return module.build(
+        module.Inputs(
+            run_id=run_id,
+            status=status,
+            started_at=started_at,
+            finished_at=finished_at,
+            runtime_seconds=runtime_seconds,
+            prompt_path=prompt_path,
+            prompt_package=prompt_package,
+            settings=settings,
+            response=response,
+            json_path=json_path,
+            markdown_path=md_path,
+            resources=resources,
+            error=error,
+            runtime_observation=runtime_observation,
+        ),
+        policy=module.Policy(),
+        dependencies=_reporting_run_log_dependencies(),
     )
-    observed = runtime_observation if isinstance(runtime_observation, dict) else {}
-    model_path = str((response or {}).get("_analysis_model_path") or "").strip()
-    model = str((response or {}).get("_analysis_model") or "").strip()
-    observed_route = model_route if model and model_path else ""
-    if not model and status != "running":
-        active_phase = str(observed.get("active_phase") or "").strip().lower()
-        active_model = str(observed.get("active_model") or "").strip()
-        active_model_path = str(observed.get("active_model_path") or "").strip()
-        active_model_route = str(observed.get("active_model_route") or "").strip()
-        if (
-            active_phase in {"primary_analysis", "live_follow_up", "second_opinion"}
-            and active_model
-        ):
-            model = active_model
-            model_path = active_model_path
-            observed_route = active_model_route
-    response_provider = str((response or {}).get("_analysis_provider") or "").strip()
-    mode = (
-        "codex-cli"
-        if model_path == "frontier-codex-cli"
-        else "hermes-agent"
-        if model_path == "hermes-agent"
-        else "openclaw"
-        if model_path == "openclaw"
-        else "ollama"
-        if model_path == "ollama"
-        else response_provider
-    )
-    input_mode = str((response or {}).get("_analysis_input_mode") or "").strip()
-    record = {
-        "log_id": run_id,
-        "status": status,
-        "success": status == "success",
-        "started_at": started_at,
-        "finished_at": finished_at,
-        "runtime_seconds": round(runtime_seconds, 3) if runtime_seconds is not None else None,
-        "mode": mode,
-        "model": model,
-        "model_path": model_path,
-        "provider": response_provider,
-        "harness": str((response or {}).get("_analysis_harness") or "").strip(),
-        "agent_role": agent_role,
-        "model_route": observed_route,
-        "model_started": bool(model and (model_path or observed_route)),
-        "input_mode": input_mode,
-        "assigned_model": assigned_model,
-        "assigned_model_path": assigned_model_path,
-        "assigned_mode": assigned_mode,
-        "assigned_model_route": model_route,
-        "prompt_package": str(prompt_path) if prompt_path else "",
-        "analysis_json": str(json_path) if json_path else "",
-        "analysis_markdown": str(md_path) if md_path else "",
-        "gpu_temperature_celsius_max": resource_monitor.max_gpu_celsius,
-        "gpu_utilization_percent_max": resource_monitor.max_gpu_percent,
-        "cpu_temperature_celsius_max": resource_monitor.max_cpu_celsius,
-        "soc_temperature_celsius_max": resource_monitor.max_soc_celsius,
-        "memory_used_percent_max": resource_monitor.max_memory_percent,
-        "power_watts_max": resource_monitor.max_power_watts,
-        "cpu_used_percent_max": resource_monitor.max_cpu_percent,
-        "system_metrics_note": resource_monitor.note,
-        "gpu_temperature_note": resource_monitor.note,
-        "pcap_total_size_bytes": prompt_pcap_size_bytes(prompt_package) if prompt_package else 0,
-        "alert_context_size_bytes": prompt_alert_context_size_bytes(prompt_package) if prompt_package else 0,
-        "error": error,
-        "alert": alert_summary,
-    }
-    if status == "running":
-        record.update({
-            "active_phase": "preparing",
-            "active_phase_started_at": started_at,
-            "active_model": "",
-            "active_model_path": "",
-            "active_model_route": "",
-            "active_provider": "",
-            "second_opinion_trigger": "",
-        })
-    return record
 
 
 def latest_prompt(prompt_dir: Path) -> Path:
@@ -1662,6 +1606,23 @@ def _reporting_publication():
     _provider_routing()
     from onion_sentinel.analysis.reporting import publication
     return publication
+
+
+def _reporting_run_log():
+    _provider_routing()
+    from onion_sentinel.analysis.reporting import run_log
+    return run_log
+
+
+def _reporting_run_log_dependencies():
+    return _reporting_run_log().Dependencies(
+        alert_summary=prompt_alert_summary,
+        enabled_routes=enabled_agent_model_routes,
+        canonical_route=canonical_model_route,
+        assigned_metadata=assigned_model_metadata,
+        pcap_size=prompt_pcap_size_bytes,
+        alert_context_size=prompt_alert_context_size_bytes,
+    )
 
 
 def _analysis_index_persistence():

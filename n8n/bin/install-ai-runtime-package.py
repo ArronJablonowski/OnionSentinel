@@ -96,6 +96,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.reporting.live_osquery",
     "onion_sentinel.analysis.reporting.markdown",
     "onion_sentinel.analysis.reporting.publication",
+    "onion_sentinel.analysis.reporting.run_log",
     "onion_sentinel.evaluation.runtime_isolation",
     "onion_sentinel.composition",
     "onion_sentinel.pipeline",

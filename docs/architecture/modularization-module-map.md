@@ -208,6 +208,10 @@ line ranges below remain historical navigation aids for the extraction ledger.
   `analysis.reporting.evidence_audits`. The module exposes collector-authored
   query identity and bounded result previews but never projects Security Onion
   hit documents or performs collector I/O.
+- Assignment-versus-observed model identity, execution mode, artifact paths,
+  resource maxima, and active-run initialization now live in the pure
+  `analysis.reporting.run_log` projection. Resource sampling and operational
+  JSONL/current-record persistence remain runtime composition responsibilities.
 - Exact request envelopes, backend identity, deterministic query-ID fallback,
   backend parameter projection, and cross-backend drop audit now live in
   `analysis.query.request`.
