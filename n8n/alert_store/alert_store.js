@@ -44,6 +44,8 @@ const {createPcapRoutes} = require('./routes/pcap_routes');
 const {createEnrichmentService} = require('./services/enrichment_service');
 const {createEnrichmentRoutes} = require('./routes/enrichment_routes');
 const {createMaintenanceRoutes} = require('./routes/maintenance_routes');
+const {createAlertIngestService} = require('./services/alert_ingest_service');
+const {createAlertIngestRoutes} = require('./routes/alert_ingest_routes');
 const {
   loadAuthorizedActivityPolicy,
   matchAuthorizedActivity,
@@ -11863,6 +11865,19 @@ modularRoutes.registerAll(createMaintenanceRoutes({
   },
   sendJson,
 }));
+const alertIngestService = createAlertIngestService({
+  metrics: serviceMetrics,
+  now: Date.now,
+  readJsonBody,
+  writeBeacon: writeN8nBeacon,
+  isRelayHeartbeat,
+  assertDiskWriteAdmission,
+  storeAlert,
+});
+modularRoutes.registerAll(createAlertIngestRoutes({
+  service: alertIngestService,
+  sendJson,
+}));
 
 function controlledEvaluationRequestAuthorized(request) {
   if (!controlledEvaluationMode) return true;
@@ -11922,27 +11937,6 @@ async function handleRequest(request, response) {
       return;
     }
     if (await modularRoutes.dispatch({request, response, parsedUrl})) return;
-    if (request.method === 'POST' && request.url === '/alert') {
-      // Main ingestion endpoint called by the n8n workflow.
-      const startedAt = Date.now();
-      serviceMetrics.ingest_requests += 1;
-      const alert = await readJsonBody(request);
-      writeN8nBeacon('received', alert);
-      if (isRelayHeartbeat(alert)) {
-        const result = {ok: true, status: 'heartbeat', stored: false};
-        const beacon = writeN8nBeacon('heartbeat', alert, result);
-        sendJson(response, 200, {...result, beacon});
-        return;
-      }
-      assertDiskWriteAdmission('alert ingestion');
-      const result = await storeAlert(alert);
-      const latency = Date.now() - startedAt;
-      serviceMetrics.ingest_latency_ms_total += latency;
-      serviceMetrics.ingest_latency_ms_max = Math.max(serviceMetrics.ingest_latency_ms_max, latency);
-      writeN8nBeacon('stored', alert, result);
-      sendJson(response, result.ok ? 200 : 400, result);
-      return;
-    }
     sendJson(response, 404, {ok: false, status: 'not_found'});
   } catch (error) {
     if (request.method === 'POST' && request.url === '/alert') {

@@ -90,6 +90,7 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/routes/pcap_routes.js" \
     "$ALERT_STORE_STAGE_DIR/routes/enrichment_routes.js" \
     "$ALERT_STORE_STAGE_DIR/routes/maintenance_routes.js" \
+    "$ALERT_STORE_STAGE_DIR/routes/alert_ingest_routes.js" \
     "$ALERT_STORE_STAGE_DIR/services/inventory_service.js" \
     "$ALERT_STORE_STAGE_DIR/services/health_service.js" \
     "$ALERT_STORE_STAGE_DIR/services/analyst_state_service.js" \
@@ -97,7 +98,8 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/services/analysis_request_service.js" \
     "$ALERT_STORE_STAGE_DIR/services/analysis_result_service.js" \
     "$ALERT_STORE_STAGE_DIR/services/pcap_service.js" \
-    "$ALERT_STORE_STAGE_DIR/services/enrichment_service.js"
+    "$ALERT_STORE_STAGE_DIR/services/enrichment_service.js" \
+    "$ALERT_STORE_STAGE_DIR/services/alert_ingest_service.js"
 }
 
 trap cleanup_alert_store_stage EXIT
