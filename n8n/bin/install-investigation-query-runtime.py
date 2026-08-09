@@ -46,6 +46,7 @@ HARDENED_BUILDER_DEPENDENCIES = (
     "prompt_prior_analysis.py",
     "prompt_public_enrichment.py",
     "prompt_response_contract.py",
+    "prompt_role_task.py",
 )
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_RUNTIME_FILE_BYTES = 2 * 1024 * 1024

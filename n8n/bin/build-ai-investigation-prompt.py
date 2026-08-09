@@ -142,6 +142,7 @@ from prompt_response_contract import (
     PromptContractRequest,
     build_prompt_contract,
 )
+from prompt_role_task import build_agent_task
 import investigation_query_contract as INVESTIGATION_CONTRACT
 
 
@@ -973,58 +974,8 @@ def model_policy(level: str | None) -> dict:
 
 
 def agent_task(agent_role: str, *, blind_reanalysis: bool = False) -> str:
-    """Return the bounded objective for the selected role.
-
-    Every role receives the same immutable evidence contract. Only the decision
-    objective changes, which prevents role routing from creating divergent or
-    incomplete evidence collectors.
-    """
-    if agent_role == "incident-responder":
-        historical_context = (
-            "human analyst adjudications and operator-confirmed context"
-            if blind_reanalysis
-            else "prior SOC analyses"
-        )
-        return (
-            "Produce a senior incident-response investigation report for the complete alert group. "
-            f"Use its full timeline and frequency, {historical_context}, public enrichment, "
-            "parsed PCAP evidence, analyst notes, correlations, memory, and the supplied "
-            "read-only Security Onion query results. Build a fact-grounded timeline and "
-            "determine scope, affected systems, likely impact, containment, eradication, "
-            "recovery, evidence gaps, and safe next actions. Clearly distinguish observed "
-            "facts from hypotheses. Never claim a query or response action occurred unless "
-            "the supplied evidence records it."
-        )
-    if agent_role == "siem-engineer":
-        return (
-            "Produce a detection-engineering assessment of this alert group. "
-            "Evaluate the exact deployed rule predicates, evidence coverage, false-positive "
-            "drivers, severity and scoring, then propose bounded tuning or validation steps "
-            "with expected impact and rollback criteria. Preserve detection coverage and "
-            "never claim a rule change or query execution occurred unless supplied evidence "
-            "records it."
-        )
-    if agent_role == "cyber-threat-intel":
-        return (
-            "Produce a threat-intelligence assessment for this alert group. Separate observed "
-            "telemetry from external reporting and hypotheses; assess indicator relevance, "
-            "confidence, recency, likely behaviors, collection gaps, and defensible pivots. "
-            "Avoid unsupported attribution and never claim enrichment or query results that "
-            "are not present in the supplied evidence."
-        )
-    if agent_role == "threat-hunter":
-        return (
-            "Produce a threat-hunting assessment for this alert group. Develop prioritized, "
-            "falsifiable hypotheses from observed facts, identify expected corroborating and "
-            "disconfirming evidence, and recommend bounded read-only pivots using the supplied "
-            "query contract. Clearly distinguish proposed queries from executed queries and "
-            "never claim results that are absent from the evidence."
-        )
-    return (
-        "Explain likely meaning, repeat frequency, false positive possibilities, urgency, "
-        "next investigative steps, tuning actions, and whether an independent second-model "
-        "opinion is warranted."
-    )
+    """Compatibility delegate for immutable role-specific objectives."""
+    return build_agent_task(agent_role, blind_reanalysis=blind_reanalysis)
 
 
 def _detection_context_sources() -> DetectionContextSources:

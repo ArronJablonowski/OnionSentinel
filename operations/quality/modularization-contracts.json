@@ -189,6 +189,14 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_role_task.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_role_task.py",
+      "required_symbols": [
+        "build_agent_task"
+      ]
+    },
+    {
       "path": "n8n/bin/prompt_public_enrichment.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_public_enrichment.py",

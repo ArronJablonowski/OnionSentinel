@@ -16,7 +16,7 @@
       "max_lines": 997
     },
     "n8n/bin/build-ai-investigation-prompt.py": {
-      "max_lines": 1271
+      "max_lines": 1222
     },
     "n8n/bin/collect-software-inventory.py": {
       "max_lines": 1799
@@ -863,5 +863,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "e85ec47ee0b1348021e3c3cf94fafe6e66e7589f"
+  "source_release": "4663c350d54ad237ea5bd87e1f91189c335bfde5"
 }

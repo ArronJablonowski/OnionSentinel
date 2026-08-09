@@ -660,6 +660,13 @@ query-pack names, and query-contract feature flag. Incident-only grounding and
 report fields cannot leak into SOC Analyst packages, and returned structures do
 not share mutable state across investigations.
 
+`prompt_role_task.py` owns immutable role-specific investigation objectives.
+Incident Responder blind reanalysis replaces prior model context with human and
+operator-confirmed context, while SIEM engineering, CTI, and threat-hunting
+roles receive distinct bounded objectives without changing the evidence
+contract. Every specialist objective distinguishes supplied evidence from
+proposed work and prohibits claims of unrecorded query or response execution.
+
 `prompt_package_view_model.py` owns final model-facing package assembly. It
 merges already-prepared lineage, policy, runtime-file references, response
 contract, and bounded evidence sections, declares the exact context excluded

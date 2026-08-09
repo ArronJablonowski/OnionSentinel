@@ -563,6 +563,7 @@ cp "$REPO_DIR/n8n/bin/prompt_pcap_evidence.py" "$STACK_DIR/bin/prompt_pcap_evide
 cp "$REPO_DIR/n8n/bin/prompt_prior_analysis.py" "$STACK_DIR/bin/prompt_prior_analysis.py"
 cp "$REPO_DIR/n8n/bin/prompt_public_enrichment.py" "$STACK_DIR/bin/prompt_public_enrichment.py"
 cp "$REPO_DIR/n8n/bin/prompt_response_contract.py" "$STACK_DIR/bin/prompt_response_contract.py"
+cp "$REPO_DIR/n8n/bin/prompt_role_task.py" "$STACK_DIR/bin/prompt_role_task.py"
 cp "$REPO_DIR/n8n/bin/collect-incident-evidence.py" "$STACK_DIR/bin/collect-incident-evidence.py"
 cp "$REPO_DIR/n8n/bin/install-investigation-query-runtime.py" "$STACK_DIR/bin/install-investigation-query-runtime.py"
 # The Security Onion forced command and these three Mac files are one exact
