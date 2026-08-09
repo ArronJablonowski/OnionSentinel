@@ -516,6 +516,12 @@ pre-run state, execution contracts, and private digest-sealed manifest writes.
 The legacy cohort command remains the composition root and preserves its CLI
 and callable signatures.
 
+`operations/cohort_http.py` owns loopback-origin enforcement, race-resistant
+owner-only evaluation-token reads, bounded same-origin dashboard POSTs, and
+response-body receipts. Error classes, byte limits, token syntax, and canonical
+request serialization are injected by the cohort composition root so transport
+cannot silently broaden campaign authority.
+
 `prompt_incident_evidence_projection.py` owns the model-facing, in-memory
 projection of already-validated incident evidence. It applies deterministic
 prefix limits to Elastic hits and OSQuery rows, records source and retained

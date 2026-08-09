@@ -14,6 +14,18 @@
       ]
     },
     {
+      "path": "operations/cohort_http.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_http.py",
+      "required_symbols": [
+        "CohortHttpPolicy",
+        "HttpResult",
+        "dashboard_post_json",
+        "load_evaluation_token",
+        "validate_loopback_base_url"
+      ]
+    },
+    {
       "path": "n8n/bin/run-local-ai-analysis.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/run-local-ai-analysis.py",
