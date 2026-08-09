@@ -49,6 +49,10 @@ line ranges below remain historical navigation aids for the extraction ledger.
 
 ### Extraction ledger
 
+- Analysis CLI option families, default-path injection, bounded runtime limits,
+  generation controls, and invocation validation now live in
+  `onion_sentinel.analysis.entrypoint`; the runner retains the legacy
+  package-free-import-safe `parse_args` delegate.
 - Controlled-evaluation discovery, exact memory-freeze enforcement, output and
   harness-database confinement, one-time token consumption, deferred-result
   reconciliation, prompt loading, role attestation, settings resolution, live
