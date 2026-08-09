@@ -54,6 +54,10 @@ from trace_evaluation_model_contract import (
     ModelCallContractPolicy,
     canonical_model_call_contract as build_model_call_contract,
 )
+from trace_evaluation_model_completion import (
+    ModelPurposePolicy,
+    model_purpose_completion as evaluate_model_purpose_completion,
+)
 
 
 REPORT_SCHEMA = "onion-sentinel-harness-trace-evaluation-v1"
@@ -478,191 +482,28 @@ def canonical_model_call_contract(
     return build_model_call_contract(model_calls, _model_call_contract_policy())
 
 
+def _model_purpose_policy() -> ModelPurposePolicy:
+    return ModelPurposePolicy(
+        success_statuses=SUCCESS_STATUSES,
+        validation_failed_status=VALIDATION_FAILED_STATUS,
+        reviewer_purpose=REVIEWER_REPAIR_PURPOSE,
+        reviewer_ids=REVIEWER_REPAIR_CALL_IDS,
+        supplemental_purpose=SUPPLEMENTAL_REVIEW_PURPOSE,
+        supplemental_id=SUPPLEMENTAL_REVIEW_CALL_ID,
+        adjudication_purpose=ADJUDICATION_PURPOSE,
+        adjudication_ids=ADJUDICATION_CALL_IDS,
+        maximum_reported=MAX_REPORTED_IDS,
+        normalize_status=normalize_status,
+    )
+
+
 def model_purpose_completion(
     model_calls: list[dict[str, Any]],
     reviewer: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Classify bounded model retries without treating bad output as success.
-
-    The runtime has one explicit schema-repair path: the independent reviewer
-    may return one deterministically invalid response and then one successful
-    repair. Every invocation remains in the budget and audit ledgers. No other
-    failed call or duplicate purpose is allowed to hide behind a later success.
-    """
-
-    ordered_calls = sorted(
-        (
-            (ordinal, row)
-            for ordinal, row in enumerate(model_calls)
-            if isinstance(row, dict)
-        ),
-        key=lambda item: (
-            str(item[1].get("created_at") or ""),
-            str(item[1].get("call_id") or ""),
-            item[0],
-        ),
+    return evaluate_model_purpose_completion(
+        model_calls, reviewer, _model_purpose_policy()
     )
-    groups: dict[tuple[bool, str, str], list[dict[str, Any]]] = {}
-    call_classifications: dict[str, str] = {}
-    for ordinal, row in ordered_calls:
-        independent_review = int(row.get("independent_review") or 0) == 1
-        purpose = str(row.get("purpose") or "")
-        requested_route = str(row.get("requested_route") or "")
-        groups.setdefault(
-            (independent_review, purpose, requested_route),
-            [],
-        ).append(row)
-        call_id = str(row.get("call_id") or f"ordinal-{ordinal}")
-        call_classifications[call_id] = (
-            "successful"
-            if normalize_status(row.get("status")) in SUCCESS_STATUSES
-            else "unexpected-unsuccessful"
-        )
-
-    terminally_successful = 0
-    exact_reviewer_repairs = 0
-    exact_adjudication_repairs = 0
-    superseded_validation_failures = 0
-    malformed_sequences = 0
-    purpose_summaries: list[dict[str, Any]] = []
-    for (
-        independent_review,
-        purpose,
-        requested_route,
-    ), calls in groups.items():
-        call_ids = [str(row.get("call_id") or "") for row in calls]
-        statuses = [normalize_status(row.get("status")) for row in calls]
-        terminal_success = bool(
-            statuses and statuses[-1] in SUCCESS_STATUSES
-        )
-        if terminal_success:
-            terminally_successful += 1
-
-        adjudication_like = bool(
-            purpose == ADJUDICATION_PURPOSE
-            or any(
-                call_id.startswith("disagreement-adjudication-")
-                for call_id in call_ids
-            )
-        )
-        reviewer_like = bool(
-            (independent_review and not adjudication_like)
-            or purpose == REVIEWER_REPAIR_PURPOSE
-            or any(
-                call_id.startswith("independent-review-")
-                for call_id in call_ids
-            )
-        )
-        valid_single = bool(
-            len(calls) == 1
-            and terminal_success
-            and bool(purpose)
-            and bool(requested_route)
-            and (
-                not reviewer_like and not adjudication_like
-                or (
-                    independent_review
-                    and purpose == REVIEWER_REPAIR_PURPOSE
-                    and call_ids == [REVIEWER_REPAIR_CALL_IDS[0]]
-                    and reviewer.get("has_reviewer_decision") is True
-                )
-                or (
-                    independent_review
-                    and purpose == ADJUDICATION_PURPOSE
-                    and call_ids == [ADJUDICATION_CALL_IDS[0]]
-                )
-                or (
-                    independent_review
-                    and purpose == SUPPLEMENTAL_REVIEW_PURPOSE
-                    and call_ids == [SUPPLEMENTAL_REVIEW_CALL_ID]
-                )
-            )
-        )
-        exact_repair = bool(
-            reviewer_like
-            and independent_review
-            and purpose == REVIEWER_REPAIR_PURPOSE
-            and bool(requested_route)
-            and call_ids == list(REVIEWER_REPAIR_CALL_IDS)
-            and statuses[0] == VALIDATION_FAILED_STATUS
-            and statuses[1] in SUCCESS_STATUSES
-            and reviewer.get("has_reviewer_decision") is True
-        )
-        exact_adjudication_repair = bool(
-            adjudication_like
-            and independent_review
-            and purpose == ADJUDICATION_PURPOSE
-            and bool(requested_route)
-            and call_ids == list(ADJUDICATION_CALL_IDS)
-            and statuses[0] == VALIDATION_FAILED_STATUS
-            and statuses[1] in SUCCESS_STATUSES
-        )
-        if exact_repair or exact_adjudication_repair:
-            if exact_repair:
-                exact_reviewer_repairs += 1
-            else:
-                exact_adjudication_repairs += 1
-            superseded_validation_failures += 1
-            call_classifications[call_ids[0]] = (
-                "superseded-validation-failure"
-            )
-            sequence_classification = (
-                "exact-reviewer-repair"
-                if exact_repair
-                else "exact-adjudication-repair"
-            )
-        elif valid_single:
-            sequence_classification = "single-success"
-        else:
-            malformed_sequences += 1
-            sequence_classification = "malformed"
-        purpose_summaries.append(
-            {
-                "independent_review": independent_review,
-                "purpose": purpose[:160],
-                "requested_route": requested_route[:256],
-                "call_ids": call_ids,
-                "statuses": statuses,
-                "terminally_successful": terminal_success,
-                "sequence_classification": sequence_classification,
-            }
-        )
-
-    classified_calls = [
-        {
-            "call_id": str(row.get("call_id") or f"ordinal-{ordinal}"),
-            "status": normalize_status(row.get("status")),
-            "classification": call_classifications[
-                str(row.get("call_id") or f"ordinal-{ordinal}")
-            ],
-        }
-        for ordinal, row in ordered_calls
-    ]
-    classification_counts = collections.Counter(
-        item["classification"] for item in classified_calls
-    )
-    return {
-        "purpose_count": len(groups),
-        "terminally_successful_purpose_count": terminally_successful,
-        "incomplete_purpose_count": len(groups) - terminally_successful,
-        "exact_reviewer_repair_count": exact_reviewer_repairs,
-        "exact_adjudication_repair_count": exact_adjudication_repairs,
-        "superseded_validation_failure_count": (
-            superseded_validation_failures
-        ),
-        "unexpected_unsuccessful_call_count": classification_counts.get(
-            "unexpected-unsuccessful",
-            0,
-        ),
-        "malformed_purpose_sequence_count": malformed_sequences,
-        "call_status_classification_counts": counter_dict(
-            classification_counts
-        ),
-        "call_status_classifications": classified_calls[
-            :MAX_REPORTED_IDS
-        ],
-        "purpose_summaries": purpose_summaries[:MAX_REPORTED_IDS],
-    }
 
 
 def terminal_execution_summary(

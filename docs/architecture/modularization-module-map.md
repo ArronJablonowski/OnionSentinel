@@ -540,6 +540,12 @@ query-planning, follow-up, reviewer, supplemental, and adjudication call
 grammar; enforces round sequencing and retry budgets; and emits content-free
 facts plus exact violation codes through an immutable policy.
 
+`operations/trace_evaluation_model_completion.py` owns bounded model-purpose
+completion and exact repair classification. It preserves deterministic call
+ordering, distinguishes valid single calls from the two authorized repair
+sequences, and keeps validation failures visible unless the exact reviewer or
+adjudication repair contract supersedes them.
+
 `operations/cohort_freezing.py` owns database-newest and exact-imported-row
 cohort freezing. Immutable policy and explicit source ports bind identity
 validation, read-only database snapshots, representative-alert custody,

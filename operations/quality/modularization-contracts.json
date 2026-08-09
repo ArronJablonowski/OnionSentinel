@@ -244,6 +244,15 @@
       ]
     },
     {
+      "path": "operations/trace_evaluation_model_completion.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/trace_evaluation_model_completion.py",
+      "required_symbols": [
+        "ModelPurposePolicy",
+        "model_purpose_completion"
+      ]
+    },
+    {
       "path": "operations/cohort_execution_models.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_execution_models.py",
