@@ -89,6 +89,15 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_response_contract.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_response_contract.py",
+      "required_symbols": [
+        "PromptContractRequest",
+        "build_prompt_contract"
+      ]
+    },
+    {
       "path": "n8n/bin/auto-run-ai-analysis.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/auto-run-ai-analysis.py",

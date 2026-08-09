@@ -565,6 +565,15 @@ grounding by digest, validates every incident-evidence projection, prioritizes
 exact-alert PCAP evidence, and fails closed if the package still exceeds its
 budget. The builder facade injects evidence validators and digest policy.
 
+`prompt_response_contract.py` owns the model-visible instruction and response
+schema contract. Static grounding, factored verdict fields, hypothesis and
+memory shapes, governed query-request schema, and the incident-response report
+shape are immutable module data copied per invocation. The composition root
+injects only the role prompt, task, agent role, blind-reanalysis flag, exact
+query-pack names, and query-contract feature flag. Incident-only grounding and
+report fields cannot leak into SOC Analyst packages, and returned structures do
+not share mutable state across investigations.
+
 ## Portal Runtime
 
 Current owner: `onion-sentinel-dashboard/report_portal.py` (14,366 lines).

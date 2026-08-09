@@ -552,6 +552,7 @@ cp "$REPO_DIR/n8n/bin/prompt_correlation_context.py" "$STACK_DIR/bin/prompt_corr
 cp "$REPO_DIR/n8n/bin/prompt_correlation_facts.py" "$STACK_DIR/bin/prompt_correlation_facts.py"
 cp "$REPO_DIR/n8n/bin/prompt_investigation_query_context.py" "$STACK_DIR/bin/prompt_investigation_query_context.py"
 cp "$REPO_DIR/n8n/bin/prompt_package_compactor.py" "$STACK_DIR/bin/prompt_package_compactor.py"
+cp "$REPO_DIR/n8n/bin/prompt_response_contract.py" "$STACK_DIR/bin/prompt_response_contract.py"
 cp "$REPO_DIR/n8n/bin/collect-incident-evidence.py" "$STACK_DIR/bin/collect-incident-evidence.py"
 cp "$REPO_DIR/n8n/bin/install-investigation-query-runtime.py" "$STACK_DIR/bin/install-investigation-query-runtime.py"
 # The Security Onion forced command and these three Mac files are one exact

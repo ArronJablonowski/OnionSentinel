@@ -9,15 +9,21 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROMPT_BUILDER = REPO_ROOT / "n8n" / "bin" / "build-ai-investigation-prompt.py"
+PROMPT_CONTRACT = REPO_ROOT / "n8n" / "bin" / "prompt_response_contract.py"
 
 
 class QueryPlanningAccuracyGuidanceTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.source = PROMPT_BUILDER.read_text(encoding="utf-8")
+        self.builder_source = PROMPT_BUILDER.read_text(encoding="utf-8")
+        self.source = PROMPT_CONTRACT.read_text(encoding="utf-8")
+
+    def test_builder_uses_extracted_response_contract(self) -> None:
+        self.assertIn("from prompt_response_contract import (", self.builder_source)
+        self.assertIn("build_prompt_contract(", self.builder_source)
 
     def test_v2_schema_advertises_anchor_nearest(self) -> None:
         self.assertIn(
-            '("|anchor_nearest" if INVESTIGATION_QUERY_V2 else "")',
+            '("|anchor_nearest" if request.query_v2 else "")',
             self.source,
         )
         self.assertIn(
