@@ -92,6 +92,11 @@ line ranges below remain historical navigation aids for the extraction ledger.
   constants and classified error types re-exported by the runner namespace.
   It is direct-copied beside the runner, contains no credentials, and preserves
   pinned V1 import before the package tree is available.
+- `n8n/bin/local_ai_analysis_contract.py` owns the package-free model
+  transport, evidence-reference, reviewer-validation, and investigation-query
+  policy tables re-exported by the runner namespace. It is direct-copied
+  beside the runner and depends only on the runtime and investigation-query
+  contracts, keeping both contract modules below the size-warning threshold.
 - Concrete Markdown rendering and atomic output-publication binding now live
   in `local_ai_pipeline_adapters.write_outputs`; the runner transaction port
   delegates directly and no longer retains `render_markdown` or

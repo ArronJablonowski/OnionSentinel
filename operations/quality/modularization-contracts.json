@@ -820,6 +820,19 @@
       ]
     },
     {
+      "path": "n8n/bin/local_ai_analysis_contract.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/local_ai_analysis_contract.py",
+      "required_symbols": [
+        "HOSTED_FORBIDDEN_KEYS",
+        "INVESTIGATION_PARAMETER_KEYS",
+        "MODEL_INTERNAL_KEYS",
+        "REVIEW_KNOWN_FIELD_PATHS",
+        "STRUCTURED_ENUMS",
+        "TRUSTED_QUERY_AUDIT_FIELDS"
+      ]
+    },
+    {
       "path": "n8n/bin/local_ai_pipeline_adapters.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/local_ai_pipeline_adapters.py",

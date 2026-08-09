@@ -610,6 +610,7 @@ cp "$REPO_DIR/n8n/bin/controlled_evaluation_isolation.py" "$STACK_DIR/bin/contro
 cp "$REPO_DIR/n8n/bin/install-ai-runtime-package.py" "$STACK_DIR/bin/install-ai-runtime-package.py"
 cp "$REPO_DIR/n8n/bin/local_ai_pipeline_adapters.py" "$STACK_DIR/bin/local_ai_pipeline_adapters.py"
 cp "$REPO_DIR/n8n/bin/local_ai_runtime_contract.py" "$STACK_DIR/bin/local_ai_runtime_contract.py"
+cp "$REPO_DIR/n8n/bin/local_ai_analysis_contract.py" "$STACK_DIR/bin/local_ai_analysis_contract.py"
 cp "$REPO_DIR/n8n/bin/run-local-ai-analysis.py" "$STACK_DIR/bin/run-local-ai-analysis.py"
 cp "$REPO_DIR/n8n/bin/export-adjudicated-analysis-replays.py" "$STACK_DIR/bin/export-adjudicated-analysis-replays.py"
 cp "$REPO_DIR/n8n/bin/bounded_http.py" "$STACK_DIR/bin/bounded_http.py"

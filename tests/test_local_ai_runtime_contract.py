@@ -14,6 +14,7 @@ if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
 
 import local_ai_runtime_contract as contract  # noqa: E402
+import local_ai_analysis_contract as analysis_contract  # noqa: E402
 
 
 def load_runner():
@@ -50,6 +51,22 @@ class LocalAiRuntimeContractTests(unittest.TestCase):
         )
         self.assertEqual(self.runner._CONTROLLED_EVALUATION_TOKEN, "")
         self.assertIsNone(self.runner._CONTROLLED_EVALUATION_TMPDIR)
+
+    def test_runner_reexports_exact_analysis_policy_tables(self) -> None:
+        for name in (
+            "HOSTED_FORBIDDEN_KEYS",
+            "INVESTIGATION_PARAMETER_KEYS",
+            "MODEL_INTERNAL_KEYS",
+            "REVIEW_KNOWN_FIELD_PATHS",
+            "STRUCTURED_ENUMS",
+            "TRUSTED_QUERY_AUDIT_FIELDS",
+            "_MODEL_LIST_PATH_SENTINEL",
+        ):
+            with self.subTest(name=name):
+                self.assertIs(
+                    getattr(self.runner, name),
+                    getattr(analysis_contract, name),
+                )
 
 
 if __name__ == "__main__":
