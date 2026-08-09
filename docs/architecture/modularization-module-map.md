@@ -63,6 +63,14 @@ line ranges below remain historical navigation aids for the extraction ledger.
   `onion_sentinel.startup_runtime_adapter`. Controlled bootstrap still occurs
   before either prompt path can run, and live runner callables are resolved at
   invocation time so fail-before-work and characterization seams remain exact.
+- Controlled-evaluation runtime binding now lives in the 211-line
+  `onion_sentinel.evaluation.runtime_adapter`. It projects live runner policy
+  and callables into the package-owned isolation and result-identity modules,
+  consumes the ephemeral mutation token before model children, confines direct
+  output and temporary state to the owner-private evaluation root, rechecks
+  frozen routes before Relay or model work, and requires both observed routes
+  in the result. The runner retains lazy signature-compatible delegates so
+  operator and characterization patch seams remain effective.
 - Route resolution, harness eligibility/start/bypass behavior, controlled-mode
   enforcement, shadow-mode failure isolation, running-record publication,
   phase observation, and resource-monitor startup now live in

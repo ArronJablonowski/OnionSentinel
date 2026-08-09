@@ -2084,6 +2084,12 @@ def _evaluation_runtime_isolation():
     return runtime_isolation
 
 
+def _evaluation_runtime_adapter():
+    _provider_routing()
+    from onion_sentinel.evaluation import runtime_adapter
+    return runtime_adapter
+
+
 def _evaluation_reviewer_gate():
     _provider_routing()
     from onion_sentinel.evaluation import reviewer_gate
@@ -2104,24 +2110,14 @@ def _evaluation_reviewer_gate_dependencies():
 
 
 def _evaluation_runtime_isolation_policy():
-    module = _evaluation_runtime_isolation()
-    return module.Policy(
-        home=HOME,
-        mode_environment_key=CONTROLLED_EVALUATION_MODE_ENV,
-        runtime_environment_key=CONTROLLED_EVALUATION_RUNTIME_DIR_ENV,
-        token_environment_key=CONTROLLED_EVALUATION_TOKEN_ENV,
-        token_pattern=CONTROLLED_EVALUATION_TOKEN_RE,
+    return _evaluation_runtime_adapter().isolation_policy(
+        globals(), _evaluation_runtime_isolation()
     )
 
 
 def _evaluation_runtime_isolation_dependencies():
-    module = _evaluation_runtime_isolation()
-    return module.Dependencies(
-        environment=os.environ,
-        owner_id=os.getuid,
-        pin_tmpdir=pin_controlled_tmpdir,
-        validate_incident_route=validate_controlled_incident_evidence_route,
-        isolation_error=ControlledEvaluationIsolationError,
+    return _evaluation_runtime_adapter().isolation_dependencies(
+        globals(), _evaluation_runtime_isolation()
     )
 
 
@@ -2132,22 +2128,14 @@ def _evaluation_result_identity():
 
 
 def _evaluation_result_identity_policy():
-    return _evaluation_result_identity().Policy(
-        result_environment=CONTROLLED_RESULT_ENVIRONMENT,
-        release_environment_key="ONION_SENTINEL_RELEASE_ID",
-        model_route_pattern=CONTROLLED_MODEL_ROUTE_RE,
-        job_roles={
-            "ai_analysis": "soc-analyst",
-            "incident_response_analysis": "incident-responder",
-        },
-        maximum_settings_bytes=DEFAULT_MAX_SETTINGS_BYTES,
+    return _evaluation_runtime_adapter().result_policy(
+        globals(), _evaluation_result_identity()
     )
 
 
 def _evaluation_result_identity_dependencies():
-    return _evaluation_result_identity().Dependencies(
-        environment=os.environ,
-        enabled_routes=enabled_agent_model_routes,
+    return _evaluation_runtime_adapter().result_dependencies(
+        globals(), _evaluation_result_identity()
     )
 
 
@@ -2155,15 +2143,9 @@ def controlled_evaluation_runtime(
     runtime: argparse.Namespace | str,
 ) -> tuple[bool, Path | None]:
     """Resolve an owner-only spool root for one controlled evaluation."""
-    global _CONTROLLED_EVALUATION_TMPDIR
-    _CONTROLLED_EVALUATION_TMPDIR = None
-    result = _evaluation_runtime_isolation().resolve(
-        runtime,
-        policy=_evaluation_runtime_isolation_policy(),
-        dependencies=_evaluation_runtime_isolation_dependencies(),
+    return _evaluation_runtime_adapter().resolve_runtime(
+        globals(), _evaluation_runtime_isolation(), runtime
     )
-    _CONTROLLED_EVALUATION_TMPDIR = result.tmpdir
-    return result.enabled, result.root
 
 
 def controlled_evaluation_output_dir(
@@ -2171,39 +2153,12 @@ def controlled_evaluation_output_dir(
     runtime_root: Path,
 ) -> Path:
     """Keep direct controlled output inside its owner-only evaluation root."""
-    candidate = out_dir.expanduser()
-    try:
-        resolved = candidate.resolve(strict=False)
-        resolved.relative_to(runtime_root)
-    except (OSError, ValueError) as exc:
-        raise SystemExit(
-            "controlled evaluation out_dir must stay inside its runtime "
-            "directory"
-        ) from exc
-    if not candidate.is_absolute() or resolved != candidate:
-        raise SystemExit(
-            "controlled evaluation out_dir must stay inside its runtime "
-            "directory"
-        )
-    return resolved
+    return _evaluation_runtime_adapter().output_directory(out_dir, runtime_root)
 
 
 def consume_controlled_evaluation_token(enabled: bool) -> str:
     """Remove the mutation credential before invoking any model subprocess."""
-    global _CONTROLLED_EVALUATION_TOKEN
-    supplied = str(
-        os.environ.pop(CONTROLLED_EVALUATION_TOKEN_ENV, "") or ""
-    ).strip()
-    if enabled:
-        if not CONTROLLED_EVALUATION_TOKEN_RE.fullmatch(supplied):
-            raise SystemExit(
-                "controlled evaluation requires an exact ephemeral "
-                "authorization token"
-            )
-        _CONTROLLED_EVALUATION_TOKEN = supplied
-    else:
-        _CONTROLLED_EVALUATION_TOKEN = ""
-    return _CONTROLLED_EVALUATION_TOKEN
+    return _evaluation_runtime_adapter().consume_token(globals(), enabled)
 
 
 def controlled_evaluation_result_identity(
@@ -2212,24 +2167,17 @@ def controlled_evaluation_result_identity(
     reanalysis_attempt_id: str,
 ) -> dict[str, Any] | None:
     """Compatibility delegate for server-owned durable lease identity."""
-    return _evaluation_result_identity().identity(
+    return _evaluation_runtime_adapter().result_identity(
+        globals(),
+        _evaluation_result_identity(),
         enabled,
         reanalysis_attempt_id=reanalysis_attempt_id,
-        policy=_evaluation_result_identity_policy(),
-        dependencies=_evaluation_result_identity_dependencies(),
     )
 
 
 def controlled_evaluation_claim_digest(identity: dict[str, Any]) -> str:
     """Hash lease lineage without persisting the bearer token itself."""
-    return hashlib.sha256(
-        json.dumps(
-            identity,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-    ).hexdigest()
+    return _evaluation_runtime_adapter().claim_digest(identity)
 
 
 def require_controlled_evaluation_routes(
@@ -2239,16 +2187,13 @@ def require_controlled_evaluation_routes(
     agent_role: str,
 ) -> None:
     """Compatibility delegate for frozen controlled route admission."""
-    settings_path = Path(
-        getattr(args, "ai_settings_file", DEFAULT_AI_SETTINGS_FILE)
-    )
-    _evaluation_result_identity().require_routes(
+    _evaluation_runtime_adapter().require_routes(
+        globals(),
+        _evaluation_result_identity(),
         identity,
-        settings_path,
+        args,
         settings,
         agent_role,
-        policy=_evaluation_result_identity_policy(),
-        dependencies=_evaluation_result_identity_dependencies(),
     )
 
 
@@ -2257,28 +2202,11 @@ def require_controlled_evaluation_result_routes(
     response: dict[str, Any],
 ) -> None:
     """Reject a controlled result unless both frozen routes actually ran."""
-
-    if identity is None:
-        return
-    assigned_route = identity["expected_assigned_route"]
-    reviewer_route = identity["expected_reviewer_route"]
-    second_opinion = response.get("_second_opinion")
-    reviewer_response = (
-        second_opinion.get("response")
-        if isinstance(second_opinion, dict)
-        else None
+    _evaluation_runtime_adapter().require_result_routes(
+        identity,
+        response,
+        gate_error=ControlledEvaluationReviewerGateError,
     )
-    if (
-        response.get("_analysis_model_route") != assigned_route
-        or not isinstance(second_opinion, dict)
-        or second_opinion.get("status") != "completed"
-        or second_opinion.get("model_route") != reviewer_route
-        or not isinstance(reviewer_response, dict)
-        or reviewer_response.get("_analysis_model_route") != reviewer_route
-    ):
-        raise ControlledEvaluationReviewerGateError(
-            "controlled evaluation result does not attest both frozen routes"
-        )
 
 
 def apply_evaluation_memory_freeze(
@@ -2288,12 +2216,9 @@ def apply_evaluation_memory_freeze(
     freeze_enabled: bool,
 ) -> tuple[bool, str]:
     """Disable only memory persistence during a controlled evaluation run."""
-    if freeze_enabled:
-        return (
-            False,
-            "controlled harness evaluation froze memory writeback",
-        )
-    return allowed, reason
+    return _evaluation_runtime_adapter().apply_memory_freeze(
+        allowed, reason, freeze_enabled=freeze_enabled
+    )
 
 
 def parse_cli_harness_route(
