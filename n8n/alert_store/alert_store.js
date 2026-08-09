@@ -26,6 +26,7 @@ const {createPipelineMetrics} = require('./lib/pipeline_metrics');
 const {createSocAnalysisPolicy} = require('./lib/soc_analysis_policy');
 const {createRouteRegistry} = require('./lib/route_registry');
 const {createRequestDispatcher} = require('./lib/http_dispatch');
+const {createRequestAuthorization} = require('./lib/request_authorization');
 const {createInventoryService} = require('./services/inventory_service');
 const {createInventoryRoutes} = require('./routes/inventory_routes');
 const {createHealthRepository} = require('./repositories/health_repository');
@@ -250,6 +251,12 @@ if (controlledEvaluationMode) {
     );
   }
 }
+const requestAuthorization = createRequestAuthorization({
+  assetWriteToken: assetStoreWriteToken,
+  evaluationToken: controlledEvaluationToken,
+  controlledEvaluationMode,
+  timingSafeEqual: crypto.timingSafeEqual,
+});
 // Validate the complete controlled-runtime boundary before creating a log
 // directory or any other external state. A malformed evaluation environment
 // must fail closed without deriving a path such as /logs from a missing DB.
@@ -1416,19 +1423,11 @@ function requirePostgresAcHunterStore() {
 }
 
 function assetStoreWriteAuthorized(request) {
-  const supplied = request.headers['x-onion-sentinel-asset-token'];
-  if (typeof supplied !== 'string') return false;
-  const expected = Buffer.from(assetStoreWriteToken, 'utf8');
-  const actual = Buffer.from(supplied, 'utf8');
-  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+  return requestAuthorization.assetWriteAuthorized(request);
 }
 
 function requireAssetStoreWriteAuthorization(request) {
-  if (!assetStoreWriteAuthorized(request)) {
-    const error = new Error('asset-store write authorization failed');
-    error.statusCode = 403;
-    throw error;
-  }
+  return requestAuthorization.requireAssetWrite(request);
 }
 
 function initializePipelineMetrics() {
@@ -8811,22 +8810,7 @@ modularRoutes.registerAll(createAlertIngestRoutes({
 }));
 
 function controlledEvaluationRequestAuthorized(request) {
-  if (!controlledEvaluationMode) return true;
-  const supplied = request.headers[
-    'x-onion-sentinel-evaluation-token'
-  ];
-  if (
-    typeof supplied !== 'string'
-    || !/^[a-f0-9]{64}$/.test(supplied)
-  ) {
-    return false;
-  }
-  const expectedBytes = Buffer.from(controlledEvaluationToken, 'utf8');
-  const suppliedBytes = Buffer.from(supplied, 'utf8');
-  return (
-    expectedBytes.length === suppliedBytes.length
-    && crypto.timingSafeEqual(expectedBytes, suppliedBytes)
-  );
+  return requestAuthorization.controlledEvaluationAuthorized(request);
 }
 
 async function handleRequest(request, response) {
