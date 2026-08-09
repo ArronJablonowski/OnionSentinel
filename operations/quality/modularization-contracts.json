@@ -228,6 +228,19 @@
       ]
     },
     {
+      "path": "operations/cohort_evaluation_contracts.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_evaluation_contracts.py",
+      "required_symbols": [
+        "RESULT_SCHEMA",
+        "ADJUDICATION_SCHEMA",
+        "CONTROLLED_EVALUATION_PROFILE",
+        "RUBRIC_WEIGHTS",
+        "VERDICT_VALUE_SETS",
+        "QUERY_CLASSES"
+      ]
+    },
+    {
       "path": "operations/trace_evaluation_skills.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/trace_evaluation_skills.py",

@@ -26,6 +26,7 @@ SPEC.loader.exec_module(evaluator)
 import cohort_evaluation_query_audit  # noqa: E402
 import cohort_evaluation_execution_contract  # noqa: E402
 import cohort_evaluation_execution_proof  # noqa: E402
+import cohort_evaluation_contracts  # noqa: E402
 import cohort_evaluation_result_policy  # noqa: E402
 import cohort_execution_result  # noqa: E402
 
@@ -69,6 +70,20 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         self.assertIs(
             evaluator.admit_execution_proof,
             cohort_evaluation_execution_proof.validate_execution_proof,
+        )
+
+    def test_evaluator_uses_canonical_evaluation_contracts(self) -> None:
+        self.assertIs(
+            evaluator.RUBRIC_WEIGHTS,
+            cohort_evaluation_contracts.RUBRIC_WEIGHTS,
+        )
+        self.assertIs(
+            evaluator.VERDICT_VALUE_SETS,
+            cohort_evaluation_contracts.VERDICT_VALUE_SETS,
+        )
+        self.assertIs(
+            evaluator.QUERY_CLASSES,
+            cohort_evaluation_contracts.QUERY_CLASSES,
         )
 
     def setUp(self) -> None:

@@ -719,6 +719,12 @@ timestamp admission through injected immutable policy. The lower-level proof
 validators remain canonical in their focused modules; this layer only orders
 them and returns the sealed public proof after every gate succeeds.
 
+`operations/cohort_evaluation_contracts.py` is the canonical cohort-grading
+contract surface for schemas, input/output bounds, controlled model routes,
+identity patterns, verdict domains, query classes, hard failures, and rubric
+weights. The evaluator API and CLI import these values rather than maintaining
+independent policy copies.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental
