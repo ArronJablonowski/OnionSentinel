@@ -14,6 +14,9 @@ ENRICHMENT_POLICY = ROOT / "n8n" / "alert_store" / "lib" / "enrichment_policy.js
 ENRICHMENT_PROVIDER_CLIENT = (
     ROOT / "n8n" / "alert_store" / "services" / "enrichment_provider_client.js"
 )
+ENRICHMENT_ORCHESTRATOR = (
+    ROOT / "n8n" / "alert_store" / "services" / "enrichment_orchestrator.js"
+)
 WORKFLOW_CODE = ROOT / "n8n" / "workflows" / "code" / "investigation-enrichment.js"
 
 
@@ -141,10 +144,11 @@ class InvestigationEnrichmentTests(unittest.TestCase):
         alert_store = ALERT_STORE.read_text(encoding="utf-8")
         enrichment_policy = ENRICHMENT_POLICY.read_text(encoding="utf-8")
         provider_client = ENRICHMENT_PROVIDER_CLIENT.read_text(encoding="utf-8")
+        orchestrator = ENRICHMENT_ORCHESTRATOR.read_text(encoding="utf-8")
         workflow = WORKFLOW_CODE.read_text(encoding="utf-8")
-        self.assertIn("enrichmentCache.peek", alert_store)
-        self.assertIn("cachedLookup(source, indicatorType, indicator", alert_store)
-        self.assertIn("reserveProviderRateLimitSlot(source)", alert_store)
+        self.assertIn("cache.peek", orchestrator)
+        self.assertIn("cachedLookup(source, indicatorType, indicator", orchestrator)
+        self.assertIn("reserveProviderRateLimitSlot(source)", orchestrator)
         self.assertIn("/investigations/enrichment/query", workflow)
         self.assertIn("vuln?.knownRansomwareCampaignUse", provider_client)
         self.assertIn("'cisa_kev', cve, 'cve'", provider_client)

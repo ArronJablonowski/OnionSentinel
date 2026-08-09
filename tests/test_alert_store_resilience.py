@@ -22,6 +22,7 @@ ALERT_INGEST_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "alert_i
 NOTIFICATION_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "notification_service.js"
 ALERT_GROUP_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "alert_group_service.js"
 ENRICHMENT_PROVIDER_CLIENT = REPO_ROOT / "n8n" / "alert_store" / "services" / "enrichment_provider_client.js"
+ENRICHMENT_ORCHESTRATOR = REPO_ROOT / "n8n" / "alert_store" / "services" / "enrichment_orchestrator.js"
 ANALYST_REVIEW_POLICY = REPO_ROOT / "n8n" / "alert_store" / "lib" / "analyst_review_policy.js"
 
 
@@ -45,13 +46,14 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.notification_service = NOTIFICATION_SERVICE.read_text(encoding="utf-8")
         cls.alert_group_service = ALERT_GROUP_SERVICE.read_text(encoding="utf-8")
         cls.enrichment_provider_client = ENRICHMENT_PROVIDER_CLIENT.read_text(encoding="utf-8")
+        cls.enrichment_orchestrator = ENRICHMENT_ORCHESTRATOR.read_text(encoding="utf-8")
         cls.analyst_review_policy = ANALYST_REVIEW_POLICY.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
         self.assertIn("require('./lib/provider_scheduler')", self.code)
-        self.assertIn("enrichmentScheduler.run(", self.code)
-        self.assertIn("await Promise.all(jobs);", self.code)
-        self.assertNotIn("withEnrichmentGate", self.code)
+        self.assertIn("scheduler.run(", self.enrichment_orchestrator)
+        self.assertIn("await Promise.all(jobs);", self.enrichment_orchestrator)
+        self.assertNotIn("withEnrichmentGate", self.enrichment_orchestrator)
 
     def test_enrichment_is_durable_and_outside_ingest_latency(self) -> None:
         self.assertIn("require('./lib/durable_job_queue')", self.code)
@@ -68,14 +70,22 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("provider circuit open until", self.provider_scheduler)
 
     def test_enrichment_cache_and_rate_limits_share_the_sqlite_write_boundary(self) -> None:
-        self.assertIn("async function reserveProviderRateLimitSlot(source)", self.code)
-        self.assertIn("return withSqliteWriteGate(() => withImmediateTransaction(async () =>", self.code)
+        self.assertIn(
+            "async function reserveProviderRateLimitSlot(source)",
+            self.enrichment_orchestrator,
+        )
+        self.assertIn(
+            "return withSqliteWriteGate(() => withImmediateTransaction(async () =>",
+            self.enrichment_orchestrator,
+        )
         self.assertIn("withWriteGate: withSqliteWriteGate", self.code)
         self.assertIn("withTransaction: withImmediateTransaction", self.code)
-        cached_lookup = self.code.split("async function cachedLookup", 1)[1].split(
-            "async function lookupAbuseIpdb", 1
+        cached_lookup = self.enrichment_orchestrator.split(
+            "async function cachedLookup", 1
+        )[1].split(
+            "async function runEnrichmentLookup", 1
         )[0]
-        self.assertIn("return enrichmentCache.lookup({", cached_lookup)
+        self.assertIn("return cache.lookup({", cached_lookup)
         self.assertIn("const waitMs = await reserveProviderRateLimitSlot(source)", cached_lookup)
         self.assertIn("return lookup();", cached_lookup)
         self.assertIn("await withWriteGate(() => withTransaction(() => run(", self.enrichment_cache)

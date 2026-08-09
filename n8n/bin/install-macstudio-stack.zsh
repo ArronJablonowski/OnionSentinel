@@ -106,7 +106,8 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/services/alert_ingest_service.js" \
     "$ALERT_STORE_STAGE_DIR/services/notification_service.js" \
     "$ALERT_STORE_STAGE_DIR/services/alert_group_service.js" \
-    "$ALERT_STORE_STAGE_DIR/services/enrichment_provider_client.js"
+    "$ALERT_STORE_STAGE_DIR/services/enrichment_provider_client.js" \
+    "$ALERT_STORE_STAGE_DIR/services/enrichment_orchestrator.js"
 }
 
 trap cleanup_alert_store_stage EXIT

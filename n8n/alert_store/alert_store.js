@@ -52,6 +52,7 @@ const {createScoringPolicy} = require('./lib/scoring_policy');
 const {createIndicatorExtraction} = require('./lib/indicator_extraction');
 const {createEnrichmentPolicy} = require('./lib/enrichment_policy');
 const {createEnrichmentProviderClient} = require('./services/enrichment_provider_client');
+const {createEnrichmentOrchestrator} = require('./services/enrichment_orchestrator');
 const {
   analystAdjudicationOutcomes,
   analystAdjudicationConfidences,
@@ -614,20 +615,7 @@ const {
   extractAlertIndicators,
   hasUsableExternalIntel,
 } = createIndicatorExtraction({parseIpv4, isPrivateIpv4, nestedField});
-const {
-  investigationEnrichmentSources,
-  normalizedEnrichmentRecord,
-  notFoundEnrichmentRecord,
-  verdictFromStats,
-  sourceLimitNote,
-  sourceConfigured,
-  sourceRateLimitMs,
-  sourceTtlSeconds,
-  sourceStaleIfErrorSeconds,
-  shouldUseVirusTotal,
-  normalizeInvestigationEnrichmentIndicator,
-  investigationIndicatorAlert,
-} = createEnrichmentPolicy({
+const enrichmentPolicy = createEnrichmentPolicy({
   normalizeTimestampValue,
   nowUtc,
   isConfiguredSecret,
@@ -645,24 +633,11 @@ const {
   redactUrlForPublicLookup,
 });
 const {
-  requestJson,
-  lookupAbuseIpdb,
-  lookupGreynoise,
-  lookupShodanInternetDb,
-  lookupOtx,
-  lookupUrlhaus,
-  lookupVirusTotal,
-  lookupUrlscan,
-  lookupGoogleSafeBrowsing,
-  lookupPhishTank,
-  lookupMalwareBazaar,
-  lookupThreatFox,
-  lookupShodan,
-  lookupCensys,
-  lookupCisaKev,
-  lookupEpss,
-  lookupNvd,
-} = createEnrichmentProviderClient({
+  normalizedEnrichmentRecord,
+  notFoundEnrichmentRecord,
+  verdictFromStats,
+} = enrichmentPolicy;
+const enrichmentProviderClient = createEnrichmentProviderClient({
   controlledEvaluationMode,
   boundedRequestJson,
   timeoutMs: enrichmentTimeoutMs,
@@ -675,6 +650,7 @@ const {
   isConfiguredSecret,
   formatProjectTimestamp,
 });
+const {requestJson} = enrichmentProviderClient;
 const {
   queueTelegramNotification,
   drainTelegramOutbox,
@@ -957,235 +933,6 @@ function enrichmentRecord(alert) {
   };
 }
 
-function epochMs(value = new Date()) {
-  return value instanceof Date ? value.getTime() : new Date(value).getTime();
-}
-
-function isoFromMs(value) {
-  return formatProjectTimestamp(new Date(value));
-}
-
-async function reserveProviderRateLimitSlot(source) {
-  const minimumMs = sourceRateLimitMs(source);
-  return withSqliteWriteGate(() => withImmediateTransaction(async () => {
-    const row = await get('SELECT last_request_at FROM enrichment_rate_limit WHERE source = ?', [source]);
-    const currentMs = epochMs();
-    const parsedLastMs = row?.last_request_at
-      ? epochMs(String(row.last_request_at).replace('  ', 'T'))
-      : Number.NaN;
-
-    // Persist the reservation before releasing the gate. Different providers
-    // may run concurrently, but no cache/rate-limit statement can become part
-    // of an unrelated alert-ingest transaction on this shared connection.
-    // Implausibly future timestamps are ignored so clock corrections cannot
-    // stall enrichment indefinitely.
-    const maximumCredibleFutureMs = currentMs + Math.max(60000, minimumMs * 4);
-    const lastMs = Number.isFinite(parsedLastMs) && parsedLastMs <= maximumCredibleFutureMs
-      ? parsedLastMs
-      : currentMs - minimumMs;
-    const reservedMs = Math.max(currentMs, lastMs + minimumMs);
-    await run(
-      'INSERT INTO enrichment_rate_limit (source, last_request_at) VALUES (?, ?) ON CONFLICT(source) DO UPDATE SET last_request_at = excluded.last_request_at',
-      [source, isoFromMs(reservedMs).replace('T', '  ')],
-    );
-    return Math.max(0, reservedMs - currentMs);
-  }));
-}
-
-async function cachedLookup(source, indicatorType, indicator, lookup) {
-  const ttlSeconds = sourceTtlSeconds(source);
-  return enrichmentCache.lookup({
-    source,
-    indicatorType,
-    indicator,
-    ttlSeconds,
-    negativeTtlSeconds: Math.min(ttlSeconds, enrichmentNegativeCacheTtlSeconds),
-    staleIfErrorSeconds: sourceStaleIfErrorSeconds(source),
-    loader: () => enrichmentScheduler.run(source, async () => {
-      const waitMs = await reserveProviderRateLimitSlot(source);
-      if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
-      return lookup();
-    }),
-  });
-}
-
-async function runEnrichmentLookup(source, indicatorType, indicator, lookup, summary) {
-  if (!sourceConfigured(source)) {
-    summary.skipped.push({source, indicator, indicator_type: indicatorType, reason: 'missing_api_key', limit_note: sourceLimitNote(source)});
-    return;
-  }
-  try {
-    const result = await cachedLookup(source, indicatorType, indicator, lookup);
-    summary.records.push(result.record);
-    summary.sources[source] = {
-      status: result.cache_state === 'stale' ? 'stale_cache' : result.cached ? 'cached' : 'queried',
-      cache_state: result.cache_state,
-      limit_note: sourceLimitNote(source),
-    };
-    if (result.fallback_error) {
-      summary.warnings.push({
-        source,
-        indicator,
-        indicator_type: indicatorType,
-        reason: 'provider_refresh_failed_stale_cache_used',
-        detail: result.fallback_error,
-      });
-    }
-  } catch (error) {
-    summary.errors.push({source, indicator, indicator_type: indicatorType, reason: error.message, limit_note: sourceLimitNote(source)});
-  }
-}
-
-async function enrichAlert(alert) {
-  if (!alert || typeof alert !== 'object' || isRelayHeartbeat(alert)) {
-    return {
-      ok: true,
-      status: isRelayHeartbeat(alert) ? 'heartbeat_skipped' : 'invalid_skipped',
-      alert,
-      enrichment: {records: [], skipped: [], errors: [], indicators: {}, sources: {}},
-    };
-  }
-  const indicators = extractAlertIndicators(alert);
-  const summary = {
-    generated_at: nowUtc(),
-    cache_ttl_seconds: enrichmentCacheDefaultTtlSeconds,
-    vulnerability_cache_ttl_seconds: vulnerabilityCacheDefaultTtlSeconds,
-    indicators,
-    sources: {},
-    records: [],
-    skipped: [],
-    warnings: [],
-    errors: [],
-    privacy: {
-      submitted_private_ips: false,
-      submitted_internal_urls: false,
-      url_query_strings_redacted: true,
-      urlscan_submit_enabled: urlscanSubmitEnabled,
-    },
-  };
-
-  const jobs = [];
-  const schedule = (source, indicatorType, indicator, lookup) => {
-    jobs.push(runEnrichmentLookup(source, indicatorType, indicator, lookup, summary));
-  };
-
-  for (const ip of indicators.public_ips.slice(0, 4)) {
-    schedule('abuseipdb', 'ip', ip, () => lookupAbuseIpdb(ip));
-    schedule('greynoise', 'ip', ip, () => lookupGreynoise(ip));
-    schedule('shodan_internetdb', 'ip', ip, () => lookupShodanInternetDb(ip));
-    schedule('otx', 'ip', ip, () => lookupOtx('ip', ip));
-    schedule('shodan', 'ip', ip, () => lookupShodan(ip));
-    schedule('censys', 'ip', ip, () => lookupCensys(ip));
-  }
-
-  for (const domain of indicators.domains.slice(0, 4)) {
-    schedule('otx', 'domain', domain, () => lookupOtx('domain', domain));
-    schedule('urlscan', 'domain', domain, () => lookupUrlscan('domain', domain));
-    schedule('threatfox', 'domain', domain, () => lookupThreatFox('domain', domain));
-    if (shouldUseVirusTotal(alert)) {
-      schedule('virustotal', 'domain', domain, () => lookupVirusTotal('domain', domain));
-    } else {
-      summary.skipped.push({source: 'virustotal', indicator: domain, indicator_type: 'domain', reason: `below_${virustotalMinimumLevel}_severity`, limit_note: sourceLimitNote('virustotal')});
-    }
-  }
-
-  for (const urlValue of indicators.urls.slice(0, 3)) {
-    schedule('urlhaus', 'url', urlValue, () => lookupUrlhaus(urlValue));
-    schedule('urlscan', 'url', urlValue, () => lookupUrlscan('url', urlValue));
-    schedule('google_safe_browsing', 'url', urlValue, () => lookupGoogleSafeBrowsing(urlValue));
-    schedule('phishtank', 'url', urlValue, () => lookupPhishTank(urlValue));
-    schedule('otx', 'url', urlValue, () => lookupOtx('url', urlValue));
-    if (shouldUseVirusTotal(alert)) {
-      schedule('virustotal', 'url', urlValue, () => lookupVirusTotal('url', urlValue));
-    } else {
-      summary.skipped.push({source: 'virustotal', indicator: urlValue, indicator_type: 'url', reason: `below_${virustotalMinimumLevel}_severity`, limit_note: sourceLimitNote('virustotal')});
-    }
-  }
-
-  for (const hash of indicators.hashes.slice(0, 4)) {
-    schedule('malwarebazaar', 'hash', hash.value, () => lookupMalwareBazaar(hash.value));
-    schedule('otx', 'hash', hash.value, () => lookupOtx('hash', hash.value));
-    schedule('threatfox', 'hash', hash.value, () => lookupThreatFox('hash', hash.value));
-    if (shouldUseVirusTotal(alert)) {
-      schedule('virustotal', 'hash', hash.value, () => lookupVirusTotal('hash', hash.value));
-    } else {
-      summary.skipped.push({source: 'virustotal', indicator: hash.value, indicator_type: 'hash', reason: `below_${virustotalMinimumLevel}_severity`, limit_note: sourceLimitNote('virustotal')});
-    }
-  }
-
-  for (const cve of indicators.cves.slice(0, 6)) {
-    schedule('cisa_kev', 'cve', cve, () => lookupCisaKev(cve));
-    schedule('epss', 'cve', cve, () => lookupEpss(cve));
-    schedule('nvd', 'cve', cve, () => lookupNvd(cve));
-  }
-
-  await Promise.all(jobs);
-  const stableOrder = (left, right) => (
-    `${left.source}|${left.indicator_type}|${left.indicator}`
-      .localeCompare(`${right.source}|${right.indicator_type}|${right.indicator}`)
-  );
-  summary.records.sort(stableOrder);
-  summary.skipped.sort(stableOrder);
-  summary.errors.sort(stableOrder);
-
-  const enrichedAlert = {
-    ...alert,
-    enrichment: {
-      ...(alert.enrichment || {}),
-      external_intel: {
-        ...summary,
-        verdict_counts: summary.records.reduce((counts, record) => {
-          counts[record.verdict] = (counts[record.verdict] || 0) + 1;
-          return counts;
-        }, {}),
-      },
-    },
-  };
-  return {ok: true, status: 'enriched', alert: enrichedAlert, enrichment: enrichedAlert.enrichment.external_intel};
-}
-
-async function cachedInvestigationEnrichment(indicatorType, indicator) {
-  const normalized = normalizeInvestigationEnrichmentIndicator(indicatorType, indicator);
-  const records = [];
-  const misses = [];
-  const skipped = [];
-  for (const source of investigationEnrichmentSources[normalized.type]) {
-    if (!sourceConfigured(source)) {
-      skipped.push({source, reason: 'missing_api_key'});
-      continue;
-    }
-    const found = await enrichmentCache.peek(source, normalized.type, normalized.value);
-    if (found.cached && found.record) records.push(found.record);
-    else misses.push({source, cache_state: found.cache_state});
-  }
-  records.sort((left, right) => String(left.source).localeCompare(String(right.source)));
-  return {
-    ok: true,
-    schema: 'onion-sentinel-investigation-enrichment-v1',
-    indicator_type: normalized.type,
-    indicator: normalized.value,
-    cache_complete: misses.length === 0,
-    records,
-    misses,
-    skipped,
-  };
-}
-
-async function queryInvestigationEnrichment(indicatorType, indicator) {
-  const normalized = normalizeInvestigationEnrichmentIndicator(indicatorType, indicator);
-  const result = await enrichAlert(
-    investigationIndicatorAlert(normalized.type, normalized.value),
-  );
-  return {
-    ok: result.ok,
-    schema: 'onion-sentinel-investigation-enrichment-v1',
-    status: result.status,
-    indicator_type: normalized.type,
-    indicator: normalized.value,
-    enrichment: result.enrichment,
-  };
-}
-
 if (controlledEvaluationMode) {
   const databasePath = path.resolve(dbPath);
   const databaseMetadata = fs.lstatSync(databasePath);
@@ -1395,6 +1142,29 @@ const enrichmentCache = createEnrichmentCache({
   rawResponseMaxBytes: enrichmentCacheRawResponseMaxBytes,
   staleIfErrorSeconds: enrichmentStaleIfErrorSeconds,
   vulnerabilityStaleIfErrorSeconds: enrichmentVulnerabilityStaleIfErrorSeconds,
+});
+const {
+  enrichAlert,
+  cachedInvestigationEnrichment,
+  queryInvestigationEnrichment,
+} = createEnrichmentOrchestrator({
+  cache: enrichmentCache,
+  scheduler: enrichmentScheduler,
+  providers: enrichmentProviderClient,
+  policy: enrichmentPolicy,
+  extractAlertIndicators,
+  isRelayHeartbeat,
+  nowUtc,
+  formatProjectTimestamp,
+  withSqliteWriteGate,
+  withImmediateTransaction,
+  get,
+  run,
+  defaultTtlSeconds: enrichmentCacheDefaultTtlSeconds,
+  vulnerabilityTtlSeconds: vulnerabilityCacheDefaultTtlSeconds,
+  negativeTtlSeconds: enrichmentNegativeCacheTtlSeconds,
+  virusTotalMinimumLevel: virustotalMinimumLevel,
+  urlscanSubmitEnabled,
 });
 
 function initializeDurableJobs() {
