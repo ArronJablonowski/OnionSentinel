@@ -558,6 +558,11 @@ evidence, budget, memory, reviewer, model, route, skill, and integrity facts,
 derives coverage gaps, and assembles the established content-free per-run report
 without owning SQLite lifecycle or CLI behavior.
 
+`operations/trace_evaluation_output.py` owns the trace evaluator's output
+boundary. It renders the stable concise terminal summary and writes complete
+JSON reports atomically with owner-only permissions, a same-directory temporary
+file, flush and filesystem synchronization, and cleanup on failure.
+
 `operations/cohort_freezing.py` owns database-newest and exact-imported-row
 cohort freezing. Immutable policy and explicit source ports bind identity
 validation, read-only database snapshots, representative-alert custody,

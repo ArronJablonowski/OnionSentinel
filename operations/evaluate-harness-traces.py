@@ -18,7 +18,6 @@ import os
 import re
 import sqlite3
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -68,6 +67,7 @@ from trace_evaluation_run import (
     TraceRunServices,
     evaluate_run as evaluate_trace_run,
 )
+from trace_evaluation_output import atomic_private_json, human_report
 
 
 REPORT_SCHEMA = "onion-sentinel-harness-trace-evaluation-v1"
@@ -1124,76 +1124,6 @@ def evaluate_database(
             database_schema=schema_version,
         )
 
-
-def atomic_private_json(path: Path, value: Mapping[str, Any]) -> None:
-    path = path.expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    payload = json.dumps(value, indent=2, sort_keys=True) + "\n"
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        dir=path.parent,
-        text=True,
-    )
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        os.chmod(path, 0o600)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def human_report(report: Mapping[str, Any]) -> str:
-    completion = report["completion"]
-    integrity = report["integrity"]
-    skill_selection = report["skill_selection_attestation"]
-    models = report["models"]
-    tools = report["tools"]
-    evidence = report["evidence"]
-    reviewer = report["reviewer"]
-    budgets = report["budgets"]
-    memory = report["memory_promotion"]
-    coverage = report["coverage"]
-    return "\n".join(
-        [
-            "Onion Sentinel harness trace evaluation",
-            f"Runs: {report['run_count']} | statuses: "
-            f"{json.dumps(completion['status_counts'], sort_keys=True)}",
-            f"Completion: {completion['terminal_rate']} terminal | "
-            f"{completion['success_rate']} succeeded",
-            f"Integrity: {integrity['valid_run_count']} valid, "
-            f"{integrity['invalid_run_count']} invalid "
-            f"({integrity['event_count']} events)",
-            "Skill selection: "
-            f"{skill_selection['mandatory_ready_run_count']} evaluation-ready, "
-            f"{skill_selection['legacy_run_count']} legacy, "
-            f"{skill_selection['invalid_run_count']} invalid",
-            f"Models: {models['call_count']} calls, "
-            f"{models['independent_review_call_count']} reviewer calls",
-            f"Tools: {tools['call_count']} calls, "
-            f"{tools['rejected_count']} rejected, "
-            f"{tools['failed_count']} failed, "
-            f"{tools['coverage_gap_count']} coverage gaps, "
-            f"{tools['truncated_count']} truncated",
-            f"Evidence: {evidence['catalogued_count']} references, "
-            f"{evidence['average_distinct_source_classes_per_run']} "
-            "average source classes/run",
-            f"Reviewer: {reviewer['material_disagreement_runs']} material "
-            f"disagreements across {reviewer['comparable_decision_runs']} "
-            "comparable runs",
-            f"Budgets: {budgets['violation_runs']} violating runs | "
-            f"{json.dumps(budgets['violation_counts'], sort_keys=True)}",
-            f"Memory: {memory['allowed_count']} allowed, "
-            f"{memory['blocked_count']} blocked, "
-            f"{memory['requires_approval_count']} awaiting approval",
-            f"Coverage: {coverage['runs_with_gaps']} runs with gaps | "
-            f"{json.dumps(coverage['reason_counts'], sort_keys=True)}",
-        ]
-    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
