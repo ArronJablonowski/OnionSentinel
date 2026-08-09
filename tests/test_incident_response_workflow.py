@@ -23,6 +23,13 @@ ALERT_STORE_PATH = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
 ANALYSIS_REQUEST_ROUTES_PATH = (
     REPO_ROOT / "n8n" / "alert_store" / "routes" / "analysis_request_routes.js"
 )
+INCIDENT_REANALYSIS_BINDING_PATH = (
+    REPO_ROOT
+    / "n8n"
+    / "alert_store"
+    / "services"
+    / "incident_reanalysis_binding.js"
+)
 AI_RUNNER_PATH = REPO_ROOT / "n8n" / "bin" / "run-local-ai-analysis.py"
 ANALYSIS_INDEX_PATH = (
     REPO_ROOT
@@ -1053,6 +1060,7 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
     def test_case_bound_reanalysis_has_durable_run_progress_contract(self) -> None:
         source = ALERT_STORE_PATH.read_text(encoding="utf-8")
         routes = ANALYSIS_REQUEST_ROUTES_PATH.read_text(encoding="utf-8")
+        binding_source = INCIDENT_REANALYSIS_BINDING_PATH.read_text(encoding="utf-8")
         index_source = ANALYSIS_INDEX_PATH.read_text(encoding="utf-8")
 
         self.assertIn("CREATE TABLE IF NOT EXISTS incident_reanalysis_runs", source)
@@ -1085,7 +1093,7 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn("payload?.provider || response._analysis_provider", source)
         self.assertIn(
             "incidentAnalysisProvider(executedModelPath, provider)",
-            source,
+            binding_source,
         )
         self.assertIn("'/incidents/reanalyze'", routes)
         self.assertIn("'/incidents/reanalyze-all'", routes)
