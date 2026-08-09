@@ -72,6 +72,15 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_controlled_terminal_proof.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_controlled_terminal_proof.py",
+      "required_symbols": [
+        "ControlledTerminalProofSources",
+        "prove_controlled_terminal_success"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_execution.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_execution.py",

@@ -60,6 +60,10 @@ from scheduler_controlled_recovery import (
     controlled_recovery_spool_pending as controlled_spool_pending,
     recover_controlled_evaluation_spool as replay_controlled_result_spool,
 )
+from scheduler_controlled_terminal_proof import (
+    ControlledTerminalProofSources,
+    prove_controlled_terminal_success,
+)
 from scheduler_claim import (
     SchedulerClaimSources,
     acquire_scheduler_claim,
@@ -1158,127 +1162,36 @@ def controlled_recovery_spool_pending(runtime_root: Path) -> bool:
         runtime_root,
         effective_uid=os.getuid,
     )
-def controlled_recovery_terminal_success(
-    args: argparse.Namespace,
-    recovery: dict[str, Any],
-) -> bool:
-    """Prove a lost completion response from immutable read-only DB state."""
-    try:
+
+
+def controlled_terminal_proof_sources() -> ControlledTerminalProofSources:
+    """Bind the immutable database proof and canonical digest policies."""
+    def open_readonly_database(database_path: Path) -> sqlite3.Connection:
         connection = sqlite3.connect(
-            f"file:{args.db}?mode=ro",
+            f"file:{database_path}?mode=ro",
             uri=True,
             timeout=5,
         )
         connection.row_factory = sqlite3.Row
-        try:
-            connection.execute("BEGIN")
-            job = connection.execute(
-                """
-                SELECT id, status, lease_token, lease_expires_at,
-                       rerun_requested, payload_json
-                FROM durable_jobs
-                WHERE job_type = ? AND dedupe_key = ?
-                """,
-                (
-                    recovery["job_type"],
-                    recovery["stable_group_id"],
-                ),
-            ).fetchone()
-            accepted = connection.execute(
-                """
-                SELECT group_id, alert_id, agent_role, generated_at, model,
-                       model_path, detection_outcome, bluf, summary,
-                       confidence, artifact_path, evidence_hash, response_json
-                FROM ai_analysis_runs WHERE analysis_id = ?
-                """,
-                (recovery["analysis_id"],),
-            ).fetchone()
-            incident_attempt = connection.execute(
-                """
-                SELECT attempt_id, run_id, case_id, group_id, status,
-                       analysis_id
-                FROM incident_reanalysis_attempts
-                WHERE analysis_id = ?
-                """,
-                (recovery["analysis_id"],),
-            ).fetchone()
-        finally:
-            connection.close()
-        job_payload = json.loads(str(job["payload_json"])) if job else {}
-        stored_response = (
-            json.loads(str(accepted["response_json"])) if accepted else {}
-        )
-    except (
-        OSError,
-        sqlite3.Error,
-        TypeError,
-        ValueError,
-        json.JSONDecodeError,
-    ):
-        return False
-    identity = recovery["identity"]
-    expected_stored_response_digest = str(
-        recovery.get("stored_response_digest")
-        or recovery.get("stored_response_fallback_digest")
-        or recovery["response_digest"]
-    ).lower()
-    return bool(
-        job
-        and accepted
-        and int(job["id"] or 0) == int(recovery["job_id"])
-        and job["status"] == "completed"
-        and not job["lease_token"]
-        and not job["lease_expires_at"]
-        and int(job["rerun_requested"] or 0) == 0
-        and job_payload.get("cohort_id") == identity["cohort_id"]
-        and job_payload.get("dispatch_id") == identity["dispatch_id"]
-        and job_payload.get("release_id") == identity["release_id"]
-        and job_payload.get("alert_id")
-        == identity["representative_alert_id"]
-        and job_payload.get("representative_alert_id")
-        == identity["representative_alert_id"]
-        and job_payload.get("group_id") == identity["stable_group_id"]
-        and job_payload.get("stable_group_id")
-        == identity["stable_group_id"]
-        and job_payload.get("stable_group_key")
-        == identity["stable_group_key"]
-        and accepted["group_id"] == identity["stable_group_id"]
-        and accepted["alert_id"] == identity["representative_alert_id"]
-        and accepted["agent_role"] == identity["agent_role"]
-        and controlled_accepted_fields_match(
-            accepted,
-            recovery["accepted_fields"],
-        )
-        and isinstance(stored_response, dict)
-        and stored_response.get("_analysis_controlled_claim_sha256")
-        == recovery["claim_digest"]
-        and re.fullmatch(
-            r"[a-f0-9]{64}",
-            expected_stored_response_digest,
-        )
-        and controlled_storage_canonical_digest(stored_response)
-        == expected_stored_response_digest
-        and (
-            (
-                recovery["job_type"] == "ai_analysis"
-                and incident_attempt is None
-            )
-            or (
-                recovery["job_type"] == "incident_response_analysis"
-                and incident_attempt is not None
-                and incident_attempt["attempt_id"]
-                == identity["reanalysis_attempt_id"]
-                and incident_attempt["run_id"]
-                == job_payload.get("reanalysis_run_id")
-                and incident_attempt["case_id"]
-                == job_payload.get("case_id")
-                and incident_attempt["group_id"]
-                == identity["stable_group_id"]
-                and incident_attempt["status"] == "completed"
-                and incident_attempt["analysis_id"]
-                == recovery["analysis_id"]
-            )
-        )
+        return connection
+
+    return ControlledTerminalProofSources(
+        open_readonly_database=open_readonly_database,
+        accepted_fields_match=controlled_accepted_fields_match,
+        storage_canonical_digest=controlled_storage_canonical_digest,
+        valid_digest=lambda value: bool(re.fullmatch(r"[a-f0-9]{64}", value)),
+    )
+
+
+def controlled_recovery_terminal_success(
+    args: argparse.Namespace,
+    recovery: dict[str, Any],
+) -> bool:
+    """Compatibility delegate for immutable terminal database proof."""
+    return prove_controlled_terminal_success(
+        controlled_terminal_proof_sources(),
+        args.db,
+        recovery,
     )
 
 

@@ -275,6 +275,13 @@ handling, frozen-memory settlement, and durable spool unlink. Payload
 validation and read-only database proof remain injected ports, allowing their
 separate extraction without weakening the crash-recovery sequence.
 
+`scheduler_controlled_terminal_proof.py` is the read-only recovery repository.
+Within one immutable SQLite transaction it loads the durable job, committed
+analysis, and optional IR attempt, then proves exact job identity, cleared
+lease state, frozen dispatch metadata, accepted fields, full stored-response
+digest, claim binding, and role-appropriate attempt completion. Parse, schema,
+or database failures return no proof and never mutate state.
+
 `scheduler_claim.py` owns compare-and-set processing acquisition,
 server-authoritative job/alert/group replacement, controlled claim identity,
 IR reanalysis-attempt binding, contention projection, and automatic-threshold
