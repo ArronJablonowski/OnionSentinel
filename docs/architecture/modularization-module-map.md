@@ -567,6 +567,13 @@ identity never enter prompt evidence. Database connections, row queries, row
 access, alert parsing, and timestamp parsing remain injected by the builder
 facade, while missing schemas and malformed records yield no trusted evidence.
 
+`prompt_alert_projection.py` owns the bounded model-facing projection of the
+selected alert and deployed detection rule. It admits only explicit alert
+fields, suppresses packet-bearing or oversized message text, replaces content
+values with hashes and lengths, allowlists safe numeric/boolean rule modifiers,
+and exposes only state preconditions relevant to matching. Alert JSON parsing,
+row access, and deployed-rule extraction remain injected by the builder facade.
+
 `prompt_detection_context.py` owns ordered preparation of the exact detection
 group, deterministic investigation-skill selection, rule/playbook predicate
 validation, bounded packet features, and time-aware asset resolution. The

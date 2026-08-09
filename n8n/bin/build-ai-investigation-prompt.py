@@ -63,6 +63,10 @@ from prompt_authorization_context import (
     authorized_activity_context as project_authorized_activity_context,
     canonical_authorized_activity_entry as canonical_authorization_entry,
 )
+from prompt_alert_projection import (
+    AlertProjectionSources,
+    project_compact_alert,
+)
 from prompt_pcap_evidence import (
     PcapEvidenceRequest,
     PcapEvidenceSources,
@@ -878,105 +882,16 @@ def grouped_alert_context(conn: sqlite3.Connection, selected: sqlite3.Row, limit
 
 
 def compact_alert(row_value: sqlite3.Row) -> dict:
-    alert = parse_alert_json(row_value["alert_json"])
-    triage = alert.get("triage") if isinstance(alert.get("triage"), dict) else {}
-    raw_event = parse_json_object(str(sqlite_value(row_value, "raw_event_json") or ""))
-    rule_context = extract_rule_context(
-        alert,
-        raw_event,
-        sqlite_value(row_value, "rule_id"),
+    """Compatibility delegate for bounded alert and rule projection."""
+    return project_compact_alert(
+        AlertProjectionSources(
+            row_value=sqlite_value,
+            parse_alert_json=parse_alert_json,
+            parse_json_object=parse_json_object,
+            extract_rule_context=extract_rule_context,
+        ),
+        row_value,
     )
-    parsed_rule = (
-        rule_context.get("parsed_rule")
-        if isinstance(rule_context.get("parsed_rule"), dict)
-        else {}
-    )
-    message = alert.get("message")
-    if isinstance(message, str) and len(message) <= 2000 and '"packet"' not in message:
-        safe_message = message
-    else:
-        safe_message = None
-    safe_contents = []
-    for item in parsed_rule.get("contents", []) if isinstance(parsed_rule.get("contents"), list) else []:
-        if not isinstance(item, dict):
-            continue
-        modifiers = item.get("modifiers") if isinstance(item.get("modifiers"), dict) else {}
-        safe_contents.append(
-            {
-                "id": item.get("id"),
-                "sha256": item.get("sha256"),
-                "length": item.get("length"),
-                "negated": bool(item.get("negated")),
-                "modifiers": {
-                    key: value
-                    for key, value in modifiers.items()
-                    if key in {"offset", "depth", "distance", "within", "startswith", "endswith", "nocase", "rawbytes"}
-                    and (isinstance(value, bool) or re.fullmatch(r"\d{1,8}", str(value or "")))
-                },
-            }
-        )
-    return {
-        "alert_id": row_value["alert_id"],
-        "timestamp": row_value["timestamp"],
-        "first_seen": row_value["first_seen"],
-        "last_seen": row_value["last_seen"],
-        "seen_count": row_value["seen_count"],
-        "total_seen_count": sqlite_value(row_value, "total_seen_count"),
-        "rule_name": row_value["rule_name"],
-        "event_dataset": row_value["event_dataset"],
-        "severity": row_value["severity"],
-        "severity_label": row_value["severity_label"],
-        "source_ip": row_value["source_ip"],
-        "source_port": sqlite_value(row_value, "source_port"),
-        "destination_ip": row_value["destination_ip"],
-        "destination_port": sqlite_value(row_value, "destination_port"),
-        "transport_protocol": sqlite_value(row_value, "transport_protocol"),
-        "network_protocol": sqlite_value(row_value, "network_protocol"),
-        "rule_id": sqlite_value(row_value, "rule_id"),
-        "traffic_direction": row_value["traffic_direction"],
-        "triage_score": row_value["triage_score"],
-        "triage_level": row_value["triage_level"],
-        "routing": row_value["routing"],
-        "filter_status": row_value["filter_status"],
-        "filter_reason": row_value["filter_reason"],
-        "suppression_key": row_value["suppression_key"],
-        "triage_reasons": triage.get("reasons", []),
-        "rule_context": {
-            "sid": rule_context.get("sid"),
-            "record_rule_id": rule_context.get("record_rule_id"),
-            "revision": rule_context.get("revision"),
-            "name": rule_context.get("name"),
-            "ruleset": rule_context.get("ruleset"),
-            "category": rule_context.get("category"),
-            "rule_sha256": parsed_rule.get("rule_sha256"),
-            "deployed_rule": {
-                "protocol": parsed_rule.get("protocol"),
-                "packet_predicates": parsed_rule.get("predicates") or [],
-                "content_predicates": safe_contents,
-                "state_preconditions": [
-                    {
-                        "kind": item.get("kind"),
-                        "operation": item.get("operation"),
-                    }
-                    for item in parsed_rule.get("state_operations", [])
-                    if isinstance(item, dict)
-                    and str(item.get("operation") or "").lower() in {"isset", "isnotset"}
-                ],
-                "unsupported_constraint_count": len(parsed_rule.get("unsupported_match_options") or []),
-            },
-        },
-        "raw_alert_subset": {
-            "source": alert.get("source"),
-            "destination": alert.get("destination"),
-            "network": alert.get("network"),
-            "event": alert.get("event"),
-            "observer": alert.get("observer"),
-            "message": safe_message,
-            "rule_category": alert.get("rule_category"),
-            "rule_ruleset": alert.get("rule_ruleset"),
-            "signature_id": alert.get("signature_id"),
-        },
-    }
 
 
 def _nested_alert_value(alert: dict, dotted_path: str) -> object:

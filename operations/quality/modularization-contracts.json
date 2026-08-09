@@ -48,6 +48,15 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_alert_projection.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_alert_projection.py",
+      "required_symbols": [
+        "AlertProjectionSources",
+        "project_compact_alert"
+      ]
+    },
+    {
       "path": "n8n/bin/prompt_builder_cli.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_builder_cli.py",
