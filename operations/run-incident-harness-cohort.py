@@ -73,6 +73,10 @@ from cohort_http import (
     load_evaluation_token as read_evaluation_token,
     validate_loopback_base_url as validate_dashboard_base_url,
 )
+from cohort_monitor_binding import (
+    CohortMonitorBindingSources,
+    monitor_dispatch_job_binding as prove_monitor_dispatch_binding,
+)
 
 
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -1872,172 +1876,32 @@ def _verify_dispatch_readback(
     )
 
 
+def _cohort_monitor_binding_sources() -> CohortMonitorBindingSources:
+    return CohortMonitorBindingSources(
+        cohort_error=CohortError,
+        sha256_pattern=SHA256_RE,
+        constant_time_equal=_constant_time_equal,
+        member_stable_group_key=_member_stable_group_key,
+        load_aliases=load_aliases,
+        current_summary_identity=_current_summary_identity,
+        validate_representative_binding=_validate_representative_binding,
+        durable_dispatch_job=_durable_dispatch_job,
+        validate_dispatch_job_payload=_validate_dispatch_job_payload,
+        deterministic_dispatch_id=deterministic_dispatch_id,
+        parse_timestamp=_parse_timestamp,
+        sha256_value=sha256_value,
+    )
+
+
 def _monitor_dispatch_job_binding(
     connection: sqlite3.Connection,
     manifest: Mapping[str, Any],
     member: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Re-prove the accepted durable job before trusting any monitor state."""
-
-    dispatch = member.get("dispatch")
-    if not isinstance(dispatch, dict):
-        raise CohortError("accepted member has no dispatch record")
-    accepted = dispatch.get("accepted")
-    readback = dispatch.get("readback")
-    if not isinstance(accepted, dict) or not isinstance(readback, dict):
-        raise CohortError("accepted member has incomplete dispatch provenance")
-
-    kind = str(dispatch.get("kind") or "")
-    if kind not in {"analyze", "escalate", "reanalyze"}:
-        raise CohortError(f"unsupported dispatch kind: {kind!r}")
-    stable_id = str(member["stable_group_id"])
-    stable_group_key = _member_stable_group_key(member)
-    aliases = load_aliases(connection)
-    current_identity = _current_summary_identity(
-        connection,
-        str(member["dashboard_group_id"]),
-        aliases,
+    """Compatibility adapter for monitor-time durable-job rebinding."""
+    return prove_monitor_dispatch_binding(
+        _cohort_monitor_binding_sources(), connection, manifest, member
     )
-    if current_identity is None or current_identity[0] != stable_id:
-        raise CohortError(
-            "frozen representative identity changed during monitoring"
-        )
-    representative_binding = _validate_representative_binding(
-        connection,
-        member,
-        current_identity[1],
-    )
-    job_type = (
-        "ai_analysis"
-        if kind == "analyze"
-        else "incident_response_analysis"
-    )
-    case_id = str(accepted.get("case_id") or "") if kind != "analyze" else ""
-    run_id = (
-        str(accepted.get("run_id") or "")
-        if kind == "reanalyze"
-        else ""
-    )
-    job = _durable_dispatch_job(
-        connection,
-        job_type=job_type,
-        stable_group_id=stable_id,
-    )
-    binding = _validate_dispatch_job_payload(
-        manifest,
-        member,
-        job,
-        manual_reanalysis=kind != "escalate",
-        expected_case_id=case_id,
-        expected_reanalysis_run_id=run_id,
-    )
-
-    try:
-        expected_job_id = int(readback.get("job_id"))
-        current_job_id = int(job.get("id"))
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise CohortError("accepted dispatch has an invalid durable job ID") from exc
-    if expected_job_id < 1 or current_job_id != expected_job_id:
-        raise CohortError("accepted durable job identity changed during monitoring")
-
-    expected_payload_sha256 = str(
-        readback.get("job_payload_sha256") or ""
-    )
-    if (
-        not SHA256_RE.fullmatch(expected_payload_sha256)
-        or not _constant_time_equal(
-            expected_payload_sha256,
-            str(binding["payload_sha256"]),
-        )
-    ):
-        raise CohortError("accepted durable job payload changed during monitoring")
-
-    expected_dispatch_id = deterministic_dispatch_id(manifest, member)
-    expected_cohort_id = str(manifest["cohort_id"])
-    expected_release_id = str(
-        manifest["execution_contract"]["expected_release_id"]
-    )
-    expected_assigned_route = str(
-        manifest["execution_contract"]["expected_assigned_route"]
-    )
-    expected_reviewer_route = str(
-        manifest["execution_contract"]["expected_reviewer_route"]
-    )
-    reviewer_required = manifest["execution_contract"][
-        "reviewer_required"
-    ]
-    provenance_sources = (
-        ("accepted response", accepted),
-        ("durable readback", readback),
-    )
-    for label, source in provenance_sources:
-        if (
-            source.get("dispatch_id") != expected_dispatch_id
-            or source.get("cohort_id") != expected_cohort_id
-            or source.get("stable_group_key") != stable_group_key
-            or source.get("release_id") != expected_release_id
-            or source.get("expected_assigned_route")
-            != expected_assigned_route
-            or source.get("expected_reviewer_route")
-            != expected_reviewer_route
-            or source.get("reviewer_required") is not reviewer_required
-        ):
-            raise CohortError(
-                f"{label} dispatch identity changed during monitoring"
-            )
-    if str(dispatch.get("dispatch_id") or "") != expected_dispatch_id:
-        raise CohortError("member dispatch identity changed during monitoring")
-    if _parse_timestamp(
-        job.get("requested_at"),
-        "accepted durable job requested_at",
-    ) < _parse_timestamp(
-        dispatch.get("started_at"),
-        "accepted dispatch started_at",
-    ):
-        raise CohortError(
-            "accepted durable job predates the dispatch POST window"
-        )
-
-    expected_readback = {
-        "stable_group_id": stable_id,
-        "stable_group_key": stable_group_key,
-        "representative_alert_id": member["representative_alert_id"],
-        "release_id": expected_release_id,
-        "expected_assigned_route": expected_assigned_route,
-        "expected_reviewer_route": expected_reviewer_route,
-        "reviewer_required": reviewer_required,
-    }
-    if kind != "analyze":
-        expected_readback["case_id"] = case_id
-    if kind == "reanalyze":
-        expected_readback["run_id"] = run_id
-    if any(
-        readback.get(field) != expected
-        for field, expected in expected_readback.items()
-    ):
-        raise CohortError("durable readback identity changed during monitoring")
-
-    return {
-        key: value
-        for key, value in job.items()
-        if key != "payload_json"
-    } | {
-        "payload_sha256": binding["payload_sha256"],
-        "cohort_id": expected_cohort_id,
-        "dispatch_id": expected_dispatch_id,
-        "release_id": expected_release_id,
-        "expected_assigned_route": expected_assigned_route,
-        "expected_reviewer_route": expected_reviewer_route,
-        "reviewer_required": reviewer_required,
-        "stable_group_id": stable_id,
-        "stable_group_key": stable_group_key,
-        "representative_alert_id": str(
-            member["representative_alert_id"]
-        ),
-        "representative_binding_sha256": sha256_value(
-            representative_binding
-        ),
-    }
 
 
 def _cohort_dispatch_sources() -> CohortDispatchSources:

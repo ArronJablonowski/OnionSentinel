@@ -540,6 +540,12 @@ network I/O, persists ambiguous and rejected outcomes without retrying, and
 marks acceptance only after the injected readback proof succeeds. The module
 has no concrete database, HTTP, or filesystem dependency.
 
+`operations/cohort_monitor_binding.py` re-proves accepted dispatch provenance
+at every monitor observation. It rejects representative drift, durable-job or
+payload replacement, cohort/release/route mutation, altered case/run identity,
+and jobs predating the recorded POST window before exposing bounded job state
+to terminal monitoring.
+
 `prompt_incident_evidence_projection.py` owns the model-facing, in-memory
 projection of already-validated incident evidence. It applies deterministic
 prefix limits to Elastic hits and OSQuery rows, records source and retained
