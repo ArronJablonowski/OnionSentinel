@@ -5702,226 +5702,6 @@ def markdown_list(items: list[str]) -> str:
     return _reporting_incident().markdown_list(items)
 
 
-def _bootstrap_pipeline(module: Any, pipeline_module: Any, args: argparse.Namespace) -> Any:
-    return module.bootstrap(
-        args, environment=os.environ,
-        policy=module.BootstrapPolicy(
-            freeze_memory_env=EVALUATION_FREEZE_MEMORY_ENV,
-            path_defaults=pipeline_module.RuntimePathDefaults(
-                log_dir=DEFAULT_LLM_LOG_DIR,
-                index_queue_dir=DEFAULT_ANALYSIS_INDEX_QUEUE_DIR,
-                index_quarantine_dir=DEFAULT_ANALYSIS_INDEX_QUARANTINE_DIR,
-                memory_receipt_dir=DEFAULT_MEMORY_WRITEBACK_RECEIPT_DIR,
-                memory_pending_dir=DEFAULT_MEMORY_WRITEBACK_PENDING_DIR,
-                memory_committed_dir=DEFAULT_MEMORY_WRITEBACK_COMMITTED_DIR)),
-        ports=module.BootstrapPorts(
-            controlled_runtime=controlled_evaluation_runtime,
-            controlled_output_dir=controlled_evaluation_output_dir,
-            consume_token=consume_controlled_evaluation_token,
-            result_identity=lambda controlled, attempt: controlled_evaluation_result_identity(
-                controlled, reanalysis_attempt_id=attempt),
-            boolean_setting=boolean_setting,
-            flush_queue=lambda url, enabled: flush_analysis_index_queue(
-                url, memory_writeback_enabled=enabled),
-            emit=lambda payload: print(json.dumps(payload))),
-    )
-
-
-def _memory_guard_ports(
-    module: Any,
-    harness: OnionSentinelHarnessRun | None,
-    observe: Callable[[Callable[[], Any]], Any],
-) -> Any:
-    return module.MemoryGuardPorts(
-        promotion_decision=lambda candidate, shared: (
-            harness.memory_promotion_decision(
-                candidate, has_shared_candidates=shared, human_approved=False)
-            if harness is not None else None),
-        decision_is_effective=lambda decision: policy_decision_is_effective(
-            harness.policy.mode, decision),
-        record_audit=lambda audit: observe(
-            lambda: harness.store.append_event(
-                harness.run_id, "policy.memory-promotion", "post-processing",
-                audit, idempotency_key="policy.memory-promotion")),
-        apply_freeze=lambda allowed, reason, frozen: apply_evaluation_memory_freeze(
-            allowed, reason, freeze_enabled=frozen),
-        plan=lambda candidates, allowed, reason: memory_writeback_plan(
-            candidates, allowed=allowed, eligibility_reason=reason),
-        reviewer_eligibility=second_opinion_memory_eligibility,
-        controlled_claim_digest=controlled_evaluation_claim_digest,
-    )
-
-
-def _publication_ports(
-    module: Any,
-    legacy_adapters: Any,
-    *,
-    args: argparse.Namespace,
-    run_id: str,
-    prompt_path: Path,
-    prompt_package: dict[str, Any],
-    response: dict[str, Any],
-    started_at: dt.datetime,
-    runtime_paths: Any,
-    harness: OnionSentinelHarnessRun | None,
-    observe: Callable[[Callable[[], Any]], Any],
-) -> Any:
-    return module.PublicationPorts(
-        write_outputs=lambda: legacy_adapters.write_outputs(
-            globals(), prompt_path, prompt_package, response, args, run_id),
-        build_payload=lambda generated, artifact: analysis_index_payload(
-            run_id, prompt_package, response, args.reanalysis_attempt_id,
-            started_at, generated, artifact),
-        preflight=lambda: observe(
-            lambda: harness.preflight_completion(operation_id="pre-index-commit")
-            if harness is not None else None),
-        queue=lambda payload, controlled: queue_analysis_index(
-            payload, queue_dir=runtime_paths.index_queue_dir)
-            if controlled else queue_analysis_index(payload),
-        submit=lambda payload, controlled: post_controlled_analysis_index(
-            payload, args.alert_store_url)
-            if controlled else post_analysis_index(payload, args.alert_store_url),
-        quarantine=lambda path, payload, exc: quarantine_analysis_index(
-            path, payload, exc,
-            quarantine_dir=runtime_paths.index_quarantine_dir),
-        discard_memory=lambda: discard_pending_memory_writeback(
-            run_id, pending_dir=runtime_paths.memory_pending_dir),
-    )
-
-
-def _memory_promotion_ports(
-    module: Any,
-    *,
-    run_id: str,
-    response_digest: str,
-    runtime_paths: Any,
-    agent_role: str,
-    role_memory_file: Path,
-    shared_memory_file: Path,
-    prompt_path: Path,
-    guards: Any,
-) -> Any:
-    return module.MemoryPromotionPorts(
-        promote_staged=lambda: mark_memory_writeback_committed(
-            run_id, expected_response_digest=response_digest,
-            pending_dir=runtime_paths.memory_pending_dir,
-            committed_dir=runtime_paths.memory_committed_dir),
-        process_staged=lambda task: process_committed_memory_writeback(
-            task, receipt_dir=runtime_paths.memory_receipt_dir),
-        persist_direct=lambda: persist_postcommit_memory_writeback(
-            analysis_id=run_id, agent_role=agent_role,
-            role_memory_file=role_memory_file,
-            shared_memory_file=shared_memory_file,
-            source_artifact=str(prompt_path),
-            primary_candidates=guards.primary_candidates,
-            primary_allowed=guards.primary_allowed,
-            primary_reason=guards.primary_reason,
-            reviewer_candidates=guards.reviewer_candidates,
-            reviewer_allowed=guards.reviewer_allowed,
-            reviewer_reason=guards.reviewer_reason,
-            receipt_dir=runtime_paths.memory_receipt_dir),
-        error_digest=canonical_payload_digest,
-        warn=best_effort_warning,
-    )
-
-
-def _finalize_pipeline_telemetry(
-    module: Any,
-    *,
-    status: str,
-    error: str,
-    monitor_started: bool,
-    harness: OnionSentinelHarnessRun | None,
-    resource_monitor: SystemResourceMonitor,
-    started_at: dt.datetime,
-    started_monotonic: float,
-    run_id: str,
-    prompt_path: Path | None,
-    prompt_package: dict[str, Any],
-    settings: dict[str, Any],
-    args: argparse.Namespace,
-    response: dict[str, Any] | None,
-    json_path: Path | None,
-    md_path: Path | None,
-    runtime_paths: Any,
-    running_record: dict[str, Any],
-    active_record_path: Path,
-) -> None:
-    module.finalize(
-        module.FinalizationInputs(
-            status, error, bool(prompt_path or prompt_package),
-            monitor_started, harness),
-        module.FinalizationPorts(
-            fail_harness=lambda reason: harness.fail(reason),
-            stop_monitor=resource_monitor.stop,
-            build_record=lambda: build_llm_log_record(
-                run_id=run_id, status=status, started_at=started_at,
-                finished_at=project_now(),
-                runtime_seconds=time.monotonic() - started_monotonic,
-                prompt_path=prompt_path, prompt_package=prompt_package,
-                settings=settings or effective_ai_settings(args),
-                response=response, json_path=json_path, md_path=md_path,
-                resource_monitor=resource_monitor, error=error,
-                runtime_observation=running_record),
-            append_record=lambda record: append_jsonl(
-                runtime_paths.log_file, record),
-            write_current=lambda record: atomic_write_json(
-                runtime_paths.current_file, record),
-            cleanup_active=lambda: active_record_path.unlink(missing_ok=True),
-            warn=best_effort_warning,
-        ),
-    )
-
-
-def _finalize_harness_completion(
-    module: Any,
-    harness: OnionSentinelHarnessRun | None,
-    *,
-    run_id: str,
-    response_digest: str,
-    commit_receipt: dict[str, Any],
-    json_path: Path,
-    md_path: Path,
-    response: dict[str, Any],
-    memory_frozen: bool,
-    memory_receipt: dict[str, Any] | None,
-    memory_receipt_path: Path | None,
-) -> None:
-    if harness is None:
-        return
-    inputs = module.HarnessCompletionInputs(
-        analysis_id=run_id, submitted_response_sha256=response_digest,
-        commit_receipt=commit_receipt, json_path=json_path,
-        markdown_path=md_path, response=response,
-        evaluation_memory_frozen=memory_frozen,
-        memory_receipt=memory_receipt,
-        memory_receipt_path=memory_receipt_path)
-    ports = module.HarnessCompletionPorts(
-        digest=canonical_payload_digest,
-        record_memory_writeback=harness.record_memory_writeback,
-        observe_runtime=harness.observe_postcommit_runtime,
-        complete=lambda payload: harness.complete(payload, check_budget=False),
-        warn=best_effort_warning)
-    module.finalize_harness(inputs, ports)
-
-
-def _print_committed_outputs(
-    markdown_path: Path,
-    json_path: Path,
-    response: dict[str, Any],
-    include_response: bool,
-) -> None:
-    try:
-        print(markdown_path)
-        print(json_path)
-        if include_response:
-            print(json.dumps(response, indent=2, sort_keys=True))
-    except Exception as exc:
-        best_effort_warning(
-            "committed analysis output could not be printed: "
-            f"{type(exc).__name__}")
-
-
 def main() -> int:
     import local_ai_pipeline_adapters as legacy_adapters
     from onion_sentinel import pipeline as pipeline_module
@@ -5932,7 +5712,8 @@ def main() -> int:
     from onion_sentinel.analysis.persistence import transaction as transaction_module
     from onion_sentinel.analysis.query import audit as query_audit_module
     args = parse_args()
-    bootstrap = _bootstrap_pipeline(startup_module, pipeline_module, args)
+    bootstrap = legacy_adapters.bootstrap_pipeline(
+        globals(), startup_module, pipeline_module, args)
     if bootstrap.exit_code is not None:
         return bootstrap.exit_code
     controlled_evaluation = bootstrap.controlled
@@ -5958,9 +5739,7 @@ def main() -> int:
         prompt_path=prompt_path,
     )
     active_record_path = active_analysis_record_path(
-        run_id,
-        active_dir=runtime_paths.active_dir,
-    )
+        run_id, active_dir=runtime_paths.active_dir)
     resource_monitor = SystemResourceMonitor()
     status, error, monitor_started = "failure", "", False
     harness_runtime: OnionSentinelHarnessRun | None = None
@@ -6049,8 +5828,8 @@ def main() -> int:
             response,
             policy=memory_policy_module.MemoryGuardPolicy(
                 evaluation_memory_frozen, controlled_result_identity),
-            ports=_memory_guard_ports(
-                memory_policy_module, harness_runtime, observe_harness),
+            ports=legacy_adapters.memory_guard_ports(
+                globals(), memory_policy_module, harness_runtime, observe_harness),
         )
         raw_memory_candidates = memory_guards.primary_candidates
         primary_memory_allowed = memory_guards.primary_allowed
@@ -6109,8 +5888,8 @@ def main() -> int:
                 submission_error=AnalysisIndexSubmissionError,
                 indeterminate_message=CONTROLLED_RESULT_SUBMISSION_INDETERMINATE,
             ),
-            ports=_publication_ports(
-                transaction_module, legacy_adapters, args=args, run_id=run_id,
+            ports=legacy_adapters.publication_ports(
+                globals(), transaction_module, args=args, run_id=run_id,
                 prompt_path=prompt_path, prompt_package=prompt_package,
                 response=response, started_at=started_at,
                 runtime_paths=runtime_paths, harness=harness_runtime,
@@ -6131,8 +5910,8 @@ def main() -> int:
             analysis_id=run_id,
             staged_task=staged_memory_task,
             pending_index_path=pending_index_path,
-            ports=_memory_promotion_ports(
-                transaction_module, run_id=run_id,
+            ports=legacy_adapters.memory_promotion_ports(
+                globals(), transaction_module, run_id=run_id,
                 response_digest=submitted_response_sha256,
                 runtime_paths=runtime_paths, agent_role=agent_role,
                 role_memory_file=role_memory_file,
@@ -6141,15 +5920,16 @@ def main() -> int:
         )
         memory_receipt = memory_promotion.receipt
         memory_receipt_path = memory_promotion.receipt_path
-        _finalize_harness_completion(
-            postcommit_module, harness_runtime, run_id=run_id,
+        legacy_adapters.finalize_harness_completion(
+            globals(), postcommit_module, harness_runtime, run_id=run_id,
             response_digest=submitted_response_sha256,
             commit_receipt=commit_receipt, json_path=json_path, md_path=md_path,
             response=response, memory_frozen=evaluation_memory_frozen,
             memory_receipt=memory_receipt,
             memory_receipt_path=memory_receipt_path)
         pipeline_context.advance(pipeline_module.Stage.POST_COMMIT, "post-commit work finalized")
-        _print_committed_outputs(md_path, json_path, response, args.stdout)
+        legacy_adapters.print_committed_outputs(
+            globals(), md_path, json_path, response, args.stdout)
         pipeline_context.advance(pipeline_module.Stage.COMPLETE, "analysis pipeline completed")
         return 0
     except SystemExit as exc:
@@ -6162,8 +5942,8 @@ def main() -> int:
         raise
     finally:
         from onion_sentinel import telemetry as telemetry_module
-        _finalize_pipeline_telemetry(
-            telemetry_module, status=status, error=error,
+        legacy_adapters.finalize_pipeline_telemetry(
+            globals(), telemetry_module, status=status, error=error,
             monitor_started=monitor_started, harness=harness_runtime,
             resource_monitor=resource_monitor, started_at=started_at,
             started_monotonic=started_monotonic, run_id=run_id,

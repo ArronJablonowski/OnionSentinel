@@ -81,6 +81,11 @@ line ranges below remain historical navigation aids for the extraction ledger.
   `write_outputs` compatibility symbols. The production installer and
   executable compatibility manifest direct-copy this required adapter beside
   the runner.
+- Startup, memory-policy, publication, post-commit, telemetry, optional harness
+  completion, and committed-output port binding also live in
+  `local_ai_pipeline_adapters`. The runner now selects package stages and
+  passes runtime state; the adapter alone translates legacy globals into
+  package ports. The adapter remains a cohesive 478-line composition module.
 - `analysis.query.runtime_adapter` owns the concrete per-invocation binding of
   provider, governed-query, harness-observation, prompt-admission, and audit
   ports to the package query coordinator. The legacy query entry point now

@@ -813,7 +813,14 @@
       "runtime_path": "$STACK_DIR/bin/local_ai_pipeline_adapters.py",
       "required_symbols": [
         "analysis_review_ports",
+        "bootstrap_pipeline",
+        "finalize_harness_completion",
+        "finalize_pipeline_telemetry",
+        "memory_guard_ports",
+        "memory_promotion_ports",
         "prepare_runtime",
+        "print_committed_outputs",
+        "publication_ports",
         "write_outputs"
       ]
     },
