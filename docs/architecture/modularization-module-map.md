@@ -2465,6 +2465,10 @@ single typed runtime context exposes the ordered load, attestation, preparation,
 analysis, governed-pivot, review, adjudication, guard, validation, commit, and
 post-commit transitions as bounded metadata-only audit records. It owns no
 provider, query, filesystem, network, database, or harness side effects.
+`onion_sentinel.legacy_pipeline` owns the end-to-end composition order through
+explicit runtime ports and decomposed lifecycle stages. The executable `main`
+remains only a lazy package delegate so staged V1 compatibility can still
+import the runner before the package is installed.
 The legacy runner functions remain compatibility delegates and inject runtime
 policy explicitly, preserving existing test seams while keeping review-package
 mutation and reviewer-output admission out of the composition root.
