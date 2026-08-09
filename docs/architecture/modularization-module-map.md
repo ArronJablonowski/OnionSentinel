@@ -170,6 +170,13 @@ line ranges below remain historical navigation aids for the extraction ledger.
 - Evidence-reference validity, corroborating-source diversity, schema repair,
   contradictions, deterministic guard caps, incident-completeness caps, and
   confidence audit records now live in `analysis.conclusions.confidence`.
+- Concrete bounded hypothesis/correlation normalization, factored-verdict and
+  scope binding, trusted endpoint-gap reconciliation, deterministic evidence,
+  confidence, tuning and authorization guard binding, and Incident Response
+  report normalization/reconciliation now live in the 259-line
+  `analysis.conclusions.runtime_adapter`. The runner retains lazy compatibility
+  delegates and every dependency is resolved from live bindings so guard order,
+  test seams, and fail-closed evidence behavior remain exact.
 - Ordered second-opinion triggers and deterministic primary/reviewer field
   comparison now live in `analysis.review.comparison`. Consequential verdict,
   handling, escalation, and control-tuning differences remain material;

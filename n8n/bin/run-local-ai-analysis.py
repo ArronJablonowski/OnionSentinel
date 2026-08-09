@@ -1774,6 +1774,12 @@ def _conclusion_correlation():
     return correlation
 
 
+def _conclusion_runtime_adapter():
+    _provider_routing()
+    from onion_sentinel.analysis.conclusions import runtime_adapter
+    return runtime_adapter
+
+
 def _conclusion_scope():
     _provider_routing()
     from onion_sentinel.analysis.conclusions import scope
@@ -4574,85 +4580,37 @@ def analyze_with_config(
 
 
 def coerce_list(value: Any) -> list[str]:
-    if isinstance(value, list):
-        return [str(item) for item in value]
-    if value in (None, ""):
-        return []
-    return [str(value)]
+    return _conclusion_runtime_adapter().coerce_list(value)
 
 
 def normalize_correlation_assessment(value: Any) -> dict[str, Any]:
     """Compatibility delegate for bounded correlation assessment policy."""
-    return _conclusion_correlation().normalize(
-        value,
-        confidence_values=frozenset(CONFIDENCE_VALUES),
-    )
+    return _conclusion_runtime_adapter().normalize_correlation(globals(), value)
 
 
 def bounded_text(value: Any, limit: int = 8000) -> str:
-    return str(value or "")[:limit]
+    return _conclusion_runtime_adapter().bounded_text(value, limit)
 
 
 def bounded_text_list(value: Any, limit: int = 50, item_limit: int = 4000) -> list[str]:
-    return [bounded_text(item, item_limit) for item in coerce_list(value)[:limit]]
+    return _conclusion_runtime_adapter().bounded_text_list(
+        value, limit, item_limit
+    )
 
 
 def normalize_hypotheses(value: Any) -> list[dict[str, Any]]:
     """Keep a bounded, structured hypothesis ledger instead of stringifying it."""
-    if not isinstance(value, list):
-        return []
-    output: list[dict[str, Any]] = []
-    for item in value[:20]:
-        if not isinstance(item, dict):
-            continue
-        status = str(item.get("status") or "unresolved").strip().lower()
-        if status not in {"supported", "contradicted", "unresolved"}:
-            status = "unresolved"
-        identifier = re.sub(
-            r"[^A-Za-z0-9._-]+",
-            "-",
-            str(item.get("id") or f"hypothesis-{len(output) + 1}"),
-        ).strip("-")[:64]
-        statement = bounded_text(item.get("statement"), 2000)
-        if not identifier or not statement:
-            continue
-        output.append(
-            {
-                "id": identifier,
-                "statement": statement,
-                "status": status,
-                "supporting_evidence": bounded_text_list(
-                    item.get("supporting_evidence"),
-                    limit=20,
-                    item_limit=500,
-                ),
-                "contradicting_evidence": bounded_text_list(
-                    item.get("contradicting_evidence"),
-                    limit=20,
-                    item_limit=500,
-                ),
-                "next_discriminator": bounded_text(
-                    item.get("next_discriminator"),
-                    1000,
-                ),
-            }
-        )
-    return output
+    return _conclusion_runtime_adapter().normalize_hypotheses(value)
 
 
 def safe_nonnegative_int(value: Any) -> int:
     """Coerce untrusted collector/model metadata without breaking artifact writes."""
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError, OverflowError):
-        return 0
+    return _conclusion_runtime_adapter().safe_nonnegative_int(value)
 
 
 def normalized_detection_outcome(value: Any) -> str:
     """Return the canonical legacy outcome code or ``inconclusive``."""
-    return _conclusion_verdict().normalize_outcome(
-        value, allowed=DETECTION_OUTCOME_VALUES,
-    )
+    return _conclusion_runtime_adapter().normalized_outcome(globals(), value)
 
 
 def legacy_verdict_factors(
@@ -4661,28 +4619,19 @@ def legacy_verdict_factors(
     escalation_needed: bool = False,
 ) -> dict[str, Any]:
     """Map a legacy disposition into the orthogonal verdict dimensions."""
-    return _conclusion_verdict().legacy_factors(
-        outcome, escalation_needed=escalation_needed,
+    return _conclusion_runtime_adapter().legacy_factors(
+        globals(), outcome, escalation_needed=escalation_needed
     )
 
 
 def derive_legacy_detection_outcome(factors: dict[str, Any]) -> str:
     """Derive the compatibility outcome from normalized verdict dimensions."""
-    return _conclusion_verdict().derive_outcome(factors)
+    return _conclusion_runtime_adapter().derive_outcome(globals(), factors)
 
 
 def normalize_factored_verdict(response: dict[str, Any]) -> dict[str, Any]:
     """Normalize factored verdict fields and reconcile the legacy outcome."""
-    return _conclusion_verdict().normalize(
-        response,
-        outcome_values=DETECTION_OUTCOME_VALUES,
-        event_status_values=EVENT_STATUS_VALUES,
-        validity_values=DETECTION_VALIDITY_VALUES,
-        disposition_values=ACTIVITY_DISPOSITION_VALUES,
-        handling_values=HANDLING_VALUES,
-        factored_keys=FACTORED_VERDICT_KEYS,
-        boolean_setting=boolean_setting,
-    )
+    return _conclusion_runtime_adapter().normalize_verdict(globals(), response)
 
 
 def normalize_scope_dispositions(
@@ -4690,20 +4639,15 @@ def normalize_scope_dispositions(
     prompt_package: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Compatibility delegate for selected-event and group dispositions."""
-    return _conclusion_scope().normalize(
-        response,
-        prompt_package,
-        policy=_conclusion_scope_policy(),
-        dependencies=_conclusion_scope_dependencies(),
+    return _conclusion_runtime_adapter().normalize_scope(
+        globals(), response, prompt_package
     )
 
 
 def _has_trusted_endpoint_evidence(prompt_package: dict[str, Any] | None) -> bool:
     """Return whether a collector supplied relevant, positive endpoint facts."""
-    return _evidence_endpoint().has_trusted_evidence(
-        prompt_package,
-        policy=_evidence_endpoint_policy(),
-        dependencies=_evidence_endpoint_dependencies(),
+    return _conclusion_runtime_adapter().has_trusted_endpoint_evidence(
+        globals(), prompt_package
     )
 
 
@@ -4718,53 +4662,14 @@ def _trusted_endpoint_evidence_fields(
     evidence-gap reconciler and can be extended as other grounded-field
     contradictions are observed.
     """
-    return _evidence_endpoint().trusted_fields(
-        prompt_package,
-        policy=_evidence_endpoint_policy(),
+    return _conclusion_runtime_adapter().trusted_endpoint_fields(
+        globals(), prompt_package
     )
 
 
 def _remove_supplied_executable_path_gap(text: Any) -> tuple[str, bool]:
     """Remove only a false executable-path absence from one gap string."""
-    value = re.sub(r"\s+", " ", str(text or "")).strip()
-    if not value:
-        return "", False
-    if not re.search(
-        r"\b(?:process\.)?executable path(?:s)?\b",
-        value,
-        re.IGNORECASE,
-    ):
-        return value, False
-
-    rewritten = re.sub(
-        r"\b(?:process\.)?executable path(?:s)?\s*,\s*",
-        "",
-        value,
-        count=1,
-        flags=re.IGNORECASE,
-    )
-    if rewritten != value:
-        rewritten = re.sub(r"\s+", " ", rewritten).strip()
-        return rewritten, True
-
-    # A standalone assertion that the path is absent is wholly contradicted
-    # by the trusted row and has no remaining gap to preserve.
-    absence_markers = (
-        "missing",
-        "absent",
-        "unavailable",
-        "not supplied",
-        "not provided",
-        "not present",
-        "not available",
-        "required",
-        "needed",
-        "obtain",
-        "collect",
-    )
-    if any(marker in value.lower() for marker in absence_markers):
-        return "", True
-    return value, False
+    return _conclusion_runtime_adapter().remove_supplied_executable_path_gap(text)
 
 
 def reconcile_supplied_endpoint_evidence_gaps(
@@ -4772,54 +4677,13 @@ def reconcile_supplied_endpoint_evidence_gaps(
     prompt_package: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Prevent model-authored gap lists from denying supplied endpoint facts."""
-    supplied = _trusted_endpoint_evidence_fields(prompt_package)
-    if "process.executable" not in supplied:
-        return response
-
-    rewritten_count = 0
-    removed_count = 0
-
-    def reconcile_list(container: dict[str, Any], key: str) -> None:
-        nonlocal rewritten_count, removed_count
-        values = container.get(key)
-        if not isinstance(values, list):
-            return
-        normalized: list[Any] = []
-        for item in values:
-            if not isinstance(item, str):
-                normalized.append(item)
-                continue
-            rewritten, changed = _remove_supplied_executable_path_gap(item)
-            if not changed:
-                normalized.append(item)
-            elif rewritten:
-                normalized.append(rewritten)
-                rewritten_count += 1
-            else:
-                removed_count += 1
-        container[key] = normalized
-
-    reconcile_list(response, "evidence_gaps")
-    reconcile_list(response, "additional_evidence_needed")
-    report = response.get("incident_response_report")
-    if isinstance(report, dict):
-        reconcile_list(report, "evidence_gaps")
-        reconcile_list(report, "constraints")
-
-    if rewritten_count or removed_count:
-        response["_endpoint_evidence_gap_reconciliation"] = {
-            "schema": "onion-sentinel-endpoint-evidence-gap-reconciliation-v1",
-            "executable_path_supplied": True,
-            "rewritten_gap_count": rewritten_count,
-            "removed_gap_count": removed_count,
-        }
-    return response
+    return _conclusion_runtime_adapter().reconcile_endpoint_gaps(
+        globals(), response, prompt_package
+    )
 
 
 def _consequential_model_conclusion(response: dict[str, Any]) -> bool:
-    return _conclusion_evidence_guard().consequential(
-        response, _evidence_guard_dependencies(),
-    )
+    return _conclusion_runtime_adapter().consequential(globals(), response)
 
 
 def apply_deterministic_evidence_guard(
@@ -4827,43 +4691,29 @@ def apply_deterministic_evidence_guard(
     prompt_package: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Reconcile model conclusions with collector-owned rule-intent evidence."""
-    return _conclusion_evidence_guard().apply(
-        response, prompt_package, _evidence_guard_dependencies(),
+    return _conclusion_runtime_adapter().evidence_guard(
+        globals(), response, prompt_package
     )
 
 
 def confidence_label_for_score(score: float) -> str:
-    return _conclusion_confidence().label(
-        score, low_threshold=CONFIDENCE_LOW_THRESHOLD,
-        high_threshold=CONFIDENCE_HIGH_THRESHOLD,
-    )
+    return _conclusion_runtime_adapter().confidence_label(globals(), score)
 
 
 def calibrate_response_confidence(response: dict[str, Any]) -> dict[str, Any]:
     """Apply deterministic evidence caps to the model confidence claim."""
-    return _conclusion_confidence().calibrate(
-        response, confidence_values=CONFIDENCE_VALUES,
-        score_by_label=CONFIDENCE_SCORE_BY_LABEL,
-        calibration_version=CONFIDENCE_CALIBRATION_VERSION,
-        critical_keys=DECISION_CRITICAL_KEYS,
-        consequential_outcomes=CONSEQUENTIAL_CLOSURE_OUTCOMES,
-        outcome_normalizer=normalized_detection_outcome,
-        label_for_score=confidence_label_for_score,
-    )
+    return _conclusion_runtime_adapter().calibrate_confidence(globals(), response)
 
 
 def _is_incident_responder_package(prompt_package: dict[str, Any] | None) -> bool:
-    if not isinstance(prompt_package, dict):
-        return False
-    role = str(prompt_package.get("agent_role") or "").strip().lower().replace("_", "-")
-    return role == "incident-responder"
+    return _conclusion_runtime_adapter().is_incident_responder(prompt_package)
 
 
 def _has_structured_authorization_evidence(
     prompt_package: dict[str, Any] | None,
 ) -> bool:
-    return _conclusion_authorization_evidence().has_structured_evidence(
-        prompt_package
+    return _conclusion_runtime_adapter().has_authorization_evidence(
+        globals(), prompt_package
     )
 
 
@@ -4872,8 +4722,8 @@ def apply_tuning_coherence_guard(
     prompt_package: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Keep suppress/drop evidence-complete, advisory, and human-controlled."""
-    return _conclusion_tuning().apply(
-        response, prompt_package, _tuning_guard_dependencies(),
+    return _conclusion_runtime_adapter().tuning_guard(
+        globals(), response, prompt_package
     )
 
 
@@ -4882,8 +4732,8 @@ def apply_authorized_benign_evidence_guard(
     prompt_package: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Remove unsupported authorization and no-action claims from IR cases."""
-    return _conclusion_authorization().apply_authorized_benign(
-        response, prompt_package, _authorization_guard_dependencies(),
+    return _conclusion_runtime_adapter().authorization_guard(
+        globals(), response, prompt_package, policy_sensitive=False
     )
 
 
@@ -4892,21 +4742,17 @@ def apply_policy_sensitive_activity_guard(
     prompt_package: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Keep unattributed policy-sensitive application detections unresolved."""
-    return _conclusion_authorization().apply_policy_sensitive(
-        response, prompt_package, _authorization_guard_dependencies(),
+    return _conclusion_runtime_adapter().authorization_guard(
+        globals(), response, prompt_package, policy_sensitive=True
     )
 
 
 def validate_incident_response_report_shape(value: Any) -> dict[str, Any]:
-    return _conclusion_incident_report().validate_shape(
-        value, _incident_report_dependencies(),
-    )
+    return _conclusion_runtime_adapter().validate_report_shape(globals(), value)
 
 
 def normalize_incident_response_report(value: Any) -> dict[str, Any]:
-    return _conclusion_incident_report().normalize(
-        value, _incident_report_dependencies(),
-    )
+    return _conclusion_runtime_adapter().normalize_report(globals(), value)
 
 
 def apply_incident_evidence_completeness_guard(
@@ -4914,8 +4760,8 @@ def apply_incident_evidence_completeness_guard(
     prompt_package: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Cap confidence when required Incident Responder evidence is incomplete."""
-    return _conclusion_incident_completeness().apply(
-        response, prompt_package, _incident_completeness_dependencies(),
+    return _conclusion_runtime_adapter().completeness_guard(
+        globals(), response, prompt_package
     )
 
 
@@ -4923,8 +4769,8 @@ def reconcile_incident_response_report(
     response: dict[str, Any],
     prompt_package: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    return _conclusion_incident_report().reconcile(
-        response, prompt_package, _incident_report_dependencies(),
+    return _conclusion_runtime_adapter().reconcile_report(
+        globals(), response, prompt_package
     )
 
 

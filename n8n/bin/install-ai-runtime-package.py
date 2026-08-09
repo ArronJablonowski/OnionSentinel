@@ -83,6 +83,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.conclusions.incident_report",
     "onion_sentinel.analysis.conclusions.incident_completeness",
     "onion_sentinel.analysis.conclusions.response",
+    "onion_sentinel.analysis.conclusions.runtime_adapter",
     "onion_sentinel.analysis.conclusions.scope",
     "onion_sentinel.analysis.review.comparison",
     "onion_sentinel.analysis.review.adjudication",
