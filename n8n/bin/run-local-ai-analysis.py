@@ -18,7 +18,6 @@ import importlib.util
 import json
 import os
 import re
-import shlex
 import shutil
 import stat
 import sys
@@ -791,36 +790,33 @@ def prompt_alert_context_size_bytes(prompt_package: dict[str, Any]) -> int:
 
 
 def parse_gpu_temperature(output: str) -> float | None:
-    """Extract a GPU temperature from common macOS sensor command output."""
-    matches = re.findall(r"(?im)\bgpu\b[^\n:]*[:=]?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:°\s*)?c\b", output)
-    if not matches:
-        matches = re.findall(r"(?im)\bgpu\b.*?([0-9]+(?:\.[0-9]+)?)\s*(?:°\s*)?c\b", output)
-    if not matches:
-        return None
-    values = [float(value) for value in matches]
-    return max(values) if values else None
+    return _system_resources().parse_gpu_temperature(output)
+
+
+def _system_resources():
+    package_root = str(BIN_DIR.parent)
+    if package_root not in sys.path:
+        sys.path.insert(0, package_root)
+    from onion_sentinel.analysis import system_resources
+    return system_resources
+
+
+def _system_resource_dependencies():
+    module = _system_resources()
+    return module.Dependencies(
+        environment=os.environ,
+        path_exists=lambda path: path.exists(),
+        run_command=run_bounded_command,
+        process_error=BoundedProcessError,
+    )
 
 
 def mactop_command() -> list[str] | None:
-    custom = os.environ.get("SOC_MACTOP_COMMAND", "").strip()
-    if custom:
-        return shlex.split(custom)
-    for path in (
-        "/opt/homebrew/bin/mactop",
-        "/usr/local/bin/mactop",
-        "mactop",
-    ):
-        if path.startswith("/") and not Path(path).exists():
-            continue
-        return [path]
-    return None
+    return _system_resources().mactop_command(_system_resource_dependencies())
 
 
 def parse_float(value: Any) -> float | None:
-    try:
-        return float(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
+    return _system_resources().parse_float(value)
 
 
 def parse_mactop_sample(
@@ -834,41 +830,11 @@ def parse_mactop_sample(
     float | None,
     float | None,
 ]:
-    """Return max-relevant system metrics from mactop JSON for one sample."""
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError:
-        return None, None, None, None, None, None, None
-    sample = payload[0] if isinstance(payload, list) and payload else payload
-    if not isinstance(sample, dict):
-        return None, None, None, None, None, None, None
-    soc_metrics = sample.get("soc_metrics") if isinstance(sample.get("soc_metrics"), dict) else {}
-    gpu_metrics = sample.get("gpu_metrics") if isinstance(sample.get("gpu_metrics"), dict) else {}
-    gpu_temp_value = parse_float(soc_metrics.get("gpu_temp"))
-    gpu_percent = parse_float(gpu_metrics.get("active_percent"))
-    if gpu_percent is None:
-        gpu_percent = parse_float(sample.get("gpu_usage"))
-    if gpu_percent is None:
-        gpu_percent = parse_float(soc_metrics.get("gpu_active"))
-    cpu_temp_value = parse_float(soc_metrics.get("cpu_temp"))
-    soc_temp_value = parse_float(soc_metrics.get("soc_temp"))
-    power_watts = parse_float(soc_metrics.get("total_power"))
-    if power_watts is None:
-        power_watts = parse_float(soc_metrics.get("system_power"))
-    cpu_percent = parse_float(sample.get("cpu_usage"))
-
-    memory = sample.get("memory") if isinstance(sample.get("memory"), dict) else {}
-    used = memory.get("used")
-    total = memory.get("total")
-    try:
-        memory_percent = (float(used) / float(total)) * 100 if used is not None and total else None
-    except (TypeError, ValueError, ZeroDivisionError):
-        memory_percent = None
-    return gpu_temp_value, memory_percent, power_watts, cpu_percent, gpu_percent, cpu_temp_value, soc_temp_value
+    return _system_resources().parse_mactop_sample(output)
 
 
 class ResourceSamplingCancelled(RuntimeError):
-    """Raised inside a bounded sampler when its owning monitor is stopping."""
+    """Compatibility cancellation raised by the legacy runner helper."""
 
 
 def _raise_if_resource_sampling_cancelled(
@@ -891,168 +857,32 @@ def read_mactop_system_sample(
     float | None,
     str,
 ]:
-    command = mactop_command()
-    if not command:
-        return None, None, None, None, None, None, None, "mactop not found"
-    if cancel_event is not None and cancel_event.is_set():
-        return None, None, None, None, None, None, None, "mactop sampling cancelled"
-    try:
-        proc = run_bounded_command(
-            [*command, "--headless", "--format", "json", "--count", "1"],
-            timeout_seconds=8,
-            max_stdout_bytes=2 * 1024 * 1024,
-            max_stderr_bytes=256 * 1024,
-            progress_callback=(
-                lambda: _raise_if_resource_sampling_cancelled(cancel_event)
-                if cancel_event is not None
-                else None
-            ),
-            progress_interval_seconds=0.1,
-        )
-    except ResourceSamplingCancelled:
-        return None, None, None, None, None, None, None, "mactop sampling cancelled"
-    except FileNotFoundError:
-        return None, None, None, None, None, None, None, f"{command[0]} not found"
-    except BoundedProcessError as exc:
-        return None, None, None, None, None, None, None, f"{command[0]} unavailable: {exc}"
-    except Exception as exc:
-        return None, None, None, None, None, None, None, f"{command[0]} failed: {exc}"
-    if proc.returncode != 0 and not proc.stdout.strip():
-        detail = (proc.stderr or "").strip().splitlines()
-        return None, None, None, None, None, None, None, f"{command[0]} unavailable" + (f": {detail[-1][:120]}" if detail else "")
-    gpu_temp, memory_percent, power_watts, cpu_percent, gpu_percent, cpu_temp, soc_temp = parse_mactop_sample(proc.stdout)
-    if any(value is not None for value in (gpu_temp, memory_percent, power_watts, cpu_percent, gpu_percent, cpu_temp, soc_temp)):
-        return gpu_temp, memory_percent, power_watts, cpu_percent, gpu_percent, cpu_temp, soc_temp, "mactop sampled"
-    return None, None, None, None, None, None, None, f"{command[0]} returned no parseable mactop metrics"
+    return _system_resources().read_mactop_system_sample(
+        dependencies=_system_resource_dependencies(),
+        cancel_event=cancel_event,
+    )
 
 
 def read_gpu_temperature_celsius(
     *,
     cancel_event: threading.Event | None = None,
 ) -> tuple[float | None, str]:
-    """Read GPU temperature if the Mac exposes it to an unprivileged command."""
-    commands: list[list[str]] = []
-    custom = os.environ.get("SOC_GPU_TEMP_COMMAND", "").strip()
-    if custom:
-        commands.append(shlex.split(custom))
-    commands.extend([
-        ["powermetrics", "--samplers", "smc", "-n", "1", "-i", "500"],
-        ["/usr/bin/powermetrics", "--samplers", "smc", "-n", "1", "-i", "500"],
-    ])
-    notes: list[str] = []
-    for command in commands:
-        if cancel_event is not None and cancel_event.is_set():
-            return None, "GPU temperature sampling cancelled"
-        try:
-            proc = run_bounded_command(
-                command,
-                timeout_seconds=4,
-                max_stdout_bytes=2 * 1024 * 1024,
-                max_stderr_bytes=256 * 1024,
-                progress_callback=(
-                    lambda: _raise_if_resource_sampling_cancelled(cancel_event)
-                    if cancel_event is not None
-                    else None
-                ),
-                progress_interval_seconds=0.1,
-            )
-        except ResourceSamplingCancelled:
-            return None, "GPU temperature sampling cancelled"
-        except FileNotFoundError:
-            notes.append(f"{command[0]} not found")
-            continue
-        except BoundedProcessError as exc:
-            notes.append(f"{command[0]} unavailable: {exc}")
-            continue
-        except Exception as exc:
-            notes.append(f"{command[0]} failed: {exc}")
-            continue
-        output = "\n".join(part for part in (proc.stdout, proc.stderr) if part)
-        value = parse_gpu_temperature(output)
-        if value is not None:
-            return value, "GPU temperature sampled"
-        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-        notes.append(f"{command[0]} unavailable" + (f": {detail[-1][:120]}" if detail else ""))
-    return None, "; ".join(notes[:3]) or "GPU temperature unavailable"
+    return _system_resources().read_gpu_temperature_celsius(
+        dependencies=_system_resource_dependencies(),
+        cancel_event=cancel_event,
+    )
 
 
 class SystemResourceMonitor:
-    """Best-effort mactop sampler for max system metrics per run."""
+    """Lazy compatibility factory preserving package-free v1 runner import."""
 
-    def __init__(self, interval_seconds: float = 5.0) -> None:
-        self.interval_seconds = interval_seconds
-        self.max_gpu_celsius: float | None = None
-        self.max_memory_percent: float | None = None
-        self.max_power_watts: float | None = None
-        self.max_cpu_percent: float | None = None
-        self.max_gpu_percent: float | None = None
-        self.max_cpu_celsius: float | None = None
-        self.max_soc_celsius: float | None = None
-        self.note = "system metrics not sampled"
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        if self._thread is not None:
-            raise RuntimeError("system resource monitor was already started")
-        self._stop.clear()
-        self._sample_once()
-        self._thread = threading.Thread(
-            target=self._run,
-            name="system-resource-monitor",
-            daemon=False,
+    def __new__(cls, interval_seconds: float = 5.0):
+        module = _system_resources()
+        return module.SystemResourceMonitor(
+            interval_seconds,
+            read_mactop=lambda **kwargs: read_mactop_system_sample(**kwargs),
+            read_gpu=lambda **kwargs: read_gpu_temperature_celsius(**kwargs),
         )
-        self._thread.start()
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            if self._stop.wait(self.interval_seconds):
-                break
-            self._sample_once()
-
-    def _sample_once(self) -> None:
-        if self._stop.is_set():
-            return
-        gpu_value, memory_value, power_value, cpu_value, gpu_percent, cpu_temp, soc_temp, note = read_mactop_system_sample(
-            cancel_event=self._stop,
-        )
-        if self._stop.is_set():
-            return
-        if gpu_value is None:
-            gpu_value, fallback_note = read_gpu_temperature_celsius(
-                cancel_event=self._stop,
-            )
-            if self._stop.is_set():
-                return
-            if gpu_value is not None:
-                note = f"{note}; {fallback_note}"
-        self.note = note
-        if gpu_value is not None:
-            self.max_gpu_celsius = gpu_value if self.max_gpu_celsius is None else max(self.max_gpu_celsius, gpu_value)
-        if memory_value is not None:
-            self.max_memory_percent = memory_value if self.max_memory_percent is None else max(self.max_memory_percent, memory_value)
-        if power_value is not None:
-            self.max_power_watts = power_value if self.max_power_watts is None else max(self.max_power_watts, power_value)
-        if cpu_value is not None:
-            self.max_cpu_percent = cpu_value if self.max_cpu_percent is None else max(self.max_cpu_percent, cpu_value)
-        if gpu_percent is not None:
-            self.max_gpu_percent = gpu_percent if self.max_gpu_percent is None else max(self.max_gpu_percent, gpu_percent)
-        if cpu_temp is not None:
-            self.max_cpu_celsius = cpu_temp if self.max_cpu_celsius is None else max(self.max_cpu_celsius, cpu_temp)
-        if soc_temp is not None:
-            self.max_soc_celsius = soc_temp if self.max_soc_celsius is None else max(self.max_soc_celsius, soc_temp)
-
-    def stop(self) -> None:
-        self._stop.set()
-        thread = self._thread
-        if thread is None:
-            return
-        thread.join(timeout=12)
-        if thread.is_alive():
-            raise RuntimeError(
-                "system resource monitor did not terminate after cancellation"
-            )
-        self._thread = None
 
 
 def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
