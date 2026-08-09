@@ -86,6 +86,7 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/lib/enrichment_policy.js" \
     "$ALERT_STORE_STAGE_DIR/lib/pcap_policy.js" \
     "$ALERT_STORE_STAGE_DIR/repositories/health_repository.js" \
+    "$ALERT_STORE_STAGE_DIR/repositories/ai_correlation_repository.js" \
     "$ALERT_STORE_STAGE_DIR/repositories/ai_review_repository.js" \
     "$ALERT_STORE_STAGE_DIR/repositories/pcap_request_repository.js" \
     "$ALERT_STORE_STAGE_DIR/repositories/pcap_transfer_repository.js" \

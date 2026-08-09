@@ -29,6 +29,7 @@ const {createRequestDispatcher} = require('./lib/http_dispatch');
 const {createInventoryService} = require('./services/inventory_service');
 const {createInventoryRoutes} = require('./routes/inventory_routes');
 const {createHealthRepository} = require('./repositories/health_repository');
+const {createAiCorrelationRepository} = require('./repositories/ai_correlation_repository');
 const {createAiReviewRepository} = require('./repositories/ai_review_repository');
 const {createPcapRequestRepository} = require('./repositories/pcap_request_repository');
 const {createPcapTransferRepository} = require('./repositories/pcap_transfer_repository');
@@ -2826,22 +2827,6 @@ async function backfillAlertObservables() {
   return pending.length;
 }
 
-function normalizeCorrelationAssessment(value) {
-  const assessment = value && typeof value === 'object' ? value : {};
-  const relatedGroups = Array.isArray(assessment.related_groups)
-    ? assessment.related_groups.map((item) => {
-      if (typeof item === 'string') return safeString(item, 64).toLowerCase();
-      return safeString(item?.group_id, 64).toLowerCase();
-    }).filter(Boolean).slice(0, 20)
-    : [];
-  return {
-    correlation_found: Boolean(assessment.correlation_found),
-    confidence: safeString(assessment.confidence, 16).toLowerCase(),
-    related_groups: new Set(relatedGroups),
-    attack_chain_hypothesis: safeString(assessment.attack_chain_hypothesis, 2000),
-  };
-}
-
 async function recordAiAnalysisResult(payload) {
   const alertId = safeString(payload?.alert_id, 1024);
   const analysisId = safeString(payload?.analysis_id, 128).toLowerCase();
@@ -3091,45 +3076,12 @@ async function recordAiAnalysisResult(payload) {
     }
   }
 
-  const assessment = normalizeCorrelationAssessment(response.correlation_assessment);
-  const candidates = compactCorrelationCandidates(payload?.correlation_candidates);
-  let correlations = 0;
-  for (const candidate of candidates) {
-    if (candidate.group_id === groupId) continue;
-    const relatedExists = await get('SELECT 1 AS present FROM alerts WHERE stable_group_id = ? LIMIT 1', [candidate.group_id]);
-    if (!relatedExists) continue;
-    const modelRelated = assessment.related_groups.has(candidate.group_id);
-    await run(
-      `INSERT INTO alert_correlations (
-         source_group_id, related_group_id, analysis_id, correlation_score,
-         reasons_json, shared_observables_json, model_status, model_confidence,
-         model_hypothesis, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(source_group_id, related_group_id) DO UPDATE SET
-         analysis_id = excluded.analysis_id,
-         correlation_score = excluded.correlation_score,
-         reasons_json = excluded.reasons_json,
-         shared_observables_json = excluded.shared_observables_json,
-         model_status = excluded.model_status,
-         model_confidence = excluded.model_confidence,
-         model_hypothesis = excluded.model_hypothesis,
-         updated_at = excluded.updated_at`,
-      [
-        groupId,
-        candidate.group_id,
-        analysisId,
-        candidate.score,
-        jsonText(candidate.reasons),
-        jsonText(candidate.shared_observables),
-        modelRelated ? 'model-related' : 'candidate',
-        modelRelated ? assessment.confidence : null,
-        modelRelated ? assessment.attack_chain_hypothesis : null,
-        nowUtc(),
-        nowUtc(),
-      ],
-    );
-    correlations += 1;
-  }
+  const correlations = await aiCorrelationRepository.recordCorrelations({
+    groupId,
+    analysisId,
+    assessment: response.correlation_assessment,
+    candidates: payload?.correlation_candidates,
+  });
   return {
     ok: true,
     status: 'analysis_indexed',
@@ -8951,6 +8903,14 @@ const aiReviewRepository = createAiReviewRepository({
   safeString,
   jsonText,
   nowUtc,
+});
+const aiCorrelationRepository = createAiCorrelationRepository({
+  get,
+  run,
+  safeString,
+  jsonText,
+  nowUtc,
+  compactCorrelationCandidates,
 });
 
 async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppression, campaign = null) {
