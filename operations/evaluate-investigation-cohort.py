@@ -64,6 +64,19 @@ from cohort_model_call_proof import (
     SUPPLEMENTAL_REVIEW_PURPOSE,
     bounded_model_call_proof_valid as validate_bounded_model_call_proof,
 )
+from cohort_adjudication import (
+    AdjudicationPolicy,
+    CASE_ADJUDICATION_KEYS,
+    GROUND_TRUTH_KEYS,
+    ROLE_ASSESSMENT_KEYS,
+    TOP_LEVEL_ADJUDICATION_KEYS,
+    normalize_duplicate_of as normalize_adjudication_duplicate,
+    unexpected_keys as reject_unexpected_adjudication_keys,
+    validate_adjudication as normalize_adjudication,
+    validate_code_list as validate_adjudication_code_list,
+    validate_labels as validate_adjudication_labels,
+    validate_scores as validate_adjudication_scores,
+)
 
 
 RESULT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v4"
@@ -211,45 +224,6 @@ QUERY_CLASSES = frozenset(
     }
 )
 
-TOP_LEVEL_ADJUDICATION_KEYS = frozenset(
-    {
-        "schema",
-        "experiment_id",
-        "expected_count",
-        "independent_review",
-        "reviewer_count",
-        "adjudicated_at",
-        "methodology_sha256",
-        "source_cohorts",
-        "cases",
-    }
-)
-CASE_ADJUDICATION_KEYS = frozenset(
-    {"stable_group_id", "ground_truth", "role_assessments"}
-)
-GROUND_TRUTH_KEYS = frozenset(
-    {
-        "labels",
-        "confidence",
-        "detection_sha256",
-        "evidence_basis_sha256",
-        "scope_timeline_sha256",
-        "attribution_sha256",
-        "required_query_classes",
-        "telemetry_gap_codes",
-    }
-)
-ROLE_ASSESSMENT_KEYS = frozenset(
-    {
-        "analysis_id",
-        "scores",
-        "hard_failures",
-        "failure_modes",
-        "improvement_codes",
-    }
-)
-
-
 class CohortEvaluationError(RuntimeError):
     """The cohort cannot be evaluated safely or reproducibly."""
 
@@ -349,88 +323,60 @@ def load_private_json(path: Path, label: str) -> tuple[dict[str, Any], str]:
     return document, hashlib.sha256(raw).hexdigest()
 
 
+def _adjudication_policy() -> AdjudicationPolicy:
+    return AdjudicationPolicy(
+        error=CohortEvaluationError,
+        schema=ADJUDICATION_SCHEMA,
+        stable_group_id_pattern=STABLE_GROUP_ID_RE,
+        sha256_pattern=SHA256_RE,
+        code_pattern=CODE_RE,
+        maximum_code_items=MAX_CODE_ITEMS,
+        maximum_code_length=MAX_CODE_LENGTH,
+        verdict_fields=VERDICT_FIELDS,
+        verdict_value_sets=VERDICT_VALUE_SETS,
+        rubric_weights=RUBRIC_WEIGHTS,
+        hard_failure_codes=HARD_FAILURE_CODES,
+        query_classes=QUERY_CLASSES,
+    )
+
+
 def _unexpected_keys(
     value: Mapping[str, Any],
     allowed: frozenset[str],
     label: str,
 ) -> None:
-    unexpected = set(value) - allowed
-    if unexpected:
-        raise CohortEvaluationError(
-            f"{label} contains unsupported fields: "
-            + ", ".join(sorted(unexpected))
-        )
+    """Compatibility adapter for strict adjudication object shape."""
+    reject_unexpected_adjudication_keys(
+        value, allowed, label, CohortEvaluationError
+    )
 
 
 def _validate_code_list(value: Any, label: str) -> list[str]:
-    if not isinstance(value, list) or len(value) > MAX_CODE_ITEMS:
-        raise CohortEvaluationError(
-            f"{label} must be an array of at most {MAX_CODE_ITEMS} codes"
-        )
-    output: list[str] = []
-    for item in value:
-        code = str(item or "").strip()
-        if (
-            len(code) > MAX_CODE_LENGTH
-            or not CODE_RE.fullmatch(code)
-            or code in output
-        ):
-            raise CohortEvaluationError(f"{label} contains an invalid code")
-        output.append(code)
-    return output
+    """Compatibility adapter for bounded adjudication codes."""
+    return validate_adjudication_code_list(
+        value, label, _adjudication_policy()
+    )
 
 
 def _normalize_duplicate_of(value: Any, label: str) -> str | None:
-    if value is None:
-        return None
-    normalized = str(value).strip().lower()
-    if (
-        not normalized
-        or len(normalized) > 160
-        or re.search(r"[\x00-\x1f\x7f]", normalized)
-    ):
-        raise CohortEvaluationError(f"{label} is invalid")
-    return normalized
+    """Compatibility adapter for optional duplicate identity."""
+    return normalize_adjudication_duplicate(
+        value, label, CohortEvaluationError
+    )
 
 
 def _validate_labels(value: Any, label: str) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != set(VERDICT_FIELDS):
-        raise CohortEvaluationError(
-            f"{label} must contain exactly: " + ", ".join(VERDICT_FIELDS)
-        )
-    output: dict[str, Any] = {}
-    for field in VERDICT_FIELDS:
-        if field == "duplicate_of":
-            output[field] = _normalize_duplicate_of(
-                value.get(field), f"{label}.{field}"
-            )
-            continue
-        normalized = str(value.get(field) or "").strip().lower()
-        if normalized not in VERDICT_VALUE_SETS[field]:
-            raise CohortEvaluationError(f"{label}.{field} is invalid")
-        output[field] = normalized
-    return output
+    """Compatibility adapter for normalized verdict labels."""
+    return validate_adjudication_labels(
+        value, label, _adjudication_policy()
+    )
 
 
 def _validate_scores(value: Any, label: str) -> dict[str, float]:
-    if not isinstance(value, dict) or set(value) != set(RUBRIC_WEIGHTS):
-        raise CohortEvaluationError(
-            f"{label} must contain exactly the nine rubric criteria"
-        )
-    output: dict[str, float] = {}
-    for criterion, maximum in RUBRIC_WEIGHTS.items():
-        raw = value.get(criterion)
-        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-            raise CohortEvaluationError(
-                f"{label}.{criterion} must be numeric"
-            )
-        score = float(raw)
-        if not math.isfinite(score) or score < 0 or score > maximum:
-            raise CohortEvaluationError(
-                f"{label}.{criterion} must be between 0 and {maximum}"
-            )
-        output[criterion] = round(score, 2)
-    return output
+    """Compatibility adapter for bounded rubric scores."""
+    return validate_adjudication_scores(
+        value, label, _adjudication_policy()
+    )
 
 
 def validate_adjudication(
@@ -439,212 +385,13 @@ def validate_adjudication(
     expected_roles: Sequence[str],
     expected_count: int,
 ) -> dict[str, Any]:
-    _unexpected_keys(
-        document, TOP_LEVEL_ADJUDICATION_KEYS, "adjudication"
+    """Normalize a complete independent adjudication document."""
+    return normalize_adjudication(
+        document,
+        expected_roles=expected_roles,
+        expected_count=expected_count,
+        policy=_adjudication_policy(),
     )
-    if document.get("schema") != ADJUDICATION_SCHEMA:
-        raise CohortEvaluationError("unsupported adjudication schema")
-    experiment_id = str(document.get("experiment_id") or "").strip()
-    if (
-        len(experiment_id) < 3
-        or len(experiment_id) > 100
-        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]+", experiment_id)
-    ):
-        raise CohortEvaluationError("adjudication experiment_id is invalid")
-    if document.get("independent_review") is not True:
-        raise CohortEvaluationError(
-            "adjudication must affirm independent_review=true"
-        )
-    try:
-        adjudication_count = int(document.get("expected_count"))
-        reviewer_count = int(document.get("reviewer_count"))
-    except (TypeError, ValueError) as exc:
-        raise CohortEvaluationError(
-            "adjudication counts must be integers"
-        ) from exc
-    if adjudication_count != expected_count:
-        raise CohortEvaluationError(
-            "adjudication expected_count does not match the evaluation"
-        )
-    if reviewer_count < 1 or reviewer_count > 20:
-        raise CohortEvaluationError("reviewer_count must be between 1 and 20")
-    adjudicated_at = str(document.get("adjudicated_at") or "").strip()
-    if len(adjudicated_at) < 10 or len(adjudicated_at) > 64:
-        raise CohortEvaluationError("adjudicated_at is missing or invalid")
-    methodology_sha256 = str(document.get("methodology_sha256") or "")
-    if not SHA256_RE.fullmatch(methodology_sha256):
-        raise CohortEvaluationError("methodology_sha256 is missing or invalid")
-    source_cohorts = document.get("source_cohorts")
-    if (
-        not isinstance(source_cohorts, dict)
-        or set(source_cohorts) != set(expected_roles)
-    ):
-        raise CohortEvaluationError(
-            "source_cohorts must identify every evaluated role exactly once"
-        )
-    normalized_sources: dict[str, str] = {}
-    for role in expected_roles:
-        cohort_id = str(source_cohorts.get(role) or "").strip()
-        if not cohort_id or len(cohort_id) > 100:
-            raise CohortEvaluationError(
-                f"source cohort for {role} is invalid"
-            )
-        normalized_sources[role] = cohort_id
-
-    cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != expected_count:
-        raise CohortEvaluationError(
-            f"adjudication must contain exactly {expected_count} cases"
-        )
-    normalized_cases: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for index, item in enumerate(cases):
-        label = f"adjudication.cases[{index}]"
-        if not isinstance(item, dict):
-            raise CohortEvaluationError(f"{label} must be an object")
-        _unexpected_keys(item, CASE_ADJUDICATION_KEYS, label)
-        stable_id = str(item.get("stable_group_id") or "").strip().lower()
-        if not STABLE_GROUP_ID_RE.fullmatch(stable_id) or stable_id in seen:
-            raise CohortEvaluationError(
-                f"{label}.stable_group_id is invalid or duplicated"
-            )
-        seen.add(stable_id)
-
-        ground_truth = item.get("ground_truth")
-        if not isinstance(ground_truth, dict):
-            raise CohortEvaluationError(f"{label}.ground_truth is invalid")
-        _unexpected_keys(
-            ground_truth, GROUND_TRUTH_KEYS, f"{label}.ground_truth"
-        )
-        labels = _validate_labels(
-            ground_truth.get("labels"), f"{label}.ground_truth.labels"
-        )
-        confidence = str(ground_truth.get("confidence") or "").lower()
-        if confidence not in VERDICT_VALUE_SETS["confidence"]:
-            raise CohortEvaluationError(
-                f"{label}.ground_truth.confidence is invalid"
-            )
-        digests: dict[str, str] = {}
-        for field in (
-            "detection_sha256",
-            "evidence_basis_sha256",
-            "scope_timeline_sha256",
-            "attribution_sha256",
-        ):
-            digest = str(ground_truth.get(field) or "")
-            if not SHA256_RE.fullmatch(digest):
-                raise CohortEvaluationError(
-                    f"{label}.ground_truth.{field} is invalid"
-                )
-            digests[field] = digest
-        required_queries = ground_truth.get("required_query_classes")
-        if (
-            not isinstance(required_queries, list)
-            or len(required_queries) > len(QUERY_CLASSES)
-        ):
-            raise CohortEvaluationError(
-                f"{label}.ground_truth.required_query_classes is invalid"
-            )
-        normalized_queries: list[str] = []
-        for query_class in required_queries:
-            query_class = str(query_class or "").strip().lower()
-            if (
-                query_class not in QUERY_CLASSES
-                or query_class in normalized_queries
-            ):
-                raise CohortEvaluationError(
-                    f"{label}.ground_truth has an invalid query class"
-                )
-            normalized_queries.append(query_class)
-        telemetry_gaps = _validate_code_list(
-            ground_truth.get("telemetry_gap_codes"),
-            f"{label}.ground_truth.telemetry_gap_codes",
-        )
-
-        assessments = item.get("role_assessments")
-        if (
-            not isinstance(assessments, dict)
-            or set(assessments) != set(expected_roles)
-        ):
-            raise CohortEvaluationError(
-                f"{label}.role_assessments must grade every role"
-            )
-        normalized_assessments: dict[str, dict[str, Any]] = {}
-        for role in expected_roles:
-            assessment = assessments[role]
-            assessment_label = f"{label}.role_assessments.{role}"
-            if not isinstance(assessment, dict):
-                raise CohortEvaluationError(
-                    f"{assessment_label} must be an object"
-                )
-            _unexpected_keys(
-                assessment, ROLE_ASSESSMENT_KEYS, assessment_label
-            )
-            analysis_id_value = assessment.get("analysis_id")
-            analysis_id = (
-                None
-                if analysis_id_value is None
-                else str(analysis_id_value).strip()
-            )
-            if analysis_id is not None and (
-                not analysis_id
-                or len(analysis_id) > 200
-                or re.search(r"[\x00-\x1f\x7f]", analysis_id)
-            ):
-                raise CohortEvaluationError(
-                    f"{assessment_label}.analysis_id is invalid"
-                )
-            hard_failures = _validate_code_list(
-                assessment.get("hard_failures"),
-                f"{assessment_label}.hard_failures",
-            )
-            unknown_hard_failures = set(hard_failures) - HARD_FAILURE_CODES
-            if unknown_hard_failures:
-                raise CohortEvaluationError(
-                    f"{assessment_label} contains unsupported hard failures: "
-                    + ", ".join(sorted(unknown_hard_failures))
-                )
-            normalized_assessments[role] = {
-                "analysis_id": analysis_id,
-                "scores": _validate_scores(
-                    assessment.get("scores"),
-                    f"{assessment_label}.scores",
-                ),
-                "hard_failures": hard_failures,
-                "failure_modes": _validate_code_list(
-                    assessment.get("failure_modes"),
-                    f"{assessment_label}.failure_modes",
-                ),
-                "improvement_codes": _validate_code_list(
-                    assessment.get("improvement_codes"),
-                    f"{assessment_label}.improvement_codes",
-                ),
-            }
-
-        normalized_cases.append(
-            {
-                "stable_group_id": stable_id,
-                "ground_truth": {
-                    "labels": labels,
-                    "confidence": confidence,
-                    **digests,
-                    "required_query_classes": normalized_queries,
-                    "telemetry_gap_codes": telemetry_gaps,
-                },
-                "role_assessments": normalized_assessments,
-            }
-        )
-    return {
-        "schema": ADJUDICATION_SCHEMA,
-        "experiment_id": experiment_id,
-        "expected_count": expected_count,
-        "independent_review": True,
-        "reviewer_count": reviewer_count,
-        "adjudicated_at": adjudicated_at,
-        "methodology_sha256": methodology_sha256,
-        "source_cohorts": normalized_sources,
-        "cases": normalized_cases,
-    }
 
 
 def _safe_export_content_policy(document: Mapping[str, Any], label: str) -> None:

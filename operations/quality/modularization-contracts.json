@@ -164,6 +164,17 @@
       ]
     },
     {
+      "path": "operations/cohort_adjudication.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_adjudication.py",
+      "required_symbols": [
+        "AdjudicationPolicy",
+        "validate_adjudication",
+        "validate_labels",
+        "validate_scores"
+      ]
+    },
+    {
       "path": "n8n/bin/run-local-ai-analysis.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/run-local-ai-analysis.py",

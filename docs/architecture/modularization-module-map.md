@@ -603,6 +603,12 @@ reviewer and adjudicator repair sequences, supplemental-review bounds, route
 and purpose identity, aggregate counts, fact digests, and reviewer completion
 from the exported bounded facts rather than trusting claimed proof totals.
 
+`operations/cohort_adjudication.py` owns strict independent-adjudication
+normalization. Separate stages validate top-level experiment metadata, exact
+source-role coverage, unique stable cases, digest-referenced ground truth,
+bounded query/telemetry codes, complete role assessments, hard-failure codes,
+and rubric scores without reading cohort results or calculating grades.
+
 `prompt_incident_evidence_projection.py` owns the model-facing, in-memory
 projection of already-validated incident evidence. It applies deterministic
 prefix limits to Elastic hits and OSQuery rows, records source and retained
