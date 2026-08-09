@@ -42,6 +42,7 @@ import cohort_manifest_contract  # noqa: E402
 import cohort_private_input  # noqa: E402
 import cohort_artifact_io  # noqa: E402
 import cohort_storage_core  # noqa: E402
+import cohort_storage_state  # noqa: E402
 
 
 class IncidentHarnessCohortTests(unittest.TestCase):
@@ -122,6 +123,18 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         )
         self.assertIs(cohort.read_group_aliases, cohort_storage_core.load_aliases)
         self.assertIs(cohort.resolve_group_alias, cohort_storage_core.resolve_alias)
+
+    def test_runner_uses_extracted_storage_state(self) -> None:
+        self.assertIs(cohort.query_summary_rows, cohort_storage_state.summary_rows)
+        self.assertIs(cohort.query_active_jobs, cohort_storage_state.active_jobs)
+        self.assertIs(
+            cohort.query_analysis_ids_for_group,
+            cohort_storage_state.analysis_ids_for_group,
+        )
+        self.assertIs(
+            cohort.build_incident_pre_state,
+            cohort_storage_state.incident_pre_state,
+        )
 
     def test_query_audit_projection_excludes_query_and_result_content(self) -> None:
         projected = cohort._bounded_query_audit_metadata(

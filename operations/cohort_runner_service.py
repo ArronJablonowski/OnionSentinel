@@ -172,6 +172,21 @@ from cohort_storage_core import (
     table_columns as storage_table_columns,
     table_exists as storage_table_exists,
 )
+from cohort_storage_state import (
+    CohortStatePolicy,
+    active_jobs as query_active_jobs,
+    active_reanalysis as query_active_reanalysis,
+    analysis_ids_for_group as query_analysis_ids_for_group,
+    durable_dispatch_job as read_durable_dispatch_job,
+    durable_job_snapshot as read_durable_job_snapshot,
+    frozen_analysis_ids as read_frozen_analysis_ids,
+    incident_cases as query_incident_cases,
+    incident_pre_state as build_incident_pre_state,
+    latest_analysis_metadata as read_latest_analysis_metadata,
+    soc_pre_state as build_soc_pre_state,
+    summary_rows as query_summary_rows,
+    verify_zero_fresh_analyses as prove_zero_fresh_analyses,
+)
 
 
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -551,71 +566,23 @@ SUMMARY_EXPORT_COLUMNS = (
 
 
 def _summary_rows(connection: sqlite3.Connection) -> list[dict[str, Any]]:
-    columns = _require_columns(
-        connection,
-        "alert_group_summary",
-        {"group_id", "representative_alert_id", "last_seen"},
-    )
-    selected = [item for item in SUMMARY_EXPORT_COLUMNS if item in columns]
-    time_candidates = [
-        item for item in ("last_seen", "timestamp", "first_seen", "updated_at")
-        if item in columns
-    ]
-    time_expression = "COALESCE(" + ", ".join(
-        f"NULLIF({item}, '')" for item in time_candidates
-    ) + ")"
-    sql = (
-        "SELECT "
-        + ", ".join(selected)
-        + f", {time_expression} AS cohort_seen_at "
-        + "FROM alert_group_summary "
-        + f"ORDER BY replace(replace({time_expression}, 'T', ' '), 'Z', '') DESC, "
-        + "group_id DESC"
-    )
-    return [dict(row) for row in connection.execute(sql).fetchall()]
+    return query_summary_rows(connection, _state_policy())
 
 
-CASE_COLUMNS = (
-    "case_id",
-    "group_id",
-    "dashboard_group_id",
-    "representative_alert_id",
-    "status",
-    "agent_status",
-    "escalated_at",
-    "updated_at",
-    "latest_analysis_id",
-    "latest_model",
-    "latest_generated_at",
-)
+def _state_policy() -> CohortStatePolicy:
+    return CohortStatePolicy(
+        error=CohortError,
+        ambiguous_error=AmbiguousDispatchError,
+        storage=_storage_policy(),
+        active_agent_states=frozenset(ACTIVE_AGENT_STATES),
+    )
 
 
 def _incident_cases(
     connection: sqlite3.Connection,
     aliases: Mapping[str, str],
 ) -> dict[str, list[dict[str, Any]]]:
-    columns = _require_columns(
-        connection,
-        "incident_response_cases",
-        {
-            "case_id",
-            "group_id",
-            "dashboard_group_id",
-            "representative_alert_id",
-            "status",
-            "agent_status",
-            "latest_analysis_id",
-        },
-    )
-    selected = [item for item in CASE_COLUMNS if item in columns]
-    by_stable: dict[str, list[dict[str, Any]]] = {}
-    for row in connection.execute(
-        "SELECT " + ", ".join(selected) + " FROM incident_response_cases"
-    ):
-        item = dict(row)
-        stable = resolve_alias(str(item.get("group_id") or ""), aliases)
-        by_stable.setdefault(stable, []).append(item)
-    return by_stable
+    return query_incident_cases(connection, aliases, _state_policy())
 
 
 def _active_jobs(
@@ -625,37 +592,13 @@ def _active_jobs(
     *,
     job_type: str = "incident_response_analysis",
 ) -> list[dict[str, Any]]:
-    if job_type not in {"incident_response_analysis", "ai_analysis"}:
-        raise CohortError(f"unsupported durable job type: {job_type}")
-    _require_columns(
+    return query_active_jobs(
         connection,
-        "durable_jobs",
-        {
-            "id",
-            "job_type",
-            "dedupe_key",
-            "status",
-            "attempt_count",
-            "requested_at",
-            "updated_at",
-        },
+        stable_group_id,
+        aliases,
+        _state_policy(),
+        job_type=job_type,
     )
-    rows = connection.execute(
-        """
-        SELECT id, job_type, dedupe_key, status, attempt_count,
-               requested_at, updated_at
-        FROM durable_jobs
-        WHERE job_type = ?
-          AND status IN ('pending', 'processing')
-        ORDER BY id
-        """,
-        (job_type,),
-    ).fetchall()
-    return [
-        dict(row)
-        for row in rows
-        if resolve_alias(str(row["dedupe_key"] or ""), aliases) == stable_group_id
-    ]
 
 
 def _durable_dispatch_job(
@@ -664,39 +607,12 @@ def _durable_dispatch_job(
     job_type: str,
     stable_group_id: str,
 ) -> dict[str, Any]:
-    if job_type not in {"incident_response_analysis", "ai_analysis"}:
-        raise CohortError(f"unsupported durable job type: {job_type}")
-    _require_columns(
+    return read_durable_dispatch_job(
         connection,
-        "durable_jobs",
-        {
-            "id",
-            "job_type",
-            "dedupe_key",
-            "payload_json",
-            "status",
-            "attempt_count",
-            "requested_at",
-            "updated_at",
-            "completed_at",
-            "last_completed_at",
-        },
+        job_type=job_type,
+        stable_group_id=stable_group_id,
+        policy=_state_policy(),
     )
-    row = connection.execute(
-        """
-        SELECT id, job_type, dedupe_key, payload_json, status, attempt_count,
-               requested_at, updated_at, completed_at, last_completed_at
-        FROM durable_jobs
-        WHERE job_type = ? AND dedupe_key = ?
-        """,
-        (job_type, stable_group_id),
-    ).fetchone()
-    if row is None:
-        raise AmbiguousDispatchError(
-            "dashboard accepted the request but exact durable job readback "
-            "failed"
-        )
-    return dict(row)
 
 
 def _durable_job_snapshot(
@@ -705,31 +621,12 @@ def _durable_job_snapshot(
     job_type: str,
     stable_group_id: str,
 ) -> dict[str, Any] | None:
-    if job_type not in {"incident_response_analysis", "ai_analysis"}:
-        raise CohortError(f"unsupported durable job type: {job_type}")
-    _require_columns(
+    return read_durable_job_snapshot(
         connection,
-        "durable_jobs",
-        {
-            "id",
-            "job_type",
-            "dedupe_key",
-            "status",
-            "attempt_count",
-            "requested_at",
-            "updated_at",
-        },
+        job_type=job_type,
+        stable_group_id=stable_group_id,
+        policy=_state_policy(),
     )
-    row = connection.execute(
-        """
-        SELECT id, job_type, dedupe_key, status, attempt_count,
-               requested_at, updated_at, completed_at, last_completed_at
-        FROM durable_jobs
-        WHERE job_type = ? AND dedupe_key = ?
-        """,
-        (job_type, stable_group_id),
-    ).fetchone()
-    return dict(row) if row else None
 
 
 def _active_reanalysis(
@@ -738,38 +635,13 @@ def _active_reanalysis(
     case_id: str,
     aliases: Mapping[str, str],
 ) -> list[dict[str, Any]]:
-    _require_columns(
+    return query_active_reanalysis(
         connection,
-        "incident_reanalysis_run_cases",
-        {
-            "run_id",
-            "case_id",
-            "group_id",
-            "dashboard_group_id",
-            "representative_alert_id",
-            "status",
-            "updated_at",
-        },
+        stable_group_id,
+        case_id,
+        aliases,
+        _state_policy(),
     )
-    rows = connection.execute(
-        """
-        SELECT run_id, case_id, group_id, dashboard_group_id,
-               representative_alert_id, status, updated_at
-        FROM incident_reanalysis_run_cases
-        WHERE status IN ('queued', 'running')
-        ORDER BY updated_at, run_id
-        """
-    ).fetchall()
-    output = []
-    for row in rows:
-        if case_id and str(row["case_id"] or "") == case_id:
-            output.append(dict(row))
-        elif (
-            resolve_alias(str(row["group_id"] or ""), aliases)
-            == stable_group_id
-        ):
-            output.append(dict(row))
-    return output
 
 
 def _analysis_ids_for_group(
@@ -778,34 +650,12 @@ def _analysis_ids_for_group(
     *,
     agent_role: str,
 ) -> list[str]:
-    _require_columns(
+    return query_analysis_ids_for_group(
         connection,
-        "ai_analysis_runs",
-        {"analysis_id", "group_id", "agent_role", "generated_at"},
+        stable_group_id,
+        agent_role=agent_role,
+        policy=_state_policy(),
     )
-    rows = connection.execute(
-        """
-        SELECT analysis_id
-        FROM ai_analysis_runs
-        WHERE group_id = ? AND agent_role = ?
-        ORDER BY generated_at, analysis_id
-        LIMIT 10001
-        """,
-        (stable_group_id, agent_role),
-    ).fetchall()
-    if len(rows) > 10000:
-        raise CohortError(
-            f"stable group {stable_group_id} has too many prior analyses "
-            "for an exact bounded cohort"
-        )
-    identities = [str(row["analysis_id"] or "") for row in rows]
-    if any(not item for item in identities) or len(identities) != len(
-        set(identities)
-    ):
-        raise CohortError(
-            f"stable group {stable_group_id} has invalid analysis identities"
-        )
-    return identities
 
 
 def _frozen_analysis_ids(
@@ -814,19 +664,12 @@ def _frozen_analysis_ids(
     agent_role: str,
     pre_state_field: str,
 ) -> set[str]:
-    pre_state = member.get("pre_state")
-    if not isinstance(pre_state, dict):
-        raise CohortError("frozen member pre-state is missing or malformed")
-    prior_value = pre_state.get(pre_state_field)
-    if (
-        not isinstance(prior_value, list)
-        or any(not isinstance(item, str) or not item for item in prior_value)
-        or len(prior_value) != len(set(prior_value))
-    ):
-        raise CohortError(
-            f"frozen {agent_role} analysis identity set is malformed"
-        )
-    return set(prior_value)
+    return read_frozen_analysis_ids(
+        member,
+        agent_role=agent_role,
+        pre_state_field=pre_state_field,
+        policy=_state_policy(),
+    )
 
 
 def _verify_zero_fresh_analyses(
@@ -837,30 +680,14 @@ def _verify_zero_fresh_analyses(
     agent_role: str,
     pre_state_field: str,
 ) -> list[str]:
-    """Prove no worker result raced the controlled dispatch readback."""
-
-    prior_ids = _frozen_analysis_ids(
+    return prove_zero_fresh_analyses(
+        connection,
         member,
+        stable_group_id,
         agent_role=agent_role,
         pre_state_field=pre_state_field,
+        policy=_state_policy(),
     )
-    current_ids = set(
-        _analysis_ids_for_group(
-            connection,
-            stable_group_id,
-            agent_role=agent_role,
-        )
-    )
-    if not prior_ids.issubset(current_ids):
-        raise AmbiguousDispatchError(
-            f"prior {agent_role} analysis identities changed during dispatch"
-        )
-    if current_ids - prior_ids:
-        raise AmbiguousDispatchError(
-            f"a fresh {agent_role} analysis appeared during the "
-            "dispatch/readback window"
-        )
-    return sorted(current_ids)
 
 
 def _soc_pre_state(
@@ -868,66 +695,16 @@ def _soc_pre_state(
     stable_group_id: str,
     aliases: Mapping[str, str],
 ) -> dict[str, Any]:
-    active_jobs = _active_jobs(
-        connection,
-        stable_group_id,
-        aliases,
-        job_type="ai_analysis",
+    return build_soc_pre_state(
+        connection, stable_group_id, aliases, _state_policy()
     )
-    if active_jobs:
-        raise CohortError(
-            f"stable group {stable_group_id} already has a pending/processing "
-            "SOC Analyst job"
-        )
-    analysis_ids = _analysis_ids_for_group(
-        connection,
-        stable_group_id,
-        agent_role="soc-analyst",
-    )
-    latest = (
-        _latest_analysis_metadata(connection, analysis_ids[-1])
-        if analysis_ids
-        else None
-    )
-    return {
-        "soc_analysis_ids": analysis_ids,
-        "latest_analysis": latest,
-        "active_ai_jobs": [],
-    }
 
 
 def _latest_analysis_metadata(
     connection: sqlite3.Connection,
     analysis_id: str,
 ) -> dict[str, Any] | None:
-    if not analysis_id or not _table_exists(connection, "ai_analysis_runs"):
-        return None
-    columns = _table_columns(connection, "ai_analysis_runs")
-    allowed = [
-        item
-        for item in (
-            "analysis_id",
-            "group_id",
-            "alert_id",
-            "agent_role",
-            "generated_at",
-            "model",
-            "model_path",
-            "detection_outcome",
-            "confidence",
-            "evidence_hash",
-            "created_at",
-        )
-        if item in columns
-    ]
-    if "analysis_id" not in allowed:
-        return None
-    row = connection.execute(
-        "SELECT " + ", ".join(allowed)
-        + " FROM ai_analysis_runs WHERE analysis_id = ?",
-        (analysis_id,),
-    ).fetchone()
-    return dict(row) if row else None
+    return read_latest_analysis_metadata(connection, analysis_id)
 
 
 def _pre_state(
@@ -936,49 +713,13 @@ def _pre_state(
     aliases: Mapping[str, str],
     cases_by_stable: Mapping[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
-    cases = list(cases_by_stable.get(stable_group_id, []))
-    if len(cases) > 1:
-        raise CohortError(
-            f"multiple incident cases resolve to stable group {stable_group_id}"
-        )
-    case = cases[0] if cases else None
-    if case and str(case.get("agent_status") or "") in ACTIVE_AGENT_STATES:
-        raise CohortError(
-            f"incident case {case.get('case_id')} is already "
-            f"{case.get('agent_status')}"
-        )
-    active_jobs = _active_jobs(connection, stable_group_id, aliases)
-    if active_jobs:
-        raise CohortError(
-            f"stable group {stable_group_id} already has a pending/processing "
-            "Incident Responder job"
-        )
-    active_runs = _active_reanalysis(
+    return build_incident_pre_state(
         connection,
         stable_group_id,
-        str((case or {}).get("case_id") or ""),
         aliases,
+        cases_by_stable,
+        _state_policy(),
     )
-    if active_runs:
-        raise CohortError(
-            f"stable group {stable_group_id} already has a queued/running "
-            "reanalysis"
-        )
-    latest_analysis_id = str((case or {}).get("latest_analysis_id") or "")
-    return {
-        "incident_case": case,
-        "incident_analysis_ids": _analysis_ids_for_group(
-            connection,
-            stable_group_id,
-            agent_role="incident-responder",
-        ),
-        "latest_analysis": _latest_analysis_metadata(
-            connection,
-            latest_analysis_id,
-        ),
-        "active_incident_jobs": [],
-        "active_reanalysis_cases": [],
-    }
 
 
 def freeze_cohort(

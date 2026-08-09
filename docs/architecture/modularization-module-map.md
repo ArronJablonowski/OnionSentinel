@@ -801,6 +801,11 @@ read-only/query-only mode, table and column inspection, schema fingerprinting,
 and cycle-safe alert-group alias resolution. The hash function and fail-closed
 error type are injected by the composition service.
 
+`operations/cohort_storage_state.py` owns read-only summary, incident-case,
+durable-job, reanalysis, and analysis-identity queries plus exact SOC/Incident
+Responder frozen pre-state projections and dispatch-race proof. It consumes the
+storage-core policy and exposes no filesystem or HTTP behavior.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

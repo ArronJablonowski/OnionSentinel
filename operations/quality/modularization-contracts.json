@@ -31,6 +31,26 @@
       ]
     },
     {
+      "path": "operations/cohort_storage_state.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_storage_state.py",
+      "required_symbols": [
+        "CohortStatePolicy",
+        "summary_rows",
+        "incident_cases",
+        "active_jobs",
+        "durable_dispatch_job",
+        "durable_job_snapshot",
+        "active_reanalysis",
+        "analysis_ids_for_group",
+        "frozen_analysis_ids",
+        "verify_zero_fresh_analyses",
+        "latest_analysis_metadata",
+        "soc_pre_state",
+        "incident_pre_state"
+      ]
+    },
+    {
       "path": "operations/run-incident-harness-cohort.py",
       "deployment": "repository-only",
       "runtime_path": "operations/run-incident-harness-cohort.py",
