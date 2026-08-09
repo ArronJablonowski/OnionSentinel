@@ -54,6 +54,12 @@ from scheduler_controlled_runtime import (
     ControlledRuntimeSources,
     validate_controlled_evaluation_runtime,
 )
+from scheduler_controlled_recovery import (
+    ControlledRecoveryPolicy,
+    ControlledRecoverySources,
+    controlled_recovery_spool_pending as controlled_spool_pending,
+    recover_controlled_evaluation_spool as replay_controlled_result_spool,
+)
 from scheduler_claim import (
     SchedulerClaimSources,
     acquire_scheduler_claim,
@@ -1111,95 +1117,47 @@ def settle_controlled_frozen_memory_artifacts(
             os.close(directory_fd)
 
 
+def controlled_recovery_sources() -> ControlledRecoverySources:
+    """Bind exact result validation, replay, proof, and memory settlement."""
+    return ControlledRecoverySources(
+        effective_uid=os.getuid,
+        owner_private_directory=owner_private_directory,
+        load_owner_private_json=load_owner_private_json,
+        validate_payload=validate_controlled_recovery_payload,
+        post_result=post_controlled_recovery_result,
+        terminal_success=controlled_recovery_terminal_success,
+        settle_frozen_memory=settle_controlled_frozen_memory_artifacts,
+    )
+
+
+def controlled_recovery_policy() -> ControlledRecoveryPolicy:
+    return ControlledRecoveryPolicy(
+        max_spool_bytes=MAX_CONTROLLED_RESULT_SPOOL_BYTES,
+        indeterminate_submission_marker=(
+            CONTROLLED_RESULT_SUBMISSION_INDETERMINATE
+        ),
+    )
+
+
 def recover_controlled_evaluation_spool(
     args: argparse.Namespace,
     runtime_root: Path,
 ) -> bool:
-    """Commit and retire one prior exact lease before any new inference."""
-    queue_dir = runtime_root / "analysis-index-pending"
-    if not queue_dir.exists():
-        return False
-    if not owner_private_directory(queue_dir, runtime_root):
-        raise RuntimeError(
-            "controlled evaluation recovery spool directory is unsafe"
-        )
-    entries = list(queue_dir.iterdir())
-    spool_files = [path for path in entries if path.suffix == ".json"]
-    if not spool_files:
-        if entries:
-            raise RuntimeError(
-                "controlled evaluation recovery spool contains "
-                "an unexpected artifact"
-            )
-        return False
-    if len(entries) != 1 or len(spool_files) != 1:
-        raise RuntimeError(
-            "controlled evaluation recovery requires exactly one spool"
-        )
-    spool_path = spool_files[0]
-    payload = load_owner_private_json(
-        spool_path,
+    """Compatibility delegate for exact controlled result recovery."""
+    return replay_controlled_result_spool(
+        controlled_recovery_sources(),
+        controlled_recovery_policy(),
+        args,
         runtime_root,
-        max_bytes=MAX_CONTROLLED_RESULT_SPOOL_BYTES,
     )
-    recovery = validate_controlled_recovery_payload(payload, args)
-    if spool_path.name != f"{recovery['analysis_id']}.json":
-        raise RuntimeError(
-            "controlled evaluation recovery spool filename is not exact"
-        )
-    try:
-        receipt = post_controlled_recovery_result(
-            payload,
-            args.alert_store_url,
-        )
-        recovery["stored_response_digest"] = str(
-            receipt.get("stored_response_sha256") or ""
-        ).lower()
-    except RuntimeError as replay_error:
-        if (
-            CONTROLLED_RESULT_SUBMISSION_INDETERMINATE
-            not in str(replay_error)
-            or not controlled_recovery_terminal_success(args, recovery)
-        ):
-            raise
-    else:
-        if not controlled_recovery_terminal_success(args, recovery):
-            raise RuntimeError(
-                "controlled evaluation recovered result has no exact terminal "
-                "database proof"
-            )
-    settle_controlled_frozen_memory_artifacts(runtime_root, recovery)
-    spool_path.unlink()
-    directory_fd = os.open(queue_dir, os.O_RDONLY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
-    return True
 
 
 def controlled_recovery_spool_pending(runtime_root: Path) -> bool:
-    """Return true without following an unsafe recovery-directory symlink."""
-    queue_dir = runtime_root / "analysis-index-pending"
-    try:
-        metadata = queue_dir.lstat()
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-    if (
-        queue_dir.is_symlink()
-        or not stat.S_ISDIR(metadata.st_mode)
-        or metadata.st_uid != os.getuid()
-        or stat.S_IMODE(metadata.st_mode) & 0o077
-    ):
-        return True
-    try:
-        return any(queue_dir.iterdir())
-    except OSError:
-        return True
-
-
+    """Compatibility delegate for fail-closed spool presence checks."""
+    return controlled_spool_pending(
+        runtime_root,
+        effective_uid=os.getuid,
+    )
 def controlled_recovery_terminal_success(
     args: argparse.Namespace,
     recovery: dict[str, Any],

@@ -61,6 +61,17 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_controlled_recovery.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_controlled_recovery.py",
+      "required_symbols": [
+        "ControlledRecoveryPolicy",
+        "ControlledRecoverySources",
+        "controlled_recovery_spool_pending",
+        "recover_controlled_evaluation_spool"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_execution.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_execution.py",

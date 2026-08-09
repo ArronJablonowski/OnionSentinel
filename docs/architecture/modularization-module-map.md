@@ -268,6 +268,13 @@ runtime-confined mutable markers. The compatibility function constructs its
 policy and collaborators at call time so existing test and operator overrides
 remain observable.
 
+`scheduler_controlled_recovery.py` owns the single-spool recovery state
+machine: fail-closed directory inspection, exact artifact cardinality and
+filename binding, bounded owner-private loading, replay-or-terminal-proof
+handling, frozen-memory settlement, and durable spool unlink. Payload
+validation and read-only database proof remain injected ports, allowing their
+separate extraction without weakening the crash-recovery sequence.
+
 `scheduler_claim.py` owns compare-and-set processing acquisition,
 server-authoritative job/alert/group replacement, controlled claim identity,
 IR reanalysis-attempt binding, contention projection, and automatic-threshold
