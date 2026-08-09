@@ -213,6 +213,17 @@
       ]
     },
     {
+      "path": "operations/trace_evaluation_integrity.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/trace_evaluation_integrity.py",
+      "required_symbols": [
+        "TraceIntegrityPolicy",
+        "hypothesis_manifest_digest",
+        "ledger_manifest",
+        "verify_chain"
+      ]
+    },
+    {
       "path": "operations/cohort_execution_models.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_execution_models.py",

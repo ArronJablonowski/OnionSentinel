@@ -27,6 +27,7 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(evaluator)
 import trace_evaluation_skills  # noqa: E402
 import trace_evaluation_storage  # noqa: E402
+import trace_evaluation_integrity  # noqa: E402
 
 HARNESS_SPEC = importlib.util.spec_from_file_location(
     "evaluator_test_harness_module",
@@ -571,6 +572,16 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
         self.assertIs(
             evaluator.read_rows_for_run,
             trace_evaluation_storage.rows_for_run,
+        )
+
+    def test_evaluator_uses_extracted_trace_integrity_services(self):
+        self.assertIs(
+            evaluator.build_ledger_manifest,
+            trace_evaluation_integrity.ledger_manifest,
+        )
+        self.assertIs(
+            evaluator.verify_trace_chain,
+            trace_evaluation_integrity.verify_chain,
         )
 
     def test_resolved_repair_is_not_reported_as_tool_coverage_gap(self) -> None:
@@ -1827,6 +1838,13 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
             (
                 'cp "$REPO_DIR/operations/trace_evaluation_storage.py" '
                 '"$STACK_DIR/bin/trace_evaluation_storage.py"'
+            ),
+            source,
+        )
+        self.assertIn(
+            (
+                'cp "$REPO_DIR/operations/trace_evaluation_integrity.py" '
+                '"$STACK_DIR/bin/trace_evaluation_integrity.py"'
             ),
             source,
         )

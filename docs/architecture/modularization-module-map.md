@@ -522,6 +522,12 @@ opens SQLite with `mode=ro` and `query_only`, holds one consistent read
 transaction, rejects newer schema versions, and exposes bounded run/table reads
 without initialization or migration behavior.
 
+`operations/trace_evaluation_integrity.py` owns deterministic hypothesis
+digests, versioned terminal ledger manifests, event hash-chain validation, and
+terminal-manifest binding. Manifest schemas, identity columns, terminal states,
+hashing, normalization, and the error type are injected so the proof engine is
+independent of SQLite and CLI concerns.
+
 `operations/cohort_freezing.py` owns database-newest and exact-imported-row
 cohort freezing. Immutable policy and explicit source ports bind identity
 validation, read-only database snapshots, representative-alert custody,

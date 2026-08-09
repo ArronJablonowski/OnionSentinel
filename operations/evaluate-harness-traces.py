@@ -38,6 +38,12 @@ from trace_evaluation_storage import (
     selected_runs as read_selected_runs,
     table_names as read_table_names,
 )
+from trace_evaluation_integrity import (
+    TraceIntegrityPolicy,
+    hypothesis_manifest_digest as build_hypothesis_manifest_digest,
+    ledger_manifest as build_ledger_manifest,
+    verify_chain as verify_trace_chain,
+)
 
 
 REPORT_SCHEMA = "onion-sentinel-harness-trace-evaluation-v1"
@@ -346,25 +352,23 @@ def rows_for_run(
     )
 
 
-def hypothesis_manifest_digest(rows: Iterable[Mapping[str, Any]]) -> str:
-    return digest_json(
-        [
-            {
-                "hypothesis_id": str(row["hypothesis_id"]),
-                "statement_digest": str(row["statement_digest"]),
-                "status": str(row["status"]),
-                "supporting_refs_json": str(row["supporting_refs_json"]),
-                "contradicting_refs_json": str(
-                    row["contradicting_refs_json"]
-                ),
-                "next_discriminator_digest": digest_json(
-                    str(row["next_discriminator"])
-                ),
-                "revision": int(row["revision"]),
-            }
-            for row in rows
-        ]
+def _trace_integrity_policy() -> TraceIntegrityPolicy:
+    return TraceIntegrityPolicy(
+        current_manifest_schema=LEDGER_MANIFEST_SCHEMA,
+        legacy_manifest_schema=LEDGER_MANIFEST_SCHEMA_V1,
+        supported_manifest_schemas=SUPPORTED_LEDGER_MANIFEST_SCHEMAS,
+        current_run_identity_columns=RUN_IDENTITY_COLUMNS,
+        legacy_run_identity_columns=LEGACY_RUN_IDENTITY_COLUMNS_V1,
+        terminal_statuses=TERMINAL_STATUSES,
+        maximum_reported_errors=MAX_REPORTED_IDS,
+        digest_value=digest_json,
+        normalize_status=normalize_status,
+        error=EvaluationError,
     )
+
+
+def hypothesis_manifest_digest(rows: Iterable[Mapping[str, Any]]) -> str:
+    return build_hypothesis_manifest_digest(rows, digest_json)
 
 
 def ledger_manifest(
@@ -372,37 +376,9 @@ def ledger_manifest(
     *,
     schema: str = LEDGER_MANIFEST_SCHEMA,
 ) -> dict[str, Any]:
-    if schema == LEDGER_MANIFEST_SCHEMA:
-        run_identity_columns = RUN_IDENTITY_COLUMNS
-    elif schema == LEDGER_MANIFEST_SCHEMA_V1:
-        run_identity_columns = LEGACY_RUN_IDENTITY_COLUMNS_V1
-    else:
-        raise EvaluationError(
-            f"unsupported ledger manifest schema: {schema}"
-        )
-    normalized_ledgers: dict[str, list[dict[str, Any]]] = {}
-    for table, source_rows in ledgers.items():
-        rows = [dict(row) for row in source_rows]
-        if table == "harness_run_identity":
-            rows = [
-                {
-                    key: row[key]
-                    for key in run_identity_columns
-                    if key in row
-                }
-                for row in rows
-            ]
-        normalized_ledgers[table] = rows
-    return {
-        "schema": schema,
-        "tables": {
-            table: {
-                "count": len(rows),
-                "sha256": digest_json(rows),
-            }
-            for table, rows in sorted(normalized_ledgers.items())
-        },
-    }
+    return build_ledger_manifest(
+        ledgers, schema=schema, policy=_trace_integrity_policy()
+    )
 
 
 def verify_chain(
@@ -414,164 +390,15 @@ def verify_chain(
     ledgers: Mapping[str, Iterable[Mapping[str, Any]]] | None = None,
     require_ledger_manifest: bool = False,
 ) -> dict[str, Any]:
-    events = list(events)
-    hypotheses = list(hypotheses)
-    previous = "0" * 64
-    expected_sequence = 1
-    errors: list[str] = []
-    error_count = 0
-    event_count = 0
-
-    def record_error(message: str) -> None:
-        nonlocal error_count
-        error_count += 1
-        if len(errors) < MAX_REPORTED_IDS:
-            errors.append(message)
-
-    for row in events:
-        event_count += 1
-        try:
-            sequence = int(row.get("sequence"))
-            payload_json = str(row.get("payload_json"))
-            payload_digest = hashlib.sha256(
-                payload_json.encode("utf-8")
-            ).hexdigest()
-            body = {
-                "run_id": run_id,
-                "sequence": sequence,
-                "idempotency_key": row.get("idempotency_key"),
-                "event_type": row.get("event_type"),
-                "stage": row.get("stage"),
-                "created_at": row.get("created_at"),
-                "payload_sha256": row.get("payload_sha256"),
-                "previous_event_sha256": row.get("previous_event_sha256"),
-            }
-            expected_hash = digest_json(body)
-            if sequence != expected_sequence:
-                record_error(f"sequence gap at {sequence}")
-            if row.get("payload_sha256") != payload_digest:
-                record_error(f"payload digest mismatch at {sequence}")
-            if row.get("previous_event_sha256") != previous:
-                record_error(f"previous hash mismatch at {sequence}")
-            if row.get("event_sha256") != expected_hash:
-                record_error(f"event hash mismatch at {sequence}")
-            if row.get("event_id") != f"evt-{expected_hash[:32]}":
-                record_error(f"event id mismatch at {sequence}")
-            previous = str(row.get("event_sha256") or "")
-            expected_sequence += 1
-        except (TypeError, ValueError, OverflowError) as exc:
-            record_error(f"malformed event at position {event_count}: {exc}")
-    if event_count == 0:
-        record_error("run has no events")
-    latest_hypothesis_event = next(
-        (
-            row
-            for row in reversed(events)
-            if row.get("event_type") == "hypotheses.updated"
-        ),
-        None,
+    return verify_trace_chain(
+        run_id,
+        events,
+        hypotheses,
+        run_status=run_status,
+        ledgers=ledgers or {},
+        require_ledger_manifest=require_ledger_manifest,
+        policy=_trace_integrity_policy(),
     )
-    if latest_hypothesis_event is not None:
-        try:
-            payload = json.loads(
-                str(latest_hypothesis_event.get("payload_json") or "")
-            )
-        except (TypeError, ValueError, json.JSONDecodeError):
-            payload = {}
-        expected_manifest = str(payload.get("manifest_digest") or "")
-        actual_manifest = hypothesis_manifest_digest(hypotheses)
-        if not expected_manifest:
-            record_error("latest hypothesis event has no manifest digest")
-        elif expected_manifest != actual_manifest:
-            record_error("hypothesis ledger manifest mismatch")
-    ledger_manifest_bound = False
-    ledger_manifest_schema = ""
-    started_event = next(
-        (
-            row
-            for row in events
-            if row.get("event_type") == "run.started"
-        ),
-        None,
-    )
-    try:
-        started_payload = (
-            json.loads(str(started_event.get("payload_json") or ""))
-            if started_event is not None
-            else {}
-        )
-    except (TypeError, ValueError, json.JSONDecodeError):
-        started_payload = {}
-    legacy_manifest_eligible = (
-        started_event is not None
-        and isinstance(started_payload, dict)
-        and "assigned_reviewer_route" not in started_payload
-    )
-    normalized_run_status = normalize_status(run_status)
-    if normalized_run_status in TERMINAL_STATUSES:
-        terminal_event = next(
-            (
-                row
-                for row in reversed(events)
-                if row.get("event_type") == f"run.{normalized_run_status}"
-            ),
-            None,
-        )
-        if terminal_event is None:
-            record_error("terminal run has no matching terminal event")
-        else:
-            try:
-                terminal_payload = json.loads(
-                    str(terminal_event.get("payload_json") or "")
-                )
-            except (TypeError, ValueError, json.JSONDecodeError):
-                terminal_payload = {}
-            expected_ledger_manifest = terminal_payload.get(
-                "ledger_manifest"
-            )
-            if not isinstance(expected_ledger_manifest, dict):
-                if require_ledger_manifest:
-                    record_error(
-                        "terminal ledger manifest is missing or malformed"
-                    )
-            else:
-                ledger_manifest_schema = str(
-                    expected_ledger_manifest.get("schema") or ""
-                )
-                if ledger_manifest_schema not in (
-                    SUPPORTED_LEDGER_MANIFEST_SCHEMAS
-                ):
-                    record_error(
-                        "unsupported terminal ledger manifest schema"
-                    )
-                elif (
-                    ledger_manifest_schema == LEDGER_MANIFEST_SCHEMA_V1
-                    and not legacy_manifest_eligible
-                ):
-                    record_error(
-                        "terminal ledger manifest schema downgrade"
-                    )
-                else:
-                    ledger_manifest_bound = True
-                    actual_ledger_manifest = ledger_manifest(
-                        ledgers or {},
-                        schema=ledger_manifest_schema,
-                    )
-            if ledger_manifest_bound:
-                if digest_json(expected_ledger_manifest) != digest_json(
-                    actual_ledger_manifest
-                ):
-                    record_error("terminal ledger manifest mismatch")
-    return {
-        "valid": error_count == 0,
-        "event_count": event_count,
-        "head_sha256": previous if event_count else "",
-        "ledger_manifest_bound": ledger_manifest_bound,
-        "ledger_manifest_schema": ledger_manifest_schema,
-        "ledger_manifest_required": require_ledger_manifest,
-        "error_count": error_count,
-        "errors": errors,
-    }
 
 
 def decision_payloads(
