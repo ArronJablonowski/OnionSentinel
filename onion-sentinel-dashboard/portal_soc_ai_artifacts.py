@@ -4,11 +4,11 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Union
 
 
 JsonObject = dict[str, object]
-Row = sqlite3.Row | dict
+Row = Union[sqlite3.Row, dict]
 
 
 @dataclass(frozen=True)

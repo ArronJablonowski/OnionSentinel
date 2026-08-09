@@ -12,6 +12,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 N8N_ROOT = ROOT / "n8n"
+DASHBOARD_ROOT = ROOT / "onion-sentinel-dashboard"
 INSTALLER = N8N_ROOT / "bin" / "install-ai-runtime-package.py"
 if str(N8N_ROOT) not in sys.path:
     sys.path.insert(0, str(N8N_ROOT))
@@ -158,6 +159,24 @@ class AiRuntimePackageTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertTrue((destination / "__init__.py").is_file())
             self.assertEqual(list(destination.rglob("__pycache__")), [])
+
+    def test_dashboard_imports_with_production_system_python(self) -> None:
+        production_python = Path("/usr/bin/python3")
+        if not production_python.is_file():
+            self.skipTest("production system Python is unavailable")
+        completed = subprocess.run(
+            [
+                str(production_python),
+                "-c",
+                "import report_portal; import onion_sentinel_server",
+            ],
+            cwd=DASHBOARD_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_invalid_source_leaves_existing_runtime_untouched(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

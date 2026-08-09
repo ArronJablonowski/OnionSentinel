@@ -7,6 +7,7 @@ import re
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -108,7 +109,8 @@ def _read_attempt(
 
 def _close_http_error(error: urllib.error.HTTPError) -> int:
     status_code = int(error.code)
-    error.close()
+    with suppress(Exception):
+        error.close()
     return status_code
 
 

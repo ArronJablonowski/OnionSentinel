@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Union
 
 
 JsonObject = dict[str, object]
-Row = sqlite3.Row | dict
+Row = Union[sqlite3.Row, dict]
 
 
 @dataclass(frozen=True)

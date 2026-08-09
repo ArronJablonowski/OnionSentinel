@@ -114,7 +114,7 @@ def _section_counts(query_audit: Mapping[str, Any]) -> dict[str, int]:
     query_lists = [_list(section.get("queries")) for section in sections]
     queried = [
         (section, queries)
-        for section, queries in zip(sections, query_lists, strict=True)
+        for section, queries in zip(sections, query_lists)
         if queries
     ]
     return {

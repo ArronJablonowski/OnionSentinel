@@ -5,6 +5,7 @@ import json
 import re
 import urllib.error
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 
 from bounded_http import BoundedHttpError
@@ -257,7 +258,8 @@ def _transition_attempt(
         result = _send_status_request(sources, base_url, payload)
     except urllib.error.HTTPError as exc:
         status_code = int(exc.code)
-        exc.close()
+        with suppress(Exception):
+            exc.close()
         if status_code == 409:
             raise ControlledClaimRejected(
                 "controlled durable AI job changed before it could be claimed"

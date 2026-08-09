@@ -75,7 +75,7 @@ def _compact(text: object, max_len: int) -> str:
 
 
 def siem_engineering_html_list(values: object, empty: str) -> str:
-    if isinstance(values, list | tuple):
+    if isinstance(values, (list, tuple)):
         items = values
     elif values not in (None, ''):
         items = [values]

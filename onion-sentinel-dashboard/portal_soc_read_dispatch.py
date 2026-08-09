@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Union
 
 
 Query = dict[str, list[str]]
-Payload = dict | bytes
+Payload = Union[dict, bytes]
 ReadPair = tuple[int, Payload]
 
 
