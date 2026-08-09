@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import unittest
@@ -19,6 +20,10 @@ import cohort_runner_service  # noqa: E402
 
 
 class CohortRunnerCliTests(unittest.TestCase):
+    def test_historical_cli_path_is_executable(self) -> None:
+        mode = stat.S_IMODE(CLI_PATH.stat().st_mode)
+        self.assertTrue(mode & stat.S_IXUSR)
+
     def test_cli_delegates_parser_and_main_to_service(self) -> None:
         spec = importlib.util.spec_from_file_location("cohort_runner_cli", CLI_PATH)
         assert spec and spec.loader
