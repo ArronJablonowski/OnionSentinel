@@ -568,6 +568,12 @@ terminally successful purposes, required independent review, supplemental
 review limits, and reviewer decision completeness while producing the exact
 public proof projections consumed by cohort export.
 
+`operations/cohort_execution_tools.py` owns route authorization, read-only
+tool-ledger, collector query-audit, dynamic pivot, and tool-call binding proof.
+It requires successful dynamic read-only evidence, exact audit-to-ledger
+identity and digest equality, and Security Onion query evidence for Incident
+Responder runs before producing the tool portion of an execution proof.
+
 `prompt_incident_evidence_projection.py` owns the model-facing, in-memory
 projection of already-validated incident evidence. It applies deterministic
 prefix limits to Elastic hits and OSQuery rows, records source and retained

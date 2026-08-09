@@ -96,6 +96,7 @@ from cohort_execution_skills import (
     SkillAttestationPolicy,
     validate_skill_attestation,
 )
+from cohort_execution_tools import evaluate_tool_execution
 
 
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -2884,112 +2885,21 @@ def _harness_execution_proof(
     malformed_model_purpose_sequence_count = (
         model_execution.malformed_model_purpose_sequence_count
     )
-    for field in (
-        "authorization_failure_count",
-        "authorization_denied_event_count",
-        "authorization_malformed_event_count",
-        "authorization_orphan_event_count",
-        "authorization_unverified_call_count",
-        "observation_denied_event_count",
-        "observation_malformed_event_count",
-        "observation_orphan_event_count",
-        "identity_mismatch_count",
-        "identity_unverified_call_count",
-    ):
-        if int(routes.get(field) or 0):
-            failures.append(f"harness-route-{field}")
-    if routes.get("contract_available") is not True:
-        failures.append("harness-route-contract-unavailable")
-    tool_call_count = int(
-        (trace.get("counts") or {}).get("tool_calls") or 0
-    )
-    successful_tool_call_count = int(
-        tools.get("successful_call_count") or 0
-    )
-    read_only_tool_call_count = int(
-        tools.get("read_only_call_count") or 0
-    )
-    if tool_call_count < 1:
-        failures.append("harness-tool-call-ledger-missing")
-    if successful_tool_call_count < 1:
-        failures.append("harness-successful-tool-call-missing")
-    if read_only_tool_call_count != tool_call_count:
-        failures.append("harness-read-only-tool-ledger-incomplete")
-    if int(tools.get("read_only_violation_count") or 0):
-        failures.append("harness-non-read-only-tool-call")
     query_audit_binding = _query_audit_execution_binding(analysis)
-    if (
-        int(query_audit_binding["queried_section_count"]) > 0
-        and query_audit_binding["read_only_verified"] is not True
-    ):
-        failures.append("collector-query-audit-not-read-only")
-    if role == "incident-responder" and (
-        int(query_audit_binding["security_onion_query_count"]) < 1
-        or query_audit_binding["security_onion_read_only"] is not True
-    ):
-        failures.append(
-            "incident-security-onion-query-audit-missing-or-unverified"
-        )
-    dynamic_bindings = query_audit_binding[
-        "dynamic_successful_read_only_tool_bindings"
-    ]
-    trace_bindings = tools.get("successful_read_only_call_bindings")
-    if (
-        query_audit_binding["dynamic_read_only"] is not True
-        or query_audit_binding[
-            "dynamic_all_tool_call_bindings_read_only"
-        ]
-        is not True
-        or query_audit_binding[
-            "dynamic_evaluation_requirement_satisfied"
-        ]
-        is not True
-        or int(
-            query_audit_binding[
-                "dynamic_successful_read_only_queries"
-            ]
-        )
-        < 1
-        or int(query_audit_binding["dynamic_query_count"]) < 1
-        or int(
-            query_audit_binding[
-                "dynamic_tool_call_binding_count"
-            ]
-        )
-        < 1
-        or int(
-            query_audit_binding[
-                "dynamic_invalid_tool_call_binding_count"
-            ]
-        )
-        != 0
-        or int(
-            query_audit_binding[
-                "dynamic_duplicate_tool_call_binding_count"
-            ]
-        )
-        != 0
-        or not dynamic_bindings
-        or int(
-            query_audit_binding[
-                "dynamic_successful_read_only_queries"
-            ]
-        )
-        != len(dynamic_bindings)
-    ):
-        failures.append(
-            "dynamic-query-audit-missing-or-incomplete"
-        )
-    trace_binding_digest = str(
-        tools.get("successful_read_only_call_bindings_sha256") or ""
+    tool_execution = evaluate_tool_execution(
+        trace,
+        routes,
+        tools,
+        query_audit_binding,
+        role=role,
+        sha256_value=sha256_value,
     )
-    if (
-        not isinstance(trace_bindings, list)
-        or trace_bindings != dynamic_bindings
-        or len(dynamic_bindings) != successful_tool_call_count
-        or trace_binding_digest != sha256_value(dynamic_bindings)
-    ):
-        failures.append("dynamic-query-tool-ledger-binding-mismatch")
+    failures.extend(tool_execution.failures)
+    tool_call_count = tool_execution.tool_call_count
+    successful_tool_call_count = tool_execution.successful_tool_call_count
+    read_only_tool_call_count = tool_execution.read_only_tool_call_count
+    trace_bindings = tool_execution.trace_bindings
+    trace_binding_digest = tool_execution.trace_binding_digest
     if trace_report.get("data_quality", {}).get("malformed_json_counts"):
         failures.append("harness-trace-malformed-json")
     if terminal.get("evaluation_memory_frozen") is not True:
