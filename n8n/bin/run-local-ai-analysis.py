@@ -633,25 +633,6 @@ def safe_filename(value: Any) -> str:
     return (cleaned or "alert")[:120]
 
 
-def prompt_alert_summary(prompt_package: dict[str, Any]) -> dict[str, Any]:
-    """Compatibility delegate for operational alert projection."""
-    return _reporting_run_log().alert_summary(prompt_package)
-
-
-def prompt_pcap_size_bytes(prompt_package: dict[str, Any]) -> int:
-    """Compatibility delegate for deduplicated PCAP size projection."""
-    return _reporting_run_log().pcap_size_bytes(prompt_package)
-
-
-def prompt_alert_context_size_bytes(prompt_package: dict[str, Any]) -> int:
-    """Compatibility delegate for prompt-context byte accounting."""
-    return _reporting_run_log().alert_context_size_bytes(prompt_package)
-
-
-def parse_gpu_temperature(output: str) -> float | None:
-    return _system_resources().parse_gpu_temperature(output)
-
-
 def _system_resources():
     package_root = str(BIN_DIR.parent)
     if package_root not in sys.path:
@@ -670,14 +651,6 @@ def _system_resource_dependencies():
     )
 
 
-def mactop_command() -> list[str] | None:
-    return _system_resources().mactop_command(_system_resource_dependencies())
-
-
-def parse_float(value: Any) -> float | None:
-    return _system_resources().parse_float(value)
-
-
 def parse_mactop_sample(
     output: str,
 ) -> tuple[
@@ -690,17 +663,6 @@ def parse_mactop_sample(
     float | None,
 ]:
     return _system_resources().parse_mactop_sample(output)
-
-
-class ResourceSamplingCancelled(RuntimeError):
-    """Compatibility cancellation raised by the legacy runner helper."""
-
-
-def _raise_if_resource_sampling_cancelled(
-    cancel_event: threading.Event | None,
-) -> None:
-    if cancel_event is not None and cancel_event.is_set():
-        raise ResourceSamplingCancelled("system resource sampling cancelled")
 
 
 def read_mactop_system_sample(
