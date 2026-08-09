@@ -67,6 +67,12 @@ from prompt_alert_projection import (
     AlertProjectionSources,
     project_compact_alert,
 )
+from prompt_alert_group import (
+    AlertGroupRowsRequest,
+    AlertGroupSources,
+    build_grouped_alert_context,
+    fetch_alert_group_rows,
+)
 from prompt_pcap_evidence import (
     PcapEvidenceRequest,
     PcapEvidenceSources,
@@ -514,6 +520,17 @@ def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
         return set()
 
 
+def _alert_group_sources() -> AlertGroupSources:
+    return AlertGroupSources(
+        table_columns=table_columns,
+        row_value=sqlite_value,
+        query_rows=rows,
+        test_filter_sql=test_filter_sql,
+        safe_int=safe_int,
+        alert_group_key=alert_group_key,
+    )
+
+
 def alert_group_rows(
     conn: sqlite3.Connection,
     selected: sqlite3.Row,
@@ -522,62 +539,18 @@ def alert_group_rows(
     extra_columns: Iterable[str] = (),
     row_limit: int | None = None,
 ) -> list[sqlite3.Row]:
-    """Fetch one duplicate group through indexed identity columns.
-
-    Older disaster-recovery databases may predate ``stable_group_id``. The
-    exact-column fallback preserves compatibility without scanning every alert
-    in Python for each model invocation.
-    """
-    available = table_columns(conn, "alerts")
-    base_columns = [
-        "alert_id", "first_seen", "last_seen", "seen_count", "rule_name",
-        "source_ip", "destination_ip", "destination_port", "triage_level",
-        "triage_score", "filter_status", "suppression_key", "stable_group_id",
-    ]
-    selected_columns = [name for name in [*base_columns, *extra_columns] if name in available]
-    if not selected_columns:
-        return [selected]
-
-    params: list[object] = []
-    stable_group_id = str(sqlite_value(selected, "stable_group_id") or "").strip()
-    suppression_key = str(sqlite_value(selected, "suppression_key") or "").strip()
-    if stable_group_id and "stable_group_id" in available:
-        identity_sql = "stable_group_id = ?"
-        params.append(stable_group_id)
-    elif suppression_key and "suppression_key" in available:
-        identity_sql = "suppression_key = ?"
-        params.append(suppression_key)
-    else:
-        identity_columns = [
-            name for name in ("triage_level", "rule_name", "source_ip", "destination_ip", "filter_status")
-            if name in available
-        ]
-        identity_sql = " AND ".join(f"COALESCE({name}, '') = ?" for name in identity_columns)
-        params.extend(str(sqlite_value(selected, name) or "") for name in identity_columns)
-    if not identity_sql:
-        return [selected]
-
-    conditions = [identity_sql]
-    if "filter_status" in available:
-        conditions.append("COALESCE(filter_status, 'accepted') IN ('accepted', 'escalated', 'unknown', 'suppressed')")
-    if not include_tests and "alert_id" in available:
-        test_sql, test_params = test_filter_sql("alert_id")
-        conditions.append(test_sql)
-        params.extend(test_params)
-    try:
-        limit_sql = ""
-        if row_limit is not None:
-            bounded_limit = max(1, min(int(row_limit), MAX_DETECTION_GROUP_ROWS + 1))
-            limit_sql = f" LIMIT {bounded_limit}"
-        return rows(
-            conn,
-            f"SELECT {', '.join(selected_columns)} FROM alerts "
-            f"WHERE {' AND '.join(f'({item})' for item in conditions)} "
-            f"ORDER BY last_seen DESC, alert_id DESC{limit_sql}",
-            params,
-        ) or [selected]
-    except sqlite3.Error:
-        return [selected]
+    """Compatibility delegate for indexed duplicate-group selection."""
+    return fetch_alert_group_rows(
+        _alert_group_sources(),
+        AlertGroupRowsRequest(
+            connection=conn,
+            selected=selected,
+            include_tests=include_tests,
+            maximum_group_rows=MAX_DETECTION_GROUP_ROWS,
+            extra_columns=tuple(extra_columns),
+            row_limit=row_limit,
+        ),
+    )
 
 
 def analyst_state_context(conn: sqlite3.Connection, selected: sqlite3.Row) -> dict:
@@ -845,40 +818,17 @@ def correlated_alert_context(
 
 
 def grouped_alert_context(conn: sqlite3.Connection, selected: sqlite3.Row, limit: int, include_tests: bool) -> dict:
-    """Summarize the dashboard duplicate group so AI weighs alert frequency."""
-    selected_group_key = alert_group_key(selected)
-    group_rows = alert_group_rows(conn, selected, include_tests=include_tests)
-    total_observations = sum(max(1, safe_int(sqlite_value(item, "seen_count"))) for item in group_rows)
-    first_seen_values = [str(sqlite_value(item, "first_seen") or "") for item in group_rows if sqlite_value(item, "first_seen")]
-    last_seen_values = [str(sqlite_value(item, "last_seen") or "") for item in group_rows if sqlite_value(item, "last_seen")]
-    timeline = [
-        {
-            "alert_id": item["alert_id"],
-            "first_seen": sqlite_value(item, "first_seen"),
-            "last_seen": sqlite_value(item, "last_seen"),
-            "seen_count": max(1, safe_int(sqlite_value(item, "seen_count"))),
-            "source_ip": sqlite_value(item, "source_ip"),
-            "destination_ip": sqlite_value(item, "destination_ip"),
-            "destination_port": sqlite_value(item, "destination_port"),
-            "triage_level": sqlite_value(item, "triage_level"),
-            "triage_score": sqlite_value(item, "triage_score"),
-            "filter_status": sqlite_value(item, "filter_status"),
-        }
-        for item in group_rows[:limit]
-    ]
-    return {
-        "group_key": selected_group_key,
-        "raw_alert_rows": len(group_rows),
-        "total_observations": total_observations,
-        "first_seen": min(first_seen_values) if first_seen_values else sqlite_value(selected, "first_seen"),
-        "last_seen": max(last_seen_values) if last_seen_values else sqlite_value(selected, "last_seen"),
-        "timeline_sample": timeline,
-        "timeline_sample_limit": limit,
-        "frequency_guidance": (
-            "Use total_observations and raw_alert_rows to judge urgency, recurrence, and tuning. "
-            "A high count may indicate active behavior, noisy expected software, or a rule that needs suppression/drop/tuning."
+    """Compatibility delegate for bounded duplicate-group summary."""
+    return build_grouped_alert_context(
+        _alert_group_sources(),
+        AlertGroupRowsRequest(
+            connection=conn,
+            selected=selected,
+            include_tests=include_tests,
+            maximum_group_rows=MAX_DETECTION_GROUP_ROWS,
         ),
-    }
+        limit,
+    )
 
 
 def compact_alert(row_value: sqlite3.Row) -> dict:

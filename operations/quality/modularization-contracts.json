@@ -57,6 +57,17 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_alert_group.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_alert_group.py",
+      "required_symbols": [
+        "AlertGroupRowsRequest",
+        "AlertGroupSources",
+        "build_grouped_alert_context",
+        "fetch_alert_group_rows"
+      ]
+    },
+    {
       "path": "n8n/bin/prompt_builder_cli.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_builder_cli.py",

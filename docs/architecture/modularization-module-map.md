@@ -574,6 +574,15 @@ values with hashes and lengths, allowlists safe numeric/boolean rule modifiers,
 and exposes only state preconditions relevant to matching. Alert JSON parsing,
 row access, and deployed-rule extraction remain injected by the builder facade.
 
+`prompt_alert_group.py` owns indexed duplicate-group selection and its bounded
+model-facing frequency/timeline summary. It prefers stable group identity,
+falls back to suppression identity, and finally uses the exact available
+legacy identity columns without scanning alerts in Python. It enforces
+admitted filter statuses, test-alert policy, caller row limits, schema/query
+fail-soft behavior, and a separate timeline sample bound. Schema inspection,
+query execution, row access, integer normalization, test filtering, and group
+key derivation remain injected by the builder facade.
+
 `prompt_detection_context.py` owns ordered preparation of the exact detection
 group, deterministic investigation-skill selection, rule/playbook predicate
 validation, bounded packet features, and time-aware asset resolution. The
