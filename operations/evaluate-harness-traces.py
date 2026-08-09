@@ -63,6 +63,11 @@ from trace_evaluation_model_routes import (
     expected_route_identity,
     model_route_consistency as evaluate_model_route_consistency,
 )
+from trace_evaluation_run import (
+    TraceRunPolicy,
+    TraceRunServices,
+    evaluate_run as evaluate_trace_run,
+)
 
 
 REPORT_SCHEMA = "onion-sentinel-harness-trace-evaluation-v1"
@@ -612,6 +617,42 @@ def model_route_consistency(
     )
 
 
+def _trace_run_policy() -> TraceRunPolicy:
+    return TraceRunPolicy(
+        run_identity_columns=RUN_IDENTITY_COLUMNS,
+        trusted_source_tiers=frozenset(
+            {"trusted-collector", "read-only-backend", "human-confirmed"}
+        ),
+        rejection_statuses=REJECTION_STATUSES,
+        failure_statuses=FAILURE_STATUSES,
+        success_statuses=SUCCESS_STATUSES,
+        unresolved_hypothesis_statuses=frozenset(
+            {"", "unknown", "unresolved", "open", "proposed"}
+        ),
+        maximum_reported=MAX_REPORTED_IDS,
+    )
+
+
+def _trace_run_services() -> TraceRunServices:
+    return TraceRunServices(
+        rows_for_run=rows_for_run,
+        normalize_status=normalize_status,
+        safe_json=safe_json,
+        nonnegative_int=nonnegative_int,
+        unresolved_tool_coverage_gaps=unresolved_tool_coverage_gaps,
+        budget_operation_id=budget_operation_id,
+        reviewer_result=reviewer_result,
+        model_purpose_completion=model_purpose_completion,
+        reviewer_completion_contract=reviewer_completion_contract,
+        canonical_model_call_contract=canonical_model_call_contract,
+        model_route_consistency=model_route_consistency,
+        skill_selection_attestation_result=skill_selection_attestation_result,
+        terminal_execution_summary=terminal_execution_summary,
+        verify_chain=verify_chain,
+        digest_json=digest_json,
+    )
+
+
 def evaluate_run(
     connection: sqlite3.Connection,
     available_tables: set[str],
@@ -620,375 +661,15 @@ def evaluate_run(
     *,
     require_ledger_manifest: bool = False,
 ) -> dict[str, Any]:
-    run_id = str(run.get("run_id") or "")
-    events = rows_for_run(
-        connection, available_tables, "harness_events", run_id, "sequence"
-    )
-    evidence = rows_for_run(
+    return evaluate_trace_run(
         connection,
         available_tables,
-        "harness_evidence",
-        run_id,
-        "evidence_ref",
-    )
-    hypotheses = rows_for_run(
-        connection,
-        available_tables,
-        "harness_hypotheses",
-        run_id,
-        "hypothesis_id",
-    )
-    decisions = rows_for_run(
-        connection,
-        available_tables,
-        "harness_decisions",
-        run_id,
-        "created_at, decision_id",
-    )
-    model_calls = rows_for_run(
-        connection,
-        available_tables,
-        "harness_model_calls",
-        run_id,
-        "created_at, call_id",
-    )
-    tool_calls = rows_for_run(
-        connection,
-        available_tables,
-        "harness_tool_calls",
-        run_id,
-        "round_number, call_id",
-    )
-    budget_reservations = rows_for_run(
-        connection,
-        available_tables,
-        "harness_budget_reservations",
-        run_id,
-        "reservation_type, reservation_id",
-    )
-    ledgers = {
-        "harness_run_identity": [
-            {
-                key: run[key]
-                for key in RUN_IDENTITY_COLUMNS
-                if key in run
-            }
-        ],
-        "harness_evidence": evidence,
-        "harness_hypotheses": hypotheses,
-        "harness_decisions": decisions,
-        "harness_model_calls": model_calls,
-        "harness_tool_calls": tool_calls,
-        "harness_budget_reservations": budget_reservations,
-    }
-
-    source_classes = sorted(
-        {
-            str(row.get("source_class") or "unknown")
-            for row in evidence
-            if str(row.get("source_class") or "")
-            and int(row.get("corroborating") or 0) == 1
-            and normalize_status(row.get("trust_tier"))
-            in {
-                "trusted-collector",
-                "read-only-backend",
-                "human-confirmed",
-            }
-        }
-    )
-    rejected_tools = [
-        str(row.get("call_id") or "")
-        for row in tool_calls
-        if normalize_status(row.get("status")) in REJECTION_STATUSES
-    ]
-    failed_tools = [
-        str(row.get("call_id") or "")
-        for row in tool_calls
-        if normalize_status(row.get("status")) in FAILURE_STATUSES
-    ]
-    coverage_gaps = unresolved_tool_coverage_gaps(tool_calls)
-    truncated_tools = [
-        str(row.get("call_id") or "")
-        for row in tool_calls
-        if int(row.get("truncated") or 0) == 1
-    ]
-    read_only_violations = [
-        str(row.get("call_id") or "")
-        for row in tool_calls
-        if int(row.get("read_only") or 0) != 1
-    ]
-    successful_tools = [
-        str(row.get("call_id") or "")
-        for row in tool_calls
-        if normalize_status(row.get("status")) in SUCCESS_STATUSES
-    ]
-    read_only_tools = [
-        str(row.get("call_id") or "")
-        for row in tool_calls
-        if int(row.get("read_only") or 0) == 1
-    ]
-    successful_read_only_call_bindings = []
-    for row in tool_calls:
-        if (
-            normalize_status(row.get("status")) not in SUCCESS_STATUSES
-            or int(row.get("read_only") or 0) != 1
-        ):
-            continue
-        round_number = nonnegative_int(row.get("round_number"))
-        call_id = str(row.get("call_id") or "")
-        call_prefix = f"round-{round_number}-"
-        successful_read_only_call_bindings.append(
-            {
-                "call_id": call_id,
-                "round_number": round_number,
-                "query_id": (
-                    call_id[len(call_prefix) :]
-                    if call_id.startswith(call_prefix)
-                    else ""
-                ),
-                "backend": str(row.get("backend") or ""),
-                "status": normalize_status(row.get("status")),
-                "request_digest": str(row.get("request_digest") or ""),
-                "result_digest": str(row.get("result_digest") or ""),
-                "read_only": True,
-            }
-        )
-    successful_read_only_call_bindings.sort(
-        key=lambda item: (
-            int(item["round_number"]),
-            str(item["call_id"]),
-        )
-    )
-
-    budget_violation_sources: dict[tuple[str, str], set[str]] = {}
-    memory_promotions: list[dict[str, Any]] = []
-    event_type_counts: collections.Counter[str] = collections.Counter()
-    stages: set[str] = set()
-    for event in events:
-        event_type = str(event.get("event_type") or "")
-        event_type_counts[event_type] += 1
-        stages.add(str(event.get("stage") or ""))
-        payload = safe_json(
-            event.get("payload_json"),
-            {},
-            malformed,
-            "event.payload_json",
-        )
-        if event_type in {"policy.budget", "queries.completed"}:
-            key = (
-                "violations"
-                if event_type == "policy.budget"
-                else "budget_violations"
-            )
-            values = payload.get(key)
-            if isinstance(values, list):
-                operation_id = budget_operation_id(event, payload)
-                for value in values:
-                    violation = str(value or "").strip()
-                    if not violation:
-                        continue
-                    budget_violation_sources.setdefault(
-                        (operation_id, violation),
-                        set(),
-                    ).add(event_type)
-        elif event_type == "policy.memory-promotion":
-            memory_promotions.append(
-                {
-                    "allowed": bool(payload.get("allowed")),
-                    "requires_approval": bool(payload.get("requires_approval")),
-                    "candidate_count": nonnegative_int(
-                        payload.get("candidate_count")
-                    ),
-                    "reason": str(payload.get("reason") or "")[:500],
-                }
-            )
-
-    budget_violations: collections.Counter[str] = collections.Counter(
-        violation for _operation_id, violation in budget_violation_sources
-    )
-    budget_violation_operations = [
-        {
-            "operation_id": operation_id,
-            "violation": violation,
-            "sources": sorted(sources),
-        }
-        for (operation_id, violation), sources in sorted(
-            budget_violation_sources.items()
-        )
-    ]
-    reviewer = reviewer_result(model_calls, decisions, malformed)
-    purpose_completion = model_purpose_completion(
-        model_calls,
-        reviewer,
-    )
-    reviewer.update(
-        reviewer_completion_contract(reviewer, purpose_completion)
-    )
-    model_call_contract = canonical_model_call_contract(model_calls)
-    route_consistency = model_route_consistency(
         run,
-        events,
-        model_calls,
         malformed,
+        _trace_run_policy(),
+        _trace_run_services(),
+        require_ledger_manifest=require_ledger_manifest,
     )
-    skill_selection = skill_selection_attestation_result(
-        run,
-        events,
-        malformed,
-    )
-    unresolved_hypotheses = sum(
-        normalize_status(row.get("status"))
-        in {"", "unknown", "unresolved", "open", "proposed"}
-        for row in hypotheses
-    )
-    coverage_reasons: list[str] = []
-    if not evidence:
-        coverage_reasons.append("no-evidence-catalogue")
-    if not model_calls:
-        coverage_reasons.append("no-model-call-ledger")
-    if not tool_calls:
-        coverage_reasons.append("no-tool-call-ledger")
-    elif not successful_tools:
-        coverage_reasons.append("no-successful-tool-call-ledger")
-    if coverage_gaps:
-        coverage_reasons.append("tool-evidence-gap")
-    if truncated_tools:
-        coverage_reasons.append("truncated-tool-results")
-    if len(source_classes) < 2:
-        coverage_reasons.append("fewer-than-two-evidence-source-classes")
-    if read_only_violations:
-        coverage_reasons.append("non-read-only-tool-call")
-    if reviewer["missing_reviewer_decision"]:
-        coverage_reasons.append("reviewer-call-without-decision")
-    if reviewer["completion_contract_satisfied"] is not True:
-        coverage_reasons.append("reviewer-completion-contract-failed")
-    if model_call_contract["valid"] is not True:
-        coverage_reasons.append("noncanonical-model-call-contract")
-    if purpose_completion["incomplete_purpose_count"]:
-        coverage_reasons.append("model-purpose-incomplete")
-    if purpose_completion["malformed_purpose_sequence_count"]:
-        coverage_reasons.append("model-purpose-sequence-malformed")
-    if purpose_completion["unexpected_unsuccessful_call_count"]:
-        coverage_reasons.append("unexpected-unsuccessful-model-call")
-    if route_consistency["authorization_failure_count"]:
-        coverage_reasons.append("model-route-authorization-failure")
-    if route_consistency["identity_mismatch_count"]:
-        coverage_reasons.append("model-runtime-identity-mismatch")
-
-    return {
-        "run_id": run_id,
-        "trace_id": str(run.get("trace_id") or ""),
-        "correlation_id": str(run.get("correlation_id") or ""),
-        "case_id": str(run.get("case_id") or ""),
-        "alert_id": str(run.get("alert_id") or ""),
-        "role": str(run.get("role") or ""),
-        "task_kind": str(run.get("task_kind") or ""),
-        "status": str(run.get("status") or ""),
-        "stage": str(run.get("stage") or ""),
-        "assigned_route": str(run.get("assigned_route") or ""),
-        "assigned_reviewer_route": str(
-            run.get("assigned_reviewer_route") or ""
-        ),
-        "policy_mode": str(run.get("policy_mode") or ""),
-        "started_at": str(run.get("started_at") or ""),
-        "completed_at": str(run.get("completed_at") or ""),
-        "terminal_execution_summary": terminal_execution_summary(
-            events,
-            run.get("status"),
-            malformed,
-        ),
-        "skill_selection_attestation": skill_selection,
-        "integrity": verify_chain(
-            run_id,
-            events,
-            hypotheses,
-            run_status=str(run.get("status") or ""),
-            ledgers=ledgers,
-            require_ledger_manifest=require_ledger_manifest,
-        ),
-        "counts": {
-            "events": len(events),
-            "evidence": len(evidence),
-            "hypotheses": len(hypotheses),
-            "unresolved_hypotheses": unresolved_hypotheses,
-            "decisions": len(decisions),
-            "model_calls": len(model_calls),
-            "tool_calls": len(tool_calls),
-            "budget_reservations": len(budget_reservations),
-        },
-        "event_type_counts": dict(sorted(event_type_counts.items())),
-        "stage_count": len({stage for stage in stages if stage}),
-        "models": {
-            "observed": sorted(
-                {
-                    str(row.get("observed_model") or row.get("requested_route") or "")
-                    for row in model_calls
-                    if str(
-                        row.get("observed_model")
-                        or row.get("requested_route")
-                        or ""
-                    )
-                }
-            ),
-            "independent_review_calls": reviewer["model_call_count"],
-            "successful_call_count": sum(
-                normalize_status(row.get("status")) in SUCCESS_STATUSES
-                for row in model_calls
-            ),
-            "successful_primary_call_count": sum(
-                normalize_status(row.get("status")) in SUCCESS_STATUSES
-                and int(row.get("independent_review") or 0) == 0
-                for row in model_calls
-            ),
-            **purpose_completion,
-            "model_call_contract": model_call_contract,
-            "duration_ms": sum(
-                nonnegative_int(row.get("duration_ms")) for row in model_calls
-            ),
-            "route_consistency": route_consistency,
-        },
-        "tools": {
-            "backends": sorted(
-                {
-                    str(row.get("backend") or "unknown")
-                    for row in tool_calls
-                    if str(row.get("backend") or "")
-                }
-            ),
-            "rejected_call_ids": rejected_tools[:MAX_REPORTED_IDS],
-            "rejected_count": len(rejected_tools),
-            "failed_call_ids": failed_tools[:MAX_REPORTED_IDS],
-            "failed_count": len(failed_tools),
-            "coverage_gap_call_ids": coverage_gaps[:MAX_REPORTED_IDS],
-            "coverage_gap_count": len(coverage_gaps),
-            "truncated_call_ids": truncated_tools[:MAX_REPORTED_IDS],
-            "truncated_count": len(truncated_tools),
-            "read_only_violation_call_ids": read_only_violations[
-                :MAX_REPORTED_IDS
-            ],
-            "read_only_violation_count": len(read_only_violations),
-            "successful_call_count": len(successful_tools),
-            "read_only_call_count": len(read_only_tools),
-            "successful_read_only_call_bindings": (
-                successful_read_only_call_bindings
-            ),
-            "successful_read_only_call_bindings_sha256": digest_json(
-                successful_read_only_call_bindings
-            ),
-        },
-        "evidence": {
-            "source_classes": source_classes,
-            "distinct_source_classes": len(source_classes),
-            "corroborating_count": sum(
-                int(row.get("corroborating") or 0) == 1 for row in evidence
-            ),
-        },
-        "reviewer": reviewer,
-        "budget_violations": dict(sorted(budget_violations.items())),
-        "budget_violation_operations": budget_violation_operations,
-        "memory_promotions": memory_promotions,
-        "coverage_gap_reasons": coverage_reasons,
-    }
 
 
 def counter_dict(counter: collections.Counter[str]) -> dict[str, int]:

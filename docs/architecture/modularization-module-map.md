@@ -552,6 +552,12 @@ missing, duplicate, denied, mismatched, and orphaned route evidence, and verifie
 collector-recorded model, provider, path, and harness identity through an
 immutable policy with explicit parsing and normalization ports.
 
+`operations/trace_evaluation_run.py` owns evaluation of one immutable harness
+run. It loads bounded ledgers through an injected read-only port, projects tool,
+evidence, budget, memory, reviewer, model, route, skill, and integrity facts,
+derives coverage gaps, and assembles the established content-free per-run report
+without owning SQLite lifecycle or CLI behavior.
+
 `operations/cohort_freezing.py` owns database-newest and exact-imported-row
 cohort freezing. Immutable policy and explicit source ports bind identity
 validation, read-only database snapshots, representative-alert custody,
