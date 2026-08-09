@@ -17,6 +17,7 @@ ANALYST_STATE_ROUTES = REPO_ROOT / "n8n" / "alert_store" / "routes" / "analyst_s
 DURABLE_JOB_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "durable_job_service.js"
 DURABLE_JOB_ROUTES = REPO_ROOT / "n8n" / "alert_store" / "routes" / "durable_job_routes.js"
 PCAP_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "pcap_service.js"
+ENRICHMENT_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "enrichment_service.js"
 
 
 class AlertStoreResilienceTest(unittest.TestCase):
@@ -34,6 +35,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.durable_job_service = DURABLE_JOB_SERVICE.read_text(encoding="utf-8")
         cls.durable_job_routes = DURABLE_JOB_ROUTES.read_text(encoding="utf-8")
         cls.pcap_service = PCAP_SERVICE.read_text(encoding="utf-8")
+        cls.enrichment_service = ENRICHMENT_SERVICE.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
         self.assertIn("require('./lib/provider_scheduler')", self.code)
@@ -244,7 +246,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("function assertDiskWriteAdmission", self.code)
         self.assertIn("Math.min(80", self.code)
         self.assertIn("assertDiskWriteAdmission('alert ingestion')", self.code)
-        self.assertIn("assertDiskWriteAdmission('alert enrichment')", self.code)
+        self.assertIn("assertDiskWriteAdmission('alert enrichment')", self.enrichment_service)
         self.assertIn("error.statusCode = 507", self.code)
         self.assertIn("disk_capacity: state.diskCapacitySnapshot()", self.health_service)
 

@@ -41,6 +41,8 @@ const {createAnalysisResultService} = require('./services/analysis_result_servic
 const {createAnalysisResultRoutes} = require('./routes/analysis_result_routes');
 const {createPcapService} = require('./services/pcap_service');
 const {createPcapRoutes} = require('./routes/pcap_routes');
+const {createEnrichmentService} = require('./services/enrichment_service');
+const {createEnrichmentRoutes} = require('./routes/enrichment_routes');
 const {
   loadAuthorizedActivityPolicy,
   matchAuthorizedActivity,
@@ -11841,6 +11843,18 @@ modularRoutes.registerAll(createPcapRoutes({
   readJsonBody,
   sendJson,
 }));
+const enrichmentService = createEnrichmentService({
+  assertDiskWriteAdmission,
+  enrichAlert,
+  cachedInvestigationEnrichment,
+  queryInvestigationEnrichment,
+});
+modularRoutes.registerAll(createEnrichmentRoutes({
+  service: enrichmentService,
+  authorizeInvestigation: requireAssetStoreWriteAuthorization,
+  readJsonBody,
+  sendJson,
+}));
 
 function controlledEvaluationRequestAuthorized(request) {
   if (!controlledEvaluationMode) return true;
@@ -11919,50 +11933,6 @@ async function handleRequest(request, response) {
       serviceMetrics.ingest_latency_ms_max = Math.max(serviceMetrics.ingest_latency_ms_max, latency);
       writeN8nBeacon('stored', alert, result);
       sendJson(response, result.ok ? 200 : 400, result);
-      return;
-    }
-    if (request.method === 'POST' && request.url === '/enrich') {
-      // n8n calls this as a dedicated enrichment stage before /alert storage.
-      // Public lookups are skipped unless their key is configured, except
-      // intentionally keyless public sources such as Shodan InternetDB, KEV,
-      // EPSS, and NVD without a key.
-      const alert = await readJsonBody(request);
-      assertDiskWriteAdmission('alert enrichment');
-      const result = await enrichAlert(alert);
-      sendJson(response, result.ok ? 200 : 400, result);
-      return;
-    }
-    if (
-      request.method === 'POST'
-      && parsedUrl.pathname === '/investigations/enrichment/cache'
-    ) {
-      requireAssetStoreWriteAuthorization(request);
-      const payload = await readJsonBody(request);
-      sendJson(
-        response,
-        200,
-        await cachedInvestigationEnrichment(
-          payload.indicator_type,
-          payload.indicator,
-        ),
-      );
-      return;
-    }
-    if (
-      request.method === 'POST'
-      && parsedUrl.pathname === '/investigations/enrichment/query'
-    ) {
-      requireAssetStoreWriteAuthorization(request);
-      assertDiskWriteAdmission('investigation enrichment');
-      const payload = await readJsonBody(request);
-      sendJson(
-        response,
-        200,
-        await queryInvestigationEnrichment(
-          payload.indicator_type,
-          payload.indicator,
-        ),
-      );
       return;
     }
     if (request.method === 'POST' && request.url === '/rescore') {
