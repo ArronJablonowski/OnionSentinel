@@ -153,6 +153,11 @@ from cohort_private_input import (
     load_private_manifest as read_private_manifest,
     load_private_source_rows as read_private_source_rows,
 )
+from cohort_runner_cli import (
+    CohortCliOperations,
+    build_parser as build_cli_parser,
+    main as run_cli,
+)
 
 
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -1929,199 +1934,23 @@ def export_cohort(
     )
 
 
-def _print_summary(document: Mapping[str, Any]) -> None:
-    print(
-        json.dumps(
-            {
-                "schema": document.get("schema"),
-                "cohort_id": document.get("cohort_id"),
-                "agent_role": document.get("agent_role"),
-                "state": document.get("state"),
-                "count": document.get("count"),
-                "manifest_sha256": document.get("manifest_sha256"),
-                "export_sha256": document.get("export_sha256"),
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
-
-
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest="command", required=True)
+    return build_cli_parser(__doc__ or "", sorted(AGENT_ROLES))
 
-    freeze = commands.add_parser("freeze", help="freeze the newest stable cohort")
-    freeze.add_argument("--db", required=True, type=Path)
-    freeze.add_argument("--manifest", required=True, type=Path)
-    freeze.add_argument("--cohort-id", required=True)
-    freeze.add_argument("--reason", required=True)
-    freeze.add_argument("--count", required=True, type=int)
-    freeze.add_argument("--expected-release-id", required=True)
-    freeze.add_argument("--expected-assigned-route", required=True)
-    freeze.add_argument("--expected-reviewer-route", required=True)
-    freeze.add_argument(
-        "--evaluation-profile",
-        default="",
-        help=(
-            "optional exact controlled campaign profile; the named profile "
-            "pins its approved primary and reviewer routes"
-        ),
-    )
-    freeze.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="validate and print the frozen plan without writing a manifest",
-    )
 
-    imported = commands.add_parser(
-        "freeze-from-rows",
-        help="freeze an already-selected owner-only JSON array without reselection",
+def _cli_operations() -> CohortCliOperations:
+    return CohortCliOperations(
+        freeze_cohort=freeze_cohort,
+        freeze_cohort_from_rows=freeze_cohort_from_rows,
+        queue_cohort=queue_cohort,
+        monitor_cohort=monitor_cohort,
+        export_cohort=export_cohort,
+        handled_errors=(CohortError, sqlite3.Error),
     )
-    imported.add_argument("--db", required=True, type=Path)
-    imported.add_argument("--source-rows", required=True, type=Path)
-    imported.add_argument("--manifest", required=True, type=Path)
-    imported.add_argument("--cohort-id", required=True)
-    imported.add_argument("--reason", required=True)
-    imported.add_argument("--expected-count", required=True, type=int)
-    imported.add_argument("--expected-release-id", required=True)
-    imported.add_argument("--expected-assigned-route", required=True)
-    imported.add_argument("--expected-reviewer-route", required=True)
-    imported.add_argument(
-        "--evaluation-profile",
-        default="",
-        help=(
-            "optional exact controlled campaign profile; the named profile "
-            "pins its approved primary and reviewer routes"
-        ),
-    )
-    imported.add_argument(
-        "--agent-role",
-        choices=sorted(AGENT_ROLES),
-        default="incident-responder",
-        help="agent queue to exercise; defaults to incident-responder",
-    )
-    imported.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="validate exact source rows without writing a manifest",
-    )
-
-    queue = commands.add_parser("queue", help="queue each frozen member once")
-    queue.add_argument("--db", required=True, type=Path)
-    queue.add_argument("--manifest", required=True, type=Path)
-    queue.add_argument(
-        "--base-url",
-        default="http://127.0.0.1:8766",
-        help="loopback dashboard origin",
-    )
-    queue.add_argument("--http-timeout", type=float, default=15.0)
-    queue.add_argument(
-        "--evaluation-token-file",
-        type=Path,
-        help=(
-            "owner-only file containing the 64-character evaluation token; "
-            "the token is sent only as an evaluation POST header"
-        ),
-    )
-    queue.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="validate all identities without sending any HTTP request",
-    )
-
-    monitor = commands.add_parser("monitor", help="monitor exact accepted identities")
-    monitor.add_argument("--db", required=True, type=Path)
-    monitor.add_argument("--manifest", required=True, type=Path)
-    monitor.add_argument(
-        "--timeout",
-        type=float,
-        default=0.0,
-        help="seconds to wait; zero performs one snapshot",
-    )
-    monitor.add_argument("--poll-interval", type=float, default=5.0)
-
-    export = commands.add_parser("export", help="export terminal result metadata")
-    export.add_argument("--db", required=True, type=Path)
-    export.add_argument("--manifest", required=True, type=Path)
-    export.add_argument("--output", required=True, type=Path)
-    export.add_argument(
-        "--harness-db",
-        required=True,
-        type=Path,
-        help="read-only harness ledger used to attest every exact analysis",
-    )
-    return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    try:
-        if args.command == "freeze":
-            result = freeze_cohort(
-                args.db,
-                args.manifest,
-                cohort_id=args.cohort_id,
-                reason=args.reason,
-                count=args.count,
-                expected_release_id=args.expected_release_id,
-                expected_assigned_route=args.expected_assigned_route,
-                expected_reviewer_route=args.expected_reviewer_route,
-                evaluation_profile=args.evaluation_profile,
-                dry_run=args.dry_run,
-            )
-            _print_summary(result)
-            return 0
-        if args.command == "freeze-from-rows":
-            result = freeze_cohort_from_rows(
-                args.db,
-                args.source_rows,
-                args.manifest,
-                cohort_id=args.cohort_id,
-                reason=args.reason,
-                expected_count=args.expected_count,
-                expected_release_id=args.expected_release_id,
-                agent_role=args.agent_role,
-                expected_assigned_route=args.expected_assigned_route,
-                expected_reviewer_route=args.expected_reviewer_route,
-                evaluation_profile=args.evaluation_profile,
-                dry_run=args.dry_run,
-            )
-            _print_summary(result)
-            return 0
-        if args.command == "queue":
-            result = queue_cohort(
-                args.db,
-                args.manifest,
-                base_url=args.base_url,
-                timeout=args.http_timeout,
-                dry_run=args.dry_run,
-                evaluation_token_file=args.evaluation_token_file,
-            )
-            _print_summary(result)
-            return 0
-        if args.command == "monitor":
-            result, terminal = monitor_cohort(
-                args.db,
-                args.manifest,
-                timeout=args.timeout,
-                poll_interval=args.poll_interval,
-            )
-            _print_summary(result)
-            return 0 if terminal else 3
-        if args.command == "export":
-            result = export_cohort(
-                args.db,
-                args.manifest,
-                args.output,
-                harness_database_path=args.harness_db,
-            )
-            _print_summary(result)
-            return 0
-    except (CohortError, sqlite3.Error) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    raise AssertionError(f"unhandled command: {args.command}")
+    return run_cli(argv, parser=build_parser(), operations=_cli_operations())
 
 
 if __name__ == "__main__":

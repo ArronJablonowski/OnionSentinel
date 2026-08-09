@@ -26,6 +26,17 @@
       ]
     },
     {
+      "path": "operations/cohort_runner_cli.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_runner_cli.py",
+      "required_symbols": [
+        "CohortCliOperations",
+        "build_parser",
+        "print_summary",
+        "main"
+      ]
+    },
+    {
       "path": "operations/cohort_freezing.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_freezing.py",

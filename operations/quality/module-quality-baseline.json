@@ -58,7 +58,7 @@
       "max_lines": 1164
     },
     "operations/cohort_runner_service.py": {
-      "max_lines": 2128
+      "max_lines": 1957
     },
     "relay/app/relay.py": {
       "max_lines": 2098
@@ -633,9 +633,6 @@
     "operations/benchmark-ollama-cybersecurity.py::score_query_batch": {
       "max_complexity": 20
     },
-    "operations/cohort_runner_service.py::build_parser": {
-      "max_lines": 105
-    },
     "operations/evaluate-analysis-replays.py::_classification_metrics": {
       "max_complexity": 32
     },
@@ -712,5 +709,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "e2f6ae259854e7955f4459ce46c7365d60b6563c"
+  "source_release": "e73733126f877cff8c6991a244c4714b27b2e8c8"
 }

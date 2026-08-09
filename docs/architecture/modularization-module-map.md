@@ -786,6 +786,11 @@ execution-proof, and export services. The historical
 `operations/run-incident-harness-cohort.py` path is a 20-line compatibility
 CLI that delegates parser construction and execution to the service.
 
+`operations/cohort_runner_cli.py` owns parser construction, command-to-service
+argument mapping, summary rendering, and exit-code policy. The composition root
+injects cohort operations and handled exception types, leaving the historical
+executable free of application logic.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental
