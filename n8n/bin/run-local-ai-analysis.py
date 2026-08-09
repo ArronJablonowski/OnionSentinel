@@ -1590,6 +1590,12 @@ def _query_runtime_adapter():
     return runtime_adapter
 
 
+def _query_invocation_adapter():
+    _provider_routing()
+    from onion_sentinel.analysis.query import invocation_adapter
+    return invocation_adapter
+
+
 def _query_derived():
     _provider_routing()
     from onion_sentinel.analysis.query import derived
@@ -3429,69 +3435,27 @@ def apply_investigation_query_loop(
     query_round_offset: int = 0,
 ) -> dict[str, Any]:
     """Compose runtime ports for the package-owned query coordinator."""
-    runtime_adapter = _query_runtime_adapter()
-    model_executor = model_executor or analyze_model_route
-    configured_query_executor = query_executor is None
-    query_executor = query_executor or execute_investigation_query_batch
-    route = canonical_model_route(
-        route_override or (settings.get("agent_models") or {}).get(agent_role)
-    )
-    evaluation_required = bool(
-        harness_runtime is not None
-        and boolean_setting(os.environ.get(EVALUATION_FREEZE_MEMORY_ENV))
-        and not model_call_independent_review
-    )
-    maximum_prompt_bytes = int(
-        getattr(args, "max_prompt_bytes", DEFAULT_MAX_PROMPT_BYTES)
-        or DEFAULT_MAX_PROMPT_BYTES
-    )
-    hosted_route = model_route_is_hosted(route, settings)
-    if canonical_model_route(
-        route, enabled_agent_model_routes(settings)
-    ).startswith("codex-cli:"):
-        maximum_prompt_bytes = min(
-            maximum_prompt_bytes, CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES
-        )
-    invocation = runtime_adapter.Invocation(
-        prompt_package=prompt_package,
-        primary_response=primary_response,
-        args=args,
-        settings=settings,
-        harness_runtime=harness_runtime,
-        model_executor=model_executor,
-        query_executor=query_executor,
-        configured_query_executor=configured_query_executor,
-        live_osquery_config=live_osquery_config,
-        enrichment_config=enrichment_config,
-        security_onion_config_path=security_onion_config_path,
-        investigation_pivot_dir=investigation_pivot_dir,
-        model_input_builder=model_input_builder,
-    )
-    return runtime_adapter.run(
-        invocation,
-        runtime_adapter.Policy(
-            route=route,
-            evaluation_required=evaluation_required,
-            maximum_prompt_bytes=maximum_prompt_bytes,
-            hosted_route=hosted_route,
-            maximum_rounds=MAX_INVESTIGATION_QUERY_ROUNDS,
-            maximum_queries=MAX_INVESTIGATION_QUERIES_TOTAL,
-            maximum_queries_per_round=MAX_INVESTIGATION_QUERIES_PER_ROUND,
-            rounds_override=max_rounds_override,
-            queries_override=max_queries_total_override,
+    module = _query_invocation_adapter()
+    return module.run(
+        globals(), prompt_package, primary_response, args, settings, agent_role,
+        module.Options(
+            live_osquery_config=live_osquery_config,
+            enrichment_config=enrichment_config,
+            security_onion_config_path=security_onion_config_path,
+            investigation_pivot_dir=investigation_pivot_dir,
+            harness_runtime=harness_runtime,
+            model_executor=model_executor,
+            query_executor=query_executor,
+            route_override=route_override,
+            max_rounds_override=max_rounds_override,
+            max_queries_total_override=max_queries_total_override,
             include_deterministic_requests=include_deterministic_requests,
-            query_round_offset=query_round_offset,
+            model_input_builder=model_input_builder,
             model_call_id_prefix=model_call_id_prefix,
             model_call_purpose_prefix=model_call_purpose_prefix,
             model_call_independent_review=model_call_independent_review,
-            query_result_schema=INVESTIGATION_QUERY_RESULT_SCHEMA,
-            query_contract=INVESTIGATION_QUERY_CONTRACT,
-            max_discovered_observables=MAX_DISCOVERED_OBSERVABLES,
-            max_prompt_evidence_bytes=MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES,
-            max_prompt_evidence_rows=MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS,
+            query_round_offset=query_round_offset,
         ),
-        _query_runtime_dependencies(runtime_adapter),
-        error_type=InvestigationQueryError,
     )
 
 

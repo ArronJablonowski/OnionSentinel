@@ -3045,6 +3045,7 @@
         "onion_sentinel.analysis.query.enrichment",
         "onion_sentinel.analysis.query.event_tuple",
         "onion_sentinel.analysis.query.finalization",
+        "onion_sentinel.analysis.query.invocation_adapter",
         "onion_sentinel.analysis.query.live_endpoint",
         "onion_sentinel.analysis.query.live_workflow",
         "onion_sentinel.analysis.query.observables",

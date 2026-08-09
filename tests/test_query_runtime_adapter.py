@@ -15,7 +15,7 @@ N8N_ROOT = ROOT / "n8n"
 if str(N8N_ROOT) not in sys.path:
     sys.path.insert(0, str(N8N_ROOT))
 
-from onion_sentinel.analysis.query import runtime_adapter
+from onion_sentinel.analysis.query import invocation_adapter, runtime_adapter
 
 
 class QueryRuntimeAdapterTests(unittest.TestCase):
@@ -122,6 +122,77 @@ class QueryRuntimeAdapterTests(unittest.TestCase):
         self.assertTrue(dependencies.valid_query_id("q-12"))
         self.assertFalse(dependencies.valid_query_id("invalid"))
         self.assertEqual(dependencies.monotonic(), 1.0)
+
+    def test_legacy_run_clamps_codex_prompt_and_requires_controlled_observation(
+        self,
+    ) -> None:
+        sentinel = lambda *_args, **_kwargs: None
+        dependency_names = (
+            "pop_investigation_query_requests",
+            "deterministic_incident_pivot_requests", "model_safe_copy",
+            "normalize_investigation_query_request",
+            "validate_investigation_query_repair_scope",
+            "investigation_backend_available",
+            "investigation_request_semantic_digest",
+            "live_osquery_harness_operator_approved", "query_backend_is_approval_gated",
+            "policy_decision_is_effective", "query_backend_capability",
+            "investigation_query_repair_scope", "_query_text",
+            "investigation_query_repair_failures", "project_now",
+            "_validated_discovered_observables", "investigation_query_canonical_digest",
+            "canonical_payload_digest", "investigation_query_repair_prompt_entry",
+            "investigation_query_request_from_repair_scope",
+            "_admit_investigation_query_prompt", "investigation_query_outcome_summary",
+            "_investigation_round_audit", "investigation_query_binding_summary",
+            "_append_investigation_evidence_gaps",
+        )
+        bindings = {name: sentinel for name in dependency_names}
+        default_model = mock.Mock()
+        default_query = mock.Mock()
+        bindings.update({
+            "analyze_model_route": default_model,
+            "execute_investigation_query_batch": default_query,
+            "canonical_model_route": lambda route, _enabled=None: route,
+            "boolean_setting": lambda value: value == "1",
+            "os": SimpleNamespace(environ={"FREEZE": "1"}),
+            "EVALUATION_FREEZE_MEMORY_ENV": "FREEZE",
+            "DEFAULT_MAX_PROMPT_BYTES": 900_000,
+            "model_route_is_hosted": lambda _route, _settings: True,
+            "enabled_agent_model_routes": lambda _settings: ["codex-cli:gpt"],
+            "CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES": 200_000,
+            "MAX_INVESTIGATION_QUERY_ROUNDS": 3,
+            "MAX_INVESTIGATION_QUERIES_TOTAL": 8,
+            "MAX_INVESTIGATION_QUERIES_PER_ROUND": 4,
+            "INVESTIGATION_QUERY_RESULT_SCHEMA": "result-v1",
+            "INVESTIGATION_QUERY_CONTRACT": "query-v2",
+            "MAX_DISCOVERED_OBSERVABLES": 32,
+            "MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES": 100_000,
+            "MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS": 80,
+            "INVESTIGATION_QUERY_ID_RE": re.compile(r"q-[0-9]+"),
+            "time": SimpleNamespace(monotonic=lambda: 1.0),
+            "sys": SimpleNamespace(stderr=sys.stderr),
+            "InvestigationQueryError": ValueError,
+        })
+        with mock.patch.object(
+            invocation_adapter.runtime_adapter, "run", return_value={"ok": True}
+        ) as execute:
+            result = invocation_adapter.run(
+                bindings, {"case": "one"}, {"analysis": "primary"},
+                SimpleNamespace(max_prompt_bytes=700_000),
+                {"agent_models": {"soc-analyst": "codex-cli:gpt"}},
+                "soc-analyst", invocation_adapter.Options(harness_runtime=object()),
+            )
+        self.assertEqual(result, {"ok": True})
+        invocation, policy, dependencies = execute.call_args.args
+        self.assertIs(invocation.model_executor, default_model)
+        self.assertIs(invocation.query_executor, default_query)
+        self.assertTrue(invocation.configured_query_executor)
+        self.assertEqual(policy.route, "codex-cli:gpt")
+        self.assertTrue(policy.hosted_route)
+        self.assertTrue(policy.evaluation_required)
+        self.assertEqual(policy.maximum_prompt_bytes, 200_000)
+        self.assertEqual(policy.maximum_queries, 8)
+        self.assertIs(dependencies.pop_requests, sentinel)
+        self.assertIs(execute.call_args.kwargs["error_type"], ValueError)
 
 
 if __name__ == "__main__":

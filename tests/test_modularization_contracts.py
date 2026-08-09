@@ -137,7 +137,7 @@ class ModularizationCompatibilityContractTests(unittest.TestCase):
             and isinstance(node.func, ast.Attribute)
             and isinstance(node.func.value, ast.Name)
         }
-        self.assertIn("runtime_adapter.run", calls)
+        self.assertIn("module.run", calls)
 
     def test_ai_runner_query_execution_is_a_bounded_runtime_delegate(self) -> None:
         function = top_level_function(

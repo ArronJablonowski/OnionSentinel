@@ -105,6 +105,10 @@ line ranges below remain historical navigation aids for the extraction ledger.
   scoped repair, deterministic planning, and coordinator ports. The legacy
   query entry point resolves limits and routes, constructs immutable records,
   and delegates without retaining a second runtime implementation.
+- `analysis.query.invocation_adapter` binds the compatibility call to immutable
+  invocation options, exact route/hosted prompt limits, controlled-evaluation
+  observation requirements, configured/default executors, and coordinator
+  dependencies without extending query or model authority.
 - The 301-line `analysis.query.execution_runtime_adapter` now owns concrete
   mixed-backend execution binding, Security Onion authorization projection,
   bounded trusted-query audits, live endpoint and derived-evidence dispatch,
