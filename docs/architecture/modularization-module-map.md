@@ -275,6 +275,13 @@ explicit request and source bundles keep evidence and inference effects
 testable while the launchd wrapper binds mutable runtime collaborators at call
 time for compatibility.
 
+`scheduler_drain.py` owns per-drain exclusions and counters, the runtime
+automation-floor refresh, maintenance checks immediately before each claim,
+read-only indexed-versus-legacy selection, candidate identity projection, and
+the dry-run/max-attempt stop contract. Claim contention explicitly returns its
+attempt slot, while completed and recovered outcomes update the shared state
+used by final settlement.
+
 `scheduler_outcome.py` owns child-process output projection, production
 completion and retryable-failure transitions, exact controlled-lease release,
 and crash-safe controlled result spool recovery. It returns an explicit loop

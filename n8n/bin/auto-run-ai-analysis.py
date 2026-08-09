@@ -60,6 +60,11 @@ from scheduler_execution import (
     SchedulerExecutionSources,
     execute_scheduler_analysis,
 )
+from scheduler_drain import (
+    SchedulerDrainSources,
+    SchedulerDrainState,
+    select_scheduler_work,
+)
 from scheduler_job_reporting import (
     ClaimedAiLease,
     ControlledClaimRejected,
@@ -3504,6 +3509,31 @@ def scheduler_outcome_sources() -> SchedulerOutcomeSources:
     )
 
 
+def scheduler_drain_sources() -> SchedulerDrainSources:
+    """Bind queue selection and drain-loop projection services."""
+    def open_readonly_database(database_path: Path) -> sqlite3.Connection:
+        connection = sqlite3.connect(
+            f"file:{database_path}?mode=ro",
+            uri=True,
+        )
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    return SchedulerDrainSources(
+        stop_for_drain=stop_for_maintenance_drain,
+        configured_levels=configured_analysis_levels,
+        open_readonly_database=open_readonly_database,
+        select_indexed=select_next_alert_indexed,
+        select_legacy=select_next_alert,
+        analyzed_alert_ids=analyzed_alert_ids,
+        alert_group_key=alert_group_key,
+        alert_group_id=alert_group_id,
+        durable_payload=durable_payload,
+        now=project_now,
+        emit=lambda message: print(message, flush=True),
+    )
+
+
 def main() -> int:
     args = parse_args()
     startup_sources = scheduler_startup_sources()
@@ -3533,87 +3563,25 @@ def main() -> int:
         if not initialization.proceed:
             return 0
         indexed_mode = initialization.indexed_mode
-        selected_groups: set[str] = set()
-        analyzed_count = 0
-        attempted_count = 0
-        controlled_owned_job_failed = False
-        controlled_failure_detail = ""
-        controlled_failure_group_id = ""
-        while args.max_per_run == 0 or attempted_count < args.max_per_run:
-            # The check belongs inside the drain loop, immediately before the
-            # next durable selection.  A marker created during inference lets
-            # that owned job complete but prevents a subsequent claim.
-            if stop_for_maintenance_drain(
-                getattr(args, "drain_file", DEFAULT_DRAIN)
-            ):
+        drain_state = SchedulerDrainState()
+        while True:
+            selection = select_scheduler_work(
+                scheduler_drain_sources(),
+                args,
+                drain_state,
+                indexed_mode=indexed_mode,
+                launch_levels=launch_levels,
+                drain_file=getattr(args, "drain_file", DEFAULT_DRAIN),
+            )
+            if selection.disposition != "selected":
                 break
-            allowed_analysis_levels = configured_analysis_levels(
-                args.ai_settings_file,
-                launch_levels,
-            )
-            # A sentinel keeps the indexed query able to claim and retire
-            # pre-upgrade automatic jobs while excluding every legacy
-            # non-durable candidate when automation is disabled.
-            args.levels = ",".join(allowed_analysis_levels or ["__disabled__"])
-            # Re-query before every selection so newly arrived higher-severity
-            # alerts take priority over any lower-severity backlog.
-            print(f"{project_now()} checking highest-priority unanalyzed alert queue", flush=True)
-            conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
-            conn.row_factory = sqlite3.Row
-            try:
-                if indexed_mode:
-                    selected = select_next_alert_indexed(conn, args, selected_groups)
-                else:
-                    selected = select_next_alert(
-                        conn,
-                        args,
-                        analyzed_alert_ids(args.analysis_dir, args.pcap_analysis_dir, args.prompt_dir),
-                        selected_groups,
-                    )
-            finally:
-                conn.close()
-
-            if not selected:
-                if analyzed_count == 0:
-                    print(f"{project_now()} no eligible unanalyzed alert found")
-                break
-
-            alert_id = selected["alert_id"]
-            selected_group_id = str(selected["stable_group_id"] or "") if "stable_group_id" in selected.keys() else ""
-            if not selected_group_id:
-                selected_group_id = alert_group_id(str(selected["queue_group_key"] or alert_group_key(selected)))
-            selected_groups.add(selected_group_id)
-            selected_groups.add(str(selected["queue_group_key"] or alert_group_key(selected)))
-            durable_job_type = (
-                str(selected["durable_job_type"] or "ai_analysis")
-                if "durable_job_type" in selected.keys()
-                else "ai_analysis"
-            )
-            job_payload = durable_payload(selected)
-            durable_intent = bool(
-                selected["has_durable_intent"]
-                if "has_durable_intent" in selected.keys()
-                else False
-            )
-            attempted_count += 1
-            print(
-                json.dumps(
-                    {
-                        "selected_alert_id": alert_id,
-                        "rule_name": selected["rule_name"],
-                        "triage_level": selected["triage_level"],
-                        "triage_score": selected["triage_score"],
-                        "last_seen": selected["last_seen"],
-                        "queue_time": selected["queue_time"],
-                        "job_type": durable_job_type,
-                        "provider_lane": args.provider_lane,
-                    },
-                    sort_keys=True,
-                ),
-                flush=True,
-            )
-            if args.dry_run:
-                break
+            selected = selection.selected
+            alert_id = selection.alert_id
+            selected_group_id = selection.group_id
+            durable_job_type = selection.job_type
+            job_payload = selection.job_payload
+            durable_intent = selection.durable_intent
+            allowed_analysis_levels = selection.allowed_analysis_levels
 
             processing_recorded = False
             processing_lease_token = ""
@@ -3651,7 +3619,7 @@ def main() -> int:
                         claim_state.controlled_exact_lease_owned
                     )
                 if claim.disposition == "contended":
-                    attempted_count = max(0, attempted_count - 1)
+                    drain_state.release_contended_attempt()
                     continue
                 job_payload = claim.job_payload
                 alert_id = claim.alert_id
@@ -3692,11 +3660,7 @@ def main() -> int:
                     outcome_request,
                     proc,
                 )
-                analyzed_count += outcome.analyzed_increment
-                if outcome.controlled_owned_job_failed:
-                    controlled_owned_job_failed = True
-                    controlled_failure_detail = outcome.failure_detail
-                    controlled_failure_group_id = outcome.failure_group_id
+                drain_state.apply_outcome(outcome)
                 if outcome.stop:
                     break
             except ControlledClaimRejected as error:
@@ -3717,10 +3681,7 @@ def main() -> int:
                     ),
                     error,
                 )
-                if outcome.controlled_owned_job_failed:
-                    controlled_owned_job_failed = True
-                    controlled_failure_detail = outcome.failure_detail
-                    controlled_failure_group_id = outcome.failure_group_id
+                drain_state.apply_outcome(outcome)
                 break
             except (BoundedProcessError, RuntimeError, OSError) as error:
                 outcome = handle_scheduler_exception(
@@ -3737,11 +3698,7 @@ def main() -> int:
                     ),
                     error,
                 )
-                analyzed_count += outcome.analyzed_increment
-                if outcome.controlled_owned_job_failed:
-                    controlled_owned_job_failed = True
-                    controlled_failure_detail = outcome.failure_detail
-                    controlled_failure_group_id = outcome.failure_group_id
+                drain_state.apply_outcome(outcome)
                 if outcome.stop:
                     break
                 continue
@@ -3750,12 +3707,16 @@ def main() -> int:
             scheduler_settlement_sources(),
             args,
             SchedulerSettlement(
-                analyzed_count=analyzed_count,
+                analyzed_count=drain_state.analyzed_count,
                 indexed_mode=indexed_mode,
                 controlled_evaluation=controlled_evaluation_dir is not None,
-                controlled_owned_job_failed=controlled_owned_job_failed,
-                controlled_failure_detail=controlled_failure_detail,
-                controlled_failure_group_id=controlled_failure_group_id,
+                controlled_owned_job_failed=(
+                    drain_state.controlled_owned_job_failed
+                ),
+                controlled_failure_detail=drain_state.controlled_failure_detail,
+                controlled_failure_group_id=(
+                    drain_state.controlled_failure_group_id
+                ),
             ),
         )
 

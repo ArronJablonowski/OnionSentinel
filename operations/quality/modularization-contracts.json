@@ -62,6 +62,17 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_drain.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_drain.py",
+      "required_symbols": [
+        "SchedulerDrainSources",
+        "SchedulerDrainState",
+        "SchedulerSelection",
+        "select_scheduler_work"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_job_reporting.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_job_reporting.py",
