@@ -2335,7 +2335,9 @@ execution remain outside this pure settings boundary.
 
 Bounded provider runtime-artifact reads, non-symlink admission, descriptor
 identity checks, strict UTF-8 decoding, and JSON-object validation now live in
-`onion_sentinel.analysis.providers.artifacts`.
+`onion_sentinel.analysis.providers.artifacts`. The same boundary owns
+fail-closed model-output object parsing: it accepts strict or fenced JSON and
+the first independently complete object, but never repairs malformed evidence.
 
 Independent-review package construction, text/repetition policy, and
 fail-closed response validation live under `onion_sentinel.analysis.review`.

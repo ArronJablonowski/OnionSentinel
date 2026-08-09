@@ -2377,32 +2377,8 @@ def effective_ai_settings(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
-    """Parse strict JSON, fenced JSON, or the first complete object in output.
-
-    Local models occasionally append a second object or a short explanation.
-    ``raw_decode`` accepts the first complete JSON value without broad regex
-    repair, preserving the fail-closed contract for malformed evidence.
-    """
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
-        stripped = re.sub(r"\s*```$", "", stripped)
-    try:
-        parsed = json.loads(stripped)
-        if isinstance(parsed, dict):
-            return parsed
-    except json.JSONDecodeError:
-        pass
-
-    decoder = json.JSONDecoder()
-    for match in re.finditer(r"\{", stripped):
-        try:
-            parsed, _ = decoder.raw_decode(stripped, match.start())
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            continue
-    raise SystemExit("model output did not contain a valid JSON object")
+    """Compatibility delegate for fail-closed provider output parsing."""
+    return _provider_artifacts().parse_model_output_object(text)
 
 
 MODEL_INTERNAL_KEYS = {

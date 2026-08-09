@@ -17,6 +17,29 @@ class ArtifactError(RuntimeError):
 
 
 class ProviderArtifactsPackageTests(unittest.TestCase):
+    def test_parses_strict_fenced_and_first_complete_model_objects(self) -> None:
+        for raw, expected in (
+            ('{"summary":"strict"}', {"summary": "strict"}),
+            ('```JSON\n{"summary":"fenced"}\n```', {"summary": "fenced"}),
+            (
+                'Preface {"summary":"first"}\n{"summary":"second"}',
+                {"summary": "first"},
+            ),
+        ):
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    artifacts.parse_model_output_object(raw), expected
+                )
+
+    def test_model_output_parser_rejects_nonobject_and_malformed_fragments(
+        self,
+    ) -> None:
+        for raw in ('["not-an-object"]', 'analysis: {"summary": invalid}'):
+            with self.subTest(raw=raw), self.assertRaisesRegex(
+                SystemExit, "valid JSON object"
+            ):
+                artifacts.parse_model_output_object(raw)
+
     def test_reads_owner_only_bounded_json_object(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "auth.json"

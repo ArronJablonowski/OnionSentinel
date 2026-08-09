@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import stat
 from typing import Any
 
@@ -127,3 +128,34 @@ def read_json_object(
     if not isinstance(value, dict):
         raise error_type(f"{label} JSON root must be an object")
     return value
+
+
+def parse_model_output_object(text: str) -> dict[str, Any]:
+    """Return the first complete JSON object without repairing malformed data.
+
+    Providers may wrap an object in a Markdown fence or append bounded prose or
+    another value. The first independently decodable object is admitted; an
+    array root and malformed object fragments are never coerced into evidence.
+    """
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(
+            r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE
+        )
+        stripped = re.sub(r"\s*```$", "", stripped)
+    try:
+        parsed = json.loads(stripped)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", stripped):
+        try:
+            parsed, _ = decoder.raw_decode(stripped, match.start())
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            continue
+    raise SystemExit("model output did not contain a valid JSON object")
