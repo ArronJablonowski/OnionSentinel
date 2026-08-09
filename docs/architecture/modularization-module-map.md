@@ -509,6 +509,13 @@ Ground truth, frozen evidence, model results, and unblinded comparison remain
 separate inputs. Shared contracts have one implementation; CLI wrappers do not
 copy validation logic.
 
+`prompt_incident_evidence_projection.py` owns the model-facing, in-memory
+projection of already-validated incident evidence. It applies deterministic
+prefix limits to Elastic hits and OSQuery rows, records source and retained
+canonical digests and byte counts, accumulates projection reasons, and rejects
+collector artifacts that arrive preprojected. The legacy builder retains thin
+delegates so package construction and existing integrations keep the same API.
+
 ## Portal Runtime
 
 Current owner: `onion-sentinel-dashboard/report_portal.py` (14,366 lines).

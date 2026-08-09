@@ -44,6 +44,11 @@ from investigation_skills import (
     load_investigation_skills,
     resolve_investigation_skills,
 )
+from prompt_incident_evidence_projection import (
+    project_incident_evidence_hits as project_evidence_hits,
+    project_incident_evidence_osquery_rows as project_evidence_osquery_rows,
+    reject_preprojected_incident_evidence_source as reject_preprojected_source,
+)
 import investigation_query_contract as INVESTIGATION_CONTRACT
 
 
@@ -219,66 +224,12 @@ def project_incident_evidence_hits(
     limit: int,
     reason: str,
 ) -> int:
-    """Bound prompt hit bodies without invalidating the v2 evidence contract.
-
-    The collector artifact is validated before this function is called.  A
-    prompt package is a derived projection, so it records the original result
-    count and digest while making the projected ``returned_hits`` and
-    ``truncated`` fields describe the hit set actually supplied to the model.
-    """
-    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
-        raise ValueError("incident evidence hit projection limit must be non-negative")
-    response = incident_evidence.get("security_onion_response")
-    results = response.get("results") if isinstance(response, dict) else None
-    if not isinstance(results, list):
-        return 0
-    projected = 0
-    for result in results:
-        if not isinstance(result, dict) or not isinstance(result.get("hits"), list):
-            continue
-        hits = result["hits"]
-        if len(hits) <= limit:
-            continue
-        projection = result.get("prompt_projection")
-        if not isinstance(projection, dict):
-            encoded_hits = json.dumps(
-                hits,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-            projection = {
-                "version": 1,
-                "source_returned_hits": int(result.get("returned_hits") or len(hits)),
-                "source_total_hits": int(result.get("total_hits") or len(hits)),
-                "source_truncated": bool(result.get("truncated")),
-                "source_hits_bytes": len(encoded_hits),
-                "source_hits_sha256": hashlib.sha256(encoded_hits).hexdigest(),
-                "reasons": [],
-            }
-            result["prompt_projection"] = projection
-        reasons = projection.get("reasons")
-        if not isinstance(reasons, list):
-            reasons = []
-            projection["reasons"] = reasons
-        if reason not in reasons:
-            reasons.append(reason)
-        result["hits"] = hits[:limit]
-        result["returned_hits"] = len(result["hits"])
-        total_hits = int(result.get("total_hits") or 0)
-        relation = result.get("total_hits_relation")
-        result["truncated"] = relation != "eq" or total_hits > len(result["hits"])
-        retained_hits = json.dumps(
-            result["hits"],
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        projection.update({
-            "retained_hits": len(result["hits"]),
-            "retained_hits_bytes": len(retained_hits),
-            "retained_hits_sha256": hashlib.sha256(retained_hits).hexdigest(),
-        })
-        projected += 1
-    return projected
+    """Compatibility delegate for bounded Elastic evidence projection."""
+    return project_evidence_hits(
+        incident_evidence,
+        limit=limit,
+        reason=reason,
+    )
 
 
 def project_incident_evidence_osquery_rows(
@@ -289,122 +240,21 @@ def project_incident_evidence_osquery_rows(
     max_row_bytes: int,
     reason: str,
 ) -> int:
-    """Bound appliance OSQuery rows while retaining auditable provenance.
-
-    Exact SQL, target, status, query digest, total row count, and timing remain
-    in every result. Rows are retained only as a deterministic prefix whose
-    count and canonical JSON size satisfy both limits. The digest and size of
-    the original row set make every omission explicit to downstream models and
-    analysts.
-    """
-    for value, label in (
-        (limit, "row limit"),
-        (max_retained_bytes, "retained byte limit"),
-        (max_row_bytes, "individual row byte limit"),
-    ):
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise ValueError(f"incident evidence OSQuery {label} must be non-negative")
-    if not str(reason or "").strip() or len(str(reason)) > 100:
-        raise ValueError(
-            "incident evidence OSQuery projection reason must contain 1 through 100 characters"
-        )
-
-    response = incident_evidence.get("security_onion_response")
-    results = response.get("osquery_results") if isinstance(response, dict) else None
-    if not isinstance(results, list):
-        return 0
-
-    projected = 0
-    for result in results:
-        if not isinstance(result, dict) or not isinstance(result.get("rows"), list):
-            continue
-        rows = result["rows"]
-        retained: list[dict] = []
-        for candidate in rows:
-            candidate_bytes = json.dumps(
-                candidate,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-            if len(candidate_bytes) > max_row_bytes:
-                break
-            proposed = [*retained, candidate]
-            proposed_bytes = json.dumps(
-                proposed,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-            if len(proposed) > limit or len(proposed_bytes) > max_retained_bytes:
-                break
-            retained = proposed
-        if len(retained) == len(rows):
-            continue
-
-        projection = result.get("prompt_projection")
-        if not isinstance(projection, dict):
-            encoded_rows = json.dumps(
-                rows,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-            projection = {
-                "version": 1,
-                "source_returned_rows": int(
-                    result.get("returned_rows") or len(rows)
-                ),
-                "source_total_rows": int(result.get("total_rows") or len(rows)),
-                "source_truncated": bool(result.get("truncated")),
-                "source_rows_bytes": len(encoded_rows),
-                "source_rows_sha256": hashlib.sha256(encoded_rows).hexdigest(),
-                "reasons": [],
-            }
-            result["prompt_projection"] = projection
-        reasons = projection.get("reasons")
-        if not isinstance(reasons, list):
-            reasons = []
-            projection["reasons"] = reasons
-        if reason not in reasons:
-            reasons.append(reason)
-
-        retained_bytes = json.dumps(
-            retained,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        result["rows"] = retained
-        result["returned_rows"] = len(retained)
-        result["truncated"] = int(result.get("total_rows") or 0) > len(retained)
-        projection.update({
-            "retained_rows": len(retained),
-            "retained_rows_bytes": len(retained_bytes),
-            "retained_rows_sha256": hashlib.sha256(retained_bytes).hexdigest(),
-            "max_retained_rows": limit,
-            "max_retained_bytes": max_retained_bytes,
-            "max_row_bytes": max_row_bytes,
-        })
-        projected += 1
-    return projected
+    """Compatibility delegate for bounded OSQuery evidence projection."""
+    return project_evidence_osquery_rows(
+        incident_evidence,
+        limit=limit,
+        max_retained_bytes=max_retained_bytes,
+        max_row_bytes=max_row_bytes,
+        reason=reason,
+    )
 
 
 def reject_preprojected_incident_evidence_source(
     incident_evidence: dict,
 ) -> None:
-    """Reject collector input that already claims a model-facing projection."""
-    response = incident_evidence.get("security_onion_response")
-    if not isinstance(response, dict):
-        return
-    for collection_name in ("results", "osquery_results"):
-        results = response.get(collection_name)
-        if not isinstance(results, list):
-            continue
-        if any(
-            isinstance(result, dict) and "prompt_projection" in result
-            for result in results
-        ):
-            raise ValueError(
-                "raw incident evidence collector artifact must not contain "
-                f"prompt_projection metadata in {collection_name}"
-            )
+    """Compatibility delegate for rejecting preprojected source evidence."""
+    reject_preprojected_source(incident_evidence)
 
 
 def parse_args() -> argparse.Namespace:

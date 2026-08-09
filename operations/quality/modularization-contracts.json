@@ -18,6 +18,16 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_incident_evidence_projection.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_incident_evidence_projection.py",
+      "required_symbols": [
+        "project_incident_evidence_hits",
+        "project_incident_evidence_osquery_rows",
+        "reject_preprojected_incident_evidence_source"
+      ]
+    },
+    {
       "path": "n8n/bin/auto-run-ai-analysis.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/auto-run-ai-analysis.py",
