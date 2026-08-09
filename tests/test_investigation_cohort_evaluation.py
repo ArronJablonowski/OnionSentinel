@@ -24,6 +24,8 @@ assert SPEC and SPEC.loader
 evaluator = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(evaluator)
 import cohort_evaluation_query_audit  # noqa: E402
+import cohort_evaluation_execution_contract  # noqa: E402
+import cohort_execution_result  # noqa: E402
 
 
 class InvestigationCohortEvaluationTests(unittest.TestCase):
@@ -35,6 +37,20 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         self.assertIs(
             evaluator.summarize_query_audit,
             cohort_evaluation_query_audit.query_audit_summary,
+        )
+
+    def test_evaluator_uses_extracted_execution_contract_services(self) -> None:
+        self.assertIs(
+            evaluator.validate_execution_contract,
+            cohort_evaluation_execution_contract.validate_execution_contract,
+        )
+        self.assertIs(
+            evaluator.collect_prior_analysis_ids,
+            cohort_execution_result.prior_analysis_ids,
+        )
+        self.assertIs(
+            evaluator.derive_expected_task_kind,
+            cohort_execution_result.expected_task_kind,
         )
 
     def setUp(self) -> None:

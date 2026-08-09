@@ -132,6 +132,14 @@ from cohort_evaluation_query_audit import (
     query_audit_execution_binding as evaluate_query_audit_binding,
     query_audit_summary as summarize_query_audit,
 )
+from cohort_evaluation_execution_contract import (
+    ExecutionContractPolicy,
+    validate_execution_contract,
+)
+from cohort_execution_result import (
+    expected_task_kind as derive_expected_task_kind,
+    prior_analysis_ids as collect_prior_analysis_ids,
+)
 
 
 RESULT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v4"
@@ -523,97 +531,31 @@ def _parse_timestamp(value: Any, label: str) -> dt.datetime:
     return parsed.astimezone(dt.timezone.utc)
 
 
+def _execution_contract_policy() -> ExecutionContractPolicy:
+    return ExecutionContractPolicy(
+        controlled_route_pattern=CONTROLLED_ROUTE_RE,
+        release_id_pattern=RELEASE_ID_RE,
+        controlled_profile=CONTROLLED_EVALUATION_PROFILE,
+        profile_assigned_route=PROFILE_ASSIGNED_ROUTE,
+        profile_reviewer_route=PROFILE_REVIEWER_ROUTE,
+        error=CohortEvaluationError,
+    )
+
+
 def _execution_contract(value: Any, label: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise CohortEvaluationError(f"{label} has no execution contract")
-    expected = {
-        "harness_required": True,
-        "harness_mode": "shadow",
-        "memory_frozen": True,
-        "expected_release_id": str(
-            value.get("expected_release_id") or ""
-        ).strip(),
-        "expected_assigned_route": str(
-            value.get("expected_assigned_route") or ""
-        ).strip(),
-        "expected_reviewer_route": str(
-            value.get("expected_reviewer_route") or ""
-        ).strip(),
-        "reviewer_required": value.get("reviewer_required"),
-        "evaluation_profile": str(
-            value.get("evaluation_profile") or ""
-        ).strip(),
-    }
-    if value != expected or not CONTROLLED_ROUTE_RE.fullmatch(
-        expected["expected_assigned_route"]
-    ):
-        raise CohortEvaluationError(
-            f"{label} execution contract is not the required shadow/frozen contract"
-        )
-    if not RELEASE_ID_RE.fullmatch(expected["expected_release_id"]):
-        raise CohortEvaluationError(
-            f"{label} expected release ID is malformed"
-        )
-    reviewer_route = expected["expected_reviewer_route"]
-    if (
-        expected["reviewer_required"] is not True
-        or not CONTROLLED_ROUTE_RE.fullmatch(reviewer_route)
-        or reviewer_route.rsplit(":", 1)[0]
-        == expected["expected_assigned_route"].rsplit(":", 1)[0]
-    ):
-        raise CohortEvaluationError(
-            f"{label} expected reviewer route contract is malformed"
-        )
-    profile = expected["evaluation_profile"]
-    if profile and (
-        profile != CONTROLLED_EVALUATION_PROFILE
-        or expected["expected_assigned_route"] != PROFILE_ASSIGNED_ROUTE
-        or expected["expected_reviewer_route"] != PROFILE_REVIEWER_ROUTE
-    ):
-        raise CohortEvaluationError(
-            f"{label} controlled evaluation profile does not match"
-        )
-    return expected
+    return validate_execution_contract(
+        value, label, _execution_contract_policy()
+    )
 
 
 def _prior_analysis_ids(member: Mapping[str, Any]) -> set[str]:
-    pre_state = (
-        member.get("pre_state")
-        if isinstance(member.get("pre_state"), dict)
-        else {}
-    )
-    identities: set[str] = set()
-    for field in ("soc_analysis_ids", "incident_analysis_ids"):
-        values = pre_state.get(field)
-        if isinstance(values, list):
-            identities.update(str(item) for item in values if str(item))
-    for source in (
-        pre_state.get("latest_analysis"),
-        pre_state.get("incident_case"),
-    ):
-        if not isinstance(source, dict):
-            continue
-        identity = str(
-            source.get("analysis_id")
-            or source.get("latest_analysis_id")
-            or ""
-        )
-        if identity:
-            identities.add(identity)
-    return identities
+    return collect_prior_analysis_ids(member)
 
 
 def _expected_task_kind(role: str, dispatch_kind: str) -> str:
-    expected = {
-        ("soc-analyst", "analyze"): "reanalysis",
-        ("incident-responder", "escalate"): "incident-response",
-        ("incident-responder", "reanalyze"): "reanalysis",
-    }.get((role, dispatch_kind))
-    if not expected:
-        raise CohortEvaluationError(
-            f"{role} export has invalid dispatch kind {dispatch_kind!r}"
-        )
-    return expected
+    return derive_expected_task_kind(
+        role, dispatch_kind, CohortEvaluationError
+    )
 
 
 def _expected_dispatch_id(

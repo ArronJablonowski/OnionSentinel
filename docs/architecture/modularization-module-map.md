@@ -703,6 +703,11 @@ bindings, validates call/round/query identity and request/result digests, counts
 Security Onion and dynamic queries, and recomputes the canonical binding digest
 without accepting query text or result content.
 
+`operations/cohort_evaluation_execution_contract.py` owns exact admission of
+the frozen shadow evaluation contract. It validates release and controlled
+route syntax, requires an independent reviewer model, and enforces the optional
+controlled-profile route pair without loading exports or grading results.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental
