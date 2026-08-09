@@ -26,13 +26,16 @@ class Defaults:
     max_prompt_bytes: int
 
 
-def _add_paths(parser: argparse.ArgumentParser, defaults: Defaults) -> None:
+def _add_initial_paths(parser: argparse.ArgumentParser, defaults: Defaults) -> None:
     parser.add_argument("--prompt-package", type=Path, help="Prompt package JSON to analyze")
     parser.add_argument("--prompt-dir", type=Path, default=defaults.prompt_dir, help="Directory containing prompt packages")
     parser.add_argument("--out-dir", type=Path, default=defaults.out_dir, help="Directory for AI analysis JSON/Markdown output")
     parser.add_argument("--ai-settings-file", type=Path, default=defaults.ai_settings_file, help="AI model routing settings JSON")
     parser.add_argument("--investigation-harness-policy", type=Path, default=defaults.harness_policy, help="Versioned Onion Sentinel investigation harness policy")
     parser.add_argument("--investigation-harness-db", type=Path, default=defaults.harness_db, help="Owner-only durable investigation harness event store")
+
+
+def _add_evidence_paths(parser: argparse.ArgumentParser, defaults: Defaults) -> None:
     parser.add_argument("--system-prompt-file", type=Path, default=defaults.system_prompt_file, help="Editable SOC Analyst system prompt file")
     parser.add_argument("--second-opinion-prompt-file", type=Path, default=defaults.second_opinion_prompt_file, help="Independent second-opinion system prompt file")
     parser.add_argument("--disagreement-adjudicator-prompt-file", type=Path, default=defaults.adjudicator_prompt_file, help="Bounded shadow-mode disagreement adjudicator system prompt file")
@@ -45,6 +48,9 @@ def _add_model_controls(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--analysis-mode", choices=("ollama", "cloud", "hybrid"), help="Override configured analysis mode")
     parser.add_argument("--model", help="Override the configured Ollama roster with one model for this invocation")
     parser.add_argument("--ollama-url", help="Override the configured Ollama base URL for this invocation")
+
+
+def _add_model_response_controls(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-predict-tokens", type=int, default=4096, help="Maximum output tokens for one bounded local analysis")
     parser.add_argument("--temperature", type=float, default=0.1, help="Low temperature keeps SOC analysis repeatable")
     parser.add_argument("--response-json", type=Path, help="Use an existing model response JSON instead of calling Ollama")
@@ -58,6 +64,12 @@ def _add_runtime_limits(
     parser.add_argument("--timeout", type=int, default=600, help="Ollama request timeout in seconds")
     parser.add_argument("--max-response-bytes", type=int, default=defaults.max_response_bytes, help="Maximum bytes accepted from one local or cloud model response")
     parser.add_argument("--max-prompt-bytes", type=int, default=defaults.max_prompt_bytes, help="Maximum serialized prompt-package bytes admitted to a model call")
+
+
+def _add_persistence_controls(
+    parser: argparse.ArgumentParser,
+    environment: Mapping[str, str],
+) -> None:
     parser.add_argument("--alert-store-url", default=environment.get("ALERT_STORE_URL", "http://127.0.0.1:8787"), help="Alert-store URL for durable analysis indexing")
     parser.add_argument("--reanalysis-attempt-id", default="", help="Non-secret immutable Incident Responder lease fingerprint")
     parser.add_argument("--flush-index-only", action="store_true", help="Publish deferred analysis indexes and exit without invoking a model")
@@ -80,10 +92,13 @@ def build_parser(
     parser = argparse.ArgumentParser(
         description="Run local AI analysis for a SOC alert prompt package"
     )
-    _add_paths(parser, defaults)
+    _add_initial_paths(parser, defaults)
     _add_model_controls(parser)
+    _add_evidence_paths(parser, defaults)
     _add_runtime_limits(parser, defaults, environment)
+    _add_model_response_controls(parser)
     _add_generation(parser)
+    _add_persistence_controls(parser, environment)
     return parser
 
 

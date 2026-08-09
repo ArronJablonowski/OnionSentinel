@@ -27,6 +27,46 @@ DEFAULTS = entrypoint.Defaults(
 
 
 class AnalysisEntrypointPackageTests(unittest.TestCase):
+    def test_public_option_order_matches_the_legacy_cli(self) -> None:
+        parser = entrypoint.build_parser(DEFAULTS, {})
+        self.assertEqual(
+            [action.dest for action in parser._actions],
+            [
+                "help",
+                "prompt_package",
+                "prompt_dir",
+                "out_dir",
+                "ai_settings_file",
+                "investigation_harness_policy",
+                "investigation_harness_db",
+                "analysis_mode",
+                "model",
+                "ollama_url",
+                "system_prompt_file",
+                "second_opinion_prompt_file",
+                "disagreement_adjudicator_prompt_file",
+                "live_osquery_config",
+                "incident_evidence_config",
+                "investigation_pivot_dir",
+                "timeout",
+                "max_response_bytes",
+                "max_prompt_bytes",
+                "max_predict_tokens",
+                "temperature",
+                "response_json",
+                "generate_prompt",
+                "levels",
+                "hours",
+                "related_limit",
+                "correlation_limit",
+                "correlation_min_score",
+                "alert_store_url",
+                "reanalysis_attempt_id",
+                "flush_index_only",
+                "stdout",
+            ],
+        )
+
     def test_defaults_and_environment_are_injected(self) -> None:
         args = entrypoint.parse(
             DEFAULTS,
