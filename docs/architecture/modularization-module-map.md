@@ -563,6 +563,12 @@ boundary. It renders the stable concise terminal summary and writes complete
 JSON reports atomically with owner-only permissions, a same-directory temporary
 file, flush and filesystem synchronization, and cleanup on failure.
 
+`operations/trace_evaluation_summary.py` owns cross-run trace aggregation. A
+typed accumulator separates workload, model, route, tool, evidence, reviewer,
+budget, memory, coverage, skill, and data-quality dimensions; small report
+section builders preserve the stable aggregate JSON schema while database reads,
+normalization, ratios, timestamps, and limits remain injected composition ports.
+
 `operations/cohort_freezing.py` owns database-newest and exact-imported-row
 cohort freezing. Immutable policy and explicit source ports bind identity
 validation, read-only database snapshots, representative-alert custody,

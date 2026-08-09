@@ -68,6 +68,11 @@ from trace_evaluation_run import (
     evaluate_run as evaluate_trace_run,
 )
 from trace_evaluation_output import atomic_private_json, human_report
+from trace_evaluation_summary import (
+    TraceSummaryPolicy,
+    TraceSummaryServices,
+    summarize as summarize_trace_runs,
+)
 
 
 REPORT_SCHEMA = "onion-sentinel-harness-trace-evaluation-v1"
@@ -676,6 +681,25 @@ def counter_dict(counter: collections.Counter[str]) -> dict[str, int]:
     return dict(sorted(counter.items()))
 
 
+def _trace_summary_policy() -> TraceSummaryPolicy:
+    return TraceSummaryPolicy(
+        report_schema=REPORT_SCHEMA,
+        terminal_statuses=TERMINAL_STATUSES,
+        optional_tables=OPTIONAL_TABLES,
+        maximum_reported=MAX_REPORTED_IDS,
+    )
+
+
+def _trace_summary_services() -> TraceSummaryServices:
+    return TraceSummaryServices(
+        normalize_status=normalize_status,
+        counter_dict=counter_dict,
+        ratio=ratio,
+        utc_now=utc_now,
+        rows_for_run=rows_for_run,
+    )
+
+
 def summarize(
     connection: sqlite3.Connection,
     db_path: Path,
@@ -685,404 +709,17 @@ def summarize(
     selected_run_id: str | None,
     database_schema: int | None,
 ) -> dict[str, Any]:
-    statuses: collections.Counter[str] = collections.Counter()
-    roles: collections.Counter[str] = collections.Counter()
-    task_kinds: collections.Counter[str] = collections.Counter()
-    policy_modes: collections.Counter[str] = collections.Counter()
-    model_names: collections.Counter[str] = collections.Counter()
-    model_providers: collections.Counter[str] = collections.Counter()
-    model_purposes: collections.Counter[str] = collections.Counter()
-    model_statuses: collections.Counter[str] = collections.Counter()
-    tool_backends: collections.Counter[str] = collections.Counter()
-    tool_capabilities: collections.Counter[str] = collections.Counter()
-    tool_statuses: collections.Counter[str] = collections.Counter()
-    tool_coverage: collections.Counter[str] = collections.Counter()
-    source_classes: collections.Counter[str] = collections.Counter()
-    trust_tiers: collections.Counter[str] = collections.Counter()
-    review_disputes: collections.Counter[str] = collections.Counter()
-    budget_names: collections.Counter[str] = collections.Counter()
-    memory_reasons: collections.Counter[str] = collections.Counter()
-    coverage_reasons: collections.Counter[str] = collections.Counter()
-    route_authorization_reasons: collections.Counter[str] = (
-        collections.Counter()
+    return summarize_trace_runs(
+        connection,
+        db_path,
+        run_results,
+        available_tables,
+        malformed,
+        selected_run_id,
+        database_schema,
+        _trace_summary_policy(),
+        _trace_summary_services(),
     )
-    model_identity_reasons: collections.Counter[str] = collections.Counter()
-
-    total_events = total_evidence = total_hypotheses = total_decisions = 0
-    total_model_calls = total_model_ms = independent_review_calls = 0
-    total_tool_calls = successful_tools = read_only_tools = 0
-    rejected_tools = failed_tools = 0
-    coverage_gap_tools = truncated_tools = read_only_violations = 0
-    corroborating_evidence = 0
-    reviewer_runs = comparable_reviews = reviewer_disagreements = 0
-    missing_reviewer_decisions = 0
-    reviewer_completion_failure_runs = 0
-    budget_violation_runs = 0
-    budget_violation_operation_count = 0
-    memory_decisions = memory_allowed = memory_blocked = 0
-    memory_requires_approval = memory_candidates = 0
-    integrity_invalid_ids: list[str] = []
-    coverage_gap_ids: list[str] = []
-    source_diversity_values: list[int] = []
-    route_authorization_failures = route_authorization_denials = 0
-    model_observation_denials = 0
-    route_authorization_unverified = model_identity_mismatches = 0
-    model_identity_unverified = 0
-    model_purpose_count = terminally_successful_model_purposes = 0
-    incomplete_model_purposes = exact_reviewer_repairs = 0
-    superseded_validation_failures = unexpected_unsuccessful_model_calls = 0
-    malformed_model_purpose_sequences = 0
-    noncanonical_model_calls = invalid_model_call_contract_runs = 0
-    route_authorization_failure_run_ids: list[str] = []
-    model_identity_failure_run_ids: list[str] = []
-    skill_attestation_present = skill_attestation_valid = 0
-    skill_attestation_ready = skill_attestation_legacy = 0
-    skill_attestation_unavailable = 0
-    skill_attestation_invalid_run_ids: list[str] = []
-
-    for result in run_results:
-        run_id = result["run_id"]
-        skill_attestation = result["skill_selection_attestation"]
-        skill_attestation_present += int(skill_attestation["present"])
-        skill_attestation_valid += int(skill_attestation["valid"])
-        skill_attestation_ready += int(skill_attestation["mandatory_ready"])
-        skill_attestation_legacy += int(skill_attestation["legacy"])
-        skill_attestation_unavailable += int(
-            not skill_attestation["available"]
-        )
-        if not skill_attestation["valid"]:
-            skill_attestation_invalid_run_ids.append(run_id)
-        statuses[normalize_status(result["status"])] += 1
-        roles[result["role"] or "unknown"] += 1
-        task_kinds[result["task_kind"] or "unknown"] += 1
-        policy_modes[result["policy_mode"] or "unknown"] += 1
-        total_events += result["counts"]["events"]
-        total_evidence += result["counts"]["evidence"]
-        total_hypotheses += result["counts"]["hypotheses"]
-        total_decisions += result["counts"]["decisions"]
-        total_model_calls += result["counts"]["model_calls"]
-        total_tool_calls += result["counts"]["tool_calls"]
-        successful_tools += result["tools"]["successful_call_count"]
-        read_only_tools += result["tools"]["read_only_call_count"]
-        total_model_ms += result["models"]["duration_ms"]
-        independent_review_calls += result["models"][
-            "independent_review_calls"
-        ]
-        model_purpose_count += result["models"]["purpose_count"]
-        terminally_successful_model_purposes += result["models"][
-            "terminally_successful_purpose_count"
-        ]
-        incomplete_model_purposes += result["models"][
-            "incomplete_purpose_count"
-        ]
-        exact_reviewer_repairs += result["models"][
-            "exact_reviewer_repair_count"
-        ]
-        superseded_validation_failures += result["models"][
-            "superseded_validation_failure_count"
-        ]
-        unexpected_unsuccessful_model_calls += result["models"][
-            "unexpected_unsuccessful_call_count"
-        ]
-        malformed_model_purpose_sequences += result["models"][
-            "malformed_purpose_sequence_count"
-        ]
-        model_call_contract = result["models"]["model_call_contract"]
-        noncanonical_model_calls += model_call_contract[
-            "noncanonical_model_call_count"
-        ]
-        if model_call_contract["valid"] is not True:
-            invalid_model_call_contract_runs += 1
-        route_consistency = result["models"]["route_consistency"]
-        route_authorization_failures += route_consistency[
-            "authorization_failure_count"
-        ]
-        route_authorization_denials += route_consistency[
-            "authorization_denied_event_count"
-        ]
-        model_observation_denials += route_consistency[
-            "observation_denied_event_count"
-        ]
-        route_authorization_unverified += route_consistency[
-            "authorization_unverified_call_count"
-        ]
-        model_identity_mismatches += route_consistency[
-            "identity_mismatch_count"
-        ]
-        model_identity_unverified += route_consistency[
-            "identity_unverified_call_count"
-        ]
-        if route_consistency["authorization_failure_count"]:
-            route_authorization_failure_run_ids.append(run_id)
-        if route_consistency["identity_mismatch_count"]:
-            model_identity_failure_run_ids.append(run_id)
-        for failure in route_consistency["authorization_failures"]:
-            route_authorization_reasons.update(failure["reasons"])
-        for failure in route_consistency["identity_failures"]:
-            model_identity_reasons.update(failure["reasons"])
-        rejected_tools += result["tools"]["rejected_count"]
-        failed_tools += result["tools"]["failed_count"]
-        coverage_gap_tools += result["tools"]["coverage_gap_count"]
-        truncated_tools += result["tools"]["truncated_count"]
-        read_only_violations += result["tools"]["read_only_violation_count"]
-        corroborating_evidence += result["evidence"]["corroborating_count"]
-        source_diversity_values.append(
-            result["evidence"]["distinct_source_classes"]
-        )
-        if not result["integrity"]["valid"]:
-            integrity_invalid_ids.append(run_id)
-        if result["coverage_gap_reasons"]:
-            coverage_gap_ids.append(run_id)
-            coverage_reasons.update(result["coverage_gap_reasons"])
-        for name, count in result["budget_violations"].items():
-            budget_names[name] += count
-        if result["budget_violations"]:
-            budget_violation_runs += 1
-        budget_violation_operation_count += len(
-            result["budget_violation_operations"]
-        )
-        reviewer = result["reviewer"]
-        if reviewer["model_call_count"]:
-            reviewer_runs += 1
-        if reviewer["decision_comparable"]:
-            comparable_reviews += 1
-        if reviewer["material_disagreement"]:
-            reviewer_disagreements += 1
-            review_disputes.update(reviewer["disputed_fields"])
-        if reviewer["missing_reviewer_decision"]:
-            missing_reviewer_decisions += 1
-        if reviewer["completion_contract_satisfied"] is not True:
-            reviewer_completion_failure_runs += 1
-        for promotion in result["memory_promotions"]:
-            memory_decisions += 1
-            memory_candidates += promotion["candidate_count"]
-            if promotion["allowed"]:
-                memory_allowed += 1
-            else:
-                memory_blocked += 1
-            if promotion["requires_approval"]:
-                memory_requires_approval += 1
-            memory_reasons[promotion["reason"] or "unspecified"] += 1
-
-        for row in rows_for_run(
-            connection,
-            available_tables,
-            "harness_model_calls",
-            run_id,
-            "created_at, call_id",
-        ):
-            model_names[
-                str(
-                    row.get("observed_model")
-                    or row.get("requested_route")
-                    or "unknown"
-                )
-            ] += 1
-            model_providers[str(row.get("observed_provider") or "unknown")] += 1
-            model_purposes[str(row.get("purpose") or "unknown")] += 1
-            model_statuses[normalize_status(row.get("status")) or "unknown"] += 1
-        for row in rows_for_run(
-            connection,
-            available_tables,
-            "harness_tool_calls",
-            run_id,
-            "round_number, call_id",
-        ):
-            tool_backends[str(row.get("backend") or "unknown")] += 1
-            tool_capabilities[str(row.get("capability") or "unknown")] += 1
-            tool_statuses[normalize_status(row.get("status")) or "unknown"] += 1
-            tool_coverage[normalize_status(row.get("coverage")) or "unknown"] += 1
-        for row in rows_for_run(
-            connection,
-            available_tables,
-            "harness_evidence",
-            run_id,
-            "evidence_ref",
-        ):
-            source_classes[str(row.get("source_class") or "unknown")] += 1
-            trust_tiers[str(row.get("trust_tier") or "unknown")] += 1
-
-    run_count = len(run_results)
-    terminal_runs = sum(
-        count for status, count in statuses.items() if status in TERMINAL_STATUSES
-    )
-    succeeded_runs = statuses.get("succeeded", 0)
-    source_diversity_average = (
-        round(sum(source_diversity_values) / len(source_diversity_values), 3)
-        if source_diversity_values
-        else None
-    )
-    return {
-        "schema": REPORT_SCHEMA,
-        "generated_at": utc_now(),
-        "database": str(db_path.expanduser()),
-        "selected_run_id": selected_run_id,
-        "run_count": run_count,
-        "completion": {
-            "status_counts": counter_dict(statuses),
-            "terminal_runs": terminal_runs,
-            "terminal_rate": ratio(terminal_runs, run_count),
-            "succeeded_runs": succeeded_runs,
-            "success_rate": ratio(succeeded_runs, run_count),
-        },
-        "integrity": {
-            "all_chains_valid": not integrity_invalid_ids and run_count > 0,
-            "valid_run_count": run_count - len(integrity_invalid_ids),
-            "invalid_run_count": len(integrity_invalid_ids),
-            "invalid_run_ids": integrity_invalid_ids[:MAX_REPORTED_IDS],
-            "event_count": total_events,
-        },
-        "workload": {
-            "role_counts": counter_dict(roles),
-            "task_kind_counts": counter_dict(task_kinds),
-            "policy_mode_counts": counter_dict(policy_modes),
-        },
-        "skill_selection_attestation": {
-            "present_run_count": skill_attestation_present,
-            "valid_run_count": skill_attestation_valid,
-            "mandatory_ready_run_count": skill_attestation_ready,
-            "legacy_run_count": skill_attestation_legacy,
-            "unavailable_run_count": skill_attestation_unavailable,
-            "invalid_run_count": len(skill_attestation_invalid_run_ids),
-            "invalid_run_ids": skill_attestation_invalid_run_ids[
-                :MAX_REPORTED_IDS
-            ],
-        },
-        "models": {
-            "call_count": total_model_calls,
-            "calls_per_run": ratio(total_model_calls, run_count),
-            "duration_ms": total_model_ms,
-            "average_duration_ms": (
-                round(total_model_ms / total_model_calls)
-                if total_model_calls
-                else None
-            ),
-            "independent_review_call_count": independent_review_calls,
-            "purpose_count": model_purpose_count,
-            "terminally_successful_purpose_count": (
-                terminally_successful_model_purposes
-            ),
-            "incomplete_purpose_count": incomplete_model_purposes,
-            "exact_reviewer_repair_count": exact_reviewer_repairs,
-            "superseded_validation_failure_count": (
-                superseded_validation_failures
-            ),
-            "unexpected_unsuccessful_call_count": (
-                unexpected_unsuccessful_model_calls
-            ),
-            "malformed_purpose_sequence_count": (
-                malformed_model_purpose_sequences
-            ),
-            "noncanonical_call_count": noncanonical_model_calls,
-            "invalid_call_contract_run_count": (
-                invalid_model_call_contract_runs
-            ),
-            "by_model": counter_dict(model_names),
-            "by_provider": counter_dict(model_providers),
-            "by_purpose": counter_dict(model_purposes),
-            "by_status": counter_dict(model_statuses),
-            "route_authorization": {
-                "failure_count": route_authorization_failures,
-                "failure_run_count": len(
-                    route_authorization_failure_run_ids
-                ),
-                "failure_run_ids": route_authorization_failure_run_ids[
-                    :MAX_REPORTED_IDS
-                ],
-                "denied_event_count": route_authorization_denials,
-                "observation_denied_event_count": (
-                    model_observation_denials
-                ),
-                "unverified_call_count": route_authorization_unverified,
-                "reason_counts": counter_dict(
-                    route_authorization_reasons
-                ),
-            },
-            "runtime_identity": {
-                "mismatch_count": model_identity_mismatches,
-                "mismatch_run_count": len(model_identity_failure_run_ids),
-                "mismatch_run_ids": model_identity_failure_run_ids[
-                    :MAX_REPORTED_IDS
-                ],
-                "unverified_call_count": model_identity_unverified,
-                "reason_counts": counter_dict(model_identity_reasons),
-            },
-        },
-        "tools": {
-            "call_count": total_tool_calls,
-            "successful_call_count": successful_tools,
-            "read_only_call_count": read_only_tools,
-            "calls_per_run": ratio(total_tool_calls, run_count),
-            "rejected_count": rejected_tools,
-            "rejection_rate": ratio(rejected_tools, total_tool_calls),
-            "failed_count": failed_tools,
-            "failure_rate": ratio(failed_tools, total_tool_calls),
-            "coverage_gap_count": coverage_gap_tools,
-            "coverage_gap_rate": ratio(coverage_gap_tools, total_tool_calls),
-            "truncated_count": truncated_tools,
-            "truncation_rate": ratio(truncated_tools, total_tool_calls),
-            "read_only_violation_count": read_only_violations,
-            "by_backend": counter_dict(tool_backends),
-            "by_capability": counter_dict(tool_capabilities),
-            "by_status": counter_dict(tool_statuses),
-            "by_coverage": counter_dict(tool_coverage),
-        },
-        "evidence": {
-            "catalogued_count": total_evidence,
-            "corroborating_count": corroborating_evidence,
-            "hypothesis_count": total_hypotheses,
-            "decision_count": total_decisions,
-            "source_class_counts": counter_dict(source_classes),
-            "trust_tier_counts": counter_dict(trust_tiers),
-            "average_distinct_source_classes_per_run": source_diversity_average,
-            "minimum_distinct_source_classes_per_run": (
-                min(source_diversity_values) if source_diversity_values else None
-            ),
-            "runs_with_fewer_than_two_source_classes": sum(
-                value < 2 for value in source_diversity_values
-            ),
-        },
-        "reviewer": {
-            "runs_with_reviewer_calls": reviewer_runs,
-            "comparable_decision_runs": comparable_reviews,
-            "material_disagreement_runs": reviewer_disagreements,
-            "material_disagreement_rate": ratio(
-                reviewer_disagreements, comparable_reviews
-            ),
-            "missing_reviewer_decision_runs": missing_reviewer_decisions,
-            "completion_contract_failure_runs": (
-                reviewer_completion_failure_runs
-            ),
-            "disputed_field_counts": counter_dict(review_disputes),
-        },
-        "budgets": {
-            "violation_runs": budget_violation_runs,
-            "violation_run_rate": ratio(budget_violation_runs, run_count),
-            "violation_operation_count": budget_violation_operation_count,
-            "violation_counts": counter_dict(budget_names),
-        },
-        "memory_promotion": {
-            "decision_count": memory_decisions,
-            "allowed_count": memory_allowed,
-            "blocked_count": memory_blocked,
-            "requires_approval_count": memory_requires_approval,
-            "candidate_count": memory_candidates,
-            "reason_counts": counter_dict(memory_reasons),
-        },
-        "coverage": {
-            "runs_with_gaps": len(coverage_gap_ids),
-            "run_gap_rate": ratio(len(coverage_gap_ids), run_count),
-            "run_ids": coverage_gap_ids[:MAX_REPORTED_IDS],
-            "reason_counts": counter_dict(coverage_reasons),
-        },
-        "data_quality": {
-            "database_schema_version": database_schema,
-            "available_tables": sorted(available_tables),
-            "missing_optional_tables": sorted(OPTIONAL_TABLES - available_tables),
-            "malformed_json_counts": counter_dict(malformed),
-        },
-        "runs": run_results,
-    }
 
 
 def evaluate_database(

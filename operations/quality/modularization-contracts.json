@@ -282,6 +282,16 @@
       ]
     },
     {
+      "path": "operations/trace_evaluation_summary.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/trace_evaluation_summary.py",
+      "required_symbols": [
+        "TraceSummaryPolicy",
+        "TraceSummaryServices",
+        "summarize"
+      ]
+    },
+    {
       "path": "operations/cohort_execution_models.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_execution_models.py",

@@ -34,6 +34,7 @@ import trace_evaluation_model_completion  # noqa: E402
 import trace_evaluation_model_routes  # noqa: E402
 import trace_evaluation_run  # noqa: E402
 import trace_evaluation_output  # noqa: E402
+import trace_evaluation_summary  # noqa: E402
 
 HARNESS_SPEC = importlib.util.spec_from_file_location(
     "evaluator_test_harness_module",
@@ -636,6 +637,12 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
         self.assertIs(
             evaluator.human_report,
             trace_evaluation_output.human_report,
+        )
+
+    def test_evaluator_uses_extracted_summary_service(self):
+        self.assertIs(
+            evaluator.summarize_trace_runs,
+            trace_evaluation_summary.summarize,
         )
 
     def test_resolved_repair_is_not_reported_as_tool_coverage_gap(self) -> None:
@@ -1941,6 +1948,13 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
             (
                 'cp "$REPO_DIR/operations/trace_evaluation_output.py" '
                 '"$STACK_DIR/bin/trace_evaluation_output.py"'
+            ),
+            source,
+        )
+        self.assertIn(
+            (
+                'cp "$REPO_DIR/operations/trace_evaluation_summary.py" '
+                '"$STACK_DIR/bin/trace_evaluation_summary.py"'
             ),
             source,
         )
