@@ -561,6 +561,8 @@ read-only data and time ports.
 attestation validation and its bounded public projection. It enforces exact
 skill identity fields, registry and content digests, selection limits,
 mandatory readiness, and advisory-only execution without loading a registry.
+The same module also validates the canonical, content-free skill summary in
+offline cohort exports so collection and grading share one proof boundary.
 
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,

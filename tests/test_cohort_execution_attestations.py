@@ -33,6 +33,16 @@ def load_legacy_cohort():
     return module
 
 
+def load_cohort_evaluator():
+    path = OPERATIONS / "evaluate-investigation-cohort.py"
+    spec = importlib.util.spec_from_file_location("cohort_evaluator_test", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load cohort evaluator")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class CohortExecutionAttestationBoundaryTests(unittest.TestCase):
     def test_legacy_runner_uses_extracted_attestation_services(self):
         legacy = load_legacy_cohort()
@@ -70,6 +80,14 @@ class CohortExecutionAttestationBoundaryTests(unittest.TestCase):
         self.assertIs(
             sources.harness_execution_proof,
             legacy._harness_execution_proof,
+        )
+
+    def test_offline_evaluator_uses_extracted_skill_proof_validator(self):
+        evaluator = load_cohort_evaluator()
+
+        self.assertIs(
+            evaluator.validate_exported_skill_summary,
+            cohort_execution_skills.validate_exported_skill_summary,
         )
 
     def test_skill_projection_rejects_extra_identity_fields(self):

@@ -77,6 +77,10 @@ from cohort_adjudication import (
     validate_labels as validate_adjudication_labels,
     validate_scores as validate_adjudication_scores,
 )
+from cohort_execution_skills import (
+    SkillAttestationPolicy,
+    validate_exported_skill_summary,
+)
 
 
 RESULT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v4"
@@ -110,16 +114,6 @@ CODE_RE = re.compile(r"[a-z][a-z0-9_]{1,79}")
 SHA256_RE = re.compile(r"[a-f0-9]{64}")
 SKILL_ID_RE = re.compile(r"[A-Za-z0-9.][A-Za-z0-9._:@+=/-]{0,255}")
 MAX_ATTESTED_INVESTIGATION_SKILLS = 4
-SKILL_SELECTION_SUMMARY_KEYS = frozenset(
-    {
-        "registry_version",
-        "registry_sha256",
-        "selected",
-        "selected_count",
-        "truncated",
-        "advisory_mode",
-    }
-)
 CONTROLLED_ROUTE_RE = re.compile(
     r"codex-cli:(?:gpt-5\.5|gpt-5\.6-(?:sol|terra|luna)):"
     r"(?:low|medium|high|xhigh)"
@@ -967,91 +961,16 @@ def _validate_skill_selection_attestation_proof(
     label: str,
 ) -> dict[str, Any]:
     """Require the collector's bounded, content-free skill proof."""
-    if harness.get("skill_selection_attestation_validated") is not True:
-        raise CohortEvaluationError(
-            f"{label} skill selection attestation was not validated"
-        )
-    summary = harness.get("skill_selection_attestation")
-    if (
-        not isinstance(summary, dict)
-        or set(summary) != SKILL_SELECTION_SUMMARY_KEYS
-    ):
-        raise CohortEvaluationError(
-            f"{label} skill selection attestation schema is invalid"
-        )
-    registry_version = summary.get("registry_version")
-    registry_sha256 = str(summary.get("registry_sha256") or "")
-    selected_count = summary.get("selected_count")
-    truncated = summary.get("truncated")
-    advisory_mode = str(summary.get("advisory_mode") or "")
-    selected = summary.get("selected")
-    if (
-        not isinstance(registry_version, int)
-        or isinstance(registry_version, bool)
-        or registry_version < 1
-        or SHA256_RE.fullmatch(registry_sha256) is None
-        or not isinstance(selected, list)
-        or len(selected) > MAX_ATTESTED_INVESTIGATION_SKILLS
-        or not isinstance(selected_count, int)
-        or isinstance(selected_count, bool)
-        or selected_count != len(selected)
-        or not isinstance(truncated, bool)
-        or advisory_mode != "advisory_only"
-    ):
-        raise CohortEvaluationError(
-            f"{label} skill selection attestation values are invalid"
-        )
-    projected: list[dict[str, Any]] = []
-    identities: set[tuple[str, int]] = set()
-    for item in selected:
-        if (
-            not isinstance(item, dict)
-            or set(item) != {"id", "version", "skill_sha256"}
-        ):
-            raise CohortEvaluationError(
-                f"{label} selected skill identity schema is invalid"
-            )
-        skill_id = str(item.get("id") or "")
-        version = item.get("version")
-        skill_sha256 = str(item.get("skill_sha256") or "")
-        if (
-            SKILL_ID_RE.fullmatch(skill_id) is None
-            or not isinstance(version, int)
-            or isinstance(version, bool)
-            or version < 1
-            or SHA256_RE.fullmatch(skill_sha256) is None
-            or (skill_id, version) in identities
-        ):
-            raise CohortEvaluationError(
-                f"{label} selected skill identity is invalid"
-            )
-        identities.add((skill_id, version))
-        projected.append(
-            {
-                "id": skill_id,
-                "version": version,
-                "skill_sha256": skill_sha256,
-            }
-        )
-    if projected != sorted(
-        projected,
-        key=lambda item: (
-            str(item["id"]),
-            int(item["version"]),
-            str(item["skill_sha256"]),
+    return validate_exported_skill_summary(
+        harness,
+        label,
+        SkillAttestationPolicy(
+            skill_id_pattern=SKILL_ID_RE,
+            sha256_pattern=SHA256_RE,
+            maximum_selected=MAX_ATTESTED_INVESTIGATION_SKILLS,
         ),
-    ):
-        raise CohortEvaluationError(
-            f"{label} selected skill identities are not canonical"
-        )
-    return {
-        "registry_version": registry_version,
-        "registry_sha256": registry_sha256,
-        "selected": projected,
-        "selected_count": selected_count,
-        "truncated": truncated,
-        "advisory_mode": advisory_mode,
-    }
+        CohortEvaluationError,
+    )
 
 
 def _validate_execution_proof(
