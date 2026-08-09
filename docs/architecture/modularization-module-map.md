@@ -509,6 +509,13 @@ Ground truth, frozen evidence, model results, and unblinded comparison remain
 separate inputs. Shared contracts have one implementation; CLI wrappers do not
 copy validation logic.
 
+`operations/cohort_freezing.py` owns database-newest and exact-imported-row
+cohort freezing. Immutable policy and explicit source ports bind identity
+validation, read-only database snapshots, representative-alert custody,
+pre-run state, execution contracts, and private digest-sealed manifest writes.
+The legacy cohort command remains the composition root and preserves its CLI
+and callable signatures.
+
 `prompt_incident_evidence_projection.py` owns the model-facing, in-memory
 projection of already-validated incident evidence. It applies deterministic
 prefix limits to Elastic hits and OSQuery rows, records source and retained

@@ -42,6 +42,17 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 
+OPERATIONS_DIR = Path(__file__).resolve().parent
+if str(OPERATIONS_DIR) not in sys.path:
+    sys.path.insert(0, str(OPERATIONS_DIR))
+from cohort_freezing import (
+    CohortFreezePolicy,
+    CohortFreezeSources,
+    freeze_cohort as run_freeze_cohort,
+    freeze_cohort_from_rows as run_freeze_cohort_from_rows,
+)
+
+
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
 EXPORT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v4"
 MAX_COHORT_SIZE = 100
@@ -1203,154 +1214,20 @@ def freeze_cohort(
     evaluation_profile: str = "",
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    cohort_id, reason = validate_cohort_identity(cohort_id, reason)
-    expected_release_id = validate_release_id(expected_release_id)
-    if count < 1 or count > MAX_COHORT_SIZE:
-        raise CohortError(f"cohort size must be between 1 and {MAX_COHORT_SIZE}")
-    if manifest_path.expanduser().exists() and not dry_run:
-        raise CohortError(f"manifest already exists: {manifest_path.expanduser()}")
-
-    connection = connect_read_only(database_path)
-    try:
-        connection.execute("BEGIN")
-        aliases = load_aliases(connection)
-        cases_by_stable = _incident_cases(connection, aliases)
-        selected: list[dict[str, Any]] = []
-        selected_stable: set[str] = set()
-        for summary in _summary_rows(connection):
-            dashboard_id = str(summary.get("group_id") or "").strip().lower()
-            if not DASHBOARD_GROUP_ID_RE.fullmatch(dashboard_id):
-                raise CohortError(
-                    f"invalid dashboard group identity in summary: {dashboard_id!r}"
-                )
-            if dashboard_id not in aliases:
-                raise CohortError(
-                    f"dashboard group {dashboard_id} has no stable alias"
-                )
-            stable_id = resolve_alias(dashboard_id, aliases)
-            if not STABLE_GROUP_ID_RE.fullmatch(stable_id):
-                raise CohortError(
-                    f"dashboard group {dashboard_id} resolves to invalid "
-                    f"stable identity {stable_id!r}"
-                )
-            if stable_id in selected_stable:
-                continue
-            representative_alert_id = str(
-                summary.get("representative_alert_id") or ""
-            ).strip()
-            if not REPRESENTATIVE_ALERT_ID_RE.fullmatch(
-                representative_alert_id
-            ):
-                raise CohortError(
-                    f"dashboard group {dashboard_id} has an invalid "
-                    "representative alert ID"
-                )
-            detection = {
-                key: value
-                for key, value in summary.items()
-                if key != "group_id"
-            }
-            detection = _bind_representative_stable_group_key(
-                connection,
-                representative_alert_id,
-                detection,
-            )
-            stable_group_key = validate_stable_group_key(
-                detection.get("stable_group_key"),
-                (
-                    "representative alert stable_group_key for dashboard "
-                    f"group {dashboard_id}"
-                ),
-            )
-            _validate_representative_binding(
-                connection,
-                {
-                    "dashboard_group_id": dashboard_id,
-                    "stable_group_id": stable_id,
-                    "stable_group_key": stable_group_key,
-                    "representative_alert_id": representative_alert_id,
-                    "detection": detection,
-                },
-                representative_alert_id,
-            )
-            pre_state = _pre_state(
-                connection,
-                stable_id,
-                aliases,
-                cases_by_stable,
-            )
-            selected_stable.add(stable_id)
-            selected.append(
-                {
-                    "rank": len(selected) + 1,
-                    "dashboard_group_id": dashboard_id,
-                    "stable_group_id": stable_id,
-                    "stable_group_key": stable_group_key,
-                    "representative_alert_id": representative_alert_id,
-                    "detection": detection,
-                    "pre_state": pre_state,
-                    "dispatch": {
-                        "kind": (
-                            "reanalyze"
-                            if pre_state["incident_case"]
-                            else "escalate"
-                        ),
-                        "state": "unattempted",
-                        "attempt_count": 0,
-                    },
-                    "monitor": {"state": "not_started"},
-                }
-            )
-            if len(selected) == count:
-                break
-        if len(selected) != count:
-            raise CohortError(
-                f"requested {count} distinct stable groups but only "
-                f"{len(selected)} were available"
-            )
-        identities = ordered_identity_projection(selected)
-        manifest: dict[str, Any] = {
-            "schema": SCHEMA,
-            "cohort_id": cohort_id,
-            "reason": reason,
-            "agent_role": "incident-responder",
-            "count": count,
-            "created_at": utc_now(),
-            "selection": {
-                "mode": "database_newest",
-                "source_sha256": sha256_value(identities),
-                "source_count": len(identities),
-                "order_preserved": True,
-                "ordered_identity_sha256": sha256_value(identities),
-            },
-            "execution_contract": execution_contract(
-                expected_release_id=expected_release_id,
-                expected_assigned_route=expected_assigned_route,
-                expected_reviewer_route=expected_reviewer_route,
-                evaluation_profile=evaluation_profile,
-            ),
-            "database": {
-                "path": str(database_path.expanduser().resolve()),
-                "schema_sha256": schema_fingerprint(connection),
-                "user_version": int(
-                    connection.execute("PRAGMA user_version").fetchone()[0]
-                ),
-                "read_only": True,
-            },
-            "security_onion_access": "none",
-            "state": "frozen",
-            "members": selected,
-        }
-        manifest["frozen_plan_sha256"] = _frozen_plan_digest(manifest)
-    finally:
-        connection.close()
-    if dry_run:
-        return _digest_bound(manifest, "manifest_sha256")
-    return write_private_json(
+    """Compatibility adapter for the extracted cohort-freezing workflow."""
+    return run_freeze_cohort(
+        _cohort_freeze_policy(),
+        _cohort_freeze_sources(),
+        database_path,
         manifest_path,
-        manifest,
-        digest_field="manifest_sha256",
-        replace=False,
+        cohort_id=cohort_id,
+        reason=reason,
+        count=count,
+        expected_release_id=expected_release_id,
+        expected_assigned_route=expected_assigned_route,
+        expected_reviewer_route=expected_reviewer_route,
+        evaluation_profile=evaluation_profile,
+        dry_run=dry_run,
     )
 
 
@@ -1464,6 +1341,51 @@ def _validate_source_pre_state(
             )
 
 
+def _cohort_freeze_policy() -> CohortFreezePolicy:
+    return CohortFreezePolicy(
+        schema=SCHEMA,
+        maximum_cohort_size=MAX_COHORT_SIZE,
+        dashboard_group_id_pattern=DASHBOARD_GROUP_ID_RE,
+        stable_group_id_pattern=STABLE_GROUP_ID_RE,
+        representative_alert_id_pattern=REPRESENTATIVE_ALERT_ID_RE,
+    )
+
+
+def _cohort_freeze_sources() -> CohortFreezeSources:
+    """Bind legacy patch points to the extracted freezing workflow."""
+    return CohortFreezeSources(
+        error_type=CohortError,
+        validate_cohort_identity=validate_cohort_identity,
+        validate_release_id=validate_release_id,
+        validate_agent_role=validate_agent_role,
+        connect_read_only=connect_read_only,
+        load_aliases=load_aliases,
+        incident_cases=_incident_cases,
+        summary_rows=_summary_rows,
+        resolve_alias=resolve_alias,
+        bind_representative_stable_group_key=(
+            _bind_representative_stable_group_key
+        ),
+        validate_stable_group_key=validate_stable_group_key,
+        validate_representative_binding=_validate_representative_binding,
+        incident_pre_state=_pre_state,
+        soc_pre_state=_soc_pre_state,
+        source_identity=_source_identity,
+        source_detection_projection=_source_detection_projection,
+        validate_source_detection=_validate_source_detection,
+        validate_source_pre_state=_validate_source_pre_state,
+        ordered_identity_projection=ordered_identity_projection,
+        utc_now=utc_now,
+        sha256_value=sha256_value,
+        execution_contract=execution_contract,
+        schema_fingerprint=schema_fingerprint,
+        frozen_plan_digest=_frozen_plan_digest,
+        digest_bound=_digest_bound,
+        write_private_json=write_private_json,
+        load_private_source_rows=load_private_source_rows,
+    )
+
+
 def freeze_cohort_from_rows(
     database_path: Path,
     source_rows_path: Path,
@@ -1479,190 +1401,22 @@ def freeze_cohort_from_rows(
     evaluation_profile: str = "",
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Import exact preselected identities; never recompute cohort membership."""
-
-    cohort_id, reason = validate_cohort_identity(cohort_id, reason)
-    agent_role = validate_agent_role(agent_role)
-    expected_release_id = validate_release_id(expected_release_id)
-    if expected_count < 1 or expected_count > MAX_COHORT_SIZE:
-        raise CohortError(
-            f"expected count must be between 1 and {MAX_COHORT_SIZE}"
-        )
-    rows, source_sha256 = load_private_source_rows(source_rows_path)
-    if len(rows) != expected_count:
-        raise CohortError(
-            f"source contains {len(rows)} rows; expected {expected_count}"
-        )
-    if manifest_path.expanduser().exists() and not dry_run:
-        raise CohortError(f"manifest already exists: {manifest_path.expanduser()}")
-
-    connection = connect_read_only(database_path)
-    try:
-        connection.execute("BEGIN")
-        aliases = load_aliases(connection)
-        cases_by_stable = _incident_cases(connection, aliases)
-        summaries = {
-            str(item.get("group_id") or ""): item
-            for item in _summary_rows(connection)
-        }
-        members: list[dict[str, Any]] = []
-        seen_dashboard: set[str] = set()
-        seen_stable: set[str] = set()
-        for index, source in enumerate(rows):
-            dashboard_id, stable_id, representative_alert_id = (
-                _source_identity(source)
-            )
-            if dashboard_id in seen_dashboard:
-                raise CohortError(
-                    f"source repeats dashboard group {dashboard_id}"
-                )
-            if stable_id in seen_stable:
-                raise CohortError(
-                    f"source repeats stable group {stable_id}"
-                )
-            current = summaries.get(dashboard_id)
-            if not current:
-                raise CohortError(
-                    f"source dashboard group no longer exists: {dashboard_id}"
-                )
-            resolved = resolve_alias(dashboard_id, aliases)
-            if resolved != stable_id:
-                raise CohortError(
-                    f"source stable identity changed for {dashboard_id}"
-                )
-            current_representative_alert_id = str(
-                current.get("representative_alert_id") or ""
-            )
-            if current_representative_alert_id == representative_alert_id:
-                source_detection = _validate_source_detection(
-                    source,
-                    current,
-                    dashboard_id,
-                )
-                frozen_detection = {
-                    key: value
-                    for key, value in current.items()
-                    if key != "group_id"
-                }
-                if "stable_group_key" in source_detection:
-                    frozen_detection["stable_group_key"] = source_detection[
-                        "stable_group_key"
-                    ]
-            else:
-                try:
-                    frozen_detection = _source_detection_projection(source)
-                except CohortError as exc:
-                    raise CohortError(
-                        f"source row {dashboard_id} detection must be an "
-                        "object"
-                    ) from exc
-            frozen_detection = _bind_representative_stable_group_key(
-                connection,
-                representative_alert_id,
-                frozen_detection,
-            )
-            stable_group_key = validate_stable_group_key(
-                frozen_detection.get("stable_group_key"),
-                (
-                    "representative alert stable_group_key for dashboard "
-                    f"group {dashboard_id}"
-                ),
-            )
-            _validate_representative_binding(
-                connection,
-                {
-                    "dashboard_group_id": dashboard_id,
-                    "stable_group_id": stable_id,
-                    "stable_group_key": stable_group_key,
-                    "representative_alert_id": representative_alert_id,
-                    "detection": frozen_detection,
-                },
-                current_representative_alert_id,
-            )
-            if agent_role == "soc-analyst":
-                pre_state = _soc_pre_state(
-                    connection,
-                    stable_id,
-                    aliases,
-                )
-            else:
-                pre_state = _pre_state(
-                    connection,
-                    stable_id,
-                    aliases,
-                    cases_by_stable,
-                )
-                _validate_source_pre_state(source, pre_state, dashboard_id)
-            seen_dashboard.add(dashboard_id)
-            seen_stable.add(stable_id)
-            members.append(
-                {
-                    "rank": index + 1,
-                    "dashboard_group_id": dashboard_id,
-                    "stable_group_id": stable_id,
-                    "stable_group_key": stable_group_key,
-                    "representative_alert_id": representative_alert_id,
-                    "detection": frozen_detection,
-                    "pre_state": pre_state,
-                    "dispatch": {
-                        "kind": (
-                            "analyze"
-                            if agent_role == "soc-analyst"
-                            else (
-                                "reanalyze"
-                                if pre_state["incident_case"]
-                                else "escalate"
-                            )
-                        ),
-                        "state": "unattempted",
-                        "attempt_count": 0,
-                    },
-                    "monitor": {"state": "not_started"},
-                }
-            )
-        identities = ordered_identity_projection(members)
-        manifest: dict[str, Any] = {
-            "schema": SCHEMA,
-            "cohort_id": cohort_id,
-            "reason": reason,
-            "agent_role": agent_role,
-            "count": expected_count,
-            "created_at": utc_now(),
-            "selection": {
-                "mode": "imported_rows",
-                "source_sha256": source_sha256,
-                "source_count": len(rows),
-                "order_preserved": True,
-                "ordered_identity_sha256": sha256_value(identities),
-            },
-            "execution_contract": execution_contract(
-                expected_release_id=expected_release_id,
-                expected_assigned_route=expected_assigned_route,
-                expected_reviewer_route=expected_reviewer_route,
-                evaluation_profile=evaluation_profile,
-            ),
-            "database": {
-                "path": str(database_path.expanduser().resolve()),
-                "schema_sha256": schema_fingerprint(connection),
-                "user_version": int(
-                    connection.execute("PRAGMA user_version").fetchone()[0]
-                ),
-                "read_only": True,
-            },
-            "security_onion_access": "none",
-            "state": "frozen",
-            "members": members,
-        }
-        manifest["frozen_plan_sha256"] = _frozen_plan_digest(manifest)
-    finally:
-        connection.close()
-    if dry_run:
-        return _digest_bound(manifest, "manifest_sha256")
-    return write_private_json(
+    """Compatibility adapter for exact imported-row cohort freezing."""
+    return run_freeze_cohort_from_rows(
+        _cohort_freeze_policy(),
+        _cohort_freeze_sources(),
+        database_path,
+        source_rows_path,
         manifest_path,
-        manifest,
-        digest_field="manifest_sha256",
-        replace=False,
+        cohort_id=cohort_id,
+        reason=reason,
+        expected_count=expected_count,
+        expected_release_id=expected_release_id,
+        agent_role=agent_role,
+        expected_assigned_route=expected_assigned_route,
+        expected_reviewer_route=expected_reviewer_route,
+        evaluation_profile=evaluation_profile,
+        dry_run=dry_run,
     )
 
 
