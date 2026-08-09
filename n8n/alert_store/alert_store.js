@@ -37,6 +37,7 @@ const {createPcapRequestRepository} = require('./repositories/pcap_request_repos
 const {createPcapTransferRepository} = require('./repositories/pcap_transfer_repository');
 const {createHealthService} = require('./services/health_service');
 const {createAiAnalysisAcceptance} = require('./services/ai_analysis_acceptance');
+const {createControlledJobTransition} = require('./services/controlled_job_transition');
 const {createIncidentAnalysisCompletion} = require('./services/incident_analysis_completion');
 const {createIncidentReanalysisBindingService} = require('./services/incident_reanalysis_binding');
 const {createHealthRoutes} = require('./routes/health_routes');
@@ -3577,239 +3578,16 @@ function controlledJobClaimIdentity(value) {
   return controlledJobIdentity.parseClaim(value);
 }
 
-const controlledEvaluationLeases = new Map();
-
 function controlledEvaluationLeaseKey(jobType, dedupeKey) {
-  return `${jobType}\0${dedupeKey}`;
+  return controlledJobTransitionAuthority.leaseKey(jobType, dedupeKey);
 }
 
 async function controlledJobTransitionAdmission(payload) {
-  if (!controlledEvaluationMode) return null;
-  const jobType = safeString(payload?.job_type, 64);
-  const dedupeKey = safeString(payload?.dedupe_key, 256);
-  const status = safeString(payload?.status, 32).toLowerCase();
-  const leaseToken = safeString(payload?.lease_token, 128);
-  if (
-    typeof payload?.job_type !== 'string'
-    || payload.job_type !== jobType
-    || typeof payload?.dedupe_key !== 'string'
-    || payload.dedupe_key !== dedupeKey
-    || typeof payload?.status !== 'string'
-    || payload.status !== status
-    || typeof payload?.lease_token !== 'string'
-    || payload.lease_token !== leaseToken
-    || !['ai_analysis', 'incident_response_analysis'].includes(jobType)
-    || !stableGroupIdPattern.test(dedupeKey)
-    || !['processing', 'completed', 'failed'].includes(status)
-  ) {
-    throw incidentIdentityConflict(
-      'controlled evaluation job transition is not allowed',
-    );
-  }
-  const key = controlledEvaluationLeaseKey(jobType, dedupeKey);
-  const exactClaim = controlledJobClaimIdentity(payload);
-  if (status === 'processing' && !leaseToken) {
-    if (!exactClaim) {
-      throw incidentIdentityConflict(
-        'controlled evaluation requires one exact unowned job claim',
-      );
-    }
-    const processing = await all(
-      `SELECT id, job_type, dedupe_key
-       FROM durable_jobs
-       WHERE status = 'processing'
-         AND job_type IN ('ai_analysis', 'incident_response_analysis')
-       ORDER BY id ASC LIMIT 2`,
-    );
-    if (
-      processing.length > 1
-      || processing.some((job) => (
-        Number(job.id || 0) !== exactClaim.jobId
-        || job.job_type !== jobType
-        || job.dedupe_key !== dedupeKey
-      ))
-    ) {
-      throw incidentIdentityConflict(
-        'controlled evaluation requires one exact unowned job claim',
-      );
-    }
-    return {action: 'claim', key, exactClaim};
-  }
-  if (exactClaim) {
-    throw incidentIdentityConflict(
-      'controlled evaluation lease transition cannot repeat claim identity',
-    );
-  }
-  if (!leaseToken) {
-    throw incidentIdentityConflict(
-      'controlled evaluation transition does not own the active lease',
-    );
-  }
-  const current = await get(
-    `SELECT id, status, lease_token, lease_expires_at, rerun_requested,
-            payload_json
-     FROM durable_jobs WHERE job_type = ? AND dedupe_key = ?`,
-    [jobType, dedupeKey],
-  );
-  const currentLeaseExpiry = Date.parse(
-    String(current?.lease_expires_at || '').replace('  ', 'T'),
-  );
-  const currentPayload = incidentReanalysisJobPayload(current);
-  const expectedRole = (
-    jobType === 'incident_response_analysis'
-      ? 'incident-responder'
-      : 'soc-analyst'
-  );
-  if (
-    !Number.isSafeInteger(Number(current?.id))
-    || Number(current.id) < 1
-    || current?.status !== 'processing'
-    || current?.lease_token !== leaseToken
-    || Number(current?.rerun_requested || 0) !== 0
-    || !Number.isFinite(currentLeaseExpiry)
-    || currentPayload.alert_id !== currentPayload.representative_alert_id
-    || currentPayload.group_id !== dedupeKey
-    || currentPayload.stable_group_id !== dedupeKey
-    || !validPinnedStableGroupKey(currentPayload.stable_group_key)
-    || !cohortIdPattern.test(String(currentPayload.cohort_id || ''))
-    || !dispatchIdPattern.test(String(currentPayload.dispatch_id || ''))
-    || !representativeAlertIdPattern.test(
-      String(currentPayload.representative_alert_id || ''),
-    )
-    || currentPayload.release_id !== controlledRuntimeReleaseId()
-    || currentPayload.agent_role !== expectedRole
-    || !controlledRoutePattern.test(
-      String(currentPayload.expected_assigned_route || ''),
-    )
-    || !controlledRoutePattern.test(
-      String(currentPayload.expected_reviewer_route || ''),
-    )
-    || controlledRouteModelIdentity(
-      currentPayload.expected_assigned_route,
-    ) === controlledRouteModelIdentity(
-      currentPayload.expected_reviewer_route,
-    )
-    || currentPayload.reviewer_required !== true
-  ) {
-    throw incidentIdentityConflict(
-      'controlled evaluation lease is no longer active',
-    );
-  }
-  const currentRepresentative = await get(
-    `SELECT stable_group_id, stable_group_key
-     FROM alerts WHERE alert_id = ? LIMIT 1`,
-    [currentPayload.representative_alert_id],
-  );
-  if (
-    currentRepresentative?.stable_group_id !== dedupeKey
-    || currentRepresentative?.stable_group_key
-      !== currentPayload.stable_group_key
-  ) {
-    throw incidentIdentityConflict(
-      'controlled evaluation lease representative changed',
-    );
-  }
-  let reanalysisAttemptId = '';
-  if (jobType === 'incident_response_analysis') {
-    reanalysisAttemptId = incidentReanalysisAttemptId(leaseToken);
-    const attempt = await get(
-      `SELECT attempt_id, run_id, case_id, group_id, status
-       FROM incident_reanalysis_attempts WHERE attempt_id = ?`,
-      [reanalysisAttemptId],
-    );
-    if (
-      attempt?.status !== 'running'
-      || attempt?.group_id !== dedupeKey
-      || attempt?.run_id !== currentPayload.reanalysis_run_id
-      || attempt?.case_id !== currentPayload.case_id
-    ) {
-      throw incidentIdentityConflict(
-        'controlled evaluation incident attempt does not own the lease',
-      );
-    }
-  }
-  if (status === 'completed') {
-    throw incidentIdentityConflict(
-      'controlled evaluation job cannot complete before its bound result',
-    );
-  }
-  const owned = {
-    jobId: Number(current.id),
-    jobType,
-    dedupeKey,
-    leaseToken,
-    cohortId: String(currentPayload.cohort_id || ''),
-    dispatchId: String(currentPayload.dispatch_id || ''),
-    releaseId: String(currentPayload.release_id || ''),
-    representativeAlertId: String(
-      currentPayload.representative_alert_id || '',
-    ),
-    stableGroupId: String(currentPayload.stable_group_id || ''),
-    stableGroupKey: currentPayload.stable_group_key,
-    agentRole: expectedRole,
-    expectedAssignedRoute: currentPayload.expected_assigned_route,
-    expectedReviewerRoute: currentPayload.expected_reviewer_route,
-    reviewerRequired: true,
-    reanalysisAttemptId,
-    resultCommitted: false,
-    analysisId: '',
-  };
-  return {action: status, key, owned};
+  return controlledJobTransitionAuthority.admit(payload);
 }
 
 function applyControlledJobTransition(admission, transition) {
-  if (!controlledEvaluationMode || !admission || !transition?.updated) return;
-  if (admission.action === 'claim') {
-    const claim = transition.claim;
-    const payload = claim?.payload;
-    if (
-      !claim
-      || !payload
-      || !transition.leaseToken
-      || Number(claim.job_id || 0) !== admission.exactClaim.jobId
-    ) {
-      throw incidentIdentityConflict(
-        'controlled evaluation claim receipt is incomplete',
-      );
-    }
-    // SQLite is the authority for the global lease. Replace any stale
-    // process-local reconstruction only after the claim transaction commits.
-    controlledEvaluationLeases.clear();
-    controlledEvaluationLeases.set(admission.key, {
-      jobId: Number(claim.job_id),
-      jobType: String(claim.job_type || ''),
-      dedupeKey: String(claim.dedupe_key || ''),
-      leaseToken: String(transition.leaseToken),
-      cohortId: String(payload.cohort_id || ''),
-      dispatchId: String(payload.dispatch_id || ''),
-      releaseId: String(payload.release_id || ''),
-      representativeAlertId: String(
-        payload.representative_alert_id || '',
-      ),
-      stableGroupId: String(payload.stable_group_id || ''),
-      stableGroupKey: String(payload.stable_group_key || ''),
-      agentRole: String(payload.agent_role || ''),
-      expectedAssignedRoute: String(payload.expected_assigned_route || ''),
-      expectedReviewerRoute: String(payload.expected_reviewer_route || ''),
-      reviewerRequired: payload.reviewer_required === true,
-      reanalysisAttemptId: String(
-        claim.reanalysis_attempt_id || '',
-      ),
-      resultCommitted: false,
-      analysisId: '',
-    });
-    return;
-  }
-  if (admission.action === 'processing') {
-    // Reconstruct the diagnostic mirror from SQLite after a successful
-    // heartbeat. SQLite, not process memory, remains the lease authority.
-    controlledEvaluationLeases.clear();
-    controlledEvaluationLeases.set(admission.key, admission.owned);
-    return;
-  }
-  if (['completed', 'failed'].includes(admission.action)) {
-    controlledEvaluationLeases.delete(admission.key);
-  }
+  return controlledJobTransitionAuthority.apply(admission, transition);
 }
 
 function controlledEvaluationClaimDigest(identity) {
@@ -8425,6 +8203,25 @@ const controlledJobIdentity = createControlledJobIdentity({
   controlledRoutePattern,
   controlledRouteModelIdentity,
 });
+const controlledJobTransitionAuthority = createControlledJobTransition({
+  controlledEvaluationMode,
+  safeString,
+  identityConflict: incidentIdentityConflict,
+  stableGroupIdPattern,
+  parseClaimIdentity: controlledJobClaimIdentity,
+  all,
+  get,
+  incidentReanalysisJobPayload,
+  validPinnedStableGroupKey,
+  cohortIdPattern,
+  dispatchIdPattern,
+  representativeAlertIdPattern,
+  controlledRuntimeReleaseId,
+  controlledRoutePattern,
+  controlledRouteModelIdentity,
+  incidentReanalysisAttemptId,
+});
+const controlledEvaluationLeases = controlledJobTransitionAuthority.leases;
 
 async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppression, campaign = null) {
   if (!inserted) return {status: 'skipped_duplicate'};
