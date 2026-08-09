@@ -1815,6 +1815,29 @@ def _query_repair():
     return repair
 
 
+def _query_observables():
+    _provider_routing()
+    from onion_sentinel.analysis.query import observables
+    return observables
+
+
+def _query_observable_validation_policy():
+    module = _query_observables()
+    return module.ValidationPolicy(
+        safe_domain_pattern=INVESTIGATION_SAFE_DOMAIN_RE,
+        safe_atom_pattern=INVESTIGATION_SAFE_ATOM_RE,
+        maximum_queries_per_round=MAX_INVESTIGATION_QUERIES_PER_ROUND,
+    )
+
+
+def _query_observable_validation_dependencies():
+    module = _query_observables()
+    return module.ValidationDependencies(
+        text=_query_text,
+        evidence_ref_component=_evidence_ref_component,
+    )
+
+
 def _query_deterministic_planning():
     _provider_routing()
     from onion_sentinel.analysis.query import deterministic_planning
@@ -5264,183 +5287,12 @@ def _validated_discovered_observables(
     limit: int = MAX_DISCOVERED_OBSERVABLES,
 ) -> list[dict[str, str]]:
     """Extract pivots only from provenance-bound broker hits or derived records."""
-    discovered: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    ip_keys = {
-        "source.ip", "destination.ip", "client.ip", "server.ip",
-        "host.ip", "dns.resolved_ip", "related.ip", "source.address",
-        "src_ip", "dst_ip", "source_ip", "destination_ip",
-    }
-    domain_keys = {
-        "dns.question.name", "dns.query.name", "domain", "query",
-        "dns_query", "query_name", "server_name", "sni",
-        "tls.server.name", "ssl.server_name", "http.virtual_host",
-        "quic.server_name",
-    }
-    host_keys = {
-        "host.name", "host.hostname", "host.id", "agent.id",
-        "agent.name", "related.hosts", "hostname", "computer_name",
-    }
-    user_keys = {
-        "user.name", "user.id", "related.user", "username", "user_name",
-    }
-
-    def visit(item: Any, evidence_base: str, path: tuple[str, ...] = ()) -> None:
-        if len(discovered) >= limit:
-            return
-        if isinstance(item, dict):
-            for key, child in list(item.items())[:128]:
-                visit(child, evidence_base, (*path, str(key).lower()))
-        elif isinstance(item, list):
-            for child in item[:200]:
-                visit(child, evidence_base, path)
-        else:
-            fields = {
-                ".".join(path[-count:])
-                for count in (1, 2, 3)
-                if len(path) >= count
-            }
-            kind = ""
-            if fields.intersection(ip_keys):
-                kind = "ips"
-            elif fields.intersection(domain_keys):
-                kind = "domains"
-            elif fields.intersection(host_keys):
-                kind = "hosts"
-            elif fields.intersection(user_keys):
-                kind = "users"
-            text = _query_text(item, 255).rstrip(".")
-            if not kind or not text:
-                return
-            if kind == "ips":
-                import ipaddress
-
-                try:
-                    text = str(ipaddress.ip_address(text))
-                except ValueError:
-                    return
-            elif kind == "domains":
-                if not INVESTIGATION_SAFE_DOMAIN_RE.fullmatch(text):
-                    return
-                text = text.lower()
-            elif not INVESTIGATION_SAFE_ATOM_RE.fullmatch(text):
-                return
-            key = (kind, text)
-            if key in seen:
-                return
-            seen.add(key)
-            field_path = ".".join(path)
-            discovered.append(
-                {
-                    "kind": kind,
-                    "value": text,
-                    "evidence_ref": (
-                        f"{evidence_base}#{_evidence_ref_component(field_path, 72)}"
-                    )[:256],
-                }
-            )
-
-    if not isinstance(results, list):
-        return discovered
-    for result in results:
-        if len(discovered) >= limit or not isinstance(result, dict):
-            break
-        backend = result.get("backend")
-        evidence = result.get("evidence")
-        status = result.get("status")
-        if (
-            not isinstance(evidence, dict)
-            or (
-                status != "ok"
-                and not (backend == "security_onion" and status == "partial")
-            )
-        ):
-            continue
-        trusted = result.get("trusted_query_audit")
-        trusted_items = trusted if isinstance(trusted, list) else []
-        trusted_by_id = {
-            str(item.get("query_id")): item
-            for item in trusted_items
-            if isinstance(item, dict)
-            and item.get("status") == "ok"
-        }
-        if backend == "security_onion":
-            response_digest = _query_text(
-                result.get("security_onion_response_digest"),
-                64,
-            )
-            evidence_results = evidence.get("results")
-            if (
-                not re.fullmatch(r"[a-f0-9]{64}", response_digest)
-                or evidence.get("controls_valid") is not True
-                or not isinstance(evidence_results, list)
-            ):
-                continue
-            for query_result in evidence_results[:MAX_INVESTIGATION_QUERIES_PER_ROUND]:
-                if not isinstance(query_result, dict) or query_result.get("status") != "ok":
-                    continue
-                query_id = _query_text(query_result.get("query_id"), 128)
-                audit = trusted_by_id.get(query_id)
-                query_digest = _query_text(
-                    audit.get("query_digest") if isinstance(audit, dict) else "",
-                    64,
-                )
-                if (
-                    not isinstance(audit, dict)
-                    or not re.fullmatch(r"[a-f0-9]{64}", query_digest)
-                    or query_result.get("query_digest") != query_digest
-                ):
-                    continue
-                hits = query_result.get("hits")
-                if not isinstance(hits, list):
-                    continue
-                for hit_index, hit in enumerate(hits[:200]):
-                    if not isinstance(hit, dict) or not isinstance(hit.get("source"), dict):
-                        continue
-                    evidence_base = (
-                        f"so:{response_digest[:20]}:"
-                        f"{_evidence_ref_component(query_id, 32)}:{query_digest[:20]}:"
-                        f"{_evidence_ref_component(hit.get('index'), 32)}:"
-                        f"{_evidence_ref_component(hit.get('id'), 32)}:"
-                        f"hit-{hit_index}"
-                    )
-                    visit(hit["source"], evidence_base)
-        elif backend == "pcap_zeek":
-            records = evidence.get("records")
-            query_id = _query_text(result.get("query_id"), 128)
-            audit = trusted_by_id.get(query_id)
-            query_digest = _query_text(evidence.get("query_digest"), 64)
-            result_digest = _query_text(evidence.get("result_digest"), 64)
-            source_ref = _query_text(evidence.get("evidence_ref"), 256)
-            if (
-                not isinstance(records, list)
-                or not isinstance(audit, dict)
-                or audit.get("query_digest") != query_digest
-                or audit.get("result_digest") != result_digest
-                or audit.get("evidence_ref") != source_ref
-                or not re.fullmatch(r"[a-f0-9]{64}", query_digest)
-                or not re.fullmatch(r"[a-f0-9]{64}", result_digest)
-            ):
-                continue
-            for record_index, record in enumerate(records[:200]):
-                if not isinstance(record, dict):
-                    continue
-                record_digest = hashlib.sha256(
-                    json.dumps(
-                        record,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        default=str,
-                    ).encode("utf-8")
-                ).hexdigest()
-                evidence_base = (
-                    f"pcap:{_evidence_ref_component(source_ref, 32)}:"
-                    f"{_evidence_ref_component(query_id, 32)}:"
-                    f"{query_digest[:16]}:{result_digest[:16]}:"
-                    f"record-{record_index}-{record_digest[:16]}"
-                )
-                visit(record, evidence_base)
-    return discovered
+    return _query_observables().validate(
+        results,
+        limit=limit,
+        policy=_query_observable_validation_policy(),
+        dependencies=_query_observable_validation_dependencies(),
+    )
 
 
 def investigation_query_prompt_error_category(reason: Any) -> str:

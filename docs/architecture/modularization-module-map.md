@@ -2230,9 +2230,12 @@ semantic deduplication, and authorization enforcement live under
 injected ports; the package returns an immutable admission result and cannot
 execute a query, call a model, access the Relay, or widen repair scope.
 Bounded observable promotion lives under
-`onion_sentinel.analysis.query.observables`. Only successful or partial rows
-from the trusted Security Onion and PCAP/Zeek broker classes reach the injected
-validator; existing and new values remain stable, deduplicated, and capped.
+`onion_sentinel.analysis.query.observables`. The module validates exact
+Security Onion response/query digests and PCAP/Zeek query/result/reference
+bindings before recursively recognizing approved IP, domain, host, and user
+fields. Only positive evidence rows can produce row-bound references; query
+filters and unbound values cannot become pivots. Existing and newly discovered
+values remain stable, deduplicated, and capped.
 Deterministic repair-stage artifacts live under
 `onion_sentinel.analysis.query.repair_stage`. The authoritative engine decision
 is converted into bounded audit metadata, exact pending scopes, a secret-safe
