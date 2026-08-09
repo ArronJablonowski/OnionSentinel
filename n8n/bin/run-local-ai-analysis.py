@@ -3382,16 +3382,6 @@ def normalize_investigation_query_window(
     )
 
 
-def project_investigation_parameters(
-    backend: str,
-    parameters: dict[str, Any],
-) -> tuple[dict[str, Any], list[str]]:
-    return _query_request().project_parameters(
-        backend, parameters, policy=_query_request_policy(),
-        error_type=InvestigationQueryError,
-    )
-
-
 def _normalize_investigation_backend_parameters(
     backend: str, parameters: dict[str, Any], purpose: str,
     time_envelope: Any, authorization_context: Any,
@@ -4103,56 +4093,9 @@ def _compact_prompt_trusted_query_audit(
     )
 
 
-def _bounded_investigation_prompt_fact(
-    value: Any,
-    *,
-    maximum_bytes: int = 256,
-) -> str:
-    return _query_prompt_facts().bounded(
-        value, maximum_bytes=maximum_bytes
-    )
-
-
 def _canonical_investigation_count(value: Any) -> int | None:
     return _query_prompt_facts().canonical_count(
         value, policy=_query_prompt_facts_policy()
-    )
-
-
-def _investigation_provenance_count(
-    containers: tuple[dict[str, Any], ...],
-    keys: tuple[str, ...],
-) -> int | None:
-    return _query_prompt_facts().provenance_count(
-        containers, keys, policy=_query_prompt_facts_policy()
-    )
-
-
-def _investigation_query_semantics(
-    containers: tuple[dict[str, Any], ...],
-) -> str:
-    return _query_prompt_facts().query_semantics(containers)
-
-
-def _investigation_result_summary(
-    containers: tuple[dict[str, Any], ...],
-    *,
-    status: str,
-    returned: int | None,
-) -> str:
-    return _query_prompt_facts().result_summary(
-        containers,
-        status=status,
-        returned=returned,
-        policy=_query_prompt_facts_policy(),
-    )
-
-
-def _investigation_prompt_provenance_rows(
-    rounds: list[dict[str, Any]],
-) -> list[dict[str, Any]] | None:
-    return _query_prompt_provenance().rows(
-        rounds, policy=_query_prompt_provenance_policy()
     )
 
 
@@ -4218,16 +4161,6 @@ INVESTIGATION_QUERY_NONEXECUTION_STATUSES = frozenset(
 )
 
 
-def _investigation_tool_call_bindings(
-    round_result: dict[str, Any],
-) -> list[dict[str, Any]]:
-    return _query_audit().tool_call_bindings(
-        round_result,
-        policy=_query_audit_policy(),
-        dependencies=_query_audit_dependencies(),
-    )
-
-
 def investigation_query_binding_summary(
     bindings: list[dict[str, Any]],
     *,
@@ -4277,15 +4210,6 @@ def investigation_request_semantic_digest(request: dict[str, Any]) -> str:
     """Identify an equivalent execution independently of model labels/purpose."""
     return _query_semantic_identity().digest(
         request, _query_semantic_identity_dependencies(),
-    )
-
-
-def recover_repair_observables_from_trusted_catalog(
-    value: Any,
-    authorization_context: Any,
-) -> dict[str, list[str]] | None:
-    return _query_repair().recover_observables(
-        value, authorization_context
     )
 
 
