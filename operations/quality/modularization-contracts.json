@@ -39,6 +39,15 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_application.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_application.py",
+      "required_symbols": [
+        "SchedulerApplicationSources",
+        "run_scheduler_application"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_claim.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_claim.py",

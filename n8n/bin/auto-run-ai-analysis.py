@@ -124,6 +124,10 @@ from scheduler_runner_invocation import (
     analysis_command as build_analysis_command,
     invoke_analysis_runner,
 )
+from scheduler_application import (
+    SchedulerApplicationSources,
+    run_scheduler_application,
+)
 from scheduler_controlled_payload import (
     ControlledPayloadPolicy,
     ControlledPayloadSources,
@@ -157,7 +161,6 @@ from scheduler_execution import (
 )
 from scheduler_drain import (
     SchedulerDrainSources,
-    SchedulerDrainState,
     select_scheduler_work,
 )
 from scheduler_job_reporting import (
@@ -193,7 +196,6 @@ from scheduler_startup import (
     prepare_scheduler_run,
 )
 from scheduler_settlement import (
-    SchedulerSettlement,
     SchedulerSettlementSources,
     settle_scheduler_run,
 )
@@ -1763,72 +1765,27 @@ def scheduler_worker_sources() -> SchedulerWorkerSources:
 
 
 def main() -> int:
-    args = parse_args()
-    startup_sources = scheduler_startup_sources()
-    preflight = prepare_scheduler_run(
-        startup_sources,
-        args,
-        drain_file=getattr(args, "drain_file", DEFAULT_DRAIN),
-    )
-    if not preflight.proceed:
-        return preflight.exit_code
-    controlled_evaluation_dir = preflight.controlled_evaluation_dir
-    launch_levels = preflight.launch_levels
-
-    args.lock_file.parent.mkdir(parents=True, exist_ok=True)
-    with args.lock_file.open("w") as lock_handle:
-        try:
-            fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print(f"{project_now()} another AI analysis run is already active")
-            return 0
-
-        initialization = initialize_scheduler_run(
-            startup_sources,
-            args,
-            controlled_evaluation_dir=controlled_evaluation_dir,
-        )
-        if not initialization.proceed:
-            return 0
-        indexed_mode = initialization.indexed_mode
-        drain_state = SchedulerDrainState()
-        while True:
-            selection = select_scheduler_work(
-                scheduler_drain_sources(),
-                args,
-                drain_state,
-                indexed_mode=indexed_mode,
-                launch_levels=launch_levels,
-                drain_file=getattr(args, "drain_file", DEFAULT_DRAIN),
-            )
-            if selection.disposition != "selected":
-                break
-            if process_scheduler_selection(
-                scheduler_worker_sources(),
-                args,
-                drain_state,
-                selection,
-                indexed_mode=indexed_mode,
-                controlled_evaluation_dir=controlled_evaluation_dir,
-            ):
-                break
-
-        return settle_scheduler_run(
-            scheduler_settlement_sources(),
-            args,
-            SchedulerSettlement(
-                analyzed_count=drain_state.analyzed_count,
-                indexed_mode=indexed_mode,
-                controlled_evaluation=controlled_evaluation_dir is not None,
-                controlled_owned_job_failed=(
-                    drain_state.controlled_owned_job_failed
-                ),
-                controlled_failure_detail=drain_state.controlled_failure_detail,
-                controlled_failure_group_id=(
-                    drain_state.controlled_failure_group_id
-                ),
+    return run_scheduler_application(
+        SchedulerApplicationSources(
+            parse_args=parse_args,
+            startup_sources=scheduler_startup_sources,
+            prepare_run=prepare_scheduler_run,
+            initialize_run=initialize_scheduler_run,
+            drain_sources=scheduler_drain_sources,
+            select_work=select_scheduler_work,
+            worker_sources=scheduler_worker_sources,
+            process_selection=process_scheduler_selection,
+            settlement_sources=scheduler_settlement_sources,
+            settle_run=settle_scheduler_run,
+            acquire_nonblocking_lock=lambda handle: fcntl.flock(
+                handle,
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
             ),
+            emit=lambda message: print(message, flush=True),
+            now=project_now,
+            default_drain_file=DEFAULT_DRAIN,
         )
+    )
 
 
 if __name__ == "__main__":

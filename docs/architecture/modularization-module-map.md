@@ -253,6 +253,12 @@ reviewer, and resource-monitor test modules until those tests migrate.
 The launchd-facing wrapper keeps the current filename, arguments, lock files,
 wake files, provider lanes, and exit semantics.
 
+`scheduler_application.py` owns the preflight-to-settlement application flow:
+single-process nonblocking lock acquisition, locked initialization, repeated
+selection and processing, controlled-run state projection, and final
+settlement. The legacy `main()` now only binds current facade collaborators,
+so tests and operational overrides retain their existing interception points.
+
 `scheduler_cli.py` now owns the launchd-facing argument schema, runtime path
 options, lane and queue controls, numeric bounds, and fail-closed controlled-
 evaluation identity validation. `auto-run-ai-analysis.py` retains a thin
