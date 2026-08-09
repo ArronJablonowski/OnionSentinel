@@ -27,6 +27,10 @@ VERSIONED_QUERY_FILES = (
     "collect-investigation-pivots.py",
 )
 HARDENED_BUILDER = "build-ai-investigation-prompt.py"
+HARDENED_BUILDER_DEPENDENCIES = (
+    "prompt_builder_cli.py",
+    "prompt_incident_evidence_projection.py",
+)
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_RUNTIME_FILE_BYTES = 2 * 1024 * 1024
 
@@ -141,11 +145,32 @@ def validate_hardened_builder(path: Path) -> None:
         raise QueryRuntimeInstallError(
             "hardened prompt builder does not import the adjacent contract authority"
         )
-    source = _read_regular_file(
+    imported_dependencies = {
+        node.module
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and isinstance(node.module, str)
+    }
+    required_dependencies = {
+        Path(name).stem for name in HARDENED_BUILDER_DEPENDENCIES
+    }
+    if not required_dependencies.issubset(imported_dependencies):
+        raise QueryRuntimeInstallError(
+            "hardened prompt builder does not import its adjacent modules"
+        )
+    for name in HARDENED_BUILDER_DEPENDENCIES:
+        _module_tree(path.parent / name)
+    builder_source = _read_regular_file(
         path,
         maximum_bytes=MAX_RUNTIME_FILE_BYTES,
     ).decode("utf-8")
-    if "--blind-reanalysis" not in source or "blind_model_authored_context" not in source:
+    cli_source = _read_regular_file(
+        path.parent / "prompt_builder_cli.py",
+        maximum_bytes=MAX_RUNTIME_FILE_BYTES,
+    ).decode("utf-8")
+    if (
+        "--blind-reanalysis" not in cli_source
+        or "blind_model_authored_context" not in builder_source
+    ):
         raise QueryRuntimeInstallError(
             "prompt builder is missing blind-reanalysis hardening"
         )
@@ -232,6 +257,8 @@ def install_query_runtime(
         action = "installed_explicit_v2"
 
     validate_hardened_builder(current_source / HARDENED_BUILDER)
+    for name in HARDENED_BUILDER_DEPENDENCIES:
+        _atomic_install(current_source / name, runtime_bin / name)
     _atomic_install(
         current_source / HARDENED_BUILDER,
         runtime_bin / HARDENED_BUILDER,

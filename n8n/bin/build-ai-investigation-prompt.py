@@ -49,6 +49,11 @@ from prompt_incident_evidence_projection import (
     project_incident_evidence_osquery_rows as project_evidence_osquery_rows,
     reject_preprojected_incident_evidence_source as reject_preprojected_source,
 )
+from prompt_builder_cli import (
+    PromptBuilderCliDefaults,
+    PromptBuilderCliSources,
+    parse_prompt_builder_args,
+)
 import investigation_query_contract as INVESTIGATION_CONTRACT
 
 
@@ -258,97 +263,30 @@ def reject_preprojected_incident_evidence_source(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build an AI investigation prompt package")
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="Path to alert-store SQLite DB")
-    parser.add_argument("--rollup-dir", type=Path, default=DEFAULT_ROLLUPS, help="Daily rollup directory")
-    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT, help="Output directory for prompt packages")
-    parser.add_argument("--alert-id", help="Exact alert_id to package")
-    parser.add_argument("--levels", default="critical,high,medium", help="Comma-separated levels when alert-id is omitted")
-    parser.add_argument("--hours", type=int, default=24, help="Lookback when alert-id is omitted")
-    parser.add_argument("--related-limit", type=int, default=15, help="Maximum related alerts to include")
-    parser.add_argument("--correlation-limit", type=int, default=8, help="Maximum scored correlation candidates to include")
-    parser.add_argument("--correlation-min-score", type=int, default=15, help="Minimum deterministic correlation score")
-    parser.add_argument("--rollup-bytes", type=int, default=12000, help="Maximum bytes from latest daily rollup")
-    parser.add_argument("--system-prompt-file", type=Path, default=DEFAULT_SYSTEM_PROMPT_FILE, help="Editable SOC Analyst system prompt file")
-    parser.add_argument(
-        "--second-opinion-prompt-file",
-        type=Path,
-        default=DEFAULT_SECOND_OPINION_PROMPT_FILE,
-        help="Independent SOC Analyst reviewer system prompt file",
-    )
-    parser.add_argument("--agent-memory-file", type=Path, default=DEFAULT_SOC_ANALYST_MEMORY_FILE, help="SOC Analyst Markdown memory file")
-    parser.add_argument("--shared-memory-file", type=Path, default=DEFAULT_SHARED_AGENT_MEMORY_FILE, help="Shared Cyber Security Agent Markdown memory file")
-    parser.add_argument("--pcap-analysis-dir", type=Path, default=DEFAULT_PCAP_ANALYSIS_DIR, help="Parsed Zeek/TShark PCAP evidence directory")
-    parser.add_argument("--analysis-dir", type=Path, default=DEFAULT_AI_ANALYSIS_DIR, help="Prior local AI analysis directory")
-    parser.add_argument(
-        "--detection-playbooks",
-        type=Path,
-        default=DEFAULT_DETECTION_PLAYBOOKS_FILE,
-        help="Versioned deterministic detection-validation playbook registry",
-    )
-    parser.add_argument(
-        "--investigation-skills",
-        type=Path,
-        default=DEFAULT_INVESTIGATION_SKILLS_FILE,
-        help="Versioned read-only investigation skill registry",
-    )
-    parser.add_argument(
-        "--asset-inventory-file",
-        type=Path,
-        default=DEFAULT_ASSET_INVENTORY_FILE,
-        help="Operator-owned time-aware asset inventory",
-    )
-    parser.add_argument("--incident-evidence-file", type=Path, help="Trusted restricted Security Onion incident evidence artifact")
-    parser.add_argument(
-        "--agent-role",
-        choices=sorted(MEMORY_ROLES),
-        default="soc-analyst",
-        help="Cyber Security Agent role that will consume this evidence package",
-    )
-    parser.add_argument("--memory-bytes", type=int, default=8000, help="Maximum bytes to include from each agent memory file")
-    parser.add_argument("--pcap-analysis-limit", type=int, default=3, help="Maximum parsed PCAP evidence artifacts to include")
-    parser.add_argument(
-        "--max-package-bytes",
-        type=int,
-        default=DEFAULT_MAX_PACKAGE_BYTES,
-        help="Hard serialized prompt-package limit",
-    )
-    parser.add_argument("--include-tests", action="store_true", help="Include validation/test alerts")
-    parser.add_argument(
-        "--blind-reanalysis",
-        action="store_true",
-        help=(
-            "Build a rerun package without prior AI conclusions, model-authored "
-            "correlations, or unconfirmed model-observed memory"
+    return parse_prompt_builder_args(
+        PromptBuilderCliDefaults(
+            db=DEFAULT_DB,
+            rollup_dir=DEFAULT_ROLLUPS,
+            out_dir=DEFAULT_OUT,
+            system_prompt_file=DEFAULT_SYSTEM_PROMPT_FILE,
+            second_opinion_prompt_file=DEFAULT_SECOND_OPINION_PROMPT_FILE,
+            agent_memory_dir=DEFAULT_AGENT_MEMORY_DIR,
+            agent_memory_file=DEFAULT_SOC_ANALYST_MEMORY_FILE,
+            shared_memory_file=DEFAULT_SHARED_AGENT_MEMORY_FILE,
+            pcap_analysis_dir=DEFAULT_PCAP_ANALYSIS_DIR,
+            analysis_dir=DEFAULT_AI_ANALYSIS_DIR,
+            detection_playbooks=DEFAULT_DETECTION_PLAYBOOKS_FILE,
+            investigation_skills=DEFAULT_INVESTIGATION_SKILLS_FILE,
+            asset_inventory_file=DEFAULT_ASSET_INVENTORY_FILE,
+            max_package_bytes=DEFAULT_MAX_PACKAGE_BYTES,
+        ),
+        PromptBuilderCliSources(
+            memory_roles=frozenset(MEMORY_ROLES),
+            role_prompt_file=role_prompt_file,
+            role_second_opinion_prompt_file=role_second_opinion_prompt_file,
+            role_memory_file=role_memory_file,
         ),
     )
-    parser.add_argument("--stdout", action="store_true", help="Print package JSON instead of writing a file")
-    args = parser.parse_args()
-    if args.hours <= 0:
-        parser.error("--hours must be positive")
-    if args.related_limit <= 0:
-        parser.error("--related-limit must be positive")
-    if args.correlation_limit <= 0:
-        parser.error("--correlation-limit must be positive")
-    if args.correlation_min_score < 0 or args.correlation_min_score > 100:
-        parser.error("--correlation-min-score must be between 0 and 100")
-    if args.rollup_bytes <= 0:
-        parser.error("--rollup-bytes must be positive")
-    if args.memory_bytes <= 0:
-        parser.error("--memory-bytes must be positive")
-    if args.pcap_analysis_limit <= 0:
-        parser.error("--pcap-analysis-limit must be positive")
-    if args.max_package_bytes < 256 * 1024:
-        parser.error("--max-package-bytes must be at least 262144")
-    if args.agent_role != "soc-analyst":
-        config_dir = DEFAULT_SYSTEM_PROMPT_FILE.parent
-        if args.system_prompt_file == DEFAULT_SYSTEM_PROMPT_FILE:
-            args.system_prompt_file = role_prompt_file(config_dir, args.agent_role)
-        if args.second_opinion_prompt_file == DEFAULT_SECOND_OPINION_PROMPT_FILE:
-            args.second_opinion_prompt_file = role_second_opinion_prompt_file(config_dir, args.agent_role)
-        if args.agent_memory_file == DEFAULT_SOC_ANALYST_MEMORY_FILE:
-            args.agent_memory_file = role_memory_file(DEFAULT_AGENT_MEMORY_DIR, args.agent_role)
-    return args
 
 
 def project_now() -> str:

@@ -28,6 +28,16 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_builder_cli.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_builder_cli.py",
+      "required_symbols": [
+        "PromptBuilderCliDefaults",
+        "PromptBuilderCliSources",
+        "parse_prompt_builder_args"
+      ]
+    },
+    {
       "path": "n8n/bin/auto-run-ai-analysis.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/auto-run-ai-analysis.py",

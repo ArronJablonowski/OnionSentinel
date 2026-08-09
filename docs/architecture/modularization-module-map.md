@@ -516,6 +516,12 @@ canonical digests and byte counts, accumulates projection reasons, and rejects
 collector artifacts that arrive preprojected. The legacy builder retains thin
 delegates so package construction and existing integrations keep the same API.
 
+`prompt_builder_cli.py` owns the prompt builder's stable command-line schema,
+numeric safety bounds, agent-role allowlist, and role-specific default prompt
+and memory paths. The legacy `parse_args()` constructs defaults and callbacks
+at call time, preserving operator overrides while removing parser policy from
+the evidence and package assembly module.
+
 ## Portal Runtime
 
 Current owner: `onion-sentinel-dashboard/report_portal.py` (14,366 lines).
