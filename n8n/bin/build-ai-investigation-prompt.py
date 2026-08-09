@@ -63,6 +63,13 @@ from prompt_authorization_context import (
     authorized_activity_context as project_authorized_activity_context,
     canonical_authorized_activity_entry as canonical_authorization_entry,
 )
+from prompt_pcap_evidence import (
+    PcapEvidenceRequest,
+    PcapEvidenceSources,
+    build_pcap_evidence_context,
+    compact_pcap_analysis as project_pcap_analysis,
+    pcap_request_context as project_pcap_request_context,
+)
 from prompt_correlation_context import (
     CorrelationContextSources,
     build_correlated_alert_context,
@@ -649,88 +656,8 @@ def prior_analysis_context(
 
 
 def compact_pcap_analysis(record: dict) -> dict:
-    """Keep PCAP evidence prompt-safe by including summaries, not packet bodies."""
-    zeek = record.get("zeek") if isinstance(record.get("zeek"), dict) else {}
-    tshark = record.get("tshark") if isinstance(record.get("tshark"), dict) else {}
-    request = record.get("request") if isinstance(record.get("request"), dict) else {}
-    local_query_index: dict[str, list] = {}
-    for parser in (zeek, tshark):
-        index = parser.get("_local_query_index") if isinstance(parser.get("_local_query_index"), dict) else {}
-        for operation, values in index.items():
-            if not isinstance(values, list):
-                continue
-            current = local_query_index.setdefault(str(operation), [])
-            current.extend(item for item in values if isinstance(item, dict))
-            del current[192:]
-    return {
-        "analysis_artifact": record.get("_analysis_path"),
-        "evidence_relationship": record.get("_evidence_relationship"),
-        "generated_at": record.get("generated_at"),
-        "request_id": request.get("request_id"),
-        "alert_id": request.get("alert_id"),
-        "group_id": request.get("group_id"),
-        "artifact_state": record.get("artifact_state"),
-        "coverage": record.get("coverage") if isinstance(record.get("coverage"), dict) else {},
-        "evidence_security": record.get("evidence_security") if isinstance(record.get("evidence_security"), dict) else {},
-        "pcap_files": [
-            {
-                "name": item.get("name"),
-                "size_bytes": item.get("size_bytes"),
-                "sha256": item.get("sha256"),
-            }
-            for item in (record.get("pcap_files") if isinstance(record.get("pcap_files"), list) else [])[:5]
-            if isinstance(item, dict)
-        ],
-        "tool_paths": record.get("tool_paths") if isinstance(record.get("tool_paths"), dict) else {},
-        "zeek": {
-            "available": bool(zeek.get("available")),
-            "reason": zeek.get("reason"),
-            "record_counts": zeek.get("record_counts") if isinstance(zeek.get("record_counts"), dict) else {},
-            "coverage": zeek.get("coverage") if isinstance(zeek.get("coverage"), dict) else {},
-            "sampling": zeek.get("sampling") if isinstance(zeek.get("sampling"), dict) else {},
-            "top_connections": zeek.get("top_connections") if isinstance(zeek.get("top_connections"), list) else [],
-            "dns_queries": zeek.get("dns_queries") if isinstance(zeek.get("dns_queries"), list) else [],
-            "tls_sni": zeek.get("tls_sni") if isinstance(zeek.get("tls_sni"), list) else [],
-            "http_hosts": zeek.get("http_hosts") if isinstance(zeek.get("http_hosts"), list) else [],
-            "files": zeek.get("files") if isinstance(zeek.get("files"), list) else [],
-            "notices": zeek.get("notices") if isinstance(zeek.get("notices"), list) else [],
-            "weird": zeek.get("weird") if isinstance(zeek.get("weird"), list) else [],
-        },
-        "tshark": {
-            "available": bool(tshark.get("available")),
-            "reason": tshark.get("reason"),
-            "coverage": tshark.get("coverage") if isinstance(tshark.get("coverage"), dict) else {},
-            "sampling": tshark.get("sampling") if isinstance(tshark.get("sampling"), dict) else {},
-            "protocol_counts": (tshark.get("protocol_counts") if isinstance(tshark.get("protocol_counts"), list) else [])[:20],
-            "top_conversations": (tshark.get("top_conversations") if isinstance(tshark.get("top_conversations"), list) else [])[:20],
-            "icmp_size_review": tshark.get("icmp_size_review") if isinstance(tshark.get("icmp_size_review"), dict) else {},
-            "icmp_semantics": tshark.get("icmp_semantics") if isinstance(tshark.get("icmp_semantics"), dict) else {},
-            "dns_activity": tshark.get("dns_activity") if isinstance(tshark.get("dns_activity"), dict) else {},
-            "http_user_agents": tshark.get("http_user_agents") if isinstance(tshark.get("http_user_agents"), dict) else {},
-            "tls_versions": tshark.get("tls_versions") if isinstance(tshark.get("tls_versions"), dict) else {},
-            "geoip": tshark.get("geoip") if isinstance(tshark.get("geoip"), dict) else {},
-            "packet_samples": (tshark.get("packet_samples") if isinstance(tshark.get("packet_samples"), list) else [])[:20],
-            "samples": [
-                {
-                    "pcap": Path(str(sample.get("pcap") or "capture")).name,
-                    "protocol_hierarchy": str(sample.get("protocol_hierarchy") or "")[:4000],
-                    "conversations": str(sample.get("conversations") or "")[:4000],
-                    "field_sample_tsv": str(sample.get("field_sample_tsv") or "")[:4000],
-                }
-                for sample in (tshark.get("samples") if isinstance(tshark.get("samples"), list) else [])[:2]
-                if isinstance(sample, dict)
-            ],
-        },
-        "detection_context": (
-            record.get("detection_context")
-            if isinstance(record.get("detection_context"), dict)
-            else {}
-        ),
-        # This is a local runtime capability index, not model context. The LLM
-        # runner removes it from every model request and exposes it only through
-        # the fixed read-only PCAP query operations.
-        "_local_query_index": local_query_index,
-    }
+    """Compatibility delegate for bounded PCAP artifact projection."""
+    return project_pcap_analysis(record)
 
 
 def compact_public_enrichment_record(record: dict) -> dict:
@@ -841,154 +768,31 @@ def public_enrichment_context(conn: sqlite3.Connection, selected: sqlite3.Row, l
     }
 
 
+def _pcap_evidence_sources() -> PcapEvidenceSources:
+    return PcapEvidenceSources(
+        row_value=sqlite_value,
+        query_rows=rows,
+        load_json_bounded=load_json_bounded,
+    )
+
+
 def pcap_request_context(conn: sqlite3.Connection, selected: sqlite3.Row) -> list[dict]:
-    alert_id = str(selected["alert_id"] or "")
-    stable_group_id = str(
-        sqlite_value(selected, "stable_group_id") or ""
-    ).strip()
-    try:
-        found = rows(
-            conn,
-            """
-            SELECT p.*,
-                   CASE
-                     WHEN p.alert_id = ? THEN 'exact_alert'
-                     ELSE 'stable_group_related'
-                   END AS evidence_relationship
-            FROM pcap_requests p
-            LEFT JOIN alert_group_alias a
-              ON a.legacy_group_id = p.group_id
-            WHERE p.alert_id = ?
-               OR (
-                 ? <> ''
-                 AND COALESCE(a.stable_group_id, p.group_id) = ?
-               )
-            ORDER BY created_at DESC
-            LIMIT 10
-            """,
-            [alert_id, alert_id, stable_group_id, stable_group_id],
-        )
-    except sqlite3.Error:
-        # Disaster-recovery and test databases can predate stable group
-        # aliases. Preserve the exact-alert evidence path in that case.
-        try:
-            found = rows(
-                conn,
-                """
-                SELECT p.*, 'exact_alert' AS evidence_relationship
-                FROM pcap_requests p
-                WHERE p.alert_id = ?
-                ORDER BY created_at DESC
-                LIMIT 10
-                """,
-                [alert_id],
-            )
-        except sqlite3.Error:
-            return []
-    return [dict(item) for item in found]
+    """Compatibility delegate for exact and related PCAP requests."""
+    return project_pcap_request_context(_pcap_evidence_sources(), conn, selected)
 
 
 def pcap_evidence_context(conn: sqlite3.Connection, selected: sqlite3.Row, analysis_dir: Path, limit: int) -> dict:
-    requests = pcap_request_context(conn, selected)
-    request_ids = [
-        str(item.get("request_id") or "")
-        for item in requests
-        if str(item.get("request_id") or "")
-    ]
-    request_id_set = set(request_ids)
-    request_order = {
-        request_id: position
-        for position, request_id in enumerate(request_ids)
-    }
-    request_relationships = {
-        str(item.get("request_id") or ""): str(
-            item.get("evidence_relationship") or "exact_alert"
-        )
-        for item in requests
-        if str(item.get("request_id") or "")
-    }
-    alert_id = str(selected["alert_id"])
-    evidence = []
-    loaded_paths: set[Path] = set()
-    if analysis_dir.exists():
-        # Broker artifacts use request_id-derived names, so normal lookups are
-        # direct and O(number of requests) instead of O(all historical PCAPs).
-        direct_paths = [
-            analysis_dir / f"{re.sub(r'[^A-Za-z0-9_.-]+', '-', request_id).strip('-')[:140]}-pcap-analysis.json"
-            for request_id in request_ids
-            if request_id
-        ]
-        candidates = [path for path in direct_paths if path.exists()]
-        # A bounded legacy scan retains compatibility with manually named or
-        # pre-request-id artifacts without reintroducing an unbounded walk.
-        if len(candidates) < limit:
-            try:
-                legacy = sorted(
-                    analysis_dir.glob("*-pcap-analysis.json"),
-                    key=lambda item: item.stat().st_mtime,
-                    reverse=True,
-                )[:LEGACY_ARTIFACT_SCAN_LIMIT]
-            except OSError:
-                legacy = []
-            candidates.extend(path for path in legacy if path not in candidates)
-        for path in candidates:
-            if path in loaded_paths:
-                continue
-            loaded_paths.add(path)
-            try:
-                record = load_json_bounded(path)
-            except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
-                continue
-            if not isinstance(record, dict):
-                continue
-            request = record.get("request") if isinstance(record.get("request"), dict) else {}
-            if request.get("alert_id") != alert_id and request.get("request_id") not in request_id_set:
-                continue
-            record["_analysis_path"] = str(path)
-            record["_evidence_relationship"] = request_relationships.get(
-                str(request.get("request_id") or ""),
-                "exact_alert",
-            )
-            evidence.append(compact_pcap_analysis(record))
-            if len(evidence) >= limit:
-                break
-    # Exact selected-alert packet evidence must survive later package-budget
-    # truncation ahead of merely related historical captures.  The secondary
-    # key preserves the database's newest-request-first order.
-    evidence.sort(
-        key=lambda item: (
-            0
-            if item.get("evidence_relationship") == "exact_alert"
-            else 1,
-            request_order.get(
-                str(item.get("request_id") or ""),
-                len(request_order),
-            ),
-        )
+    """Compatibility delegate for bounded prompt-facing PCAP evidence."""
+    return build_pcap_evidence_context(
+        _pcap_evidence_sources(),
+        PcapEvidenceRequest(
+            connection=conn,
+            selected=selected,
+            analysis_dir=analysis_dir,
+            evidence_limit=limit,
+            legacy_scan_limit=LEGACY_ARTIFACT_SCAN_LIMIT,
+        ),
     )
-    return {
-        "pcap_requests": requests,
-        "parsed_evidence": evidence,
-        "exact_alert_evidence_count": sum(
-            1
-            for item in evidence
-            if item.get("evidence_relationship") == "exact_alert"
-        ),
-        "stable_group_related_evidence_count": sum(
-            1
-            for item in evidence
-            if item.get("evidence_relationship") == "stable_group_related"
-        ),
-        "analysis_dir": str(analysis_dir),
-        "usage_guidance": (
-            "Use parsed_evidence when present. Zeek is the primary structured network evidence; "
-            "TShark corroborates packet-level conversations and protocol hierarchy. If parsed_evidence is empty, "
-            "treat PCAP as unavailable and list it as an evidence gap instead of inferring packet contents. "
-            "Evidence marked exact_alert can support the selected event. Evidence marked stable_group_related "
-            "is historical context for a related group event and must not be represented as packet proof for "
-            "the selected alert."
-        ),
-    }
 
 
 def select_alert(conn: sqlite3.Connection, args: argparse.Namespace) -> sqlite3.Row:

@@ -156,6 +156,18 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_pcap_evidence.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_pcap_evidence.py",
+      "required_symbols": [
+        "PcapEvidenceRequest",
+        "PcapEvidenceSources",
+        "build_pcap_evidence_context",
+        "compact_pcap_analysis",
+        "pcap_request_context"
+      ]
+    },
+    {
       "path": "n8n/bin/auto-run-ai-analysis.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/auto-run-ai-analysis.py",

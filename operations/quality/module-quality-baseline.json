@@ -16,7 +16,7 @@
       "max_lines": 997
     },
     "n8n/bin/build-ai-investigation-prompt.py": {
-      "max_lines": 1753
+      "max_lines": 1557
     },
     "n8n/bin/collect-software-inventory.py": {
       "max_lines": 1799
@@ -117,15 +117,8 @@
     "n8n/bin/build-ai-investigation-prompt.py::compact_alert": {
       "max_complexity": 22
     },
-    "n8n/bin/build-ai-investigation-prompt.py::compact_pcap_analysis": {
-      "max_complexity": 45
-    },
     "n8n/bin/build-ai-investigation-prompt.py::exact_detection_group_rows": {
       "max_complexity": 19
-    },
-    "n8n/bin/build-ai-investigation-prompt.py::pcap_evidence_context": {
-      "max_complexity": 35,
-      "max_lines": 101
     },
     "n8n/bin/build-ai-investigation-prompt.py::public_enrichment_context": {
       "max_complexity": 25
@@ -882,5 +875,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "98ec5e8cb1ba68e9cc0acf3332f201f5cb21ac5c"
+  "source_release": "7bce228b1b5f6f57e5b0edf7c8b4c9fc11457188"
 }

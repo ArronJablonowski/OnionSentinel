@@ -605,6 +605,15 @@ grounding by digest, validates every incident-evidence projection, prioritizes
 exact-alert PCAP evidence, and fails closed if the package still exceeds its
 budget. The builder facade injects evidence validators and digest policy.
 
+`prompt_pcap_evidence.py` owns bounded prompt-facing PCAP projection. It
+classifies alert-store requests as exact-alert or stable-group-related with an
+exact-alert fallback for legacy schemas, tries sanitized request-ID artifact
+paths before a bounded compatibility scan, rejects unrelated artifacts,
+prioritizes exact evidence, and stops at the configured evidence limit. Zeek,
+TShark, sample text, file metadata, and local query indexes have explicit caps;
+raw packet bodies and broker messages are never projected. Database queries,
+row access, and bounded JSON loading remain injected by the builder facade.
+
 `prompt_response_contract.py` owns the model-visible instruction and response
 schema contract. Static grounding, factored verdict fields, hypothesis and
 memory shapes, governed query-request schema, and the incident-response report
