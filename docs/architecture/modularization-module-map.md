@@ -752,6 +752,12 @@ tool bindings. It explicitly allowlists scalar provenance fields and excludes
 query text and result rows. The cohort runner delegates execution-binding proof
 to the canonical `cohort_evaluation_query_audit.py` implementation.
 
+`operations/cohort_execution_proof_service.py` composes fresh-result admission,
+single-trace evaluation, skill attestation, trace/route integrity, model and
+reviewer proof, read-only tool/query binding, failure aggregation, and sealed
+public proof rendering. Trace loading and query binding remain injected so the
+runner can preserve deterministic failure-path testing and strict I/O control.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

@@ -118,6 +118,10 @@ from cohort_evaluation_query_audit import (
     QueryAuditPolicy,
     query_audit_execution_binding as normalize_query_audit_binding,
 )
+from cohort_execution_proof_service import (
+    ExecutionProofPolicy,
+    build_execution_proof,
+)
 
 
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -2300,6 +2304,19 @@ def _expected_task_kind(role: str, dispatch_kind: str) -> str:
     return resolve_expected_task_kind(role, dispatch_kind, CohortError)
 
 
+def _execution_proof_policy() -> ExecutionProofPolicy:
+    return ExecutionProofPolicy(
+        error=CohortError,
+        parse_timestamp=_parse_timestamp,
+        sha256_pattern=SHA256_RE,
+        skill_id_pattern=SKILL_ID_RE,
+        maximum_selected_skills=MAX_ATTESTED_INVESTIGATION_SKILLS,
+        model_call_contract_schema=MODEL_CALL_CONTRACT_SCHEMA,
+        maximum_model_calls=MAX_RUNTIME_MODEL_CALLS,
+        sha256_value=sha256_value,
+    )
+
+
 def _harness_execution_proof(
     *,
     harness_database_path: Path,
@@ -2307,160 +2324,15 @@ def _harness_execution_proof(
     member: Mapping[str, Any],
     monitor: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Fail closed unless one fresh result has one valid successful trace."""
-
-    result_execution = evaluate_result_execution(
-        manifest,
-        member,
-        monitor,
-        ResultExecutionPolicy(
-            cohort_error=CohortError,
-            parse_timestamp=_parse_timestamp,
-        ),
-    )
-    role = result_execution.role
-    contract = result_execution.contract
-    dispatch = result_execution.dispatch
-    analysis = result_execution.analysis
-    analysis_id = result_execution.analysis_id
-    expected_route = result_execution.expected_route
-    expected_reviewer_route = result_execution.expected_reviewer_route
-    dispatch_started = result_execution.dispatch_started
-    analysis_generated = result_execution.analysis_generated
-    failures = list(result_execution.failures)
-
-    trace_evaluator = _load_trace_evaluator()
-    try:
-        trace_report = trace_evaluator.evaluate_database(
-            harness_database_path,
-            analysis_id,
-        )
-    except Exception as exc:
-        raise CohortError(
-            f"harness trace evaluation failed for {analysis_id}: "
-            f"{type(exc).__name__}"
-        ) from exc
-    trace_runs = trace_report.get("runs")
-    if not isinstance(trace_runs, list) or len(trace_runs) != 1:
-        raise CohortError(
-            f"harness trace for {analysis_id} is not exactly one run"
-        )
-    trace = trace_runs[0]
-    routes = (
-        (trace.get("models") or {}).get("route_consistency")
-        if isinstance(trace.get("models"), dict)
-        else {}
-    )
-    routes = routes if isinstance(routes, dict) else {}
-    tools = trace.get("tools") if isinstance(trace.get("tools"), dict) else {}
-    models = (
-        trace.get("models")
-        if isinstance(trace.get("models"), dict)
-        else {}
-    )
-    reviewer = (
-        trace.get("reviewer")
-        if isinstance(trace.get("reviewer"), dict)
-        else {}
-    )
-    model_call_contract = (
-        models.get("model_call_contract")
-        if isinstance(models.get("model_call_contract"), dict)
-        else {}
-    )
-    skill_attestation = (
-        trace.get("skill_selection_attestation")
-        if isinstance(trace.get("skill_selection_attestation"), dict)
-        else {}
-    )
-    skill_selection_summary, skill_attestation_valid = (
-        validate_skill_attestation(
-            skill_attestation,
-            SkillAttestationPolicy(
-                skill_id_pattern=SKILL_ID_RE,
-                sha256_pattern=SHA256_RE,
-                maximum_selected=MAX_ATTESTED_INVESTIGATION_SKILLS,
-            ),
-        )
-    )
-    if not skill_attestation_valid:
-        failures.append("harness-skill-selection-attestation-invalid")
-    dispatch_kind = str(dispatch.get("kind") or "")
-    trace_execution = evaluate_trace_execution(
-        trace_report,
-        trace,
-        models,
-        analysis,
-        TraceExecutionExpectation(
-            analysis_id=analysis_id,
-            role=role,
-            task_kind=_expected_task_kind(role, dispatch_kind),
-            stable_group_id=str(member.get("stable_group_id") or ""),
-            representative_alert_id=str(
-                member.get("representative_alert_id") or ""
-            ),
-            harness_mode=str(contract.get("harness_mode") or ""),
-            assigned_route=expected_route,
-            reviewer_route=expected_reviewer_route,
-        ),
-        TraceExecutionPolicy(
-            timestamp_error=CohortError,
-            parse_timestamp=_parse_timestamp,
-            sha256_pattern=SHA256_RE,
-        ),
-        dispatch_started=dispatch_started,
-        analysis_generated=analysis_generated,
-    )
-    failures.extend(trace_execution.failures)
-    integrity = trace_execution.integrity
-    model_execution = evaluate_model_execution(
-        trace,
-        models,
-        reviewer,
-        model_call_contract,
-        reviewer_required=contract.get("reviewer_required") is True,
-        policy=ModelExecutionPolicy(
-            contract_schema=MODEL_CALL_CONTRACT_SCHEMA,
-            maximum_model_calls=MAX_RUNTIME_MODEL_CALLS,
-            sha256_value=sha256_value,
-        ),
-    )
-    failures.extend(model_execution.failures)
-    query_audit_binding = _query_audit_execution_binding(analysis)
-    tool_execution = evaluate_tool_execution(
-        trace,
-        routes,
-        tools,
-        query_audit_binding,
-        role=role,
-        sha256_value=sha256_value,
-    )
-    failures.extend(tool_execution.failures)
-
-    if failures:
-        raise CohortError(
-            f"execution gate failed for {analysis_id}: "
-            + ", ".join(sorted(set(failures)))
-        )
-    return render_execution_proof(
-        ExecutionProofView(
-            analysis_id=analysis_id,
-            analysis_generated_at=str(analysis.get("generated_at") or ""),
-            release_id=str(contract.get("expected_release_id") or ""),
-            role=role,
-            trace=trace,
-            integrity=integrity,
-            skill_selection=skill_selection_summary,
-            model_execution=model_execution,
-            tool_execution=tool_execution,
-            submitted_response_sha256=(
-                trace_execution.submitted_response_sha256
-            ),
-            response_canonical_sha256=(
-                trace_execution.canonical_response_sha256
-            ),
-        ),
-        sha256_value,
+    return build_execution_proof(
+        harness_database_path=harness_database_path,
+        manifest=manifest,
+        member=member,
+        monitor=monitor,
+        load_trace_evaluator=_load_trace_evaluator,
+        expected_task_kind=_expected_task_kind,
+        query_audit_binding=_query_audit_execution_binding,
+        policy=_execution_proof_policy(),
     )
 
 

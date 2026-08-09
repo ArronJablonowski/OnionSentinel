@@ -34,6 +34,7 @@ cohort_evaluator = importlib.util.module_from_spec(EVALUATOR_SPEC)
 EVALUATOR_SPEC.loader.exec_module(cohort_evaluator)
 import cohort_evaluation_query_audit  # noqa: E402
 import cohort_query_audit_projection  # noqa: E402
+import cohort_execution_proof_service  # noqa: E402
 
 
 class IncidentHarnessCohortTests(unittest.TestCase):
@@ -45,6 +46,12 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         self.assertIs(
             cohort.normalize_query_audit_binding,
             cohort_evaluation_query_audit.query_audit_execution_binding,
+        )
+
+    def test_runner_uses_extracted_execution_proof_service(self) -> None:
+        self.assertIs(
+            cohort.build_execution_proof,
+            cohort_execution_proof_service.build_execution_proof,
         )
 
     def test_query_audit_projection_excludes_query_and_result_content(self) -> None:
