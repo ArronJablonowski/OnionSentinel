@@ -37,7 +37,7 @@
       "max_lines": 2018
     },
     "n8n/bin/run-local-ai-analysis.py": {
-      "max_lines": 3737
+      "max_lines": 3542
     },
     "onion-sentinel-dashboard/ac_hunter_review.py": {
       "max_lines": 2225
@@ -593,5 +593,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "0d1048d91a846a3d217673c228a2359976fcb106"
+  "source_release": "de2029a36a60f407f7b533c57a066e9f47131627"
 }
