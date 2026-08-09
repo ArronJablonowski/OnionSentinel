@@ -75,6 +75,24 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_artifact_repository.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_artifact_repository.py",
+      "required_symbols": [
+        "latest_analysis_mtimes",
+        "latest_pcap_analysis_mtimes",
+        "latest_pcap_group_mtimes",
+        "latest_prompt_mtimes",
+        "latest_prompt_group_mtimes",
+        "analyzed_alert_ids",
+        "analyzed_alert_groups",
+        "completed_analysis_group_ids",
+        "latest_prompt_for_alert",
+        "latest_pcap_evidence_mtime_for_alert",
+        "reusable_prompt_for_alert"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_javascript_compat.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_javascript_compat.py",

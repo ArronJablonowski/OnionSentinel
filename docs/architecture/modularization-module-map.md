@@ -333,6 +333,16 @@ normalized-plus-raw snapshot used by controlled route binding. The canonical
 runner parser and bounded reader are injected so scheduler and runner retain
 one normalization contract.
 
+`scheduler_artifact_repository.py` owns the pre-indexed scheduler's read-only
+filesystem artifact index. It tolerates malformed or concurrently removed
+legacy JSON files, resolves prompt packages through current database grouping,
+retains deterministic fallback grouping for aged-out alerts, compares AI
+analysis freshness against alert- and group-scoped PCAP and prompt evidence,
+prefers stable V2 group identities during reconciliation, and reuses a prompt
+only while it remains newer than matching parsed PCAP evidence. The scheduler
+facade retains compatibility delegates while indexed deployments remain
+independent of this upgrade-window repository.
+
 `scheduler_claim.py` owns compare-and-set processing acquisition,
 server-authoritative job/alert/group replacement, controlled claim identity,
 IR reanalysis-attempt binding, contention projection, and automatic-threshold
