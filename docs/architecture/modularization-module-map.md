@@ -124,6 +124,10 @@ line ranges below remain historical navigation aids for the extraction ledger.
 - Reviewer case precedence, blind-package evidence hashing, bounded validation
   telemetry, field-specific repair guidance, and rejected-observable-safe error
   categories now live in `analysis.review.contracts`.
+- Typed-field, traversal-bounded observable, taxonomy, artifact, and detector
+  shorthand discovery now lives in `analysis.review.catalogs`. Arbitrary prose
+  cannot promote a foreign domain, artifact, or rule label into the review
+  allowlist; the legacy runner retains compatibility delegates.
 - Blind package copying, anti-anchoring sanitization, operator-confirmed memory
   admission, transport-before-catalog ordering, review schema/contracts, and
   supplemental-context re-binding now live in `analysis.review.package`.

@@ -2447,6 +2447,34 @@ def _review_package():
     return package
 
 
+def _review_catalogs():
+    _provider_routing()
+    from onion_sentinel.analysis.review import catalogs
+    return catalogs
+
+
+def _review_catalog_policy():
+    module = _review_catalogs()
+    return module.Policy(
+        observable_max=REVIEW_OBSERVABLE_MAX,
+        observable_kinds=REVIEW_OBSERVABLE_KINDS,
+        ipv4_pattern=REVIEW_IPV4_RE,
+        domain_pattern=REVIEW_DOMAIN_RE,
+        taxonomy_field_paths=REVIEW_TAXONOMY_FIELD_PATHS,
+        artifact_field_paths=REVIEW_ARTIFACT_FIELD_PATHS,
+        artifact_suffixes=REVIEW_ARTIFACT_SUFFIXES,
+        rule_label_field_paths=REVIEW_RULE_LABEL_FIELD_PATHS,
+    )
+
+
+def _review_catalog_dependencies():
+    module = _review_catalogs()
+    return module.Dependencies(
+        bounded_reference=_bounded_reference,
+        reviewer_safe_copy=lambda value: model_safe_copy(value, reviewer_safe=True),
+    )
+
+
 def _review_text():
     _provider_routing()
     from onion_sentinel.analysis.review import text
@@ -3768,102 +3796,9 @@ def validate_evidence_references(
 
 def reviewer_observable_catalog(prompt_package: dict[str, Any]) -> list[dict[str, str]]:
     """Return exact observables that an independent reviewer may mention."""
-    found: set[tuple[str, str]] = set()
-
-    def add(kind: str, value: Any) -> None:
-        text = _bounded_reference(value)
-        if (
-            kind in REVIEW_OBSERVABLE_KINDS
-            and text
-            and len(found) < REVIEW_OBSERVABLE_MAX
-        ):
-            found.add((kind, text.lower() if kind in {"domain", "host", "user"} else text))
-
-    local = prompt_package.get("_local_investigation_query_context")
-    if isinstance(local, dict):
-        permitted = local.get("permitted_observables")
-        if isinstance(permitted, dict):
-            for plural, kind in (
-                ("ips", "ip"),
-                ("domains", "domain"),
-                ("hosts", "host"),
-                ("users", "user"),
-            ):
-                values = permitted.get(plural)
-                for value in values if isinstance(values, list) else []:
-                    add(kind, value)
-        for tuple_item in (
-            local.get("permitted_event_tuples")
-            if isinstance(local.get("permitted_event_tuples"), list)
-            else []
-        ):
-            event_tuple = (
-                tuple_item.get("event_tuple")
-                if isinstance(tuple_item, dict)
-                else None
-            )
-            if not isinstance(event_tuple, dict):
-                continue
-            for key, kind in (
-                ("source_ip", "ip"),
-                ("destination_ip", "ip"),
-                ("community_id", "community_id"),
-            ):
-                add(kind, event_tuple.get(key))
-
-    def visit(value: Any, key: str = "") -> None:
-        if isinstance(value, dict):
-            for child_key, child in value.items():
-                visit(child, str(child_key).lower().replace("-", "_"))
-        elif isinstance(value, list):
-            for child in value[:1000]:
-                visit(child, key)
-        elif isinstance(value, (str, int)):
-            text = str(value).strip()
-            if key in {
-                "source_ip", "destination_ip", "src_ip", "dest_ip",
-                "client_ip", "server_ip", "ip", "address",
-            }:
-                for match in REVIEW_IPV4_RE.findall(text):
-                    add("ip", match)
-            elif key in {"domain", "domain_name", "dns_query", "sni", "server_name"}:
-                add("domain", text)
-            elif key in {"host", "hostname", "host_name", "observer_name"}:
-                add("host", text)
-            elif key in {"user", "username", "user_name"}:
-                add("user", text)
-            elif key == "community_id":
-                add("community_id", text)
-
-    for section in (
-        "alert",
-        "grouped_alert_context",
-        "correlated_alert_context",
-        "public_enrichment",
-        "pcap_evidence",
-        "detection_validation",
-        "asset_context",
-        "analyst_state",
-        "incident_response_evidence",
-        "investigation_query_capability",
-        "investigation_query_results",
-        "live_osquery_evidence",
-    ):
-        visit(prompt_package.get(section))
-    # IPs may also occur in bounded narrative projections under non-standard
-    # field names. They are safe identifiers and provide a robust foreign-fact
-    # allowlist without admitting arbitrary prose as an observable.
-    serialized = json.dumps(
-        model_safe_copy(prompt_package, reviewer_safe=True),
-        sort_keys=True,
-        default=str,
+    return _review_catalogs().observables(
+        prompt_package, _review_catalog_policy(), _review_catalog_dependencies(),
     )
-    for match in REVIEW_IPV4_RE.findall(serialized):
-        add("ip", match)
-    return [
-        {"kind": kind, "value": value}
-        for kind, value in sorted(found)
-    ]
 
 
 def reviewer_non_domain_taxonomy_catalog(
@@ -3877,105 +3812,18 @@ def reviewer_non_domain_taxonomy_catalog(
     evidence package supplies that exact value.  Arbitrary dotted prose and
     values under unrelated keys never enter this catalog.
     """
-    found: set[str] = set()
-
-    def field_segment(value: Any) -> str:
-        return re.sub(
-            r"[^a-z0-9]+",
-            "_",
-            str(value or "").strip().lower(),
-        ).strip("_")
-
-    def add(value: Any) -> None:
-        text = _bounded_reference(value).lower()
-        if text and REVIEW_DOMAIN_RE.fullmatch(text):
-            found.add(text)
-
-    def visit(value: Any, path: tuple[str, ...] = ()) -> None:
-        if isinstance(value, dict):
-            for raw_key, child in value.items():
-                segment = field_segment(raw_key)
-                child_path = path + ((segment,) if segment else ())
-                semantic_path = "_".join(child_path[-2:])
-                if (
-                    isinstance(child, (str, int))
-                    and (
-                        segment in REVIEW_TAXONOMY_FIELD_PATHS
-                        or semantic_path in REVIEW_TAXONOMY_FIELD_PATHS
-                    )
-                ):
-                    add(child)
-                else:
-                    visit(child, child_path)
-        elif isinstance(value, list):
-            for child in value[:1000]:
-                visit(child, path)
-
-    for section in (
-        "alert",
-        "grouped_alert_context",
-        "correlated_alert_context",
-        "pcap_evidence",
-        "detection_validation",
-        "incident_response_evidence",
-        "investigation_query_results",
-        "live_osquery_evidence",
-    ):
-        visit(prompt_package.get(section), ())
-    return sorted(found)
+    return _review_catalogs().taxonomy(
+        prompt_package, _review_catalog_policy(), _review_catalog_dependencies(),
+    )
 
 
 def reviewer_non_domain_artifact_catalog(
     prompt_package: dict[str, Any],
 ) -> list[str]:
     """Return exact script-like names from collector-owned command/path fields."""
-    found: set[str] = set()
-
-    def field_segment(value: Any) -> str:
-        return re.sub(
-            r"[^a-z0-9]+",
-            "_",
-            str(value or "").strip().lower(),
-        ).strip("_")
-
-    def add(value: Any) -> None:
-        for candidate in REVIEW_DOMAIN_RE.findall(str(value or "")):
-            text = candidate.lower()
-            if text.rsplit(".", 1)[-1] in REVIEW_ARTIFACT_SUFFIXES:
-                found.add(text)
-
-    def visit(value: Any, path: tuple[str, ...] = ()) -> None:
-        if isinstance(value, dict):
-            for raw_key, child in value.items():
-                segment = field_segment(raw_key)
-                child_path = path + ((segment,) if segment else ())
-                semantic_path = "_".join(child_path[-2:])
-                if (
-                    isinstance(child, str)
-                    and (
-                        segment in REVIEW_ARTIFACT_FIELD_PATHS
-                        or semantic_path in REVIEW_ARTIFACT_FIELD_PATHS
-                    )
-                ):
-                    add(child)
-                else:
-                    visit(child, child_path)
-        elif isinstance(value, list):
-            for child in value[:1000]:
-                visit(child, path)
-
-    for section in (
-        "alert",
-        "grouped_alert_context",
-        "correlated_alert_context",
-        "pcap_evidence",
-        "detection_validation",
-        "incident_response_evidence",
-        "investigation_query_results",
-        "live_osquery_evidence",
-    ):
-        visit(prompt_package.get(section))
-    return sorted(found)
+    return _review_catalogs().artifacts(
+        prompt_package, _review_catalog_policy(), _review_catalog_dependencies(),
+    )
 
 
 def reviewer_non_domain_rule_shorthand_catalog(
@@ -3991,60 +3839,9 @@ def reviewer_non_domain_rule_shorthand_catalog(
     value already present in the label is deliberately excluded so real DNS
     names continue through the domain-observable validator.
     """
-    found: set[str] = set()
-
-    def field_segment(value: Any) -> str:
-        return re.sub(
-            r"[^a-z0-9]+",
-            "_",
-            str(value or "").strip().lower(),
-        ).strip("_")
-
-    def add(value: Any) -> None:
-        raw = _bounded_reference(value)
-        tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{1,62}", raw)
-        if len(tokens) < 2 or not re.fullmatch(r"[A-Z0-9]{2,8}", tokens[0]):
-            return
-        namespace = tokens[0].lower()
-        raw_lower = raw.lower()
-        for token in tokens[1:32]:
-            candidate = f"{namespace}.{token.lower()}"
-            if (
-                candidate not in raw_lower
-                and REVIEW_DOMAIN_RE.fullmatch(candidate)
-            ):
-                found.add(candidate)
-
-    def visit(value: Any, path: tuple[str, ...] = ()) -> None:
-        if isinstance(value, dict):
-            for raw_key, child in value.items():
-                segment = field_segment(raw_key)
-                child_path = path + ((segment,) if segment else ())
-                semantic_path = "_".join(child_path[-2:])
-                if (
-                    isinstance(child, str)
-                    and (
-                        segment in REVIEW_RULE_LABEL_FIELD_PATHS
-                        or semantic_path in REVIEW_RULE_LABEL_FIELD_PATHS
-                    )
-                ):
-                    add(child)
-                else:
-                    visit(child, child_path)
-        elif isinstance(value, list):
-            for child in value[:1000]:
-                visit(child, path)
-
-    for section in (
-        "alert",
-        "grouped_alert_context",
-        "correlated_alert_context",
-        "detection_validation",
-        "incident_response_evidence",
-        "investigation_query_results",
-    ):
-        visit(prompt_package.get(section))
-    return sorted(found)
+    return _review_catalogs().rule_shorthands(
+        prompt_package, _review_catalog_policy(), _review_catalog_dependencies(),
+    )
 
 
 class InvestigationQueryError(ValueError):

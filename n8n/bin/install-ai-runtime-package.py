@@ -82,6 +82,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.review.adjudication",
     "onion_sentinel.analysis.review.adjudication_workflow",
     "onion_sentinel.analysis.review.authorization",
+    "onion_sentinel.analysis.review.catalogs",
     "onion_sentinel.analysis.review.disagreement",
     "onion_sentinel.analysis.review.gates",
     "onion_sentinel.analysis.review.contracts",
