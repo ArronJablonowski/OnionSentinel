@@ -89,6 +89,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.review.validation",
     "onion_sentinel.analysis.review.supplemental",
     "onion_sentinel.analysis.review.workflow",
+    "onion_sentinel.analysis.reporting.evidence_audits",
     "onion_sentinel.analysis.reporting.incident",
     "onion_sentinel.analysis.reporting.live_osquery",
     "onion_sentinel.analysis.reporting.markdown",

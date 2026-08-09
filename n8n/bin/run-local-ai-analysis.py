@@ -1616,6 +1616,23 @@ def _reporting_incident():
     return incident
 
 
+def _reporting_evidence_audits():
+    _provider_routing()
+    from onion_sentinel.analysis.reporting import evidence_audits
+    return evidence_audits
+
+
+def _reporting_evidence_audit_policy():
+    return _reporting_evidence_audits().Policy()
+
+
+def _reporting_evidence_audit_dependencies():
+    return _reporting_evidence_audits().Dependencies(
+        bounded_text=bounded_text,
+        safe_nonnegative_int=safe_nonnegative_int,
+    )
+
+
 def _reporting_live_osquery():
     _provider_routing()
     from onion_sentinel.analysis.reporting import live_osquery
@@ -7513,125 +7530,21 @@ def reconcile_incident_response_report(
 
 
 def incident_query_audit(prompt_package: dict[str, Any]) -> dict[str, Any]:
-    """Extract immutable Security Onion query provenance without event bodies.
-
-    This runs after model inference. Consequently neither the primary nor the
-    second-opinion model can claim that an invented query executed. The exact
-    Query DSL and the wrapper-produced KQL equivalent are copied from the
-    restricted collection artifact; hit documents remain in that artifact.
-    """
-    evidence = prompt_package.get("incident_response_evidence")
-    response = evidence.get("security_onion_response") if isinstance(evidence, dict) else None
-    if not isinstance(response, dict):
-        return {
-            "trusted_source": "restricted-security-onion-wrapper",
-            "complete": False,
-            "partial": True,
-            "read_only": True,
-            "queries": [],
-            "error": "Restricted Security Onion query evidence was unavailable.",
-        }
-
-    queries: list[dict[str, Any]] = []
-    results = response.get("results") if isinstance(response.get("results"), list) else []
-    for result in results[:100]:
-        if not isinstance(result, dict):
-            continue
-        query_dsl = result.get("query_dsl") if isinstance(result.get("query_dsl"), dict) else {}
-        window = result.get("window") if isinstance(result.get("window"), dict) else {}
-        projection = (
-            result.get("prompt_projection")
-            if isinstance(result.get("prompt_projection"), dict)
-            else {}
-        )
-        queries.append({
-            "pack": bounded_text(result.get("pack"), 100),
-            "status": bounded_text(result.get("status"), 40),
-            "query_digest": bounded_text(result.get("query_digest"), 128),
-            "kql_equivalent": bounded_text(result.get("kql_equivalent"), 12000),
-            "query_dsl": query_dsl,
-            "window_index": result.get("window_index"),
-            "window": {
-                "start": bounded_text(window.get("start"), 100),
-                "end": bounded_text(window.get("end"), 100),
-            },
-            "total_hits": safe_nonnegative_int(result.get("total_hits")),
-            "returned_hits": safe_nonnegative_int(result.get("returned_hits")),
-            "source_returned_hits": safe_nonnegative_int(
-                projection.get("source_returned_hits", result.get("returned_hits"))
-            ),
-            "prompt_projection_applied": bool(projection),
-            "truncated": bool(result.get("truncated")),
-            "duration_ms": safe_nonnegative_int(result.get("duration_ms")),
-            "error": bounded_text(result.get("error"), 1000),
-        })
-    return {
-        "trusted_source": "restricted-security-onion-wrapper",
-        "generated_at": bounded_text(evidence.get("generated_at") if isinstance(evidence, dict) else "", 100),
-        "complete": bool(response.get("complete")),
-        "partial": bool(response.get("partial")),
-        "read_only": bool(response.get("read_only", True)),
-        "query_contract": bounded_text(response.get("query_contract"), 200),
-        "queries": queries,
-    }
+    """Compatibility delegate for immutable Security Onion query provenance."""
+    return _reporting_evidence_audits().security_onion(
+        prompt_package,
+        policy=_reporting_evidence_audit_policy(),
+        dependencies=_reporting_evidence_audit_dependencies(),
+    )
 
 
 def incident_osquery_audit(prompt_package: dict[str, Any]) -> dict[str, Any]:
-    """Copy trusted Security Onion appliance OSQuery snapshot provenance.
-
-    The LLM can reason over validated rows but cannot author this audit trail.
-    Every SQL statement is an exact reviewed pack from the Security Onion
-    wrapper, and bounded row previews make host evidence inspectable without
-    turning the Incident Response report into an unbounded telemetry export.
-    """
-    evidence = prompt_package.get("incident_response_evidence")
-    response = evidence.get("security_onion_response") if isinstance(evidence, dict) else None
-    if not isinstance(response, dict):
-        return {
-            "trusted_source": "restricted-security-onion-osquery-wrapper",
-            "read_only": True,
-            "queries": [],
-            "error": "Restricted live OSquery evidence was unavailable.",
-        }
-
-    queries: list[dict[str, Any]] = []
-    results = response.get("osquery_results")
-    if not isinstance(results, list):
-        results = []
-    for result in results[:32]:
-        if not isinstance(result, dict):
-            continue
-        rows: list[dict[str, str]] = []
-        raw_rows = result.get("rows") if isinstance(result.get("rows"), list) else []
-        for raw_row in raw_rows[:25]:
-            if not isinstance(raw_row, dict):
-                continue
-            rows.append({
-                bounded_text(key, 128): bounded_text(value, 2000)
-                for key, value in list(raw_row.items())[:64]
-            })
-        queries.append({
-            "pack": bounded_text(result.get("pack"), 100),
-            "target": bounded_text(result.get("target"), 100),
-            "status": bounded_text(result.get("status"), 40),
-            "query_digest": bounded_text(result.get("query_digest"), 128),
-            "query": bounded_text(result.get("query"), 16000),
-            "total_rows": safe_nonnegative_int(result.get("total_rows")),
-            "returned_rows": safe_nonnegative_int(result.get("returned_rows")),
-            "truncated": bool(result.get("truncated")),
-            "duration_ms": safe_nonnegative_int(result.get("duration_ms")),
-            "rows_preview": rows,
-            "error": bounded_text(result.get("error"), 1000),
-        })
-    return {
-        "trusted_source": "restricted-security-onion-appliance-osquery-wrapper",
-        "generated_at": bounded_text(
-            evidence.get("generated_at") if isinstance(evidence, dict) else "", 100
-        ),
-        "read_only": bool(response.get("read_only", True)),
-        "query_contract": bounded_text(response.get("query_contract"), 200),
-        "queries": queries,
-    }
+    """Compatibility delegate for trusted appliance OSQuery provenance."""
+    return _reporting_evidence_audits().appliance_osquery(
+        prompt_package,
+        policy=_reporting_evidence_audit_policy(),
+        dependencies=_reporting_evidence_audit_dependencies(),
+    )
 
 
 def incident_live_osquery_audit(prompt_package: dict[str, Any]) -> dict[str, Any]:

@@ -194,6 +194,11 @@ line ranges below remain historical navigation aids for the extraction ledger.
 - Bounded public live-OSQuery audit and row-preview projection now live in
   `analysis.reporting.live_osquery`. This reporting boundary cannot authorize
   a target, dispatch a query, or mutate the private evidence accumulator.
+- Immutable Security Onion Query DSL/KQL provenance and bounded appliance
+  OSQuery snapshot projection now live in
+  `analysis.reporting.evidence_audits`. The module exposes collector-authored
+  query identity and bounded result previews but never projects Security Onion
+  hit documents or performs collector I/O.
 - Exact request envelopes, backend identity, deterministic query-ID fallback,
   backend parameter projection, and cross-backend drop audit now live in
   `analysis.query.request`.
