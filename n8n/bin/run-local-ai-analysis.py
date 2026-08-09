@@ -1747,6 +1747,29 @@ def _evidence_hosted_projection_dependencies():
     )
 
 
+def _evidence_endpoint():
+    _provider_routing()
+    from onion_sentinel.analysis.evidence import endpoint
+    return endpoint
+
+
+def _evidence_endpoint_policy():
+    module = _evidence_endpoint()
+    return module.Policy(
+        live_schema=LIVE_OSQUERY_SCHEMA,
+        support_schema="onion-sentinel-live-osquery-support-v1",
+        success_statuses=frozenset(INVESTIGATION_QUERY_SUCCESS_STATUSES),
+    )
+
+
+def _evidence_endpoint_dependencies():
+    module = _evidence_endpoint()
+    return module.Dependencies(
+        normalize_live_query=normalize_live_osquery_query,
+        normalization_error=LiveOsqueryContractError,
+    )
+
+
 def _evidence_traversal():
     _provider_routing()
     from onion_sentinel.analysis.evidence import traversal
@@ -7634,163 +7657,11 @@ def normalize_scope_dispositions(
 
 def _has_trusted_endpoint_evidence(prompt_package: dict[str, Any] | None) -> bool:
     """Return whether a collector supplied relevant, positive endpoint facts."""
-    if not isinstance(prompt_package, dict):
-        return False
-    def completed_result(value: Any) -> bool:
-        if not isinstance(value, dict):
-            return False
-        status = str(value.get("status") or "").strip().lower()
-        rows = value.get("rows")
-        return (
-            status in {"complete", "completed", "ok", "success", "succeeded"}
-            and isinstance(rows, list)
-            and bool(rows)
-        )
-
-    def relevant_live_result(value: Any) -> bool:
-        if not completed_result(value):
-            return False
-        digest = str(value.get("query_digest") or "").strip().lower()
-        query = str(value.get("query") or "")
-        if not re.fullmatch(r"[0-9a-f]{64}", digest) or not query:
-            return False
-        try:
-            normalized_query = normalize_live_osquery_query(query)
-        except LiveOsqueryContractError:
-            return False
-        if (
-            hashlib.sha256(normalized_query.encode("utf-8")).hexdigest()
-            != digest
-        ):
-            return False
-        tables = {
-            match.group(1).lower()
-            for match in re.finditer(
-                r"\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_]*)",
-                query,
-                re.IGNORECASE,
-            )
-        }
-        supports = value.get("support_bindings")
-        if not isinstance(supports, list) or not supports:
-            return False
-        rows = value.get("rows")
-        if not isinstance(rows, list):
-            return False
-        for support in supports:
-            if (
-                not isinstance(support, dict)
-                or support.get("schema")
-                != "onion-sentinel-live-osquery-support-v1"
-                or support.get("query_digest") != digest
-                or support.get("target_alias")
-                != value.get("target_alias")
-                or support.get("source")
-                != "trusted-investigation-context"
-                or support.get("temporal_scope")
-                != "collection_snapshot"
-                or support.get("table") not in tables
-            ):
-                continue
-            row_index = support.get("row_index")
-            column = str(support.get("column") or "")
-            kind = str(support.get("observable_kind") or "")
-            if (
-                isinstance(row_index, bool)
-                or not isinstance(row_index, int)
-                or row_index < 0
-                or row_index >= len(rows)
-                or not isinstance(rows[row_index], dict)
-                or column not in rows[row_index]
-                or kind not in {"ip", "port", "host", "domain", "user"}
-            ):
-                continue
-            row_value = str(rows[row_index][column] or "").strip().rstrip(".")
-            if kind in {"host", "domain", "user"}:
-                row_value = row_value.lower()
-            plural = f"{kind}s"
-            expected_support_digest = hashlib.sha256(
-                f"{plural}\0{row_value}".encode("utf-8")
-            ).hexdigest()
-            if (
-                support.get("observable_digest")
-                == expected_support_digest
-            ):
-                return True
-        return False
-
-    def endpoint_collection_has_evidence(value: Any) -> bool:
-        if isinstance(value, list):
-            return any(endpoint_collection_has_evidence(item) for item in value)
-        if not isinstance(value, dict):
-            return False
-        results = value.get("results")
-        if isinstance(results, list) and any(
-            completed_result(item) for item in results
-        ):
-            return True
-        status = str(value.get("status") or "").strip().lower()
-        if status not in {
-            "complete",
-            "completed",
-            "ok",
-            "success",
-            "succeeded",
-        }:
-            return False
-        for key in (
-            "rows",
-            "findings",
-            "observations",
-            "artifacts",
-            "processes",
-        ):
-            items = value.get(key)
-            if isinstance(items, list) and bool(items):
-                return True
-        return False
-
-    live_osquery = prompt_package.get("_live_osquery_evidence_accumulator")
-    if isinstance(live_osquery, dict):
-        results = live_osquery.get("results")
-        batches = live_osquery.get("batches")
-        provenance_ok = (
-            live_osquery.get("schema") == LIVE_OSQUERY_SCHEMA
-            and live_osquery.get("read_only") is True
-            and (
-                isinstance(batches, list)
-                and bool(batches)
-                and all(
-                    isinstance(item, dict)
-                    and item.get("validated") is True
-                    for item in batches
-                )
-            )
-        )
-        if (
-            provenance_ok
-            and live_osquery.get("complete") is True
-            and isinstance(results, list)
-            and any(relevant_live_result(item) for item in results)
-        ):
-            return True
-
-    incident_evidence = prompt_package.get("incident_response_evidence")
-    if isinstance(incident_evidence, dict):
-        # Fixed ``osquery_results`` are local snapshots of the Security Onion
-        # appliance. They cannot corroborate process, persistence, identity, or
-        # compromise claims about the alert endpoint. Only explicitly separate
-        # endpoint/host evidence collections may satisfy this guard.
-        for key in ("endpoint_evidence", "host_evidence", "osquery_evidence"):
-            evidence = incident_evidence.get(key)
-            if endpoint_collection_has_evidence(evidence):
-                return True
-
-    for key in ("endpoint_evidence", "host_evidence", "osquery_evidence"):
-        evidence = prompt_package.get(key)
-        if endpoint_collection_has_evidence(evidence):
-            return True
-    return False
+    return _evidence_endpoint().has_trusted_evidence(
+        prompt_package,
+        policy=_evidence_endpoint_policy(),
+        dependencies=_evidence_endpoint_dependencies(),
+    )
 
 
 def _trusted_endpoint_evidence_fields(
@@ -7804,88 +7675,10 @@ def _trusted_endpoint_evidence_fields(
     evidence-gap reconciler and can be extended as other grounded-field
     contradictions are observed.
     """
-    if not isinstance(prompt_package, dict):
-        return set()
-    iterative = prompt_package.get("investigation_query_results")
-    if not isinstance(iterative, dict):
-        return set()
-    rounds = iterative.get("rounds")
-    if not isinstance(rounds, list):
-        return set()
-
-    supplied: set[str] = set()
-
-    def record_source(source: Any) -> None:
-        if not isinstance(source, dict):
-            return
-        process = source.get("process")
-        if (
-            isinstance(process, dict)
-            and isinstance(process.get("executable"), str)
-            and process["executable"].strip()
-        ):
-            supplied.add("process.executable")
-        direct = source.get("process.executable")
-        if isinstance(direct, str) and direct.strip():
-            supplied.add("process.executable")
-
-    for round_item in rounds:
-        if not isinstance(round_item, dict):
-            continue
-        results = round_item.get("results")
-        if not isinstance(results, list):
-            continue
-        for result in results:
-            if not isinstance(result, dict):
-                continue
-            if result.get("read_only") is not True:
-                continue
-            if str(result.get("status") or "").strip().lower() not in (
-                INVESTIGATION_QUERY_SUCCESS_STATUSES
-            ):
-                continue
-            evidence = result.get("evidence")
-            if (
-                not isinstance(evidence, dict)
-                or evidence.get("controls_valid") is False
-                or evidence.get("partial") is True
-                or evidence.get("complete") is False
-            ):
-                continue
-            evidence_results = evidence.get("results")
-            if not isinstance(evidence_results, list):
-                continue
-            for evidence_result in evidence_results:
-                if not isinstance(evidence_result, dict):
-                    continue
-                if str(
-                    evidence_result.get("status") or ""
-                ).strip().lower() not in INVESTIGATION_QUERY_SUCCESS_STATUSES:
-                    continue
-                if (
-                    evidence_result.get("semantic_valid") is False
-                    or evidence_result.get("truncated") is True
-                    or evidence_result.get("model_projection_truncated") is True
-                    or evidence_result.get("hits_prompt_truncated") is True
-                    or evidence_result.get("rows_prompt_truncated") is True
-                ):
-                    continue
-                hits = evidence_result.get("hits")
-                if isinstance(hits, list):
-                    for hit in hits:
-                        if not isinstance(hit, dict):
-                            continue
-                        source = hit.get("_source")
-                        if not isinstance(source, dict):
-                            source = hit.get("source")
-                        if not isinstance(source, dict):
-                            source = hit
-                        record_source(source)
-                rows = evidence_result.get("rows")
-                if isinstance(rows, list):
-                    for row in rows:
-                        record_source(row)
-    return supplied
+    return _evidence_endpoint().trusted_fields(
+        prompt_package,
+        policy=_evidence_endpoint_policy(),
+    )
 
 
 def _remove_supplied_executable_path_gap(text: Any) -> tuple[str, bool]:

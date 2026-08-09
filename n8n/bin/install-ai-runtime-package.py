@@ -26,6 +26,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.conclusions.verdict",
     "onion_sentinel.analysis.evidence.references",
     "onion_sentinel.analysis.evidence.columnar",
+    "onion_sentinel.analysis.evidence.endpoint",
     "onion_sentinel.analysis.evidence.hosted_projection",
     "onion_sentinel.analysis.evidence.contract",
     "onion_sentinel.analysis.evidence.registry",

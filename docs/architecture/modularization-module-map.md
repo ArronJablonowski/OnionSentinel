@@ -2174,6 +2174,14 @@ order after factored-verdict normalization and deterministic rule validation.
 Collector-owned rule-intent reconciliation is isolated in the same package,
 with endpoint trust, verdict normalization, and bounded-text policy injected
 from their authoritative runtime owners.
+Endpoint trust decisions live under
+`onion_sentinel.analysis.evidence.endpoint`. Live OSQuery facts require an
+exact normalized-query digest, validated batch provenance, a supported table,
+and a row/column/observable digest binding. Explicit endpoint or host evidence
+collections remain a separate trusted path, while fixed Security Onion
+appliance OSQuery snapshots cannot satisfy endpoint attribution. The same
+module exposes only grounded fields from complete, read-only, untruncated
+investigation result rows for deterministic evidence-gap reconciliation.
 Advisory suppress/drop coherence is a separate conclusion policy module; it
 records deterministic blockers and always preserves explicit human approval
 as the only authority for detection-control changes.
