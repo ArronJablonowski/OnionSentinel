@@ -19,6 +19,10 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BIN_DIR = REPO_ROOT / "n8n" / "bin"
 RUNNER_PATH = BIN_DIR / "run-local-ai-analysis.py"
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+
+import local_ai_pipeline_adapters as PIPELINE_ADAPTERS
 
 
 def load_runner():
@@ -3793,7 +3797,7 @@ class AiModelRoutingTests(unittest.TestCase):
                     )
                 )
                 write = stack.enter_context(
-                    mock.patch.object(self.runner, "write_outputs")
+                    mock.patch.object(PIPELINE_ADAPTERS, "write_outputs")
                 )
                 queue = stack.enter_context(
                     mock.patch.object(
