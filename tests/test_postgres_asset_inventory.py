@@ -9,7 +9,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = ROOT / "n8n" / "postgres" / "asset-inventory-schema.sql"
 STORE = ROOT / "n8n" / "alert_store" / "lib" / "postgres_asset_store.js"
-SERVICE = ROOT / "n8n" / "alert_store" / "alert_store.js"
+ENTRYPOINT = ROOT / "n8n" / "alert_store" / "alert_store.js"
+ROUTES = ROOT / "n8n" / "alert_store" / "routes" / "inventory_routes.js"
+SERVICE = ROOT / "n8n" / "alert_store" / "services" / "inventory_service.js"
 COLLECTOR = ROOT / "n8n" / "bin" / "collect-dhcp-asset-discovery.py"
 PLIST = ROOT / "n8n" / "launchd" / "com.arron.soc.dhcp-asset-discovery.plist"
 PORTAL = ROOT / "onion-sentinel-dashboard" / "report_portal.py"
@@ -48,21 +50,24 @@ class PostgresAssetInventoryTests(unittest.TestCase):
         self.assertNotIn("drop schema", sql)
 
     def test_service_has_paged_reads_and_token_gated_writes(self) -> None:
-        source = SERVICE.read_text(encoding="utf-8")
+        entrypoint = ENTRYPOINT.read_text(encoding="utf-8")
+        routes = ROUTES.read_text(encoding="utf-8")
+        service = SERVICE.read_text(encoding="utf-8")
         store = STORE.read_text(encoding="utf-8")
-        self.assertIn("GET' && parsedUrl.pathname === '/assets/inventory'", source)
-        self.assertIn("parsedUrl.searchParams.get('limit')", source)
-        self.assertIn("requireAssetStoreWriteAuthorization(request)", source)
-        self.assertIn("crypto.timingSafeEqual", source)
-        self.assertIn("ASSET_STORE_WRITE_TOKEN", source)
-        self.assertIn("store.putDhcpState", source)
-        self.assertIn("store.promoteDhcp", source)
-        self.assertIn("store.approveDhcpIpChange", source)
-        self.assertIn("store.updateAsset", source)
-        self.assertIn("store.demoteAsset", source)
-        self.assertIn("/assets/approve-dhcp-ip-change", source)
-        self.assertIn("/assets/update", source)
-        self.assertIn("/assets/demote", source)
+        self.assertIn("path: '/assets/inventory'", routes)
+        self.assertIn("parsedUrl.searchParams.get('limit')", routes)
+        self.assertIn("authorizeWrite(request)", routes)
+        self.assertIn("requireAssetStoreWriteAuthorization", entrypoint)
+        self.assertIn("crypto.timingSafeEqual", entrypoint)
+        self.assertIn("ASSET_STORE_WRITE_TOKEN", entrypoint)
+        self.assertIn("assetStore().putDhcpState", service)
+        self.assertIn("assetStore().promoteDhcp", service)
+        self.assertIn("assetStore().approveDhcpIpChange", service)
+        self.assertIn("assetStore().updateAsset", service)
+        self.assertIn("assetStore().demoteAsset", service)
+        self.assertIn("/assets/approve-dhcp-ip-change", routes)
+        self.assertIn("/assets/update", routes)
+        self.assertIn("/assets/demote", routes)
         self.assertIn("conditions.push('$1::timestamptz IS NOT NULL')", store)
         self.assertIn("asset.ip_address_changed_from_dhcp", store)
         self.assertIn("ip_change_approved", store)

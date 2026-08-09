@@ -81,12 +81,12 @@ test('bounds database query pagination and filters', () => {
 
 test('alert-store route serializes the default observation time', () => {
   const source = require('node:fs').readFileSync(
-    require('node:path').join(__dirname, '..', 'alert_store.js'),
+    require('node:path').join(__dirname, '..', 'routes', 'inventory_routes.js'),
     'utf8',
   );
   assert.match(
     source,
-    /parsedUrl\.searchParams\.get\('observed_at'\)[\s\S]{0,100}new Date\(\)\.toISOString\(\)/,
+    /parsedUrl\.searchParams\.get\('observed_at'\)[\s\S]{0,100}now\(\)\.toISOString\(\)/,
   );
 });
 

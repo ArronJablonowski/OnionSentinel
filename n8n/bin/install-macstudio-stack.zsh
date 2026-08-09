@@ -14,6 +14,7 @@ LAUNCHD_DIR="${HOME}/Library/LaunchAgents"
 DASHBOARD_RUNTIME_DIR="${STACK_DIR}/onion-sentinel-dashboard"
 AI_DEPLOYMENT_GUARD_PID=""
 AI_DEPLOYMENT_GUARD_DIR=""
+ALERT_STORE_STAGE_DIR=""
 
 # Every deployed runtime must carry the exact code release that produced its
 # reports and reanalysis ledger. A commit-less disaster recovery is allowed
@@ -31,6 +32,59 @@ fi
 /usr/bin/python3 "$REPO_DIR/n8n/bin/set-runtime-release-id.py" \
   --release-id "$RUNTIME_RELEASE_ID" \
   --validate-only
+
+cleanup_alert_store_stage() {
+  if [[ -n "$ALERT_STORE_STAGE_DIR" ]]; then
+    case "$ALERT_STORE_STAGE_DIR" in
+      "$STACK_DIR"/run/.alert-store-stage.*)
+        /bin/rm -rf -- "$ALERT_STORE_STAGE_DIR"
+        ;;
+      *)
+        echo "Refusing unsafe alert-store stage cleanup path." >&2
+        return 1
+        ;;
+    esac
+  fi
+  ALERT_STORE_STAGE_DIR=""
+}
+
+prepare_alert_store_stage() {
+  mkdir -p "$STACK_DIR/run"
+  chmod 0700 "$STACK_DIR/run"
+  ALERT_STORE_STAGE_DIR="$(
+    /usr/bin/mktemp -d "$STACK_DIR/run/.alert-store-stage.XXXXXX"
+  )"
+  chmod 0700 "$ALERT_STORE_STAGE_DIR"
+  local tree
+  for tree in lib routes services repositories jobs; do
+    local source="$REPO_DIR/n8n/alert_store/$tree"
+    [[ -d "$source" ]] || continue
+    if [[ -n "$(find "$source" ! -type d ! -type f -print -quit)" ]]; then
+      echo "Refusing alert-store $tree tree with a non-regular entry." >&2
+      return 1
+    fi
+    cp -R "$source" "$ALERT_STORE_STAGE_DIR/$tree"
+  done
+  for tree in lib routes services; do
+    if [[ ! -d "$ALERT_STORE_STAGE_DIR/$tree" ]]; then
+      echo "Refusing incomplete staged alert-store module tree: $tree" >&2
+      return 1
+    fi
+  done
+  local source_file
+  while IFS= read -r source_file; do
+    /opt/homebrew/bin/node --check "$source_file" >/dev/null
+  done < <(find "$ALERT_STORE_STAGE_DIR" -type f -name '*.js' -print | sort)
+  /opt/homebrew/bin/node -e '
+    for (const modulePath of process.argv.slice(1)) require(modulePath);
+  ' \
+    "$ALERT_STORE_STAGE_DIR/lib/route_registry.js" \
+    "$ALERT_STORE_STAGE_DIR/routes/inventory_routes.js" \
+    "$ALERT_STORE_STAGE_DIR/services/inventory_service.js"
+}
+
+trap cleanup_alert_store_stage EXIT
+prepare_alert_store_stage
 
 # Take the same advisory locks used by both AI scheduler lanes before touching
 # launchd or runtime files. A nonblocking failure means an investigation is in
@@ -253,6 +307,7 @@ keep_critical_agents_down_on_failure() {
     echo "The software-inventory LaunchAgent also remains stopped." >&2
   fi
   release_ai_deployment_guard
+  cleanup_alert_store_stage
   return $exit_code
 }
 
@@ -290,6 +345,14 @@ fi
 # Copy source and config into the runtime directory. Runtime data directories are
 # created but not populated from Git.
 cp "$REPO_DIR/n8n/docker-compose.yml" "$STACK_DIR/docker-compose.yml"
+for tree in lib routes services repositories jobs; do
+  if [[ -d "$ALERT_STORE_STAGE_DIR/$tree" ]]; then
+    mkdir -p "$STACK_DIR/alert_store/$tree"
+    /usr/bin/rsync -a --delete \
+      "$ALERT_STORE_STAGE_DIR/$tree/" \
+      "$STACK_DIR/alert_store/$tree/"
+  fi
+done
 cp "$REPO_DIR/n8n/alert_store/alert_store.js" "$STACK_DIR/alert_store/alert_store.js"
 cp "$REPO_DIR/n8n/alert_store/alert_store_proxy.js" "$STACK_DIR/alert_store/alert_store_proxy.js"
 cp "$REPO_DIR/n8n/alert_store/package.json" "$STACK_DIR/alert_store/package.json"

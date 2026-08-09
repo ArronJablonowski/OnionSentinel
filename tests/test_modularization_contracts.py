@@ -167,6 +167,19 @@ class ModularizationCompatibilityContractTests(unittest.TestCase):
                 self.assertIn(f'$REPO_DIR/{entry["path"]}', installer)
                 self.assertIn(entry["runtime_path"], installer)
 
+    def test_alert_store_module_trees_are_staged_before_consumers_stop(self) -> None:
+        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        self.assertLess(
+            installer.index("\nprepare_alert_store_stage\n"),
+            installer.index("\ncritical_launch_agents_down\n"),
+        )
+        for tree in ("lib", "routes", "services", "repositories", "jobs"):
+            self.assertIn(f"n8n/alert_store/$tree", installer)
+            self.assertIn(f'ALERT_STORE_STAGE_DIR/$tree', installer)
+        self.assertIn("node --check", installer)
+        self.assertIn("/usr/bin/rsync -a --delete", installer)
+        self.assertIn("Refusing incomplete staged alert-store module tree", installer)
+
     def test_security_and_compatibility_invariants_are_explicit(self) -> None:
         invariants = "\n".join(load_contract()["stable_service_contracts"])
         self.assertIn("read-only", invariants)

@@ -24,6 +24,9 @@ const {createPostgresAcHunterStore} = require('./lib/postgres_ac_hunter_store');
 const {createSecurityLogger} = require('./lib/security_logger');
 const {createPipelineMetrics} = require('./lib/pipeline_metrics');
 const {createSocAnalysisPolicy} = require('./lib/soc_analysis_policy');
+const {createRouteRegistry} = require('./lib/route_registry');
+const {createInventoryService} = require('./services/inventory_service');
+const {createInventoryRoutes} = require('./routes/inventory_routes');
 const {
   loadAuthorizedActivityPolicy,
   matchAuthorizedActivity,
@@ -11769,6 +11772,18 @@ const controlledEvaluationRequests = new Set([
   'POST /jobs/status',
 ]);
 
+const inventoryService = createInventoryService({
+  requireAcHunterStore: requirePostgresAcHunterStore,
+  requireSoftwareStore: requirePostgresSoftwareStore,
+  requireAssetStore: requirePostgresAssetStore,
+});
+const modularRoutes = createRouteRegistry(createInventoryRoutes({
+  service: inventoryService,
+  authorizeWrite: requireAssetStoreWriteAuthorization,
+  readJsonBody,
+  sendJson,
+}));
+
 function controlledEvaluationRequestAuthorized(request) {
   if (!controlledEvaluationMode) return true;
   const supplied = request.headers[
@@ -11826,6 +11841,7 @@ async function handleRequest(request, response) {
       });
       return;
     }
+    if (await modularRoutes.dispatch({request, response, parsedUrl})) return;
     if (request.method === 'GET' && request.url === '/health') {
       // Used by the Mac Studio monitor LaunchAgent.
       const health = {
@@ -11898,161 +11914,6 @@ async function handleRequest(request, response) {
           };
       }
       sendJson(response, 200, health);
-      return;
-    }
-    if (request.method === 'GET' && parsedUrl.pathname === '/ac-hunter/snapshot') {
-      const snapshot = await requirePostgresAcHunterStore().latest();
-      if (!snapshot) {
-        sendJson(response, 404, {
-          ok: false,
-          status: 'not_collected',
-          error: 'AC Hunter has not completed a scheduled database collection yet',
-        });
-        return;
-      }
-      sendJson(response, 200, snapshot);
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/ac-hunter/snapshots') {
-      requireAssetStoreWriteAuthorization(request);
-      const result = await requirePostgresAcHunterStore().ingest(
-        await readJsonBody(request),
-      );
-      sendJson(response, result.changed ? 201 : 200, result);
-      return;
-    }
-    if (request.method === 'GET' && parsedUrl.pathname === '/software-inventory') {
-      const store = requirePostgresSoftwareStore();
-      const result = await store.query({
-        limit: parsedUrl.searchParams.get('limit') || 100,
-        offset: parsedUrl.searchParams.get('offset') || 0,
-        search: parsedUrl.searchParams.get('search') || '',
-        tier: parsedUrl.searchParams.get('tier') || 'all',
-        confidence: parsedUrl.searchParams.get('confidence') || 'all',
-        freshness: parsedUrl.searchParams.get('freshness') || 'all',
-        platform: parsedUrl.searchParams.get('platform') || 'all',
-        window: parsedUrl.searchParams.get('window') || '30d',
-        sort: parsedUrl.searchParams.get('sort') || 'last_seen',
-        direction: parsedUrl.searchParams.get('direction') || 'desc',
-        observed_at: parsedUrl.searchParams.get('observed_at')
-          || new Date().toISOString(),
-      });
-      sendJson(response, 200, result);
-      return;
-    }
-    if (
-      request.method === 'POST'
-      && parsedUrl.pathname === '/software-inventory/import/start'
-    ) {
-      requireAssetStoreWriteAuthorization(request);
-      const store = requirePostgresSoftwareStore();
-      sendJson(response, 200, await store.startImport(await readJsonBody(request)));
-      return;
-    }
-    if (
-      request.method === 'POST'
-      && parsedUrl.pathname === '/software-inventory/import/chunk'
-    ) {
-      requireAssetStoreWriteAuthorization(request);
-      const store = requirePostgresSoftwareStore();
-      sendJson(response, 200, await store.putChunk(await readJsonBody(request)));
-      return;
-    }
-    if (
-      request.method === 'POST'
-      && parsedUrl.pathname === '/software-inventory/import/commit'
-    ) {
-      requireAssetStoreWriteAuthorization(request);
-      const store = requirePostgresSoftwareStore();
-      sendJson(response, 200, await store.commitImport(await readJsonBody(request)));
-      return;
-    }
-    if (request.method === 'GET' && parsedUrl.pathname === '/assets/inventory') {
-      const store = requirePostgresAssetStore();
-      const result = await store.page({
-        limit: parsedUrl.searchParams.get('limit') || 250,
-        offset: parsedUrl.searchParams.get('offset') || 0,
-        search: parsedUrl.searchParams.get('search') || '',
-        sort: parsedUrl.searchParams.get('sort') || 'asset_id',
-        direction: parsedUrl.searchParams.get('direction') || 'asc',
-        state: parsedUrl.searchParams.get('state') || 'current',
-        at: parsedUrl.searchParams.get('at') || new Date(),
-      });
-      sendJson(response, 200, result);
-      return;
-    }
-    if (request.method === 'GET' && parsedUrl.pathname === '/assets/snapshot') {
-      const store = requirePostgresAssetStore();
-      sendJson(response, 200, {ok: true, inventory: await store.snapshot()});
-      return;
-    }
-    if (request.method === 'GET' && parsedUrl.pathname === '/assets/dhcp-state') {
-      const store = requirePostgresAssetStore();
-      sendJson(response, 200, {ok: true, state: await store.dhcpState()});
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/assets/import') {
-      requireAssetStoreWriteAuthorization(request);
-      const store = requirePostgresAssetStore();
-      const payload = await readJsonBody(request);
-      const result = await store.importInventory(payload.inventory, {
-        actor: payload.actor || 'migration',
-        replace: payload.replace === true,
-      });
-      sendJson(response, 200, result);
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/assets/dhcp-state') {
-      requireAssetStoreWriteAuthorization(request);
-      const store = requirePostgresAssetStore();
-      const payload = await readJsonBody(request);
-      const result = await store.putDhcpState(payload.state, {
-        actor: payload.actor || 'dhcp-collector',
-      });
-      sendJson(response, 200, result);
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/assets/promote-dhcp') {
-      requireAssetStoreWriteAuthorization(request);
-      const store = requirePostgresAssetStore();
-      const payload = await readJsonBody(request);
-      const result = await store.promoteDhcp(payload, {
-        actor: payload.operator_ref || 'operator',
-      });
-      sendJson(response, 201, result);
-      return;
-    }
-    if (
-      request.method === 'POST'
-      && parsedUrl.pathname === '/assets/approve-dhcp-ip-change'
-    ) {
-      requireAssetStoreWriteAuthorization(request);
-      const store = requirePostgresAssetStore();
-      const payload = await readJsonBody(request);
-      const result = await store.approveDhcpIpChange(payload, {
-        actor: payload.operator_ref || 'operator',
-      });
-      sendJson(response, 201, result);
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/assets/update') {
-      requireAssetStoreWriteAuthorization(request);
-      const store = requirePostgresAssetStore();
-      const payload = await readJsonBody(request);
-      const result = await store.updateAsset(payload, {
-        actor: payload.operator_ref || 'operator',
-      });
-      sendJson(response, 200, result);
-      return;
-    }
-    if (request.method === 'POST' && parsedUrl.pathname === '/assets/demote') {
-      requireAssetStoreWriteAuthorization(request);
-      const store = requirePostgresAssetStore();
-      const payload = await readJsonBody(request);
-      const result = await store.demoteAsset(payload, {
-        actor: payload.operator_ref || 'operator',
-      });
-      sendJson(response, 200, result);
       return;
     }
     if (request.method === 'GET' && parsedUrl.pathname === '/metrics') {
