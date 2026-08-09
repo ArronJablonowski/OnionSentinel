@@ -63,6 +63,27 @@
       ]
     },
     {
+      "path": "operations/cohort_representative_state.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_representative_state.py",
+      "required_symbols": [
+        "CohortRepresentativeStatePolicy",
+        "current_summary_identity",
+        "alert_representative_identity",
+        "bind_representative_stable_group_key",
+        "case_for_stable"
+      ]
+    },
+    {
+      "path": "operations/cohort_second_opinion_state.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_second_opinion_state.py",
+      "required_symbols": [
+        "SECOND_OPINION_EXPORT_COLUMNS",
+        "second_opinion_metadata"
+      ]
+    },
+    {
       "path": "operations/run-incident-harness-cohort.py",
       "deployment": "repository-only",
       "runtime_path": "operations/run-incident-harness-cohort.py",

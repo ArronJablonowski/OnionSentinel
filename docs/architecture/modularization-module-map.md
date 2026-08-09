@@ -811,6 +811,15 @@ detection-field projection, frozen-detection comparison, and pre-state
 comparison contracts. Validation patterns, exported fields, and the fail-closed
 error type are injected by the composition service.
 
+`operations/cohort_representative_state.py` owns read-only current-summary,
+raw-alert representative, stable-group-key binding, and single-case lookup
+operations. Storage validation, alias resolution, incident-case lookup, and
+immutable evidence fields are injected by the composition service.
+
+`operations/cohort_second_opinion_state.py` owns the approved-column,
+read-only projection of second-opinion execution metadata used by cohort
+monitoring and export.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

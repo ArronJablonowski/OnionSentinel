@@ -194,6 +194,16 @@ from cohort_source_rows import (
     validate_source_detection as prove_source_detection,
     validate_source_pre_state as prove_source_pre_state,
 )
+from cohort_representative_state import (
+    CohortRepresentativeStatePolicy,
+    alert_representative_identity as read_alert_representative_identity,
+    bind_representative_stable_group_key as bind_stable_group_key,
+    case_for_stable as read_case_for_stable,
+    current_summary_identity as read_current_summary_identity,
+)
+from cohort_second_opinion_state import (
+    second_opinion_metadata as read_second_opinion_metadata,
+)
 
 
 SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
@@ -889,19 +899,11 @@ def _current_summary_identity(
     dashboard_group_id: str,
     aliases: Mapping[str, str],
 ) -> tuple[str, str] | None:
-    row = connection.execute(
-        """
-        SELECT group_id, representative_alert_id
-        FROM alert_group_summary
-        WHERE group_id = ?
-        """,
-        (dashboard_group_id,),
-    ).fetchone()
-    if not row:
-        return None
-    return (
-        resolve_alias(str(row["group_id"] or ""), aliases),
-        str(row["representative_alert_id"] or ""),
+    return read_current_summary_identity(
+        connection,
+        dashboard_group_id,
+        aliases,
+        _representative_state_policy(),
     )
 
 
@@ -909,20 +911,11 @@ def _alert_representative_identity(
     connection: sqlite3.Connection,
     alert_id: str,
 ) -> dict[str, Any] | None:
-    required = {
-        "alert_id",
-        "stable_group_id",
-        "stable_group_key",
-        *FROZEN_REPRESENTATIVE_IMMUTABLE_FIELDS,
-    }
-    _require_columns(connection, "alerts", required)
-    row = connection.execute(
-        "SELECT "
-        + ", ".join(sorted(required))
-        + " FROM alerts WHERE alert_id = ?",
-        (alert_id,),
-    ).fetchone()
-    return dict(row) if row else None
+    return read_alert_representative_identity(
+        connection,
+        alert_id,
+        _representative_state_policy(),
+    )
 
 
 def _bind_representative_stable_group_key(
@@ -930,18 +923,23 @@ def _bind_representative_stable_group_key(
     representative_alert_id: str,
     detection: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Bind the raw representative's group key into frozen evidence."""
-
-    bound = dict(detection)
-    if "stable_group_key" in bound:
-        return bound
-    alert = _alert_representative_identity(
+    return bind_stable_group_key(
         connection,
         representative_alert_id,
+        detection,
+        _representative_state_policy(),
+        alert_identity=_alert_representative_identity,
     )
-    if alert is not None:
-        bound["stable_group_key"] = alert.get("stable_group_key")
-    return bound
+
+
+def _representative_state_policy() -> CohortRepresentativeStatePolicy:
+    return CohortRepresentativeStatePolicy(
+        error=CohortError,
+        storage=_storage_policy(),
+        resolve_alias=resolve_alias,
+        incident_cases=_incident_cases,
+        immutable_fields=FROZEN_REPRESENTATIVE_IMMUTABLE_FIELDS,
+    )
 
 
 def _validate_representative_binding(
@@ -971,12 +969,12 @@ def _case_for_stable(
     stable_group_id: str,
     aliases: Mapping[str, str],
 ) -> dict[str, Any] | None:
-    cases = _incident_cases(connection, aliases).get(stable_group_id, [])
-    if len(cases) > 1:
-        raise CohortError(
-            f"multiple incident cases resolve to {stable_group_id}"
-        )
-    return cases[0] if cases else None
+    return read_case_for_stable(
+        connection,
+        stable_group_id,
+        aliases,
+        _representative_state_policy(),
+    )
 
 
 def validate_member_preflight(
@@ -1272,43 +1270,10 @@ def _second_opinion_metadata(
     connection: sqlite3.Connection,
     analysis_id: str,
 ) -> dict[str, Any] | None:
-    if not _table_exists(connection, "ai_second_opinion_runs"):
-        return None
-    columns = _table_columns(connection, "ai_second_opinion_runs")
-    allowed = [
-        item
-        for item in (
-            "analysis_id",
-            "group_id",
-            "alert_id",
-            "agent_role",
-            "trigger",
-            "status",
-            "primary_model",
-            "primary_model_path",
-            "primary_outcome",
-            "primary_confidence",
-            "reviewer_model",
-            "reviewer_model_path",
-            "reviewer_outcome",
-            "reviewer_confidence",
-            "agreement",
-            "material_disagreement",
-            "reviewer_runtime_seconds",
-            "generated_at",
-            "created_at",
-            "updated_at",
-        )
-        if item in columns
-    ]
-    if "analysis_id" not in allowed:
-        return None
-    row = connection.execute(
-        "SELECT " + ", ".join(allowed)
-        + " FROM ai_second_opinion_runs WHERE analysis_id = ?",
-        (analysis_id,),
-    ).fetchone()
-    return dict(row) if row else None
+    return read_second_opinion_metadata(
+        connection,
+        analysis_id,
+    )
 
 
 def _cohort_monitor_contract() -> CohortMonitorContract:

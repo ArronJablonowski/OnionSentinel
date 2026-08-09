@@ -44,6 +44,8 @@ import cohort_artifact_io  # noqa: E402
 import cohort_storage_core  # noqa: E402
 import cohort_storage_state  # noqa: E402
 import cohort_source_rows  # noqa: E402
+import cohort_representative_state  # noqa: E402
+import cohort_second_opinion_state  # noqa: E402
 
 
 class IncidentHarnessCohortTests(unittest.TestCase):
@@ -149,6 +151,26 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         self.assertIs(
             cohort.prove_source_detection,
             cohort_source_rows.validate_source_detection,
+        )
+
+    def test_runner_uses_extracted_representative_state(self) -> None:
+        self.assertIs(
+            cohort.read_current_summary_identity,
+            cohort_representative_state.current_summary_identity,
+        )
+        self.assertIs(
+            cohort.read_alert_representative_identity,
+            cohort_representative_state.alert_representative_identity,
+        )
+        self.assertIs(
+            cohort.bind_stable_group_key,
+            cohort_representative_state.bind_representative_stable_group_key,
+        )
+
+    def test_runner_uses_extracted_second_opinion_state(self) -> None:
+        self.assertIs(
+            cohort.read_second_opinion_metadata,
+            cohort_second_opinion_state.second_opinion_metadata,
         )
 
     def test_query_audit_projection_excludes_query_and_result_content(self) -> None:
