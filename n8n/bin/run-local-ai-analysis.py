@@ -1313,6 +1313,12 @@ def _query_request():
     return request
 
 
+def _query_request_runtime_adapter():
+    _provider_routing()
+    from onion_sentinel.analysis.query import request_runtime_adapter
+    return request_runtime_adapter
+
+
 def _query_semantic_identity():
     _provider_routing()
     from onion_sentinel.analysis.query import semantic_identity
@@ -2893,98 +2899,24 @@ def _normalize_investigation_backend_parameters(
     backend: str, parameters: dict[str, Any], purpose: str,
     time_envelope: Any, authorization_context: Any,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    if backend in {"elastic", "oql"}:
-        return _query_security_onion().normalize(
-            parameters,
-            purpose=purpose,
-            backend=backend,
-            time_envelope=time_envelope,
-            authorization_context=authorization_context,
-            policy=_query_security_onion_policy(),
-            dependencies=_query_security_onion_dependencies(),
-            error_type=InvestigationQueryError,
-        )
-    if backend == "osquery":
-        module = _query_endpoint()
-        normalized = module.normalize(
-            parameters, dependencies=module.Dependencies(
-                normalize_query=normalize_live_osquery_query,
-                query_error=LiveOsqueryContractError),
-            error_type=InvestigationQueryError,
-        )
-        return normalized, {}
-    if backend == "enrichment":
-        normalized = _query_enrichment().normalize(
-            parameters,
-            authorization_context=authorization_context,
-            error_type=InvestigationQueryError,
-        )
-        return normalized, {}
-    normalized = _query_derived().normalize(
-        parameters,
-        policy=_query_derived_policy(),
-        dependencies=_query_derived_dependencies(),
-        error_type=InvestigationQueryError,
-    )
-    return normalized, {}
+    return _query_request_runtime_adapter().normalize_backend_parameters(
+        globals(), backend, parameters, purpose, time_envelope,
+        authorization_context)
 
 
 def normalize_investigation_query_request(
     raw: Any, *, round_number: int, position: int,
     time_envelope: Any = None, authorization_context: Any = None,
 ) -> dict[str, Any]:
-    module = _query_request()
-    return module.normalize(
-        raw,
-        round_number=round_number,
-        position=position,
+    return _query_request_runtime_adapter().normalize_request(
+        globals(), raw, round_number=round_number, position=position,
         time_envelope=time_envelope,
-        authorization_context=authorization_context,
-        policy=_query_request_policy(),
-        dependencies=module.Dependencies(
-            normalize_parameters=_normalize_investigation_backend_parameters
-        ),
-        error_type=InvestigationQueryError,
-    )
+        authorization_context=authorization_context)
 
 
 def pop_investigation_query_requests(response: dict[str, Any]) -> list[Any]:
     """Consume the unified protocol and translate two legacy request fields."""
-    unified = response.pop("investigation_query_requests", [])
-    requests = list(unified) if isinstance(unified, list) else [unified]
-    legacy_pcap = response.pop("pcap_query_requests", [])
-    if isinstance(legacy_pcap, list):
-        for index, item in enumerate(legacy_pcap, 1):
-            if not isinstance(item, dict):
-                requests.append(item)
-                continue
-            requests.append(
-                {
-                    "query_id": f"legacy-pcap-{index}",
-                    "backend": "pcap_zeek",
-                    "purpose": "Resolve the model's requested bounded PCAP evidence gap.",
-                    "parameters": item,
-                }
-            )
-    legacy_osquery = response.pop("live_osquery_requests", [])
-    if isinstance(legacy_osquery, list):
-        for index, item in enumerate(legacy_osquery, 1):
-            if not isinstance(item, dict):
-                requests.append(item)
-                continue
-            requests.append(
-                {
-                    "query_id": f"legacy-osquery-{index}",
-                    "backend": "osquery",
-                    "purpose": _query_text(item.get("purpose"), 500)
-                    or "Resolve the model's requested endpoint evidence gap.",
-                    "parameters": {
-                        "target_alias": item.get("target_alias"),
-                        "query": item.get("query"),
-                    },
-                }
-            )
-    return requests
+    return _query_request_runtime_adapter().pop_requests(globals(), response)
 
 
 _PIVOT_COLLECTOR_MODULE: Any = None

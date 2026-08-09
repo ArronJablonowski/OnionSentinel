@@ -111,6 +111,10 @@ line ranges below remain historical navigation aids for the extraction ledger.
   suppresses production credential discovery before checking either the live
   environment or `~/n8n-local/.env`; the runner retains thin compatibility
   delegates so existing authorization and characterization seams remain live.
+- `analysis.query.request_runtime_adapter` owns concrete provider-neutral
+  request normalization and the destructive consumption/translation of legacy
+  PCAP and live-OSQuery request fields. Backend policy remains in the existing
+  query modules; live runner callables stay dynamically bound for compatibility.
 - Model roster normalization, exact route construction/parsing, assigned/live
   metadata, external-harness route handling, and reviewer model identity now
   live in `onion_sentinel.analysis.providers.routing`. The legacy runner keeps
