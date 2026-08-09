@@ -820,6 +820,10 @@ immutable evidence fields are injected by the composition service.
 read-only projection of second-opinion execution metadata used by cohort
 monitoring and export.
 
+`operations/cohort_runner_contracts.py` owns shared cohort schemas, limits,
+identity patterns, fail-closed error types, canonical JSON hashing, constant-time
+comparison, and the UTC clock used by the runner composition layer.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

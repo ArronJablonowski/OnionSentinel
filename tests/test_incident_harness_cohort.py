@@ -46,6 +46,7 @@ import cohort_storage_state  # noqa: E402
 import cohort_source_rows  # noqa: E402
 import cohort_representative_state  # noqa: E402
 import cohort_second_opinion_state  # noqa: E402
+import cohort_runner_contracts  # noqa: E402
 
 
 class IncidentHarnessCohortTests(unittest.TestCase):
@@ -172,6 +173,11 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             cohort.read_second_opinion_metadata,
             cohort_second_opinion_state.second_opinion_metadata,
         )
+
+    def test_runner_uses_extracted_runner_contracts(self) -> None:
+        self.assertIs(cohort.CohortError, cohort_runner_contracts.CohortError)
+        self.assertIs(cohort.sha256_value, cohort_runner_contracts.sha256_value)
+        self.assertEqual(cohort.SCHEMA, cohort_runner_contracts.SCHEMA)
 
     def test_query_audit_projection_excludes_query_and_result_content(self) -> None:
         projected = cohort._bounded_query_audit_metadata(

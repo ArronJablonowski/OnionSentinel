@@ -84,6 +84,19 @@
       ]
     },
     {
+      "path": "operations/cohort_runner_contracts.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_runner_contracts.py",
+      "required_symbols": [
+        "CohortError",
+        "AmbiguousDispatchError",
+        "utc_now",
+        "canonical_bytes",
+        "sha256_value",
+        "constant_time_equal"
+      ]
+    },
+    {
       "path": "operations/run-incident-harness-cohort.py",
       "deployment": "repository-only",
       "runtime_path": "operations/run-incident-harness-cohort.py",
