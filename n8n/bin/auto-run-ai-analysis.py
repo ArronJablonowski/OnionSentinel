@@ -68,6 +68,12 @@ from scheduler_controlled_acceptance import (
     controlled_accepted_fields_match,
     controlled_expected_accepted_fields,
 )
+from scheduler_controlled_artifacts import (
+    FrozenMemoryPolicy,
+    load_owner_private_json as load_private_recovery_json,
+    owner_private_directory as private_recovery_directory,
+    settle_controlled_frozen_memory_artifacts as settle_frozen_memory,
+)
 from scheduler_controlled_canonical import (
     controlled_normalize_timestamp,
     controlled_storage_canonical_digest,
@@ -340,18 +346,11 @@ def alert_store_mutation_headers(*, user_agent: str = "") -> dict[str, str]:
 
 
 def owner_private_directory(path: Path, runtime_root: Path) -> bool:
-    try:
-        metadata = path.lstat()
-        resolved = path.resolve(strict=True)
-        resolved.relative_to(runtime_root)
-    except (FileNotFoundError, OSError, ValueError):
-        return False
-    return bool(
-        resolved == path
-        and not path.is_symlink()
-        and path.is_dir()
-        and metadata.st_uid == os.getuid()
-        and not (stat.S_IMODE(metadata.st_mode) & 0o077)
+    """Compatibility delegate for owner-private recovery directories."""
+    return private_recovery_directory(
+        path,
+        runtime_root,
+        effective_uid=os.getuid(),
     )
 
 
@@ -361,47 +360,13 @@ def load_owner_private_json(
     *,
     max_bytes: int,
 ) -> dict[str, Any]:
-    """Read one non-symlink owner-only evaluation artifact with a byte cap."""
-    try:
-        resolved = path.resolve(strict=True)
-        resolved.relative_to(runtime_root)
-    except (FileNotFoundError, OSError, ValueError) as exc:
-        raise RuntimeError(
-            "controlled evaluation recovery artifact is unsafe"
-        ) from exc
-    if resolved != path or path.parent.resolve(strict=True) != path.parent:
-        raise RuntimeError(
-            "controlled evaluation recovery artifact is not canonical"
-        )
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != os.getuid()
-            or stat.S_IMODE(metadata.st_mode) & 0o077
-            or metadata.st_size > max_bytes
-        ):
-            raise RuntimeError(
-                "controlled evaluation recovery artifact must be one "
-                "bounded owner-only regular file"
-            )
-        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-            descriptor = -1
-            payload = json.load(handle)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
-            "controlled evaluation recovery artifact is invalid JSON"
-        ) from exc
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-    if not isinstance(payload, dict):
-        raise RuntimeError(
-            "controlled evaluation recovery artifact must contain an object"
-        )
-    return payload
+    """Compatibility delegate for bounded owner-private JSON loading."""
+    return load_private_recovery_json(
+        path,
+        runtime_root,
+        max_bytes=max_bytes,
+        effective_uid=os.getuid(),
+    )
 
 
 def post_controlled_recovery_result(
@@ -522,51 +487,13 @@ def settle_controlled_frozen_memory_artifacts(
     runtime_root: Path,
     recovery: dict[str, Any],
 ) -> None:
-    """Remove only frozen, response-bound memory tasks for this analysis."""
-    analysis_id = str(recovery["analysis_id"])
-    task_name = f"{analysis_id}.json"
-    for directory_name in (
-        "memory-writeback-pending",
-        "memory-writeback-committed",
-    ):
-        directory = runtime_root / directory_name
-        if not directory.exists():
-            continue
-        if not owner_private_directory(directory, runtime_root):
-            raise RuntimeError(
-                "controlled evaluation memory recovery directory is unsafe"
-            )
-        task_path = directory / task_name
-        if not task_path.exists():
-            continue
-        task = load_owner_private_json(
-            task_path,
-            runtime_root,
-            max_bytes=256 * 1024,
-        )
-        lanes = (task.get("primary"), task.get("reviewer"))
-        if (
-            task.get("schema")
-            != "onion-sentinel-memory-writeback-task-v1"
-            or task.get("analysis_id") != analysis_id
-            or task.get("submitted_response_sha256")
-            != recovery["response_digest"]
-            or any(
-                not isinstance(lane, dict)
-                or lane.get("allowed") is not False
-                or lane.get("candidates") != []
-                for lane in lanes
-            )
-        ):
-            raise RuntimeError(
-                "controlled evaluation frozen-memory task is not exact"
-            )
-        task_path.unlink()
-        directory_fd = os.open(directory, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+    """Compatibility delegate for exact frozen-memory settlement."""
+    settle_frozen_memory(
+        runtime_root,
+        recovery,
+        policy=FrozenMemoryPolicy(),
+        effective_uid=os.getuid(),
+    )
 
 
 def controlled_recovery_sources() -> ControlledRecoverySources:

@@ -90,6 +90,17 @@
       ]
     },
     {
+      "path": "n8n/bin/scheduler_controlled_artifacts.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/scheduler_controlled_artifacts.py",
+      "required_symbols": [
+        "FrozenMemoryPolicy",
+        "owner_private_directory",
+        "load_owner_private_json",
+        "settle_controlled_frozen_memory_artifacts"
+      ]
+    },
+    {
       "path": "n8n/bin/scheduler_controlled_recovery.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/scheduler_controlled_recovery.py",

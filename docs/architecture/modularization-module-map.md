@@ -299,6 +299,14 @@ compares every immutable `recordAiAnalysisResult` field. This isolates the
 cross-runtime parity code from scheduler orchestration while retaining facade
 imports for compatibility.
 
+`scheduler_controlled_artifacts.py` is the recovery filesystem repository. It
+accepts only canonical descendants, owner-only directories, and bounded
+owner-only non-symlink JSON files. Frozen-memory settlement additionally
+requires the exact task schema, analysis ID, submitted-response digest, and
+two explicitly disabled empty candidate lanes before unlinking and fsyncing
+the containing directory. The facade supplies the current effective UID and
+retains the legacy call signatures used by the recovery state machine.
+
 `scheduler_claim.py` owns compare-and-set processing acquisition,
 server-authoritative job/alert/group replacement, controlled claim identity,
 IR reanalysis-attempt binding, contention projection, and automatic-threshold
