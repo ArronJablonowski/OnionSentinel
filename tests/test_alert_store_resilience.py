@@ -19,6 +19,7 @@ DURABLE_JOB_ROUTES = REPO_ROOT / "n8n" / "alert_store" / "routes" / "durable_job
 PCAP_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "pcap_service.js"
 ENRICHMENT_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "enrichment_service.js"
 ALERT_INGEST_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "alert_ingest_service.js"
+ANALYST_REVIEW_POLICY = REPO_ROOT / "n8n" / "alert_store" / "lib" / "analyst_review_policy.js"
 
 
 class AlertStoreResilienceTest(unittest.TestCase):
@@ -38,6 +39,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.pcap_service = PCAP_SERVICE.read_text(encoding="utf-8")
         cls.enrichment_service = ENRICHMENT_SERVICE.read_text(encoding="utf-8")
         cls.alert_ingest_service = ALERT_INGEST_SERVICE.read_text(encoding="utf-8")
+        cls.analyst_review_policy = ANALYST_REVIEW_POLICY.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
         self.assertIn("require('./lib/provider_scheduler')", self.code)
@@ -124,8 +126,14 @@ class AlertStoreResilienceTest(unittest.TestCase):
                 self.code,
             )
         self.assertIn("resolve_case must be a JSON boolean", self.code)
-        self.assertIn("function deriveAnalystLegacyOutcome(factors)", self.code)
-        self.assertIn("function analystVerdictContradictions(outcome, explicitFactors)", self.code)
+        self.assertIn(
+            "function deriveAnalystLegacyOutcome(factors)",
+            self.analyst_review_policy,
+        )
+        self.assertIn(
+            "function analystVerdictContradictions(outcome, explicitFactors)",
+            self.analyst_review_policy,
+        )
         self.assertIn(
             "const verdictContradictions = analystVerdictContradictions(",
             self.code,
@@ -140,11 +148,11 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("review_completed_not_authorized", self.code)
         self.assertIn(
             "function reviewerAutomationAuthorization(",
-            self.code,
+            self.analyst_review_policy,
         )
         self.assertIn(
             "function conservativeReviewerTelemetry(",
-            self.code,
+            self.analyst_review_policy,
         )
         self.assertGreaterEqual(
             self.code.count(
@@ -154,15 +162,15 @@ class AlertStoreResilienceTest(unittest.TestCase):
         )
         self.assertIn(
             "embedded.comparison",
-            self.code,
+            self.analyst_review_policy,
         )
         self.assertIn(
             "embedded.response",
-            self.code,
+            self.analyst_review_policy,
         )
         self.assertIn(
             "corruptRow || corruptEmbedded || statusConflict",
-            self.code,
+            self.analyst_review_policy,
         )
         self.assertIn(
             "reviewAuthorization.authorized === false",
