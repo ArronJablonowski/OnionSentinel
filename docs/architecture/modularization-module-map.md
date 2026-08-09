@@ -128,6 +128,10 @@ line ranges below remain historical navigation aids for the extraction ledger.
   shorthand discovery now lives in `analysis.review.catalogs`. Arbitrary prose
   cannot promote a foreign domain, artifact, or rule label into the review
   allowlist; the legacy runner retains compatibility delegates.
+- Recursive local, reviewer-safe, and hosted evidence copying plus
+  transactional fixed-point contract rebinding now live in
+  `analysis.evidence.transport`; route-specific projection primitives remain
+  isolated in `analysis.evidence.hosted_projection`.
 - Blind package copying, anti-anchoring sanitization, operator-confirmed memory
   admission, transport-before-catalog ordering, review schema/contracts, and
   supplemental-context re-binding now live in `analysis.review.package`.

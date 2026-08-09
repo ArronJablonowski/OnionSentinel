@@ -1743,6 +1743,32 @@ def _evidence_hosted_projection_dependencies():
     )
 
 
+def _evidence_transport():
+    _provider_routing()
+    from onion_sentinel.analysis.evidence import transport
+    return transport
+
+
+def _evidence_transport_policy():
+    return _evidence_transport().Policy(
+        internal_keys=frozenset(MODEL_INTERNAL_KEYS),
+        hosted_forbidden_keys=frozenset(HOSTED_FORBIDDEN_KEYS),
+        list_path_sentinel=_MODEL_LIST_PATH_SENTINEL,
+        fixed_point_max_passes=HOSTED_TRANSPORT_FIXED_POINT_MAX_PASSES,
+    )
+
+
+def _evidence_transport_dependencies():
+    return _evidence_transport().Dependencies(
+        redact_asset_owners=_redact_unshared_asset_owners,
+        reviewed_sha256_path=_reviewed_hosted_sha256_evidence_path,
+        exact_columnar_envelope=_exact_hosted_columnar_envelope,
+        sanitize_hosted_evidence=_sanitize_hosted_investigation_evidence,
+        refinalize_columnar_envelope=_refinalize_hosted_columnar_envelope,
+        evidence_reference_contract=evidence_reference_contract,
+    )
+
+
 def _evidence_endpoint():
     _provider_routing()
     from onion_sentinel.analysis.evidence import endpoint
@@ -3512,87 +3538,11 @@ def model_safe_copy(
     model or independent reviewer receives them only when that individual asset
     record explicitly opts in.
     """
-    if isinstance(value, dict):
-        output = {}
-        for raw_key, item in value.items():
-            key = str(raw_key)
-            item_path = (*_path, key)
-            hosted_projected_evidence = hosted and key in {
-                "investigation_query_results",
-                "live_osquery_evidence",
-            }
-            preserve_columnar_rows = False
-            reviewed_hosted_sha256 = (
-                key == "sha256"
-                and hosted
-                and _reviewed_hosted_sha256_evidence_path(_path)
-            )
-            if (
-                key.startswith("_local_")
-                or (
-                    key in MODEL_INTERNAL_KEYS
-                    and not reviewed_hosted_sha256
-                )
-            ):
-                continue
-            if (
-                reviewed_hosted_sha256
-                and (
-                    not isinstance(item, str)
-                    or not re.fullmatch(r"[a-fA-F0-9]{64}", item)
-                )
-            ):
-                continue
-            if hosted and (key in HOSTED_FORBIDDEN_KEYS or key.startswith("_pcap_query_")):
-                continue
-            if hosted_projected_evidence:
-                preserve_columnar_rows = (
-                    item_path == ("investigation_query_results",)
-                    and _exact_hosted_columnar_envelope(
-                        item,
-                        require_encoded_accounting=True,
-                    )
-                )
-                item = _sanitize_hosted_investigation_evidence(
-                    item,
-                    item_path,
-                    preserve_columnar_rows=preserve_columnar_rows,
-                )
-            output[key] = model_safe_copy(
-                item,
-                hosted=hosted,
-                reviewer_safe=reviewer_safe,
-                _path=item_path,
-            )
-        if (hosted or reviewer_safe) and "asset_context" in output:
-            output["asset_context"] = _redact_unshared_asset_owners(
-                output["asset_context"]
-            )
-        if (
-            hosted
-            and not _path
-            and "investigation_query_results" in output
-        ):
-            output["investigation_query_results"] = (
-                _refinalize_hosted_columnar_envelope(
-                    output["investigation_query_results"]
-                )
-            )
-            output["evidence_reference_contract"] = (
-                evidence_reference_contract(output)
-            )
-        return output
-    if isinstance(value, list):
-        return [
-            model_safe_copy(
-                item,
-                hosted=hosted,
-                reviewer_safe=reviewer_safe,
-                _path=(*_path, _MODEL_LIST_PATH_SENTINEL),
-            )
-            for item in value
-        ]
-    return value
+    return _evidence_transport().model_safe_copy(
+        value, hosted=hosted, reviewer_safe=reviewer_safe, path=_path,
+        policy=_evidence_transport_policy(),
+        dependencies=_evidence_transport_dependencies(),
+    )
 
 
 def synchronize_hosted_investigation_contract(
@@ -3604,47 +3554,15 @@ def synchronize_hosted_investigation_contract(
     bounded convergence check. This keeps prompt admission transactional if a
     future transport rule is accidentally non-idempotent.
     """
-    working = copy.deepcopy(prompt_package)
-    seen_transport_digests: set[str] = set()
-    for _ in range(HOSTED_TRANSPORT_FIXED_POINT_MAX_PASSES):
-        transported = model_safe_copy(working, hosted=True)
-        transported_bytes = _investigation_prompt_json_bytes(transported)
-        transported_digest = hashlib.sha256(transported_bytes).hexdigest()
-        if transported_digest in seen_transport_digests:
-            raise InvestigationQueryError(
-                "hosted investigation transport did not reach a fixed point "
-                "(projection cycle)"
-            )
-        seen_transport_digests.add(transported_digest)
-        candidate = copy.deepcopy(working)
-        if "investigation_query_results" in transported:
-            candidate["investigation_query_results"] = transported[
-                "investigation_query_results"
-            ]
-        else:
-            candidate.pop("investigation_query_results", None)
-        if "evidence_reference_contract" in transported:
-            candidate["evidence_reference_contract"] = transported[
-                "evidence_reference_contract"
-            ]
-        else:
-            candidate.pop("evidence_reference_contract", None)
-        verified = model_safe_copy(candidate, hosted=True)
-        if _investigation_prompt_json_bytes(verified) == transported_bytes:
-            prompt_package.pop("investigation_query_results", None)
-            prompt_package.pop("evidence_reference_contract", None)
-            if "investigation_query_results" in candidate:
-                prompt_package["investigation_query_results"] = candidate[
-                    "investigation_query_results"
-                ]
-            if "evidence_reference_contract" in candidate:
-                prompt_package["evidence_reference_contract"] = candidate[
-                    "evidence_reference_contract"
-                ]
-            return prompt_package
-        working = candidate
-    raise InvestigationQueryError(
-        "hosted investigation transport did not reach a fixed point"
+    module = _evidence_transport()
+    return module.synchronize_hosted_contract(
+        prompt_package,
+        maximum_passes=HOSTED_TRANSPORT_FIXED_POINT_MAX_PASSES,
+        dependencies=module.SynchronizationDependencies(
+            model_safe_copy=lambda value: model_safe_copy(value, hosted=True),
+            prompt_json_bytes=_investigation_prompt_json_bytes,
+            validation_error=InvestigationQueryError,
+        ),
     )
 
 
