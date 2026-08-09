@@ -57,7 +57,7 @@
     "operations/benchmark-ollama-cybersecurity.py": {
       "max_lines": 1164
     },
-    "operations/run-incident-harness-cohort.py": {
+    "operations/cohort_runner_service.py": {
       "max_lines": 2128
     },
     "relay/app/relay.py": {
@@ -633,6 +633,9 @@
     "operations/benchmark-ollama-cybersecurity.py::score_query_batch": {
       "max_complexity": 20
     },
+    "operations/cohort_runner_service.py::build_parser": {
+      "max_lines": 105
+    },
     "operations/evaluate-analysis-replays.py::_classification_metrics": {
       "max_complexity": 32
     },
@@ -644,9 +647,6 @@
     },
     "operations/evaluate-analysis-replays.py::summarize": {
       "max_complexity": 27
-    },
-    "operations/run-incident-harness-cohort.py::build_parser": {
-      "max_lines": 105
     },
     "relay/app/ac_hunter_broker.py::_load_config": {
       "max_complexity": 22
@@ -712,5 +712,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "184d86f569a0d4dd2c9159e71549f01c733a2651"
+  "source_release": "e2f6ae259854e7955f4459ce46c7365d60b6563c"
 }

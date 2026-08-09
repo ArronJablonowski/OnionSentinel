@@ -780,6 +780,12 @@ identity, and the frozen-plan digest. `operations/cohort_private_input.py`
 separately owns owner, mode, symlink, size, encoding, JSON-root, and bounded
 source-row checks before delegating manifest semantics to that pure contract.
 
+`operations/cohort_runner_service.py` is the repository-only composition root
+that binds the extracted freeze, manifest, dispatch, preflight, monitor,
+execution-proof, and export services. The historical
+`operations/run-incident-harness-cohort.py` path is a 20-line compatibility
+CLI that delegates parser construction and execution to the service.
+
 `operations/cohort_execution_models.py` owns model-call and reviewer execution
 evidence. It validates canonical model-call facts, bounded repair sequences,
 terminally successful purposes, required independent review, supplemental

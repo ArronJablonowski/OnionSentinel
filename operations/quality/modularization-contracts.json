@@ -3,6 +3,29 @@
   "baseline_release": "3eec576a59b51b74badcc042de2e3418fca9c867",
   "python_entry_points": [
     {
+      "path": "operations/run-incident-harness-cohort.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/run-incident-harness-cohort.py",
+      "required_symbols": [
+        "build_parser",
+        "main"
+      ]
+    },
+    {
+      "path": "operations/cohort_runner_service.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_runner_service.py",
+      "required_symbols": [
+        "build_parser",
+        "main",
+        "freeze_cohort",
+        "freeze_cohort_from_rows",
+        "queue_cohort",
+        "monitor_cohort",
+        "export_cohort"
+      ]
+    },
+    {
       "path": "operations/cohort_freezing.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_freezing.py",

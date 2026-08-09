@@ -32,7 +32,7 @@ CONTROLLED_ROUTE_FIELDS = {
     "reviewer_required": True,
 }
 COHORT_MODULE_PATH = (
-    REPO_ROOT / "operations" / "run-incident-harness-cohort.py"
+    REPO_ROOT / "operations" / "cohort_runner_service.py"
 )
 COHORT_SPEC = importlib.util.spec_from_file_location(
     "run_incident_harness_cohort_for_lineage_test",

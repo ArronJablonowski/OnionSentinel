@@ -16,7 +16,7 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = ROOT / "operations" / "run-incident-harness-cohort.py"
+MODULE_PATH = ROOT / "operations" / "cohort_runner_service.py"
 SPEC = importlib.util.spec_from_file_location(
     "run_incident_harness_cohort",
     MODULE_PATH,

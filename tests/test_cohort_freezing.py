@@ -18,7 +18,7 @@ import cohort_freezing  # noqa: E402
 
 
 def load_legacy_cohort():
-    path = OPERATIONS / "run-incident-harness-cohort.py"
+    path = OPERATIONS / "cohort_runner_service.py"
     spec = importlib.util.spec_from_file_location("cohort_freezing_test", path)
     if spec is None or spec.loader is None:
         raise RuntimeError("unable to load cohort runner")
