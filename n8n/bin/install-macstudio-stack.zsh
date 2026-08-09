@@ -594,6 +594,7 @@ cp "$REPO_DIR/operations/trace_evaluation_skills.py" "$STACK_DIR/bin/trace_evalu
 cp "$REPO_DIR/operations/trace_evaluation_storage.py" "$STACK_DIR/bin/trace_evaluation_storage.py"
 cp "$REPO_DIR/operations/trace_evaluation_integrity.py" "$STACK_DIR/bin/trace_evaluation_integrity.py"
 cp "$REPO_DIR/operations/trace_evaluation_reviewer.py" "$STACK_DIR/bin/trace_evaluation_reviewer.py"
+cp "$REPO_DIR/operations/trace_evaluation_model_contract.py" "$STACK_DIR/bin/trace_evaluation_model_contract.py"
 cp "$REPO_DIR/n8n/bin/controlled_evaluation_isolation.py" "$STACK_DIR/bin/controlled_evaluation_isolation.py"
 /usr/bin/python3 "$REPO_DIR/n8n/bin/install-ai-runtime-package.py" \
   --source "$REPO_DIR/n8n/onion_sentinel" \

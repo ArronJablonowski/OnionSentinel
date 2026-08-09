@@ -50,6 +50,10 @@ from trace_evaluation_reviewer import (
     reviewer_completion_contract as evaluate_reviewer_completion,
     reviewer_result as evaluate_reviewer_result,
 )
+from trace_evaluation_model_contract import (
+    ModelCallContractPolicy,
+    canonical_model_call_contract as build_model_call_contract,
+)
 
 
 REPORT_SCHEMA = "onion-sentinel-harness-trace-evaluation-v1"
@@ -445,192 +449,33 @@ def reviewer_completion_contract(
     )
 
 
+def _model_call_contract_policy() -> ModelCallContractPolicy:
+    return ModelCallContractPolicy(
+        schema=MODEL_CALL_CONTRACT_SCHEMA,
+        maximum_calls=MAX_RUNTIME_MODEL_CALLS,
+        primary_initial_id=PRIMARY_INITIAL_CALL_ID,
+        primary_initial_purpose=PRIMARY_INITIAL_PURPOSE,
+        query_planning_id=QUERY_PLANNING_CALL_ID,
+        query_planning_purpose=QUERY_PLANNING_PURPOSE,
+        query_planning_repair_id=QUERY_PLANNING_REPAIR_CALL_ID,
+        query_planning_repair_purpose=QUERY_PLANNING_REPAIR_PURPOSE,
+        followup_pattern=FOLLOWUP_CALL_RE,
+        reviewer_ids=REVIEWER_REPAIR_CALL_IDS,
+        reviewer_purpose=REVIEWER_REPAIR_PURPOSE,
+        supplemental_id=SUPPLEMENTAL_REVIEW_CALL_ID,
+        supplemental_purpose=SUPPLEMENTAL_REVIEW_PURPOSE,
+        adjudication_ids=ADJUDICATION_CALL_IDS,
+        adjudication_purpose=ADJUDICATION_PURPOSE,
+        validation_failed_status=VALIDATION_FAILED_STATUS,
+        normalize_status=normalize_status,
+        digest_value=digest_json,
+    )
+
+
 def canonical_model_call_contract(
     model_calls: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Validate the closed model-call grammar emitted by the current runtime."""
-
-    ordered_calls = sorted(
-        (
-            (ordinal, row)
-            for ordinal, row in enumerate(model_calls)
-            if isinstance(row, dict)
-        ),
-        key=lambda item: (
-            str(item[1].get("created_at") or ""),
-            str(item[1].get("call_id") or ""),
-            item[0],
-        ),
-    )
-    facts: list[dict[str, Any]] = []
-    violations: list[dict[str, Any]] = []
-    followup_rounds: list[int] = []
-    query_planning_repair_rounds: list[int] = []
-    primary_initial_count = 0
-    query_planning_count = 0
-    query_planning_repair_count = 0
-    next_primary_round = 1
-    canonical_count = 0
-    for ordinal, row in ordered_calls:
-        call_id = str(row.get("call_id") or "")
-        purpose = str(row.get("purpose") or "")
-        requested_route = str(row.get("requested_route") or "")
-        status = normalize_status(row.get("status"))
-        independent_review = int(row.get("independent_review") or 0) == 1
-        reasons: list[str] = []
-        followup_match = FOLLOWUP_CALL_RE.fullmatch(call_id)
-        if call_id == PRIMARY_INITIAL_CALL_ID:
-            primary_initial_count += 1
-            if purpose != PRIMARY_INITIAL_PURPOSE:
-                reasons.append("primary-initial-purpose-mismatch")
-            if independent_review:
-                reasons.append("primary-initial-marked-reviewer")
-            if status != "completed":
-                reasons.append("primary-initial-status-not-completed")
-        elif call_id == QUERY_PLANNING_CALL_ID:
-            query_planning_count += 1
-            if purpose != QUERY_PLANNING_PURPOSE:
-                reasons.append("query-planning-purpose-mismatch")
-            if independent_review:
-                reasons.append("query-planning-marked-reviewer")
-            if status != "completed":
-                reasons.append("query-planning-status-not-completed")
-        elif call_id == QUERY_PLANNING_REPAIR_CALL_ID:
-            query_planning_repair_count += 1
-            # Legacy traces may contain a model-authored repair call. Current
-            # runtime repair is deterministic and therefore emits no model
-            # call or model-call round slot.
-            query_planning_repair_rounds.append(next_primary_round)
-            next_primary_round += 1
-            if purpose != QUERY_PLANNING_REPAIR_PURPOSE:
-                reasons.append("query-planning-repair-purpose-mismatch")
-            if independent_review:
-                reasons.append("query-planning-repair-marked-reviewer")
-            if status != "completed":
-                reasons.append("query-planning-repair-status-not-completed")
-        elif followup_match:
-            round_number = int(followup_match.group(1))
-            followup_rounds.append(round_number)
-            if round_number != next_primary_round:
-                reasons.append("primary-followup-round-out-of-sequence")
-            next_primary_round += 1
-            if purpose != (
-                f"primary investigation follow-up round {round_number}"
-            ):
-                reasons.append("primary-followup-purpose-mismatch")
-            if independent_review:
-                reasons.append("primary-followup-marked-reviewer")
-            if status != "completed":
-                reasons.append("primary-followup-status-not-completed")
-        elif call_id in REVIEWER_REPAIR_CALL_IDS:
-            attempt = REVIEWER_REPAIR_CALL_IDS.index(call_id) + 1
-            if purpose != REVIEWER_REPAIR_PURPOSE:
-                reasons.append("reviewer-purpose-mismatch")
-            if not independent_review:
-                reasons.append("reviewer-call-not-marked-independent")
-            allowed_statuses = (
-                {"completed", VALIDATION_FAILED_STATUS}
-                if attempt == 1
-                else {"completed"}
-            )
-            if status not in allowed_statuses:
-                reasons.append("reviewer-status-not-canonical")
-        elif call_id == SUPPLEMENTAL_REVIEW_CALL_ID:
-            if purpose != SUPPLEMENTAL_REVIEW_PURPOSE:
-                reasons.append("supplemental-reviewer-purpose-mismatch")
-            if not independent_review:
-                reasons.append("supplemental-reviewer-call-not-independent")
-            if status != "completed":
-                reasons.append("supplemental-reviewer-status-not-completed")
-        elif call_id in ADJUDICATION_CALL_IDS:
-            attempt = ADJUDICATION_CALL_IDS.index(call_id) + 1
-            if purpose != ADJUDICATION_PURPOSE:
-                reasons.append("adjudication-purpose-mismatch")
-            if not independent_review:
-                reasons.append("adjudication-call-not-marked-independent")
-            allowed_statuses = (
-                {"completed", VALIDATION_FAILED_STATUS}
-                if attempt == 1
-                else {"completed"}
-            )
-            if status not in allowed_statuses:
-                reasons.append("adjudication-status-not-canonical")
-        else:
-            reasons.append("unknown-model-call-id")
-        if not requested_route:
-            reasons.append("requested-route-missing")
-        fact = {
-            "call_id": call_id,
-            "purpose": purpose,
-            "requested_route": requested_route,
-            "independent_review": independent_review,
-            "status": status,
-        }
-        if len(facts) < MAX_RUNTIME_MODEL_CALLS:
-            facts.append(fact)
-        if reasons:
-            if len(violations) < MAX_RUNTIME_MODEL_CALLS:
-                violations.append(
-                    {
-                        "call_id": call_id or f"ordinal-{ordinal}",
-                        "reasons": reasons,
-                    }
-                )
-        else:
-            canonical_count += 1
-
-    global_reasons: list[str] = []
-    if len(ordered_calls) > MAX_RUNTIME_MODEL_CALLS:
-        global_reasons.append("model-call-budget-exceeded")
-    if primary_initial_count != 1:
-        global_reasons.append("primary-initial-count-not-one")
-    if query_planning_count not in {0, 1}:
-        global_reasons.append("query-planning-count-invalid")
-    if query_planning_repair_count not in {0, 1}:
-        global_reasons.append("query-planning-repair-count-invalid")
-    unique_followups = sorted(set(followup_rounds))
-    if len(unique_followups) != len(followup_rounds):
-        global_reasons.append("duplicate-primary-followup-round")
-    primary_rounds = sorted(
-        followup_rounds + query_planning_repair_rounds
-    )
-    unique_primary_rounds = sorted(set(primary_rounds))
-    if len(unique_primary_rounds) != len(primary_rounds):
-        global_reasons.append("duplicate-primary-round-slot")
-    if unique_primary_rounds and unique_primary_rounds != list(
-        range(1, max(unique_primary_rounds) + 1)
-    ):
-        global_reasons.append("noncontiguous-primary-rounds")
-    maximum_primary_rounds = 2 if query_planning_count else 3
-    if len(unique_primary_rounds) > maximum_primary_rounds:
-        global_reasons.append("too-many-primary-rounds")
-    return {
-        "schema": MODEL_CALL_CONTRACT_SCHEMA,
-        "valid": not violations and not global_reasons,
-        "model_call_count": len(ordered_calls),
-        "canonical_model_call_count": canonical_count,
-        "noncanonical_model_call_count": len(ordered_calls) - canonical_count,
-        "primary_initial_call_count": primary_initial_count,
-        "query_planning_call_count": query_planning_count,
-        "query_planning_repair_call_count": query_planning_repair_count,
-        "primary_followup_call_count": len(followup_rounds),
-        "reviewer_model_call_count": sum(
-            str(row.get("call_id") or "") in {
-                *REVIEWER_REPAIR_CALL_IDS,
-                SUPPLEMENTAL_REVIEW_CALL_ID,
-            }
-            for _ordinal, row in ordered_calls
-        ),
-        "adjudicator_model_call_count": sum(
-            str(row.get("call_id") or "") in ADJUDICATION_CALL_IDS
-            for _ordinal, row in ordered_calls
-        ),
-        "facts": facts,
-        "facts_sha256": digest_json(facts),
-        "violation_count": len(violations) + len(global_reasons),
-        "violations": violations,
-        "global_reasons": global_reasons,
-    }
+    return build_model_call_contract(model_calls, _model_call_contract_policy())
 
 
 def model_purpose_completion(

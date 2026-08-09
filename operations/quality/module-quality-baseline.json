@@ -58,7 +58,7 @@
       "max_lines": 1164
     },
     "operations/evaluate-harness-traces.py": {
-      "max_lines": 2158
+      "max_lines": 2003
     },
     "operations/evaluate-investigation-cohort.py": {
       "max_lines": 1303
@@ -654,10 +654,6 @@
     "operations/evaluate-harness-traces.py::budget_operation_id": {
       "max_complexity": 23
     },
-    "operations/evaluate-harness-traces.py::canonical_model_call_contract": {
-      "max_complexity": 61,
-      "max_lines": 186
-    },
     "operations/evaluate-harness-traces.py::evaluate_run": {
       "max_complexity": 104,
       "max_lines": 377
@@ -777,5 +773,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "5cbbf807da864b3db5cd8c868f8e5cd79e241374"
+  "source_release": "81c9ea2d4dc2aaa029bc7607ed290a8dae8ad045"
 }

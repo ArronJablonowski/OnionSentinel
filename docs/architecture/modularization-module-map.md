@@ -534,6 +534,12 @@ review and supplemental calls to exact primary/reviewer decision rows, reports
 material field disagreement, and validates repair and completion counts through
 injected normalization ports.
 
+`operations/trace_evaluation_model_contract.py` owns construction of the
+bounded canonical model-call proof. It classifies the closed primary,
+query-planning, follow-up, reviewer, supplemental, and adjudication call
+grammar; enforces round sequencing and retry budgets; and emits content-free
+facts plus exact violation codes through an immutable policy.
+
 `operations/cohort_freezing.py` owns database-newest and exact-imported-row
 cohort freezing. Immutable policy and explicit source ports bind identity
 validation, read-only database snapshots, representative-alert custody,

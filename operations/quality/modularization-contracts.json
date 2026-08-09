@@ -235,6 +235,15 @@
       ]
     },
     {
+      "path": "operations/trace_evaluation_model_contract.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/trace_evaluation_model_contract.py",
+      "required_symbols": [
+        "ModelCallContractPolicy",
+        "canonical_model_call_contract"
+      ]
+    },
+    {
       "path": "operations/cohort_execution_models.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_execution_models.py",
