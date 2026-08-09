@@ -2995,6 +2995,7 @@
       "installer": "n8n/bin/install-ai-runtime-package.py",
       "required_modules": [
         "onion_sentinel",
+        "onion_sentinel.analysis.providers.artifacts",
         "onion_sentinel.analysis.providers.cli_common",
         "onion_sentinel.analysis.providers.codex",
         "onion_sentinel.analysis.providers.hermes",

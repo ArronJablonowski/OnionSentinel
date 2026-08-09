@@ -1536,6 +1536,12 @@ def _cli_common_provider():
     return cli_common
 
 
+def _provider_artifacts():
+    _provider_routing()
+    from onion_sentinel.analysis.providers import artifacts
+    return artifacts
+
+
 def _openclaw_provider():
     _provider_routing()
     from onion_sentinel.analysis.providers import openclaw
@@ -5369,64 +5375,14 @@ def _load_bounded_regular_json(
     label: str,
     required_mode: int | None = None,
 ) -> dict[str, Any]:
-    """Read one non-symlink JSON file through its verified descriptor."""
-    try:
-        admitted = path.lstat()
-    except OSError as exc:
-        raise RuntimeArtifactError(f"{label} is missing") from exc
-    if stat.S_ISLNK(admitted.st_mode) or not stat.S_ISREG(admitted.st_mode):
-        raise RuntimeArtifactError(f"{label} must be a regular file")
-    if required_mode is not None and stat.S_IMODE(admitted.st_mode) != required_mode:
-        raise RuntimeArtifactError(
-            f"{label} must have mode {required_mode:04o}"
-        )
-    if admitted.st_size > max_bytes:
-        raise RuntimeArtifactError(f"{label} exceeds its size limit")
-    descriptor = -1
-    try:
-        descriptor = os.open(
-            path,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-        )
-        opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or (opened.st_dev, opened.st_ino)
-            != (admitted.st_dev, admitted.st_ino)
-        ):
-            raise RuntimeArtifactError(f"{label} changed during admission")
-        if (
-            required_mode is not None
-            and stat.S_IMODE(opened.st_mode) != required_mode
-        ):
-            raise RuntimeArtifactError(
-                f"{label} must have mode {required_mode:04o}"
-            )
-        if opened.st_size > max_bytes:
-            raise RuntimeArtifactError(f"{label} exceeds its size limit")
-        chunks: list[bytes] = []
-        remaining = max_bytes + 1
-        while remaining:
-            chunk = os.read(descriptor, min(64 * 1024, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        raw = b"".join(chunks)
-        if len(raw) > max_bytes:
-            raise RuntimeArtifactError(f"{label} exceeds its size limit")
-        try:
-            value = json.loads(raw.decode("utf-8", errors="strict"))
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise RuntimeArtifactError(f"{label} is not valid JSON") from exc
-        if not isinstance(value, dict):
-            raise RuntimeArtifactError(f"{label} JSON root must be an object")
-        return value
-    except OSError as exc:
-        raise RuntimeArtifactError(f"{label} is not safely readable") from exc
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+    """Compatibility delegate for descriptor-verified provider artifacts."""
+    return _provider_artifacts().read_json_object(
+        path,
+        max_bytes=max_bytes,
+        label=label,
+        required_mode=required_mode,
+        error_type=RuntimeArtifactError,
+    )
 
 
 def _load_dedicated_hermes_auth(path: Path) -> dict[str, Any]:

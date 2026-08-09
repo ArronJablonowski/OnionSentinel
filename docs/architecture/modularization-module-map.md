@@ -2232,6 +2232,10 @@ and primary/reviewer/adjudicator assignment composition now live under
 `onion_sentinel.analysis.providers.settings`. Provider credentials and process
 execution remain outside this pure settings boundary.
 
+Bounded provider runtime-artifact reads, non-symlink admission, descriptor
+identity checks, strict UTF-8 decoding, and JSON-object validation now live in
+`onion_sentinel.analysis.providers.artifacts`.
+
 Independent-review package construction, text/repetition policy, and
 fail-closed response validation live under `onion_sentinel.analysis.review`.
 The same package owns bounded shadow-adjudication package and validation
