@@ -581,6 +581,13 @@ and pure canonicalization, digest, normalization, ratio, integer, and bounded
 JSON primitives. The evaluator imports these symbols as its public compatibility
 surface while remaining a sub-600-line composition root.
 
+`operations/trace_evaluation_api.py` is the reusable trace-evaluation
+composition API. It binds immutable policies and explicit service ports for the
+extracted storage, integrity, skill, event, reviewer, model, route, run, summary,
+and output modules and retains the legacy callable surface. The executable
+`evaluate-harness-traces.py` re-exports that API and owns only CLI parsing,
+terminal presentation selection, exit classification, and process termination.
+
 `operations/cohort_freezing.py` owns database-newest and exact-imported-row
 cohort freezing. Immutable policy and explicit source ports bind identity
 validation, read-only database snapshots, representative-alert custody,

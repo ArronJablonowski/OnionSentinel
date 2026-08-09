@@ -37,6 +37,7 @@ import trace_evaluation_output  # noqa: E402
 import trace_evaluation_summary  # noqa: E402
 import trace_evaluation_events  # noqa: E402
 import trace_evaluation_contract  # noqa: E402
+import trace_evaluation_api  # noqa: E402
 
 HARNESS_SPEC = importlib.util.spec_from_file_location(
     "evaluator_test_harness_module",
@@ -665,6 +666,14 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
             evaluator.RUN_IDENTITY_COLUMNS,
             trace_evaluation_contract.RUN_IDENTITY_COLUMNS,
         )
+
+    def test_cli_reexports_trace_evaluation_api(self):
+        self.assertIs(
+            evaluator.evaluate_database,
+            trace_evaluation_api.evaluate_database,
+        )
+        self.assertIs(evaluator.evaluate_run, trace_evaluation_api.evaluate_run)
+        self.assertIs(evaluator.summarize, trace_evaluation_api.summarize)
 
     def test_resolved_repair_is_not_reported_as_tool_coverage_gap(self) -> None:
         calls = [
@@ -1990,6 +1999,13 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
             (
                 'cp "$REPO_DIR/operations/trace_evaluation_contract.py" '
                 '"$STACK_DIR/bin/trace_evaluation_contract.py"'
+            ),
+            source,
+        )
+        self.assertIn(
+            (
+                'cp "$REPO_DIR/operations/trace_evaluation_api.py" '
+                '"$STACK_DIR/bin/trace_evaluation_api.py"'
             ),
             source,
         )

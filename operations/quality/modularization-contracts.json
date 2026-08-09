@@ -315,6 +315,16 @@
       ]
     },
     {
+      "path": "operations/trace_evaluation_api.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/trace_evaluation_api.py",
+      "required_symbols": [
+        "evaluate_database",
+        "evaluate_run",
+        "summarize"
+      ]
+    },
+    {
       "path": "operations/cohort_execution_models.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_execution_models.py",
