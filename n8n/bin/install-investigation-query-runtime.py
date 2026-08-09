@@ -35,6 +35,7 @@ HARDENED_BUILDER_DEPENDENCIES = (
     "prompt_incident_grounding.py",
     "prompt_investigation_query_context.py",
     "prompt_package_compactor.py",
+    "prompt_package_view_model.py",
     "prompt_response_contract.py",
 )
 MAX_CONFIG_BYTES = 64 * 1024

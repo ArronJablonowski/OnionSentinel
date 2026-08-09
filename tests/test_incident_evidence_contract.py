@@ -906,10 +906,19 @@ class IncidentEvidenceContractTests(unittest.TestCase):
         self.assertIs(validated, artifact)
 
     def test_incident_prompt_builder_has_no_empty_evidence_fallback(self) -> None:
-        source = (BIN_DIR / "build-ai-investigation-prompt.py").read_text(encoding="utf-8")
+        builder = (BIN_DIR / "build-ai-investigation-prompt.py").read_text(
+            encoding="utf-8"
+        )
+        assembler = (BIN_DIR / "prompt_package_view_model.py").read_text(
+            encoding="utf-8"
+        )
 
-        self.assertIn("requires validated restricted Security Onion evidence", source)
-        self.assertNotIn('"security_onion_response": {"complete": False, "partial": True, "results": []}', source)
+        self.assertIn("assemble_prompt_package(", builder)
+        self.assertIn("requires validated restricted Security Onion evidence", assembler)
+        self.assertNotIn(
+            '"security_onion_response": {"complete": False, "partial": True, "results": []}',
+            builder + assembler,
+        )
 
     def test_mac_installer_deploys_incident_evidence_runtime_dependencies(self) -> None:
         installer = (BIN_DIR / "install-macstudio-stack.zsh").read_text(encoding="utf-8")

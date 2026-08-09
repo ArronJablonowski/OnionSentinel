@@ -574,6 +574,14 @@ query-pack names, and query-contract feature flag. Incident-only grounding and
 report fields cannot leak into SOC Analyst packages, and returned structures do
 not share mutable state across investigations.
 
+`prompt_package_view_model.py` owns final model-facing package assembly. It
+merges already-prepared lineage, policy, runtime-file references, response
+contract, and bounded evidence sections, declares the exact context excluded
+from blind reanalysis, keeps incident evidence out of SOC Analyst packages,
+and fails closed when an Incident Responder package lacks validated restricted
+Security Onion evidence. Collection, validation, projection, and persistence
+remain outside this pure assembly boundary.
+
 ## Portal Runtime
 
 Current owner: `onion-sentinel-dashboard/report_portal.py` (14,366 lines).

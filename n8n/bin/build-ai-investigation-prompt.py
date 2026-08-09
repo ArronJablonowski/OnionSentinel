@@ -82,6 +82,10 @@ from prompt_package_compactor import (
     PackageCompactionSources,
     compact_package_to_budget as compact_prompt_package,
 )
+from prompt_package_view_model import (
+    PromptPackageView,
+    assemble_prompt_package,
+)
 from prompt_response_contract import (
     PromptContractRequest,
     build_prompt_contract,
@@ -2010,61 +2014,56 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             query_v2=INVESTIGATION_QUERY_V2,
         )
     )
-    package = {
-        "package_type": "soc-ai-investigation-prompt",
-        "agent_role": args.agent_role,
-        **execution_lineage(
-            selected,
-            blind_reanalysis=args.blind_reanalysis,
-        ),
-        "generated_at": project_now(),
-        "analysis_policy": model_policy(selected["triage_level"]),
-        "system_prompt_file": str(args.system_prompt_file),
-        "second_opinion_system_prompt_file": str(args.second_opinion_prompt_file),
-        "agent_memory_file": str(args.agent_memory_file),
-        "shared_memory_file": str(args.shared_memory_file),
-        **prompt_contract,
-        "alert": compact_selected,
-        "grouped_alert_context": group_context,
-        "public_enrichment": enrichment_context,
-        "pcap_evidence": pcap_context,
-        "investigation_query_capability": investigation_capability,
-        "_local_investigation_query_context": investigation_local_context,
-        "investigation_skills": skill_selection,
-        "detection_validation": detection_validation,
-        "asset_context": asset_context,
-        "authorization_evidence": authorization_evidence,
-        "analyst_state": analyst_state,
-        "prior_analyses": (
-            []
-            if args.blind_reanalysis
-            else prior_analysis_context(conn, args.analysis_dir, selected)
-        ),
-        "related_alerts": related_alerts(conn, selected, args.related_limit, args.include_tests),
-        "correlated_alert_context": correlation_context,
-        "recent_notifications": notification_context(conn, selected),
-        "agent_memory": memory_context,
-        "latest_daily_rollup": rollup,
-        "reanalysis_context": {
-            "blind": bool(args.blind_reanalysis),
-            "excluded_context": (
-                [
-                    "prior AI analyses",
-                    "prior model-authored correlation hypotheses",
-                    "unconfirmed model-observed memory",
-                ]
-                if args.blind_reanalysis
-                else []
+    return assemble_prompt_package(
+        PromptPackageView(
+            agent_role=str(args.agent_role),
+            blind_reanalysis=bool(args.blind_reanalysis),
+            lineage=execution_lineage(
+                selected,
+                blind_reanalysis=args.blind_reanalysis,
             ),
-        },
-    }
-    if args.agent_role == "incident-responder":
-        if incident_evidence is None:
-            raise RuntimeError(
-                "incident-responder analysis requires validated restricted Security Onion evidence"
-            )
-        package["incident_response_evidence"] = incident_evidence
-    return package
+            generated_at=project_now(),
+            analysis_policy=model_policy(selected["triage_level"]),
+            runtime_files={
+                "system_prompt_file": str(args.system_prompt_file),
+                "second_opinion_system_prompt_file": str(
+                    args.second_opinion_prompt_file
+                ),
+                "agent_memory_file": str(args.agent_memory_file),
+                "shared_memory_file": str(args.shared_memory_file),
+            },
+            prompt_contract=prompt_contract,
+            evidence_sections={
+                "alert": compact_selected,
+                "grouped_alert_context": group_context,
+                "public_enrichment": enrichment_context,
+                "pcap_evidence": pcap_context,
+                "investigation_query_capability": investigation_capability,
+                "_local_investigation_query_context": investigation_local_context,
+                "investigation_skills": skill_selection,
+                "detection_validation": detection_validation,
+                "asset_context": asset_context,
+                "authorization_evidence": authorization_evidence,
+                "analyst_state": analyst_state,
+                "prior_analyses": (
+                    []
+                    if args.blind_reanalysis
+                    else prior_analysis_context(conn, args.analysis_dir, selected)
+                ),
+                "related_alerts": related_alerts(
+                    conn,
+                    selected,
+                    args.related_limit,
+                    args.include_tests,
+                ),
+                "correlated_alert_context": correlation_context,
+                "recent_notifications": notification_context(conn, selected),
+                "agent_memory": memory_context,
+                "latest_daily_rollup": rollup,
+            },
+            incident_evidence=incident_evidence,
+        )
+    )
 
 
 def incident_prompt_immutable_query_provenance(incident: dict) -> dict:
