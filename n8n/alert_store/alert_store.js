@@ -46,6 +46,9 @@ const {createDurableJobTransitionExecutor} = require('./services/durable_job_tra
 const {
   createControlledRetirementCompletedMember,
 } = require('./services/controlled_retirement_completed_member');
+const {
+  createControlledRetirementTargetMember,
+} = require('./services/controlled_retirement_target_member');
 const {createIncidentAnalysisCompletion} = require('./services/incident_analysis_completion');
 const {createIncidentReanalysisBindingService} = require('./services/incident_reanalysis_binding');
 const {createHealthRoutes} = require('./routes/health_routes');
@@ -3727,106 +3730,16 @@ async function controlledRetirementTargetMember(
   runRow,
   runReceipt,
 ) {
-  const runCases = await all(
-    `SELECT * FROM incident_reanalysis_run_cases
-     WHERE run_id = ? ORDER BY case_id LIMIT 3`,
-    [runRow.run_id],
+  return controlledRetirementTargetMemberOwner.project(
+    identity,
+    member,
+    targetState,
+    job,
+    jobPayload,
+    runRow,
+    runReceipt,
   );
-  const attempts = await all(
-    `SELECT * FROM incident_reanalysis_attempts
-     WHERE run_id = ? ORDER BY started_at, attempt_id LIMIT 3`,
-    [runRow.run_id],
-  );
-  const runCase = runCases[0];
-  const attempt = attempts[0];
-  const normalizedJobError = safeString(job.last_error, 1000);
-  const normalizedRunCaseError = safeString(
-    runCase?.latest_error,
-    1000,
-  );
-  const normalizedAttemptError = safeString(
-    attempt?.latest_error,
-    1000,
-  );
-  const pending = targetState === 'pending';
-  if (
-    runCases.length !== 1
-    || !runCase
-    || runCase.run_id !== runRow.run_id
-    || runCase.case_id !== identity.case_id
-    || runCase.group_id !== identity.stable_group_id
-    || runCase.dashboard_group_id !== jobPayload.dashboard_group_id
-    || runCase.representative_alert_id
-      !== identity.representative_alert_id
-    || runCase.latest_attempt_id !== identity.expected_attempt_id
-    || runCase.analysis_id !== null
-    || !runCase.started_at
-    || attempts.length !== 1
-    || !attempt
-    || attempt.attempt_id !== identity.expected_attempt_id
-    || attempt.run_id !== identity.reanalysis_run_id
-    || attempt.case_id !== identity.case_id
-    || attempt.group_id !== identity.stable_group_id
-    || Number(attempt.durable_attempt_count || 0)
-      !== identity.expected_attempt_count
-    || attempt.status !== 'failed'
-    || attempt.analysis_id !== null
-    || !attempt.started_at
-    || !attempt.completed_at
-    || !normalizedAttemptError
-    || (
-      pending
-      && (
-        runCase.status !== 'queued'
-        || runCase.completed_at !== null
-        || !job.processing_started_at
-        || !normalizedJobError
-        || !normalizedRunCaseError
-        || normalizedJobError !== normalizedRunCaseError
-        || normalizedJobError !== normalizedAttemptError
-      )
-    )
-    || (
-      !pending
-      && (
-        runCase.status !== 'skipped'
-        || !runCase.completed_at
-        || job.last_error !== null
-        || runCase.latest_error !== null
-      )
-    )
-  ) {
-    throw controlledRetirementConflict(
-      'controlled evaluation target failure lineage is contradictory',
-    );
-  }
-  return {
-    rank: member.rank,
-    dispatch_id: member.dispatch_id,
-    state: targetState,
-    job: controlledRetirementJobProjection(job),
-    run: controlledRetirementRunProjection(runRow, runReceipt),
-    run_case: controlledRetirementRunCaseProjection(runCase),
-    attempt: controlledRetirementAttemptProjection(attempt),
-    failure: {
-      job: controlledRetirementErrorProjection(job.last_error),
-      run_case: controlledRetirementErrorProjection(
-        runCase.latest_error,
-      ),
-      attempt: controlledRetirementErrorProjection(
-        attempt.latest_error,
-      ),
-      normalized_sha256: controlledRetirementRawSha256(
-        normalizedAttemptError,
-      ),
-    },
-    case_id: identity.case_id,
-    stable_group_id: identity.stable_group_id,
-    stable_group_key: identity.stable_group_key,
-    representative_alert_id: identity.representative_alert_id,
-  };
 }
-
 async function controlledRetirementCensus(identity, targetState) {
   if (!['pending', 'retired'].includes(targetState)) {
     throw controlledRetirementConflict(
@@ -7083,6 +6996,17 @@ const controlledRetirementCompletedMemberOwner = createControlledRetirementCompl
   incidentAnalysisProvider,
   completedJobLifecycleValid: controlledRetirementCompletedJobLifecycleValid,
   projectCompleted: controlledRetirementCompletedProjection,
+  conflict: controlledRetirementConflict,
+});
+const controlledRetirementTargetMemberOwner = createControlledRetirementTargetMember({
+  all,
+  safeString,
+  projectJob: controlledRetirementJobProjection,
+  projectRun: controlledRetirementRunProjection,
+  projectRunCase: controlledRetirementRunCaseProjection,
+  projectAttempt: controlledRetirementAttemptProjection,
+  projectError: controlledRetirementErrorProjection,
+  rawSha256: controlledRetirementRawSha256,
   conflict: controlledRetirementConflict,
 });
 
