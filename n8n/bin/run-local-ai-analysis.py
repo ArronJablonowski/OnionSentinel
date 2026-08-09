@@ -1723,6 +1723,30 @@ def _evidence_columnar_dependencies():
     )
 
 
+def _evidence_hosted_projection():
+    _provider_routing()
+    from onion_sentinel.analysis.evidence import hosted_projection
+    return hosted_projection
+
+
+def _evidence_hosted_projection_policy():
+    module = _evidence_hosted_projection()
+    return module.Policy(
+        provenance_schema=INVESTIGATION_COLUMNAR_PROVENANCE_SCHEMA,
+        columns=tuple(INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS),
+        maximum_queries=MAX_INVESTIGATION_QUERIES_TOTAL,
+        list_path_sentinel=_MODEL_LIST_PATH_SENTINEL,
+    )
+
+
+def _evidence_hosted_projection_dependencies():
+    module = _evidence_hosted_projection()
+    return module.Dependencies(
+        exact_columnar_envelope=_exact_hosted_columnar_envelope,
+        prompt_json_bytes=_investigation_prompt_json_bytes,
+    )
+
+
 def _evidence_traversal():
     _provider_routing()
     from onion_sentinel.analysis.evidence import traversal
@@ -3434,247 +3458,41 @@ def _redact_unshared_asset_owners(asset_context: Any) -> Any:
     return sanitized
 
 
-_HOSTED_RESULT_TOKEN_KEY = re.compile(
-    r"(?:^|[_-])(?:access[_-]?token|api[_-]?key|authorization|cookie|"
-    r"credential|password|secret|session[_-]?id|set[_-]?cookie)(?:$|[_-])",
-    re.IGNORECASE,
-)
-_HOSTED_RESULT_SENSITIVE_KEYS = frozenset(
-    {
-        "args",
-        "argv",
-        "cmdline",
-        "command",
-        "command_line",
-        "content",
-        "data",
-        "environment",
-        "env",
-        "filename",
-        "headers",
-        "key",
-        "message",
-        "original",
-        "path",
-        "raw",
-        "referrer",
-        "request_body",
-        "response_body",
-        "uri",
-        "user_agent",
-    }
-)
-_HOSTED_ELASTIC_SOURCE_PATHS = frozenset(
-    {
-        "@timestamp",
-        "event.dataset", "event.kind", "event.category", "event.type",
-        "event.action", "event.outcome", "event.severity", "event.id",
-        "event.code", "event.duration",
-        "rule.id", "rule.name", "rule.category", "rule.ruleset",
-        "source.ip", "source.port", "source.domain", "source.mac",
-        "source.bytes", "source.packets",
-        "destination.ip", "destination.port", "destination.domain",
-        "destination.mac", "destination.bytes", "destination.packets",
-        "client.ip", "client.port", "client.domain",
-        "server.ip", "server.port", "server.domain",
-        "network.transport", "network.protocol", "network.direction",
-        "network.community_id", "network.bytes", "network.packets",
-        "dns.id", "dns.question.name", "dns.question.type",
-        "dns.question.class", "dns.query.name", "dns.query.type",
-        "dns.query.class", "dns.response_code", "dns.response.code",
-        "dns.response.code_name", "dns.resolved_ip", "dns.answers.type",
-        "dns.highest_registered_domain", "dns.parent_domain",
-        "dns.top_level_domain", "tls.server.name", "ssl.server_name",
-        "ssl.cipher", "ssl.curve", "ssl.established",
-        "ssl.validation_status", "ssl.version", "url.domain",
-        "http.method", "http.status_code", "http.trans_depth",
-        "http.virtual_host", "http.request.body.length",
-        "http.response.body.length", "file.resp_mime_types",
-        "host.id", "host.name", "host.hostname", "host.ip", "agent.id",
-        "agent.name", "related.ip", "related.hosts", "related.user",
-        "source.address", "user.id", "user.name", "source.user.name",
-        "destination.user.name", "client.user.name",
-        "process.entity_id", "process.pid", "process.parent.pid",
-        "process.name", "system.auth.ssh.event", "log.syslog.appname",
-        "log.id.uid", "log.id.fuid", "log.id.resp_fuids",
-        "observer.name", "hash.ja3", "hash.ja3s", "hash.ja4",
-        "hash.hassh", "hash.md5", "hash.sha1", "hash.sha256",
-        "tls.server.hash.sha256", "file.extension", "file.hash.sha256",
-        "file.analyzer", "file.bytes.missing", "file.bytes.overflow",
-        "file.bytes.seen", "file.bytes.total", "file.depth",
-        "file.local_orig", "file.mime_type", "file.source",
-        "ssh.authentication.attempts", "ssh.authentication.success",
-        "ssh.cipher_algorithm", "ssh.client", "ssh.compression_algorithm",
-        "ssh.hassh_algorithms", "ssh.hassh_server",
-        "ssh.hassh_server_algorithms", "ssh.hassh_version",
-        "ssh.host_key_algorithm", "ssh.kex_algorithm",
-        "ssh.mac_algorithm", "ssh.server", "ssh.version",
-        "stun.attribute.types", "stun.attribute.values", "stun.class",
-        "stun.id", "stun.method", "stun.lan.addresses",
-        "stun.wan.addresses", "stun.wan.ports",
-        "quic.client_initial_dcid", "quic.client_protocol",
-        "quic.client_scid", "quic.history", "quic.server_name",
-        "quic.server_scid", "quic.version", "notice.action",
-        "notice.note", "notice.suppress_for", "weird.name", "weird.peer",
-        "error.reason",
-    }
-)
-_HOSTED_PCAP_RECORD_FIELDS = frozenset(
-    {
-        "timestamp", "ts", "start_time", "end_time", "first_seen",
-        "last_seen", "duration", "count", "count_error_max", "uid", "fuid",
-        "source_ip", "destination_ip", "endpoint_ip", "src_ip", "dst_ip",
-        "source_port", "destination_port", "src_port", "dst_port", "port",
-        "transport", "protocol", "service", "connection_state", "conn_state",
-        "source_bytes", "destination_bytes", "bytes", "orig_bytes",
-        "resp_bytes", "source_packets", "destination_packets", "packets",
-        "orig_pkts", "resp_pkts", "missed_bytes", "rejected",
-        "query", "query_name", "dns_query", "dns_queries", "qtype",
-        "qtype_name", "dns_qtypes", "rcode", "rcode_name", "dns_rcodes",
-        "answer", "answer_type", "dns_answers", "sni", "server_name",
-        "tls_sni", "version", "tls_versions", "cipher", "curve", "resumed",
-        "established", "next_protocol", "ja3", "ja3s", "method", "host",
-        "http_host", "request_body_len", "response_body_len", "status_code",
-        "mime_type", "seen_bytes", "total_bytes", "missing_bytes",
-        "overflow_bytes", "md5", "sha1", "sha256", "icmp_family",
-        "icmp_type", "icmp_code", "icmp_identifier", "icmp_sequence",
-        "icmp_payload_length", "frame_length_min", "frame_length_max",
-        "payload_length_min", "payload_length_max", "selected_scope_match",
-        "country_iso_code", "asn", "latitude", "longitude",
-    }
-)
-_HOSTED_OSQUERY_ROW_FIELDS = frozenset(
-    {
-        "address", "arch", "cpu_brand", "cpu_logical_cores",
-        "cpu_physical_cores", "gid", "hardware_model", "hardware_vendor",
-        "host", "hostname", "interface", "local_address", "local_port",
-        "name", "parent", "physical_memory", "pid", "port", "protocol",
-        "remote_address", "remote_port", "release", "start_time", "status",
-        "time", "tty", "type", "uid", "user", "uuid", "version",
-    }
-)
-_HOSTED_SENSITIVE_VALUE = re.compile(
-    r"(?i)(?:"
-    r"\bauthorization\s*[:=]|"
-    r"\b(?:bearer|basic)\s+[A-Za-z0-9+/_.=-]{8,}|"
-    r"\b(?:password|passwd|secret|token|api[_ -]?key|cookie|credential)"
-    r"\b\s*[:=]\s*\S+"
-    r")"
-)
-
-
 def _positive_project_paths(
     value: Any,
     allowed_paths: frozenset[str],
     path: tuple[str, ...] = (),
 ) -> Any:
     """Project a nested document using exact reviewed leaf paths."""
-    if isinstance(value, dict):
-        output: dict[str, Any] = {}
-        for raw_key, child in value.items():
-            key = str(raw_key)
-            child_path = (*path, key)
-            dotted = ".".join(child_path)
-            if not any(
-                allowed == dotted or allowed.startswith(dotted + ".")
-                for allowed in allowed_paths
-            ):
-                continue
-            projected = _positive_project_paths(child, allowed_paths, child_path)
-            if projected not in ({}, [], None):
-                output[key] = projected
-        return output
-    if isinstance(value, list):
-        return [
-            _positive_project_paths(item, allowed_paths, path)
-            for item in value[:200]
-        ]
-    return value if ".".join(path) in allowed_paths else None
+    return _evidence_hosted_projection().positive_project_paths(
+        value,
+        allowed_paths,
+        maximum_list_items=200,
+        path=path,
+    )
 
 
 def _project_hosted_result_rows(key: str, value: list[Any]) -> list[Any]:
-    projected: list[Any] = []
-    for raw in value[:600]:
-        if not isinstance(raw, dict):
-            continue
-        if key == "hits":
-            source = raw.get("source")
-            item: dict[str, Any] = {
-                field: raw[field]
-                for field in ("id", "index")
-                if field in raw
-            }
-            if isinstance(source, dict):
-                item["source"] = _positive_project_paths(
-                    source,
-                    _HOSTED_ELASTIC_SOURCE_PATHS,
-                )
-            projected.append(item)
-            continue
-        allowed = (
-            _HOSTED_PCAP_RECORD_FIELDS
-            if key == "records"
-            else _HOSTED_OSQUERY_ROW_FIELDS
-        )
-        projected.append({
-            str(field): child
-            for field, child in raw.items()
-            if str(field).lower() in allowed
-        })
-    return projected
+    return _evidence_hosted_projection().project_result_rows(
+        key,
+        value,
+        _evidence_hosted_projection_policy(),
+    )
 
 
 def _prune_empty_hosted_projection(value: Any) -> Any:
-    """Remove empty shells left after positive projection and redaction.
-
-    Empty containers do not carry evidence. Removing them in the same
-    transport pass also makes repeated hosted projection idempotent.
-    """
-    def empty_container(item: Any) -> bool:
-        return isinstance(item, (dict, list)) and not item
-
-    if isinstance(value, dict):
-        output: dict[str, Any] = {}
-        for raw_key, child in value.items():
-            projected = _prune_empty_hosted_projection(child)
-            normalized = str(raw_key).lower().replace("-", "_")
-            if (
-                isinstance(projected, list)
-                and not projected
-                and normalized in {"hits", "records", "rows"}
-            ):
-                # Preserve an explicit zero-result collection; remove only
-                # empty row/container shells inside it.
-                output[str(raw_key)] = []
-            elif not empty_container(projected):
-                output[str(raw_key)] = projected
-        return output
-    if isinstance(value, list):
-        output_list = []
-        for child in value:
-            projected = _prune_empty_hosted_projection(child)
-            if not empty_container(projected):
-                output_list.append(projected)
-        return output_list
-    return value
+    """Remove empty shells while preserving explicit zero-result collections."""
+    return _evidence_hosted_projection().prune_empty(value)
 
 
 def _reviewed_hosted_sha256_evidence_path(
     path: tuple[object, ...],
 ) -> bool:
     """Allow SHA-256 only at positively projected Elastic source paths."""
-    if not path or path[0] != "investigation_query_results":
-        return False
-    anchor = ("hits", _MODEL_LIST_PATH_SENTINEL, "source")
-    reviewed_suffixes = {
-        ("hash",),
-        ("file", "hash"),
-        ("tls", "server", "hash"),
-    }
-    for position in range(max(0, len(path) - len(anchor) + 1)):
-        if path[position:position + len(anchor)] == anchor:
-            return path[position + len(anchor):] in reviewed_suffixes
-    return False
+    return _evidence_hosted_projection().reviewed_sha256_path(
+        path,
+        _evidence_hosted_projection_policy(),
+    )
 
 
 def _exact_hosted_columnar_envelope(
@@ -3693,19 +3511,11 @@ def _exact_hosted_columnar_envelope(
 
 def _refinalize_hosted_columnar_envelope(value: Any) -> Any:
     """Refresh self-accounting after hosted string redaction."""
-    if not _exact_hosted_columnar_envelope(
+    return _evidence_hosted_projection().refinalize_columnar(
         value,
-        require_encoded_accounting=False,
-    ):
-        return value
-    projection = value["prompt_projection"]
-    projection["encoded_bytes"] = 0
-    for _ in range(8):
-        actual_bytes = len(_investigation_prompt_json_bytes(value))
-        if projection["encoded_bytes"] == actual_bytes:
-            break
-        projection["encoded_bytes"] = actual_bytes
-    return value
+        maximum_passes=HOSTED_TRANSPORT_FIXED_POINT_MAX_PASSES,
+        dependencies=_evidence_hosted_projection_dependencies(),
+    )
 
 
 def _sanitize_hosted_investigation_evidence(
@@ -3715,161 +3525,12 @@ def _sanitize_hosted_investigation_evidence(
     preserve_columnar_rows: bool = False,
 ) -> Any:
     """Keep safe facts/query provenance while removing hosted-sensitive values."""
-    if isinstance(value, dict):
-        output: dict[str, Any] = {}
-        exact_columnar_provenance = (
-            preserve_columnar_rows
-            and path == ("investigation_query_results", "rounds")
-            and value.get("schema")
-            == INVESTIGATION_COLUMNAR_PROVENANCE_SCHEMA
-            and value.get("prompt_projection")
-            == "columnar_provenance_due_to_cumulative_byte_budget"
-            and value.get("columns")
-            == list(INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS)
-        )
-        for raw_key, item in value.items():
-            key = str(raw_key)
-            normalized = key.lower().replace("-", "_")
-            if (
-                exact_columnar_provenance
-                and normalized
-                in {
-                    "backend_values",
-                    "status_values",
-                    "semantics_values",
-                    "result_summary_values",
-                }
-                and isinstance(item, list)
-            ):
-                sanitized_table = []
-                for child in item[:MAX_INVESTIGATION_QUERIES_TOTAL]:
-                    sanitized_child = (
-                        _sanitize_hosted_investigation_evidence(
-                            child,
-                            (*path, normalized),
-                            preserve_columnar_rows=True,
-                        )
-                    )
-                    # Hosted redaction must not invalidate the envelope's
-                    # already-admitted max_bytes. A compact marker is shorter
-                    # than every sensitive token/path pattern we recognize.
-                    sanitized_table.append(
-                        "[r]"
-                        if sanitized_child != child
-                        else sanitized_child
-                    )
-                output[key] = sanitized_table
-                continue
-            if (
-                exact_columnar_provenance
-                and normalized == "rows"
-                and isinstance(item, list)
-            ):
-                evidence_ref_index = (
-                    INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS.index(
-                        "evidence_ref_or_empty"
-                    )
-                )
-                sanitized_rows: list[list[Any]] = []
-                for raw_row in item[:MAX_INVESTIGATION_QUERIES_TOTAL]:
-                    if not isinstance(raw_row, list):
-                        continue
-                    sanitized_row = [
-                        _sanitize_hosted_investigation_evidence(
-                            child,
-                            (*path, normalized),
-                            preserve_columnar_rows=True,
-                        )
-                        for child in raw_row
-                    ]
-                    if (
-                        len(sanitized_row)
-                        == len(INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS)
-                        and sanitized_row[evidence_ref_index]
-                        != raw_row[evidence_ref_index]
-                    ):
-                        # A redaction placeholder is not collector-owned
-                        # evidence. Empty means derive the exact canonical,
-                        # result-bound query reference from the adjacent digests.
-                        sanitized_row[evidence_ref_index] = ""
-                    sanitized_rows.append(sanitized_row)
-                output[key] = sanitized_rows
-                continue
-            if (
-                normalized in {"hits", "records", "rows"}
-                and isinstance(item, list)
-                and not (
-                    exact_columnar_provenance
-                    and normalized == "rows"
-                )
-            ):
-                item = _project_hosted_result_rows(normalized, item)
-            parent = path[-1].lower().replace("-", "_") if path else ""
-            token_like = bool(_HOSTED_RESULT_TOKEN_KEY.search(normalized))
-            if normalized.endswith("_digest"):
-                token_like = False
-            if (
-                normalized == "sha256"
-                and (
-                    not isinstance(item, str)
-                    or not re.fullmatch(r"[a-fA-F0-9]{64}", item)
-                )
-            ):
-                continue
-            path_sensitive = (
-                (parent == "event" and normalized == "original")
-                or (parent == "process" and normalized in {"args", "command_line"})
-                or (parent == "url" and normalized == "query")
-                or (parent == "file" and normalized in {"content", "data"})
-            )
-            if (
-                token_like
-                or path_sensitive
-                or normalized in _HOSTED_RESULT_SENSITIVE_KEYS
-            ):
-                continue
-            sanitized_item = _sanitize_hosted_investigation_evidence(
-                item,
-                (*path, normalized),
-                preserve_columnar_rows=preserve_columnar_rows,
-            )
-            if (
-                normalized in {"hits", "records", "rows"}
-                and isinstance(item, list)
-                and not (
-                    exact_columnar_provenance
-                    and normalized == "rows"
-                )
-            ):
-                sanitized_item = _prune_empty_hosted_projection(
-                    sanitized_item
-                )
-            output[key] = sanitized_item
-        return output
-    if isinstance(value, list):
-        return [
-            _sanitize_hosted_investigation_evidence(
-                item,
-                path,
-                preserve_columnar_rows=preserve_columnar_rows,
-            )
-            for item in value[:2000]
-        ]
-    if isinstance(value, str):
-        if _HOSTED_SENSITIVE_VALUE.search(value):
-            return "[redacted-sensitive-value]"
-        if re.search(
-            r"(?i)(?:^|[/\\\\])(?:Users|home)[/\\\\][^/\\\\\s]+[/\\\\]",
-            value,
-        ):
-            return "[redacted-host-path]"
-        if re.search(
-            r"(?i)(?:[?&](?:access_token|api_key|authorization|cookie|"
-            r"password|secret|session|token)=)",
-            value,
-        ):
-            return value.split("?", 1)[0] + "?[redacted-query]"
-    return value
+    return _evidence_hosted_projection().sanitize(
+        value,
+        path=path,
+        preserve_columnar_rows=preserve_columnar_rows,
+        policy=_evidence_hosted_projection_policy(),
+    )
 
 
 def model_safe_copy(

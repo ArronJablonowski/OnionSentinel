@@ -155,6 +155,15 @@ line ranges below remain historical navigation aids for the extraction ledger.
   stricter hosted-transport recognizer, including exact envelope keys, bounded
   string tables and row indexes, canonical counts, digest grammar, optional
   self-accounting validation, and boolean-as-integer rejection.
+- Hosted evidence disclosure control now lives in
+  `analysis.evidence.hosted_projection`. It owns exact positive field-path
+  projection for Elastic, PCAP/Zeek, and OSQuery rows; recursive token, secret,
+  path, content, and query-string redaction; empty-shell pruning; protected
+  SHA-256 ancestry; compact-column preservation; and post-redaction byte
+  accounting. The extracted token grammar also closes the legacy `api_token`
+  key gap. The runner retains only compatibility delegates and injects dynamic
+  schema, query-budget, path-sentinel, serializer, and envelope-validation
+  policy.
 - Bounded ordinary evidence-tree traversal and discovery of query, pack,
   query-id, evidence, and PCAP references now live in
   `analysis.evidence.traversal`; nested compact-column lookalikes remain inert.
