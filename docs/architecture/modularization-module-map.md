@@ -566,6 +566,16 @@ its own. Exact-group selection failures stop playbook and asset processing, and
 only exact selected rows are admitted to packet validation, asset resolution,
 and subsequent query planning.
 
+`prompt_evidence_admission.py` owns governed admission of exact-row query
+context, public-enrichment indicators, agent memory, correlation context, and
+restricted Incident Responder evidence. It binds query authorization to the
+selected exact detection rows, projects enrichment indicators by exact kind,
+removes model-authored memory and prior correlation hypotheses during blind
+reanalysis, and preserves the validate/reject/project/revalidate order for
+incident evidence. All query builders, file reads, validators, and projectors
+are injected by the legacy composition root; source memory and correlation data
+remain unchanged by blind filtering.
+
 `prompt_package_compactor.py` owns deterministic prompt admission reduction.
 It stabilizes declared serialized size, attempts lossless compact JSON first,
 then applies an ordered set of bounded historical, asset, enrichment, PCAP,

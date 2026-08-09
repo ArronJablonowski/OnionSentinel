@@ -83,6 +83,12 @@ from prompt_detection_context import (
     DetectionContextSources,
     prepare_detection_context,
 )
+from prompt_evidence_admission import (
+    PromptEvidenceAdmissionRequest,
+    PromptEvidenceAdmissionSources,
+    blind_model_authored_context,
+    prepare_prompt_evidence_admission,
+)
 from prompt_package_compactor import (
     PackageCompactionSources,
     compact_package_to_budget as compact_prompt_package,
@@ -1825,50 +1831,6 @@ def agent_task(agent_role: str, *, blind_reanalysis: bool = False) -> str:
     )
 
 
-def blind_model_authored_context(
-    memory_context: dict,
-    correlation_context: dict,
-) -> tuple[dict, dict]:
-    """Remove prior model conclusions while retaining operator-confirmed context."""
-    memory = json.loads(json.dumps(memory_context))
-    for key in ("role_memory", "shared_memory"):
-        section = memory.get(key)
-        if not isinstance(section, dict):
-            continue
-        records = section.get("records")
-        if isinstance(records, list):
-            section["records"] = [
-                record
-                for record in records
-                if (
-                    isinstance(record, dict)
-                    and str(record.get("status") or "") == "operator-confirmed"
-                )
-            ]
-    memory["usage_guidance"] = (
-        "This is a blind reanalysis. Use only operator-authored notes and "
-        "operator-confirmed memory; do not infer any previous model conclusion."
-    )
-
-    correlation = json.loads(json.dumps(correlation_context))
-    candidates = correlation.get("candidates")
-    if isinstance(candidates, list):
-        for candidate in candidates:
-            if not isinstance(candidate, dict):
-                continue
-            candidate.pop("prior_analysis", None)
-            candidate.pop("previous_correlation", None)
-            reasons = candidate.get("correlation_reasons")
-            if isinstance(reasons, list):
-                candidate["correlation_reasons"] = [
-                    reason
-                    for reason in reasons
-                    if str(reason).strip().lower()
-                    != "previous correlation record exists"
-                ]
-    return memory, correlation
-
-
 def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argparse.Namespace) -> dict:
     rollup = latest_rollup(args.rollup_dir, args.rollup_bytes)
     group_context = grouped_alert_context(conn, selected, args.related_limit, args.include_tests)
@@ -1934,62 +1896,40 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             maximum_group_rows=MAX_DETECTION_GROUP_ROWS,
         ),
     )
-    investigation_capability, investigation_local_context = investigation_query_context(
-        selected,
-        detection_context.exact_validation_rows,
-        str(analyst_state.get("group_id") or ""),
-        str(args.agent_role),
-        bool(
-            isinstance(pcap_context.get("parsed_evidence"), list)
-            and pcap_context.get("parsed_evidence")
+    admitted_evidence = prepare_prompt_evidence_admission(
+        PromptEvidenceAdmissionSources(
+            investigation_query_context=investigation_query_context,
+            build_agent_memory_context=build_agent_memory_context,
+            blind_model_authored_context=blind_model_authored_context,
+            load_json_bounded=load_json_bounded,
+            validate_incident_evidence=validate_incident_evidence_artifact,
+            reject_preprojected_incident_evidence=(
+                reject_preprojected_incident_evidence_source
+            ),
+            project_incident_evidence_hits=project_incident_evidence_hits,
+        ),
+        PromptEvidenceAdmissionRequest(
+            selected=selected,
+            agent_role=str(args.agent_role),
+            group_id=str(analyst_state.get("group_id") or ""),
+            exact_validation_rows=detection_context.exact_validation_rows,
+            pcap_context=pcap_context,
+            enrichment_context=enrichment_context,
+            compact_alert=compact_selected,
+            grouped_alert_context=group_context,
+            detection_validation=detection_context.detection_validation,
+            asset_context=detection_context.asset_context,
+            authorization_evidence=authorization_evidence,
+            analyst_state=analyst_state,
+            correlation_context=correlation_context,
+            role_memory_file=args.agent_memory_file,
+            shared_memory_file=args.shared_memory_file,
+            memory_bytes=args.memory_bytes,
+            blind_reanalysis=bool(args.blind_reanalysis),
+            incident_evidence_file=args.incident_evidence_file,
+            maximum_incident_evidence_bytes=MAX_INCIDENT_EVIDENCE_BYTES,
         ),
     )
-    investigation_local_context["permitted_enrichment_indicators"] = {
-        "ip": list(enrichment_context.get("indicators", {}).get("public_ips", [])),
-        "domain": list(enrichment_context.get("indicators", {}).get("domains", [])),
-        "url": list(enrichment_context.get("indicators", {}).get("urls", [])),
-        "hash": [
-            item.get("value") if isinstance(item, dict) else item
-            for item in enrichment_context.get("indicators", {}).get("hashes", [])
-        ],
-        "cve": list(enrichment_context.get("indicators", {}).get("cves", [])),
-    }
-    memory_context = build_agent_memory_context(
-        agent_role=args.agent_role,
-        role_memory_file=args.agent_memory_file,
-        shared_memory_file=args.shared_memory_file,
-        evidence={
-            "alert": compact_selected,
-            "grouped_alert_context": group_context,
-            "public_enrichment": enrichment_context,
-                "pcap_evidence": pcap_context,
-                "detection_validation": detection_context.detection_validation,
-            "asset_context": detection_context.asset_context,
-            "authorization_evidence": authorization_evidence,
-            "analyst_state": analyst_state,
-            "correlated_alert_context": correlation_context,
-        },
-        limit_bytes=args.memory_bytes,
-    )
-    if args.blind_reanalysis:
-        memory_context, correlation_context = blind_model_authored_context(
-            memory_context,
-            correlation_context,
-        )
-    incident_evidence = None
-    if args.incident_evidence_file:
-        incident_evidence = load_json_bounded(args.incident_evidence_file, MAX_INCIDENT_EVIDENCE_BYTES)
-        validate_incident_evidence_artifact(incident_evidence)
-        reject_preprojected_incident_evidence_source(incident_evidence)
-        # The package is a model-facing projection of the immutable collector
-        # artifact. Keep its exact DSL/execution digests and source hit digest,
-        # while making contract counts describe the rows actually retained.
-        project_incident_evidence_hits(
-            incident_evidence,
-            limit=20,
-            reason="initial_prompt_projection",
-        )
-        validate_incident_evidence_artifact(incident_evidence)
     prompt_contract = build_prompt_contract(
         PromptContractRequest(
             agent_role=str(args.agent_role),
@@ -2027,8 +1967,12 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
                 "grouped_alert_context": group_context,
                 "public_enrichment": enrichment_context,
                 "pcap_evidence": pcap_context,
-                "investigation_query_capability": investigation_capability,
-                "_local_investigation_query_context": investigation_local_context,
+                "investigation_query_capability": (
+                    admitted_evidence.investigation_capability
+                ),
+                "_local_investigation_query_context": (
+                    admitted_evidence.local_investigation_query_context
+                ),
                 "investigation_skills": detection_context.investigation_skills,
                 "detection_validation": detection_context.detection_validation,
                 "asset_context": detection_context.asset_context,
@@ -2045,12 +1989,12 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
                     args.related_limit,
                     args.include_tests,
                 ),
-                "correlated_alert_context": correlation_context,
+                "correlated_alert_context": admitted_evidence.correlation_context,
                 "recent_notifications": notification_context(conn, selected),
-                "agent_memory": memory_context,
+                "agent_memory": admitted_evidence.memory_context,
                 "latest_daily_rollup": rollup,
             },
-            incident_evidence=incident_evidence,
+            incident_evidence=admitted_evidence.incident_evidence,
         )
     )
 

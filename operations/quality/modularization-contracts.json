@@ -81,6 +81,19 @@
       ]
     },
     {
+      "path": "n8n/bin/prompt_evidence_admission.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/prompt_evidence_admission.py",
+      "required_symbols": [
+        "AdmittedPromptEvidence",
+        "PromptEvidenceAdmissionRequest",
+        "PromptEvidenceAdmissionSources",
+        "blind_model_authored_context",
+        "permitted_enrichment_indicators",
+        "prepare_prompt_evidence_admission"
+      ]
+    },
+    {
       "path": "n8n/bin/prompt_investigation_query_context.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_investigation_query_context.py",
