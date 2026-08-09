@@ -1584,6 +1584,12 @@ def _query_execution_runtime_adapter():
     return execution_runtime_adapter
 
 
+def _query_runtime_adapter():
+    _provider_routing()
+    from onion_sentinel.analysis.query import runtime_adapter
+    return runtime_adapter
+
+
 def _query_derived():
     _provider_routing()
     from onion_sentinel.analysis.query import derived
@@ -3221,14 +3227,8 @@ def execute_investigation_query_batch(
 
 def _evidence_ref_component(value: Any, maximum: int = 40) -> str:
     """Return a compact collision-resistant component for an authorization ref."""
-    text = _query_text(value, 512)
-    if (
-        text
-        and len(text) <= maximum
-        and re.fullmatch(r"[A-Za-z0-9_.:@+=-]+", text)
-    ):
-        return text
-    return "sha256-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
+    return _query_runtime_adapter().evidence_ref_component(
+        globals(), value, maximum)
 
 
 def _validated_discovered_observables(
@@ -3237,53 +3237,38 @@ def _validated_discovered_observables(
     limit: int = MAX_DISCOVERED_OBSERVABLES,
 ) -> list[dict[str, str]]:
     """Extract pivots only from provenance-bound broker hits or derived records."""
-    return _query_observables().validate(
-        results,
-        limit=limit,
-        policy=_query_observable_validation_policy(),
-        dependencies=_query_observable_validation_dependencies(),
-    )
+    return _query_runtime_adapter().validated_discovered_observables(
+        globals(), results, limit=limit)
 
 
 def investigation_query_prompt_error_category(reason: Any) -> str:
-    return _query_prompt_errors().category(reason)
+    return _query_runtime_adapter().prompt_error_category(globals(), reason)
 
 
 def investigation_query_prompt_error_digest(reason: Any) -> str:
-    return _query_prompt_errors().digest(reason, canonical_payload_digest)
+    return _query_runtime_adapter().prompt_error_digest(globals(), reason)
 
 
 def _prompt_project_investigation_rows(
     value: Any,
     state: dict[str, int | bool],
 ) -> Any:
-    module = _query_prompt_compaction()
-    return module.project_rows(
-        value,
-        state,
-        policy=module.Policy(
-            maximum_rows=MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS
-        ),
-        dependencies=_query_prompt_compaction_dependencies(),
-    )
+    return _query_runtime_adapter().prompt_project_rows(globals(), value, state)
 
 
 def _investigation_prompt_json_bytes(value: Any) -> bytes:
-    return _query_prompt_facts().canonical_bytes(value)
+    return _query_runtime_adapter().prompt_json_bytes(globals(), value)
 
 
 def _compact_prompt_trusted_query_audit(
     value: Any,
 ) -> dict[str, Any]:
-    return _query_prompt_compaction().compact_audit(
-        value, dependencies=_query_prompt_compaction_dependencies()
-    )
+    return _query_runtime_adapter().compact_prompt_audit(globals(), value)
 
 
 def _canonical_investigation_count(value: Any) -> int | None:
-    return _query_prompt_facts().canonical_count(
-        value, policy=_query_prompt_facts_policy()
-    )
+    return _query_runtime_adapter().canonical_investigation_count(
+        globals(), value)
 
 
 def _columnar_investigation_prompt_payload(
@@ -3291,12 +3276,8 @@ def _columnar_investigation_prompt_payload(
     *,
     maximum_bytes: int,
 ) -> dict[str, Any] | None:
-    return _query_prompt_provenance().columnar_payload(
-        rounds,
-        maximum_bytes=maximum_bytes,
-        policy=_query_prompt_provenance_policy(),
-        dependencies=_query_prompt_provenance_dependencies(),
-    )
+    return _query_runtime_adapter().columnar_prompt_payload(
+        globals(), rounds, maximum_bytes=maximum_bytes)
 
 
 def _investigation_prompt_payload(
@@ -3304,17 +3285,8 @@ def _investigation_prompt_payload(
     *,
     maximum_bytes: int = MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES,
 ) -> dict[str, Any]:
-    module = _query_prompt_budget()
-    return module.payload(
-        rounds,
-        maximum_bytes=maximum_bytes,
-        policy=module.Policy(
-            maximum_rows=MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS,
-            result_schema=INVESTIGATION_QUERY_RESULT_SCHEMA,
-        ),
-        dependencies=_query_prompt_budget_dependencies(),
-        error_type=InvestigationQueryError,
-    )
+    return _query_runtime_adapter().prompt_payload(
+        globals(), rounds, maximum_bytes=maximum_bytes)
 
 def _admit_investigation_query_prompt(
     prompt_package: dict[str, Any],
@@ -3323,25 +3295,12 @@ def _admit_investigation_query_prompt(
     maximum_prompt_bytes: int,
     hosted: bool,
 ) -> int:
-    module = _query_prompt_admission()
-    return module.admit(
-        prompt_package,
-        rounds,
-        maximum_prompt_bytes=maximum_prompt_bytes,
-        hosted=hosted,
-        policy=module.Policy(
-            maximum_evidence_bytes=MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES
-        ),
-        dependencies=_query_prompt_admission_dependencies(),
-        error_type=InvestigationQueryError,
-    )
+    return _query_runtime_adapter().admit_prompt(
+        globals(), prompt_package, rounds,
+        maximum_prompt_bytes=maximum_prompt_bytes, hosted=hosted)
 
 def _investigation_round_audit(round_result: dict[str, Any]) -> dict[str, Any]:
-    return _query_audit().round_audit(
-        round_result,
-        policy=_query_audit_policy(),
-        dependencies=_query_audit_dependencies(),
-    )
+    return _query_runtime_adapter().round_audit(globals(), round_result)
 
 INVESTIGATION_QUERY_NONEXECUTION_STATUSES = frozenset(
     {"rejected", "denied", "blocked", "unauthorized", "forbidden"}
@@ -3353,11 +3312,8 @@ def investigation_query_binding_summary(
     *,
     queries_admitted: int,
 ) -> dict[str, Any]:
-    return _query_audit().binding_summary(
-        bindings,
-        queries_admitted=queries_admitted,
-        policy=_query_audit_policy(),
-    )
+    return _query_runtime_adapter().binding_summary(
+        globals(), bindings, queries_admitted=queries_admitted)
 
 
 def investigation_query_outcome_summary(
@@ -3365,18 +3321,15 @@ def investigation_query_outcome_summary(
     *,
     queries_admitted: int,
 ) -> dict[str, Any]:
-    return _query_outcomes().summary(
-        rounds,
-        queries_admitted=queries_admitted,
-        policy=_query_outcomes_policy(),
-    )
+    return _query_runtime_adapter().outcome_summary(
+        globals(), rounds, queries_admitted=queries_admitted)
 
 
 def _append_investigation_evidence_gaps(
     response: dict[str, Any],
     gaps: list[str],
 ) -> None:
-    _query_outcomes().append_evidence_gaps(response, gaps)
+    _query_runtime_adapter().append_evidence_gaps(globals(), response, gaps)
 
 
 def investigation_backend_available(
@@ -3386,18 +3339,14 @@ def investigation_backend_available(
     live_osquery_config: dict[str, Any] | None,
 ) -> bool:
     """Compatibility delegate for trusted backend capability policy."""
-    return _query_capability().available(
-        prompt_package,
-        backend,
-        live_osquery_config=live_osquery_config,
-    )
+    return _query_runtime_adapter().backend_available(
+        globals(), prompt_package, backend,
+        live_osquery_config=live_osquery_config)
 
 
 def investigation_request_semantic_digest(request: dict[str, Any]) -> str:
     """Identify an equivalent execution independently of model labels/purpose."""
-    return _query_semantic_identity().digest(
-        request, _query_semantic_identity_dependencies(),
-    )
+    return _query_runtime_adapter().semantic_digest(globals(), request)
 
 
 def investigation_query_repair_scope(
@@ -3408,36 +3357,29 @@ def investigation_query_repair_scope(
     time_envelope: Any = None,
     authorization_context: Any = None,
 ) -> dict[str, Any] | None:
-    return _query_repair().scope(
-        raw,
-        round_number=round_number,
-        position=position,
+    return _query_runtime_adapter().repair_scope(
+        globals(), raw, round_number=round_number, position=position,
         time_envelope=time_envelope,
-        authorization_context=authorization_context,
-        dependencies=_query_repair_dependencies(),
-        error_type=InvestigationQueryError,
-    )
+        authorization_context=authorization_context)
 
 
 def validate_investigation_query_repair_scope(
     request: dict[str, Any],
     scope: dict[str, Any],
 ) -> None:
-    _query_repair().validate(
-        request, scope, error_type=InvestigationQueryError
-    )
+    _query_runtime_adapter().validate_repair(globals(), request, scope)
 
 
 def investigation_query_request_from_repair_scope(
     scope: dict[str, Any],
 ) -> dict[str, Any]:
-    return _query_repair().request_from_scope(scope)
+    return _query_runtime_adapter().request_from_repair(globals(), scope)
 
 
 def investigation_query_repair_failures(
     round_result: Any,
 ) -> dict[str, str]:
-    return _query_repair().failures(round_result)
+    return _query_runtime_adapter().repair_failures(globals(), round_result)
 
 
 def investigation_query_repair_prompt_entry(
@@ -3446,59 +3388,20 @@ def investigation_query_repair_prompt_entry(
     reason: str,
     trigger: str,
 ) -> dict[str, Any]:
-    return _query_repair().prompt_entry(
-        scope,
-        reason=reason,
-        trigger=trigger,
-        dependencies=_query_repair_dependencies(),
-    )
+    return _query_runtime_adapter().repair_prompt_entry(
+        globals(), scope, reason=reason, trigger=trigger)
 
 
 def deterministic_incident_pivot_requests(
     prompt_package: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Compile a repeatable protocol-first plan from trusted local context."""
-    module = _query_deterministic_planning()
-    return module.plan(
-        prompt_package,
-        policy=_query_deterministic_planning_policy(),
-        dependencies=_query_deterministic_planning_dependencies(),
-    )
+    return _query_runtime_adapter().deterministic_requests(
+        globals(), prompt_package)
 
 
 def _query_runtime_dependencies(module: Any) -> Any:
-    return module.Dependencies(
-        pop_requests=pop_investigation_query_requests,
-        deterministic_requests=deterministic_incident_pivot_requests,
-        model_safe_copy=model_safe_copy,
-        normalize_request=normalize_investigation_query_request,
-        validate_repair=validate_investigation_query_repair_scope,
-        backend_available=investigation_backend_available,
-        semantic_digest=investigation_request_semantic_digest,
-        harness_operator_approved=live_osquery_harness_operator_approved,
-        backend_is_approval_gated=query_backend_is_approval_gated,
-        decision_is_effective=policy_decision_is_effective,
-        backend_capability=query_backend_capability,
-        repair_scope=investigation_query_repair_scope,
-        query_text=_query_text,
-        valid_query_id=lambda value: bool(
-            INVESTIGATION_QUERY_ID_RE.fullmatch(value)
-        ),
-        repair_failures=investigation_query_repair_failures,
-        now=project_now,
-        validate_observables=_validated_discovered_observables,
-        canonical_digest=investigation_query_canonical_digest,
-        error_digest=canonical_payload_digest,
-        repair_prompt_entry=investigation_query_repair_prompt_entry,
-        request_from_scope=investigation_query_request_from_repair_scope,
-        admit_prompt=_admit_investigation_query_prompt,
-        outcome_summary=investigation_query_outcome_summary,
-        round_audit=_investigation_round_audit,
-        binding_summary=investigation_query_binding_summary,
-        append_gaps=_append_investigation_evidence_gaps,
-        monotonic=time.monotonic,
-        warn=lambda message: print(f"warning: {message}", file=sys.stderr),
-    )
+    return _query_runtime_adapter().legacy_dependencies(globals(), module)
 
 
 def apply_investigation_query_loop(
@@ -3526,8 +3429,7 @@ def apply_investigation_query_loop(
     query_round_offset: int = 0,
 ) -> dict[str, Any]:
     """Compose runtime ports for the package-owned query coordinator."""
-    from onion_sentinel.analysis.query import runtime_adapter
-
+    runtime_adapter = _query_runtime_adapter()
     model_executor = model_executor or analyze_model_route
     configured_query_executor = query_executor is None
     query_executor = query_executor or execute_investigation_query_batch

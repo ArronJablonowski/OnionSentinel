@@ -99,10 +99,11 @@ line ranges below remain historical navigation aids for the extraction ledger.
   `local_ai_pipeline_adapters`. The runner now selects package stages and
   passes runtime state; the adapter alone translates legacy globals into
   package ports. The adapter remains a cohesive 478-line composition module.
-- `analysis.query.runtime_adapter` owns the concrete per-invocation binding of
-  provider, governed-query, harness-observation, prompt-admission, and audit
-  ports to the package query coordinator. The legacy query entry point now
-  resolves limits and routes, constructs immutable invocation/policy records,
+- The cohesive 594-line `analysis.query.runtime_adapter` owns the concrete
+  per-invocation binding of provider, governed-query, harness-observation,
+  prompt admission/provenance/byte budgeting, audit/outcome accounting,
+  scoped repair, deterministic planning, and coordinator ports. The legacy
+  query entry point resolves limits and routes, constructs immutable records,
   and delegates without retaining a second runtime implementation.
 - The 301-line `analysis.query.execution_runtime_adapter` now owns concrete
   mixed-backend execution binding, Security Onion authorization projection,

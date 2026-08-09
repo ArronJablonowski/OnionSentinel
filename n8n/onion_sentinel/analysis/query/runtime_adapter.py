@@ -8,7 +8,9 @@ granting any additional query authority.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+import hashlib
+import re
+from typing import Any, Callable, Mapping
 
 from . import coordinator, round_admission, state
 
@@ -83,6 +85,228 @@ class Dependencies:
     append_gaps: Callable[[dict[str, Any], list[str]], None]
     monotonic: Callable[[], float]
     warn: Callable[[str], None]
+
+
+def evidence_ref_component(
+    b: Mapping[str, Any], value: Any, maximum: int = 40,
+) -> str:
+    """Return a compact collision-resistant component for an authorization ref."""
+    text = b["_query_text"](value, 512)
+    if text and len(text) <= maximum and re.fullmatch(r"[A-Za-z0-9_.:@+=-]+", text):
+        return text
+    return "sha256-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
+
+
+def validated_discovered_observables(
+    b: Mapping[str, Any], results: Any, *, limit: int,
+) -> list[dict[str, str]]:
+    return b["_query_observables"]().validate(
+        results, limit=limit,
+        policy=b["_query_observable_validation_policy"](),
+        dependencies=b["_query_observable_validation_dependencies"](),
+    )
+
+
+def prompt_error_category(b: Mapping[str, Any], reason: Any) -> str:
+    return b["_query_prompt_errors"]().category(reason)
+
+
+def prompt_error_digest(b: Mapping[str, Any], reason: Any) -> str:
+    return b["_query_prompt_errors"]().digest(
+        reason, b["canonical_payload_digest"])
+
+
+def prompt_project_rows(
+    b: Mapping[str, Any], value: Any, state_value: dict[str, int | bool],
+) -> Any:
+    module = b["_query_prompt_compaction"]()
+    return module.project_rows(
+        value, state_value,
+        policy=module.Policy(
+            maximum_rows=b["MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS"]),
+        dependencies=b["_query_prompt_compaction_dependencies"](),
+    )
+
+
+def prompt_json_bytes(b: Mapping[str, Any], value: Any) -> bytes:
+    return b["_query_prompt_facts"]().canonical_bytes(value)
+
+
+def compact_prompt_audit(b: Mapping[str, Any], value: Any) -> dict[str, Any]:
+    return b["_query_prompt_compaction"]().compact_audit(
+        value, dependencies=b["_query_prompt_compaction_dependencies"]())
+
+
+def canonical_investigation_count(
+    b: Mapping[str, Any], value: Any,
+) -> int | None:
+    return b["_query_prompt_facts"]().canonical_count(
+        value, policy=b["_query_prompt_facts_policy"]())
+
+
+def columnar_prompt_payload(
+    b: Mapping[str, Any], rounds: list[dict[str, Any]], *, maximum_bytes: int,
+) -> dict[str, Any] | None:
+    return b["_query_prompt_provenance"]().columnar_payload(
+        rounds, maximum_bytes=maximum_bytes,
+        policy=b["_query_prompt_provenance_policy"](),
+        dependencies=b["_query_prompt_provenance_dependencies"](),
+    )
+
+
+def prompt_payload(
+    b: Mapping[str, Any], rounds: list[dict[str, Any]], *, maximum_bytes: int,
+) -> dict[str, Any]:
+    module = b["_query_prompt_budget"]()
+    return module.payload(
+        rounds, maximum_bytes=maximum_bytes,
+        policy=module.Policy(
+            maximum_rows=b["MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS"],
+            result_schema=b["INVESTIGATION_QUERY_RESULT_SCHEMA"],
+        ),
+        dependencies=b["_query_prompt_budget_dependencies"](),
+        error_type=b["InvestigationQueryError"],
+    )
+
+
+def admit_prompt(
+    b: Mapping[str, Any], prompt_package: dict[str, Any],
+    rounds: list[dict[str, Any]], *, maximum_prompt_bytes: int, hosted: bool,
+) -> int:
+    module = b["_query_prompt_admission"]()
+    return module.admit(
+        prompt_package, rounds, maximum_prompt_bytes=maximum_prompt_bytes,
+        hosted=hosted,
+        policy=module.Policy(
+            maximum_evidence_bytes=b["MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES"]),
+        dependencies=b["_query_prompt_admission_dependencies"](),
+        error_type=b["InvestigationQueryError"],
+    )
+
+
+def round_audit(
+    b: Mapping[str, Any], round_result: dict[str, Any],
+) -> dict[str, Any]:
+    return b["_query_audit"]().round_audit(
+        round_result, policy=b["_query_audit_policy"](),
+        dependencies=b["_query_audit_dependencies"]())
+
+
+def binding_summary(
+    b: Mapping[str, Any], bindings: list[dict[str, Any]], *, queries_admitted: int,
+) -> dict[str, Any]:
+    return b["_query_audit"]().binding_summary(
+        bindings, queries_admitted=queries_admitted,
+        policy=b["_query_audit_policy"]())
+
+
+def outcome_summary(
+    b: Mapping[str, Any], rounds: list[dict[str, Any]], *, queries_admitted: int,
+) -> dict[str, Any]:
+    return b["_query_outcomes"]().summary(
+        rounds, queries_admitted=queries_admitted,
+        policy=b["_query_outcomes_policy"]())
+
+
+def append_evidence_gaps(
+    b: Mapping[str, Any], response: dict[str, Any], gaps: list[str],
+) -> None:
+    b["_query_outcomes"]().append_evidence_gaps(response, gaps)
+
+
+def backend_available(
+    b: Mapping[str, Any], prompt_package: dict[str, Any], backend: str,
+    *, live_osquery_config: dict[str, Any] | None,
+) -> bool:
+    return b["_query_capability"]().available(
+        prompt_package, backend, live_osquery_config=live_osquery_config)
+
+
+def semantic_digest(b: Mapping[str, Any], request: dict[str, Any]) -> str:
+    return b["_query_semantic_identity"]().digest(
+        request, b["_query_semantic_identity_dependencies"]())
+
+
+def repair_scope(
+    b: Mapping[str, Any], raw: Any, *, round_number: int, position: int,
+    time_envelope: Any = None, authorization_context: Any = None,
+) -> dict[str, Any] | None:
+    return b["_query_repair"]().scope(
+        raw, round_number=round_number, position=position,
+        time_envelope=time_envelope,
+        authorization_context=authorization_context,
+        dependencies=b["_query_repair_dependencies"](),
+        error_type=b["InvestigationQueryError"],
+    )
+
+
+def validate_repair(
+    b: Mapping[str, Any], request: dict[str, Any], scope: dict[str, Any],
+) -> None:
+    b["_query_repair"]().validate(
+        request, scope, error_type=b["InvestigationQueryError"])
+
+
+def request_from_repair(
+    b: Mapping[str, Any], scope: dict[str, Any],
+) -> dict[str, Any]:
+    return b["_query_repair"]().request_from_scope(scope)
+
+
+def repair_failures(b: Mapping[str, Any], round_result: Any) -> dict[str, str]:
+    return b["_query_repair"]().failures(round_result)
+
+
+def repair_prompt_entry(
+    b: Mapping[str, Any], scope: dict[str, Any], *, reason: str, trigger: str,
+) -> dict[str, Any]:
+    return b["_query_repair"]().prompt_entry(
+        scope, reason=reason, trigger=trigger,
+        dependencies=b["_query_repair_dependencies"]())
+
+
+def deterministic_requests(
+    b: Mapping[str, Any], prompt_package: dict[str, Any],
+) -> list[dict[str, Any]]:
+    module = b["_query_deterministic_planning"]()
+    return module.plan(
+        prompt_package, policy=b["_query_deterministic_planning_policy"](),
+        dependencies=b["_query_deterministic_planning_dependencies"]())
+
+
+def legacy_dependencies(
+    b: Mapping[str, Any], module: Any,
+) -> Any:
+    return module.Dependencies(
+        pop_requests=b["pop_investigation_query_requests"],
+        deterministic_requests=b["deterministic_incident_pivot_requests"],
+        model_safe_copy=b["model_safe_copy"],
+        normalize_request=b["normalize_investigation_query_request"],
+        validate_repair=b["validate_investigation_query_repair_scope"],
+        backend_available=b["investigation_backend_available"],
+        semantic_digest=b["investigation_request_semantic_digest"],
+        harness_operator_approved=b["live_osquery_harness_operator_approved"],
+        backend_is_approval_gated=b["query_backend_is_approval_gated"],
+        decision_is_effective=b["policy_decision_is_effective"],
+        backend_capability=b["query_backend_capability"],
+        repair_scope=b["investigation_query_repair_scope"],
+        query_text=b["_query_text"],
+        valid_query_id=lambda value: bool(b["INVESTIGATION_QUERY_ID_RE"].fullmatch(value)),
+        repair_failures=b["investigation_query_repair_failures"],
+        now=b["project_now"],
+        validate_observables=b["_validated_discovered_observables"],
+        canonical_digest=b["investigation_query_canonical_digest"],
+        error_digest=b["canonical_payload_digest"],
+        repair_prompt_entry=b["investigation_query_repair_prompt_entry"],
+        request_from_scope=b["investigation_query_request_from_repair_scope"],
+        admit_prompt=b["_admit_investigation_query_prompt"],
+        outcome_summary=b["investigation_query_outcome_summary"],
+        round_audit=b["_investigation_round_audit"],
+        binding_summary=b["investigation_query_binding_summary"],
+        append_gaps=b["_append_investigation_evidence_gaps"],
+        monotonic=b["time"].monotonic,
+        warn=lambda message: print(f"warning: {message}", file=b["sys"].stderr),
+    )
 
 
 class Runtime:
