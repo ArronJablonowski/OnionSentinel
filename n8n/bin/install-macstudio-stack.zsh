@@ -170,6 +170,7 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/services/enrichment_orchestrator.js" \
     "$ALERT_STORE_STAGE_DIR/composition/application_composition.js" \
     "$ALERT_STORE_STAGE_DIR/composition/controlled_incident_composition.js" \
+    "$ALERT_STORE_STAGE_DIR/composition/evidence_processing_composition.js" \
     "$ALERT_STORE_STAGE_DIR/composition/mutable_runtime_owners.js" \
     "$ALERT_STORE_STAGE_DIR/composition/runtime_foundation_composition.js" \
     "$ALERT_STORE_STAGE_DIR/composition/route_composition.js"

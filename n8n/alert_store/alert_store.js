@@ -15,14 +15,8 @@ const os = require('os');
 const path = require('path');
 const {createRequestDispatcher} = require('./lib/http_dispatch');
 const analystReviewDefinitions = require('./services/analyst_review_projection');
-const {createDurableBackgroundDrains} = require('./services/durable_background_drains');
 const {createServiceRuntimeLifecycle} = require('./services/service_runtime_lifecycle');
 const {createHttpRequestBoundary} = require('./services/http_request_boundary');
-const {createAiCorrelationRepository} = require('./repositories/ai_correlation_repository');
-const {createAiReviewRepository} = require('./repositories/ai_review_repository');
-const {createPcapRequestRepository} = require('./repositories/pcap_request_repository');
-const {createAiAnalysisAcceptance} = require('./services/ai_analysis_acceptance');
-const {createPcapAnalysisCompletion} = require('./services/pcap_analysis_completion');
 const {createRouteComposition} = require('./composition/route_composition');
 const {
   createControlledIncidentComposition,
@@ -34,6 +28,9 @@ const {
 const {
   createMutableRuntimeOwners,
 } = require('./composition/mutable_runtime_owners');
+const {
+  createEvidenceProcessingComposition,
+} = require('./composition/evidence_processing_composition');
 const {createPcapPolicy} = require('./lib/pcap_policy');
 const {createProjectSerialization} = require('./lib/project_serialization');
 const {createRuntimeConfiguration} = require('./lib/runtime_configuration');
@@ -528,80 +525,66 @@ const mutableRuntimeOwners = createMutableRuntimeOwners({
     },
   },
 });
-const pcapRequestRepository = createPcapRequestRepository({
-  get,
-  all,
-  run,
-  safeString,
-  parseJsonObject,
-  jsonText,
-  nowUtc,
-  pcapCandidateFromRow,
-  normalizePcapRequest,
-  pcapRetentionError,
-  pcapRequestFromRow,
-  classifyPcapOutcome,
-  recordMetric: (...args) => mutableRuntimeOwners.pipelineMetrics().record(...args),
-  readCaptureLossThreshold: () => (
-    socAnalysisPolicy.read().pcap_capture_loss_threshold_percent
-  ),
-  requeueStaleClaims: (...args) => (
-    mutableRuntimeOwners.pcapTransferRepository().requeueStaleClaims(...args)
-  ),
-  priorityMaxWaitSeconds: pcapPriorityMaxWaitSeconds,
-  captureRetentionSeconds: pcapCaptureRetentionSeconds,
+const evidenceProcessing = createEvidenceProcessingComposition({
+  database: {
+    get,
+    all,
+    run,
+    withWriteTransaction: (task) => (
+      withSqliteWriteGate(() => withImmediateTransaction(task))
+    ),
+  },
+  runtime: {
+    pcapPriorityMaxWaitSeconds,
+    pcapCaptureRetentionSeconds,
+    enrichmentTimeoutMs,
+    n8nPostCommitUrl,
+    n8nPostCommitToken,
+    n8nPostCommitTimeoutMs,
+    n8nPostCommitBaseRetrySeconds,
+  },
+  policy: {
+    pcapCandidateFromRow,
+    normalizePcapRequest,
+    pcapRetentionError,
+    pcapRequestFromRow,
+    classifyPcapOutcome,
+    readCaptureLossThreshold: () => (
+      socAnalysisPolicy.read().pcap_capture_loss_threshold_percent
+    ),
+    matchesAnalysis: (level) => socAnalysisPolicy.matchesAnalysis(level),
+    severityRank,
+    compactCorrelationCandidates,
+    enrichmentRecord,
+    groupKeyFromRow: alertGroupKeyFromRow,
+    groupIdFromKey: alertGroupId,
+    supportedAgentRoles,
+  },
+  services: {
+    pipelineMetrics: mutableRuntimeOwners.pipelineMetrics,
+    pcapTransferRepository: mutableRuntimeOwners.pcapTransferRepository,
+    durableJobs: mutableRuntimeOwners.durableJobs,
+    authorizedCampaignForAlertId,
+    enrichAlert,
+    indexAlertObservables,
+    signalAiWorkers,
+    requestJson,
+  },
+  serialization: {
+    safeString,
+    parseJsonObject,
+    jsonText,
+    canonicalJsonText,
+    normalizeTimestampValue,
+    nowUtc,
+  },
 });
-const pcapAnalysisCompletion = createPcapAnalysisCompletion({
-  run,
-  get,
-  safeString,
-  nowUtc,
-  recordMetric: (...args) => mutableRuntimeOwners.pipelineMetrics().record(...args),
-  matchesAnalysis: (level) => socAnalysisPolicy.matchesAnalysis(level),
-  authorizedCampaignForAlertId,
-  enqueueAiJob: (...args) => mutableRuntimeOwners.durableJobs().enqueue('ai_analysis', ...args),
-  severityRank,
-});
-const aiReviewRepository = createAiReviewRepository({
-  run,
-  safeString,
-  jsonText,
-  nowUtc,
-});
-const aiCorrelationRepository = createAiCorrelationRepository({
-  get,
-  run,
-  safeString,
-  jsonText,
-  nowUtc,
-  compactCorrelationCandidates,
-});
-const durableBackgroundDrains = createDurableBackgroundDrains({
-  durableJobs: mutableRuntimeOwners.durableJobs,
-  withWriteTransaction: (task) => (
-    withSqliteWriteGate(() => withImmediateTransaction(task))
-  ),
-  get,
-  run,
-  enrichAlert,
-  enrichmentRecord,
-  jsonText,
-  indexAlertObservables,
-  groupKeyFromRow: alertGroupKeyFromRow,
-  groupIdFromKey: alertGroupId,
-  authorizedCampaignForAlertId,
-  matchesAnalysis: (level) => socAnalysisPolicy.matchesAnalysis(level),
-  severityRank,
-  recordMetric: (...args) => mutableRuntimeOwners.pipelineMetrics().record(...args),
-  signalAiWorkers,
-  requestJson,
-  safeString,
-  enrichmentTimeoutMs,
-  n8nPostCommitUrl,
-  n8nPostCommitToken,
-  n8nPostCommitTimeoutMs,
-  n8nPostCommitBaseRetrySeconds,
-});
+const {
+  aiReviewRepository,
+  pcapRequestRepository,
+  pcapAnalysisCompletion,
+  durableBackgroundDrains,
+} = evidenceProcessing;
 const {
   controlledEvaluationLeases,
   controlledJobTransitionAuthority,
@@ -671,20 +654,9 @@ const {
     formatProjectTimestamp,
   },
 });
-const aiAnalysisAcceptance = createAiAnalysisAcceptance({
-  get,
-  run,
-  safeString,
-  jsonText,
-  nowUtc,
-  parseJsonObject,
-  canonicalJsonText,
-  normalizeTimestampValue,
-  supportedAgentRoles,
-  incidentReanalysisBindingAuthority: incidentReanalysisBindingService.bindingAuthority,
-  aiReviewRepository,
-  incidentAnalysisCompletion,
-  aiCorrelationRepository,
+const aiAnalysisAcceptance = evidenceProcessing.createAiAcceptance({
+  bindingAuthority: incidentReanalysisBindingService.bindingAuthority,
+  analysisCompletion: incidentAnalysisCompletion,
 });
 const {
   aiReviewSchema,

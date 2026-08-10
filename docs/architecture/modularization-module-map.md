@@ -2362,6 +2362,12 @@ PCAP transfer repository. Request, recovery, health, and background-worker
 composition access those instances through owner functions, preserving the
 existing startup sequence without sharing facade-level mutable globals.
 
+`composition/evidence_processing_composition.js` owns PCAP request and
+completion repositories, AI review/correlation persistence, post-commit
+durable drains, and deferred AI-result acceptance. Incident-bound acceptance
+is constructed only after controlled incident ownership exists, preserving
+immutable attempt provenance without a circular module dependency.
+
 ## Deployment Map
 
 The current production installer copies individual files. These additions are
