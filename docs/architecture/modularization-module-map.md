@@ -2348,6 +2348,14 @@ domain persistence, automatic response routing, alert ingestion, and startup
 recovery from explicit database, policy, service, lifecycle, and serialization
 ports. SQL and transaction semantics remain in their existing service owners.
 
+`composition/runtime_foundation_composition.js` consumes the already-validated
+runtime configuration and constructs authorization, logging, disk admission,
+worker signaling, scoring, enrichment, SQLite, notification, beacon, alert
+group, request-admission, and PostgreSQL auxiliary owners. Controlled-runtime
+validation remains in the legacy entrypoint and therefore still precedes log
+or database creation; credential-bearing values are passed only to their
+existing bounded adapters.
+
 ## Deployment Map
 
 The current production installer copies individual files. These additions are

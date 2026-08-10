@@ -16,6 +16,13 @@ REQUEST_AUTHORIZATION = (
 ROUTE_COMPOSITION = (
     ROOT / "n8n" / "alert_store" / "composition" / "route_composition.js"
 )
+RUNTIME_FOUNDATION_COMPOSITION = (
+    ROOT
+    / "n8n"
+    / "alert_store"
+    / "composition"
+    / "runtime_foundation_composition.js"
+)
 ENTRYPOINT = ROOT / "n8n" / "alert_store" / "alert_store.js"
 RUNTIME_CONFIGURATION = (
     ROOT / "n8n" / "alert_store" / "lib" / "runtime_configuration.js"
@@ -67,6 +74,7 @@ class PostgresAssetInventoryTests(unittest.TestCase):
         runtime = RUNTIME.read_text(encoding="utf-8")
         request_authorization = REQUEST_AUTHORIZATION.read_text(encoding="utf-8")
         route_composition = ROUTE_COMPOSITION.read_text(encoding="utf-8")
+        runtime_foundation = RUNTIME_FOUNDATION_COMPOSITION.read_text(encoding="utf-8")
         runtime_configuration = RUNTIME_CONFIGURATION.read_text(encoding="utf-8")
         self.assertIn("path: '/assets/inventory'", routes)
         self.assertIn("parsedUrl.searchParams.get('limit')", routes)
@@ -90,9 +98,9 @@ class PostgresAssetInventoryTests(unittest.TestCase):
             "requireAssetStoreWriteAuthorization",
         ):
             self.assertNotIn(f"function {forwarding_function}", entrypoint)
-        self.assertIn("crypto.timingSafeEqual", entrypoint)
+        self.assertIn("crypto.timingSafeEqual", runtime_foundation)
         self.assertIn("ASSET_STORE_WRITE_TOKEN", runtime_configuration)
-        self.assertIn("createPostgresAuxiliaryStoreRuntime", entrypoint)
+        self.assertIn("createPostgresAuxiliaryStoreRuntime", runtime_foundation)
         self.assertIn("PostgreSQL asset inventory is unavailable", runtime)
         self.assertIn("asset_store.postgres_idle_error", runtime)
         self.assertNotIn("ASSET_STORE_WRITE_TOKEN", runtime)

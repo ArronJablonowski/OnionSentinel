@@ -13,30 +13,15 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const {createEnrichmentCache} = require('./lib/enrichment_cache');
-const {createProviderScheduler} = require('./lib/provider_scheduler');
 const {createDurableJobQueue} = require('./lib/durable_job_queue');
 const {createPostgresShadowOutbox} = require('./lib/postgres_shadow_outbox');
 const {createPostgresShadowProjector} = require('./lib/postgres_shadow_projector');
-const {createPostgresAssetStore} = require('./lib/postgres_asset_store');
-const {createPostgresSoftwareStore} = require('./lib/postgres_software_store');
-const {createPostgresAcHunterStore} = require('./lib/postgres_ac_hunter_store');
-const {createSecurityLogger} = require('./lib/security_logger');
 const {createPipelineMetrics} = require('./lib/pipeline_metrics');
-const {createSocAnalysisPolicy} = require('./lib/soc_analysis_policy');
 const {createRequestDispatcher} = require('./lib/http_dispatch');
-const {createRequestAuthorization} = require('./lib/request_authorization');
 const analystReviewDefinitions = require('./services/analyst_review_projection');
 const {createDurableBackgroundDrains} = require('./services/durable_background_drains');
 const {createServiceRuntimeLifecycle} = require('./services/service_runtime_lifecycle');
 const {createHttpRequestBoundary} = require('./services/http_request_boundary');
-const {createDiskWriteAdmission} = require('./services/disk_write_admission');
-const {createWorkerWakeSignaling} = require('./services/worker_wake_signaling');
-const {createBeaconPersistence} = require('./services/beacon_persistence');
-const {
-  createPostgresAuxiliaryStoreRuntime,
-} = require('./services/postgres_auxiliary_store_runtime');
-const {createSqliteRuntime} = require('./services/sqlite_runtime');
 const {createAiCorrelationRepository} = require('./repositories/ai_correlation_repository');
 const {createAiReviewRepository} = require('./repositories/ai_review_repository');
 const {createPcapRequestRepository} = require('./repositories/pcap_request_repository');
@@ -48,12 +33,9 @@ const {
   createControlledIncidentComposition,
 } = require('./composition/controlled_incident_composition');
 const {createApplicationComposition} = require('./composition/application_composition');
-const {createNotificationService} = require('./services/notification_service');
-const {createAlertGroupService} = require('./services/alert_group_service');
-const {createScoringPolicy} = require('./lib/scoring_policy');
-const {createScoringRulesRuntime} = require('./lib/scoring_rules_runtime');
-const {createIndicatorExtraction} = require('./lib/indicator_extraction');
-const {createEnrichmentPolicy} = require('./lib/enrichment_policy');
+const {
+  createRuntimeFoundationComposition,
+} = require('./composition/runtime_foundation_composition');
 const {createPcapPolicy} = require('./lib/pcap_policy');
 const {createProjectSerialization} = require('./lib/project_serialization');
 const {createRuntimeConfiguration} = require('./lib/runtime_configuration');
@@ -67,8 +49,6 @@ const {
   safeString,
   parseJsonObject,
 } = require('./lib/alert_value_normalization');
-const {createEnrichmentProviderClient} = require('./services/enrichment_provider_client');
-const {createEnrichmentOrchestrator} = require('./services/enrichment_orchestrator');
 const {
   analystAdjudicationOutcomes,
   analystAdjudicationConfidences,
@@ -78,7 +58,6 @@ const {
   analystHandlingValues,
   reviewerFailureStatuses,
   analystVerdictContradictions,
-  createReviewerPolicy,
 } = require('./lib/analyst_review_policy');
 const {
   loadAuthorizedActivityPolicy,
@@ -90,7 +69,7 @@ const {
   validPinnedStableGroupKey,
 } = require('./lib/group_identity');
 const {buildAlertObservables, compactCorrelationCandidates} = require('./lib/correlation_context');
-const {configureHttpServer, createRequestAdmission, readJsonObject} = require('./lib/http_runtime');
+const {configureHttpServer, readJsonObject} = require('./lib/http_runtime');
 const {requestJson: boundedRequestJson} = require('./lib/http_json_client');
 let sqlite3;
 try {
@@ -102,12 +81,10 @@ try {
   sqlite3 = require('/usr/local/lib/node_modules/n8n/node_modules/.pnpm/sqlite3@5.1.7/node_modules/sqlite3');
 }
 const {
-  projectOffset,
   formatProjectTimestamp,
   parseProjectTimestamp,
   nowUtc,
   normalizeTimestampValue,
-  normalizeJsonTimestamps,
   jsonText,
   canonicalJsonText,
 } = createProjectSerialization();
@@ -128,67 +105,28 @@ const {
   scoringRulesPath,
   authorizedActivityPolicyPath,
   authorizedActivityPolicy,
-  beaconPaths,
-  beaconHistoryPaths,
   host,
   port,
   postgresShadowEnabled,
   postgresShadowIntervalMs,
   postgresShadowBatchSize,
   assetPostgresEnabled,
-  assetPostgresSchemaPath,
   softwarePostgresEnabled,
-  softwarePostgresSchemaPath,
   acHunterPostgresEnabled,
-  acHunterPostgresSchemaPath,
-  assetStoreWriteToken,
   controlledEvaluationMode,
   runtimeReleaseIdValue,
-  controlledEvaluationToken,
-  applicationLogPath,
-  applicationLogMaxBytes,
-  applicationLogBackups,
-  telegramBotToken,
-  telegramChatId,
   maxRequestBytes,
   httpRequestTimeoutMs,
   httpHeadersTimeoutMs,
   httpKeepAliveTimeoutMs,
   httpMaxRequestsPerSocket,
   httpMaxConnections,
-  httpMaxActivePosts,
-  diskHardMaxUsedPercent,
-  diskStartMaxUsedPercent,
-  diskMinFreeBytes,
-  telegramAlertLevels,
-  telegramCooldownSeconds,
   telegramOutboxIntervalMs,
-  telegramOutboxBaseRetrySeconds,
-  telegramOutboxMaxRetrySeconds,
-  telegramOutboxMaxAttempts,
   telegramOutboxAutostart,
-  enrichmentCacheDefaultTtlSeconds,
-  vulnerabilityCacheDefaultTtlSeconds,
-  enrichmentNegativeCacheTtlSeconds,
-  enrichmentStaleIfErrorSeconds,
-  enrichmentVulnerabilityStaleIfErrorSeconds,
-  enrichmentCacheL1MaxEntries,
-  enrichmentCacheL1TtlSeconds,
-  enrichmentCacheL1MaxBytes,
-  enrichmentCacheMaxEntries,
-  enrichmentCacheMaxBytes,
-  enrichmentCacheRawResponseMaxBytes,
   enrichmentCacheCleanupIntervalMs,
-  enrichmentSourceTtlDefaults,
   enrichmentTimeoutMs,
-  httpJsonMaxResponseBytes,
-  enrichmentCircuitFailureThreshold,
-  enrichmentCircuitResetMs,
-  enrichmentCircuitMaxResetMs,
   enrichmentWorkerIntervalMs,
   enrichmentWorkerMaxAttempts,
-  virustotalMinimumLevel,
-  urlscanSubmitEnabled,
   pcapRequestMaxWindowSeconds,
   pcapRequestDefaultWindowSeconds,
   pcapClaimLeaseSeconds,
@@ -206,165 +144,86 @@ const {
   n8nPostCommitBaseRetrySeconds,
   durableJobRecoveryIntervalMs,
   aiAnalysisLeaseSeconds,
-  runtimeDir,
-  aiAnalysisWakePaths,
   pcapAnalysisWakePath,
   analystStatusReasonMaxLength,
   analystAdjudicationTextMaxLength,
-  enrichmentSecrets,
 } = runtimeConfiguration;
-const requestAuthorization = createRequestAuthorization({
-  assetWriteToken: assetStoreWriteToken,
-  evaluationToken: controlledEvaluationToken,
-  controlledEvaluationMode,
-  timingSafeEqual: crypto.timingSafeEqual,
-});
-// Validate the complete controlled-runtime boundary before creating a log
-// directory or any other external state. A malformed evaluation environment
-// must fail closed without deriving a path such as /logs from a missing DB.
-const applicationLogger = createSecurityLogger({
-  file: applicationLogPath,
-  service: 'onion-sentinel-alert-store',
-  releaseId: runtimeReleaseIdValue || 'unversioned',
-  maxBytes: applicationLogMaxBytes,
-  backups: applicationLogBackups,
-});
-applicationLogger.captureConsole();
-applicationLogger.log('info', 'process.starting', {
-  runtime_mode: controlledEvaluationMode ? 'controlled-evaluation' : 'production',
-  database_path: dbPath,
-  listen_host: host,
-  listen_port: port,
+const {
+  alertGroupId,
+  alertGroupKeySql,
+  alertGroupService,
+  allowedJournalModes,
+  allowedSynchronousModes,
+  allowedTempStoreModes,
+  applicationLogger,
+  beaconPersistence,
+  diskWriteAdmission,
+  enrichmentCache,
+  enrichmentOrchestrator,
+  enrichmentProviderClient,
+  enrichmentScheduler,
+  indicatorExtraction,
+  notificationService,
+  postRequestAdmission,
+  postgresAuxiliaryStores,
+  requestAuthorization,
+  reviewerPolicy,
+  scoringPolicy,
+  serviceMetrics,
+  severityRank,
+  socAnalysisPolicy,
+  sqliteBusyTimeoutMs,
+  sqliteJournalMode,
+  sqliteRuntime,
+  sqliteSynchronous,
+  sqliteTempStore,
+  supportedAgentRoles,
+  workerWakeSignaling,
+} = createRuntimeFoundationComposition({
+  runtime: runtimeConfiguration,
+  platform: {
+    fs,
+    path,
+    processApi: process,
+    sqlite3,
+    crypto,
+    createPostgresPool: (config) => {
+      const {Pool} = require('pg');
+      return new Pool(config);
+    },
+  },
+  serialization: {
+    nowUtc,
+    normalizeTimestampValue,
+    formatProjectTimestamp,
+    parseProjectTimestamp,
+  },
+  normalization: {
+    nestedField,
+    integerField,
+    nonNegativeIntegerField,
+    normalizeTriageLevel,
+    safeString,
+    parseJsonObject,
+  },
+  network: {boundedRequestJson, isRelayHeartbeat},
 });
 const {
   reviewerAutomationAuthorization,
   conservativeReviewerTelemetry,
-} = createReviewerPolicy({safeString, parseJsonObject});
-const socAnalysisPolicy = createSocAnalysisPolicy({runtimeDir});
-
-const diskWriteAdmission = createDiskWriteAdmission({
-  fs,
-  path,
-  dbPath,
-  diskStartMaxUsedPercent,
-  diskHardMaxUsedPercent,
-  diskMinFreeBytes,
-  maxRequestBytes,
-});
-
-function diskCapacitySnapshot(additionalBytes = 0) {
-  return diskWriteAdmission.diskCapacitySnapshot(additionalBytes);
-}
-
-function assertDiskWriteAdmission(label, additionalBytes = maxRequestBytes) {
-  return diskWriteAdmission.assertDiskWriteAdmission(label, additionalBytes);
-}
-
-const severityRank = {informational: 0, info: 0, low: 1, medium: 2, high: 3, critical: 4};
-const supportedAgentRoles = new Set([
-  'soc-analyst',
-  'incident-responder',
-  'siem-engineer',
-  'cyber-threat-intel',
-  'threat-hunter',
-]);
-const workerWakeSignaling = createWorkerWakeSignaling({
-  fs,
-  path,
-  nowUtc,
-  isControlledEvaluation: () => controlledEvaluationMode,
-  aiAnalysisWakePaths,
-  logError: (message) => console.error(message),
-});
-
-async function signalWorker(wakePath, eventName) {
-  return workerWakeSignaling.signalWorker(wakePath, eventName);
-}
-
-async function signalAiWorkers(eventName) {
-  return workerWakeSignaling.signalAiWorkers(eventName);
-}
-
-const scoringRulesRuntime = createScoringRulesRuntime({
-  fs,
-  scoringRulesPath,
-  logError: (message) => console.error(message),
-});
-
-function loadScoringRules() {
-  return scoringRulesRuntime.load();
-}
-
-const scoringRules = loadScoringRules();
+} = reviewerPolicy;
 const {
-  parseIpv4,
-  isPrivateIpv4,
-  trafficDirection,
   ruleName,
   findDropRule,
   suppressionKey,
   findSuppressRule,
   scoreAlert,
-} = createScoringPolicy({rules: scoringRules, nestedField});
+} = scoringPolicy;
 const {
-  isProbablyPlaceholderSecret,
-  isConfiguredSecret,
-  publicHostname,
-  redactUrlForPublicLookup,
-  extractUrlsFromText,
-  extractIpv4sFromText,
-  extractDomainsFromText,
-  extractCvesFromText,
-  extractHashesFromText,
   extractAlertIndicators,
   hasUsableExternalIntel,
-} = createIndicatorExtraction({parseIpv4, isPrivateIpv4, nestedField});
-const enrichmentPolicy = createEnrichmentPolicy({
-  normalizeTimestampValue,
-  nowUtc,
-  isConfiguredSecret,
-  enrichmentSecrets,
-  defaultTtlSeconds: enrichmentCacheDefaultTtlSeconds,
-  vulnerabilityTtlSeconds: vulnerabilityCacheDefaultTtlSeconds,
-  sourceTtlDefaults: enrichmentSourceTtlDefaults,
-  staleIfErrorSeconds: enrichmentStaleIfErrorSeconds,
-  vulnerabilityStaleIfErrorSeconds: enrichmentVulnerabilityStaleIfErrorSeconds,
-  severityRank,
-  virusTotalMinimumLevel: virustotalMinimumLevel,
-  parseIpv4,
-  isPrivateIpv4,
-  publicHostname,
-  redactUrlForPublicLookup,
-});
-const {
-  normalizedEnrichmentRecord,
-  notFoundEnrichmentRecord,
-  verdictFromStats,
-} = enrichmentPolicy;
-const enrichmentProviderClient = createEnrichmentProviderClient({
-  controlledEvaluationMode,
-  boundedRequestJson,
-  timeoutMs: enrichmentTimeoutMs,
-  maxResponseBytes: httpJsonMaxResponseBytes,
-  safeString,
-  normalizedEnrichmentRecord,
-  notFoundEnrichmentRecord,
-  verdictFromStats,
-  enrichmentSecrets,
-  isConfiguredSecret,
-  formatProjectTimestamp,
-});
+} = indicatorExtraction;
 const {requestJson} = enrichmentProviderClient;
-const sqliteBusyTimeoutMs = Number(process.env.ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS || 30000);
-const sqliteRuntime = createSqliteRuntime({
-  fs,
-  path,
-  processApi: process,
-  sqlite3,
-  dbPath,
-  controlledEvaluationMode,
-  busyTimeoutMs: sqliteBusyTimeoutMs,
-});
 const {
   database: db,
   run,
@@ -377,80 +236,7 @@ const {
   queueTelegramNotification,
   drainTelegramOutbox,
   telegramOutboxSnapshot,
-} = createNotificationService({
-  nestedField,
-  normalizeTimestampValue,
-  formatProjectTimestamp,
-  nowUtc,
-  get,
-  run,
-  all,
-  withSqliteWriteGate,
-  withImmediateTransaction,
-  botToken: telegramBotToken,
-  chatId: telegramChatId,
-  alertLevels: telegramAlertLevels,
-  cooldownSeconds: telegramCooldownSeconds,
-  outboxBaseRetrySeconds: telegramOutboxBaseRetrySeconds,
-  outboxMaxRetrySeconds: telegramOutboxMaxRetrySeconds,
-  outboxMaxAttempts: telegramOutboxMaxAttempts,
-  outboxAutostart: telegramOutboxAutostart,
-  controlledEvaluationMode,
-});
-const beaconPersistence = createBeaconPersistence({
-  fs,
-  path,
-  processId: process.pid,
-  beaconPaths,
-  beaconHistoryPaths,
-  nowUtc,
-  dateNow: () => Date.now(),
-  parseProjectTimestamp,
-  nestedField,
-  integerField,
-  nonNegativeIntegerField,
-  logError: (message) => console.error(message),
-});
-
-function writeN8nBeacon(stage, alert = {}, result = null, error = null) {
-  return beaconPersistence.writeBeacon(stage, alert, result, error);
-}
-
-const sqliteJournalMode = String(process.env.ALERT_STORE_SQLITE_JOURNAL_MODE || 'DELETE').toUpperCase();
-const sqliteSynchronous = String(process.env.ALERT_STORE_SQLITE_SYNCHRONOUS || 'FULL').toUpperCase();
-const sqliteTempStore = String(process.env.ALERT_STORE_SQLITE_TEMP_STORE || 'DEFAULT').toUpperCase();
-const allowedJournalModes = new Set(['DELETE', 'TRUNCATE', 'PERSIST', 'MEMORY', 'WAL', 'OFF']);
-const allowedSynchronousModes = new Set(['OFF', 'NORMAL', 'FULL', 'EXTRA']);
-const allowedTempStoreModes = new Set(['DEFAULT', 'FILE', 'MEMORY']);
-const alertGroupKeySql = `
-  COALESCE(
-    NULLIF(suppression_key, ''),
-    (
-      CASE lower(COALESCE(triage_level, ''))
-        WHEN 'critical' THEN 'critical'
-        WHEN 'high' THEN 'high'
-        WHEN 'medium' THEN 'medium'
-        WHEN 'low' THEN 'low'
-        WHEN 'informational' THEN 'informational'
-        WHEN 'info' THEN 'informational'
-        ELSE CASE lower(COALESCE(severity_label, ''))
-          WHEN 'critical' THEN 'critical'
-          WHEN 'high' THEN 'high'
-          WHEN 'medium' THEN 'medium'
-          WHEN 'low' THEN 'low'
-          WHEN 'informational' THEN 'informational'
-          WHEN 'info' THEN 'informational'
-          ELSE 'unknown'
-        END
-      END
-    ) || '|' ||
-    COALESCE(rule_name, 'unknown-rule') || '|' ||
-    COALESCE(source_ip, 'unknown-source') || '|' ||
-    COALESCE(destination_ip, 'unknown-destination') || '|' ||
-    COALESCE(filter_status, 'accepted')
-  )
-`;
-
+} = notificationService;
 const {
   refreshGroupAliases,
   alertGroupKeyFromRow,
@@ -458,95 +244,38 @@ const {
   refreshAlertGroupSummary,
   rebuildAlertGroupSummariesUnlocked,
   rebuildAlertGroupSummaries,
-} = createAlertGroupService({
-  all,
-  get,
-  run,
-  withImmediateTransaction,
-  withSqliteWriteGate,
-  nowUtc,
-  normalizeTriageLevel,
-  alertGroupId,
-  alertGroupKeySql,
-});
-
-const enrichmentScheduler = createProviderScheduler({
-  failureThreshold: enrichmentCircuitFailureThreshold,
-  resetMs: enrichmentCircuitResetMs,
-  maxResetMs: enrichmentCircuitMaxResetMs,
-  formatTimestamp: formatProjectTimestamp,
-});
-let durableJobs;
-let postgresShadowOutbox;
-let postgresShadowProjector;
-const postgresAuxiliaryStores = createPostgresAuxiliaryStoreRuntime({
-  env: process.env,
-  controlledEvaluationMode,
-  assetPostgresEnabled,
-  softwarePostgresEnabled,
-  acHunterPostgresEnabled,
-  assetSchemaPath: assetPostgresSchemaPath,
-  softwareSchemaPath: softwarePostgresSchemaPath,
-  acHunterSchemaPath: acHunterPostgresSchemaPath,
-  createPool: (config) => {
-    const {Pool} = require('pg');
-    return new Pool(config);
-  },
-  createAssetStore: (options) => createPostgresAssetStore(options),
-  createSoftwareStore: (options) => createPostgresSoftwareStore(options),
-  createAcHunterStore: (options) => createPostgresAcHunterStore(options),
-  logger: applicationLogger,
-});
-let pipelineMetrics;
-let pcapTransferRepository;
-const serviceMetrics = {
-  started_at: nowUtc(),
-  ingest_requests: 0,
-  ingest_errors: 0,
-  ingest_latency_ms_total: 0,
-  ingest_latency_ms_max: 0,
-};
-const postRequestAdmission = createRequestAdmission(httpMaxActivePosts);
-
-const enrichmentCache = createEnrichmentCache({
-  run,
-  get,
-  all,
-  withWriteGate: withSqliteWriteGate,
-  withTransaction: withImmediateTransaction,
-  formatTimestamp: formatProjectTimestamp,
-  l1MaxEntries: enrichmentCacheL1MaxEntries,
-  l1TtlSeconds: enrichmentCacheL1TtlSeconds,
-  l1MaxBytes: enrichmentCacheL1MaxBytes,
-  maxEntries: enrichmentCacheMaxEntries,
-  maxBytes: enrichmentCacheMaxBytes,
-  rawResponseMaxBytes: enrichmentCacheRawResponseMaxBytes,
-  staleIfErrorSeconds: enrichmentStaleIfErrorSeconds,
-  vulnerabilityStaleIfErrorSeconds: enrichmentVulnerabilityStaleIfErrorSeconds,
-});
+} = alertGroupService;
 const {
   enrichAlert,
   cachedInvestigationEnrichment,
   queryInvestigationEnrichment,
-} = createEnrichmentOrchestrator({
-  cache: enrichmentCache,
-  scheduler: enrichmentScheduler,
-  providers: enrichmentProviderClient,
-  policy: enrichmentPolicy,
-  extractAlertIndicators,
-  isRelayHeartbeat,
-  nowUtc,
-  formatProjectTimestamp,
-  withSqliteWriteGate,
-  withImmediateTransaction,
-  get,
-  run,
-  defaultTtlSeconds: enrichmentCacheDefaultTtlSeconds,
-  vulnerabilityTtlSeconds: vulnerabilityCacheDefaultTtlSeconds,
-  negativeTtlSeconds: enrichmentNegativeCacheTtlSeconds,
-  virusTotalMinimumLevel: virustotalMinimumLevel,
-  urlscanSubmitEnabled,
-});
+} = enrichmentOrchestrator;
+
+function diskCapacitySnapshot(additionalBytes = 0) {
+  return diskWriteAdmission.diskCapacitySnapshot(additionalBytes);
+}
+
+function assertDiskWriteAdmission(label, additionalBytes = maxRequestBytes) {
+  return diskWriteAdmission.assertDiskWriteAdmission(label, additionalBytes);
+}
+
+async function signalWorker(wakePath, eventName) {
+  return workerWakeSignaling.signalWorker(wakePath, eventName);
+}
+
+async function signalAiWorkers(eventName) {
+  return workerWakeSignaling.signalAiWorkers(eventName);
+}
+
+function writeN8nBeacon(stage, alert = {}, result = null, error = null) {
+  return beaconPersistence.writeBeacon(stage, alert, result, error);
+}
+
+let durableJobs;
+let postgresShadowOutbox;
+let postgresShadowProjector;
+let pipelineMetrics;
+let pcapTransferRepository;
 
 function initializeDurableJobs() {
   durableJobs = createDurableJobQueue({
@@ -663,10 +392,6 @@ async function ensureColumn(tableName, columnName, columnType) {
   if (!columns.includes(columnName)) {
     await run(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnType}`);
   }
-}
-
-function alertGroupId(groupKey) {
-  return crypto.createHash('sha1').update(String(groupKey || '')).digest('hex').slice(0, 12);
 }
 
 async function persistStableIdentity(alertId, row, alert = {}) {

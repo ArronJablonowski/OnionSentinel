@@ -38,6 +38,13 @@ ROUTE_COMPOSITION = REPO_ROOT / "n8n" / "alert_store" / "composition" / "route_c
 APPLICATION_COMPOSITION = (
     REPO_ROOT / "n8n" / "alert_store" / "composition" / "application_composition.js"
 )
+RUNTIME_FOUNDATION_COMPOSITION = (
+    REPO_ROOT
+    / "n8n"
+    / "alert_store"
+    / "composition"
+    / "runtime_foundation_composition.js"
+)
 DISK_WRITE_ADMISSION = REPO_ROOT / "n8n" / "alert_store" / "services" / "disk_write_admission.js"
 WORKER_WAKE_SIGNALING = REPO_ROOT / "n8n" / "alert_store" / "services" / "worker_wake_signaling.js"
 BEACON_PERSISTENCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "beacon_persistence.js"
@@ -97,6 +104,9 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.durable_job_transition_executor = DURABLE_JOB_TRANSITION_EXECUTOR.read_text(encoding="utf-8")
         cls.route_composition = ROUTE_COMPOSITION.read_text(encoding="utf-8")
         cls.application_composition = APPLICATION_COMPOSITION.read_text(encoding="utf-8")
+        cls.runtime_foundation_composition = RUNTIME_FOUNDATION_COMPOSITION.read_text(
+            encoding="utf-8"
+        )
         cls.disk_write_admission = DISK_WRITE_ADMISSION.read_text(encoding="utf-8")
         cls.worker_wake_signaling = WORKER_WAKE_SIGNALING.read_text(encoding="utf-8")
         cls.beacon_persistence = BEACON_PERSISTENCE.read_text(encoding="utf-8")
@@ -112,7 +122,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         )
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
-        self.assertIn("require('./lib/provider_scheduler')", self.code)
+        self.assertIn("require('../lib/provider_scheduler')", self.runtime_foundation_composition)
         self.assertIn("scheduler.run(", self.enrichment_orchestrator)
         self.assertIn("await Promise.all(jobs);", self.enrichment_orchestrator)
         self.assertNotIn("withEnrichmentGate", self.enrichment_orchestrator)
@@ -393,7 +403,8 @@ class AlertStoreResilienceTest(unittest.TestCase):
     def test_new_intake_stops_before_the_eighty_percent_disk_ceiling(self) -> None:
         self.assertIn("function assertDiskWriteAdmission", self.code)
         self.assertIn("80, Math.max(2", self.runtime_configuration)
-        self.assertIn("createDiskWriteAdmission", self.code)
+        self.assertIn("createRuntimeFoundationComposition", self.code)
+        self.assertIn("createDiskWriteAdmission", self.runtime_foundation_composition)
         self.assertIn("assertDiskWriteAdmission('alert ingestion')", self.alert_ingest_service)
         self.assertIn("assertDiskWriteAdmission('alert enrichment')", self.enrichment_service)
         self.assertIn("error.statusCode = 507", self.disk_write_admission)
@@ -412,7 +423,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("pipelineMetrics.captureDiskSample", self.code)
 
     def test_beacon_artifacts_have_one_atomic_bounded_persistence_owner(self) -> None:
-        self.assertIn("createBeaconPersistence", self.code)
+        self.assertIn("createBeaconPersistence", self.runtime_foundation_composition)
         self.assertIn("writeBeacon: writeN8nBeacon", self.code)
         self.assertIn("function writeJsonAtomic", self.beacon_persistence)
         self.assertNotIn("function writeJsonAtomic", self.code)
@@ -445,7 +456,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
             self.assertNotIn(f"function {forwarding_function}", self.code)
 
     def test_sqlite_runtime_owns_admission_promises_and_transaction_serialization(self) -> None:
-        self.assertIn("createSqliteRuntime", self.code)
+        self.assertIn("createSqliteRuntime", self.runtime_foundation_composition)
         self.assertIn("controlled evaluation refuses database recovery sidecar", self.sqlite_runtime)
         self.assertIn("function run(sql, params = [])", self.sqlite_runtime)
         self.assertIn("function get(sql, params = [])", self.sqlite_runtime)
@@ -481,7 +492,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
 
     def test_committed_evidence_wakes_local_workers_without_owning_durability(self) -> None:
         self.assertIn("async function signalWorker", self.code)
-        self.assertIn("createWorkerWakeSignaling", self.code)
+        self.assertIn("createWorkerWakeSignaling", self.runtime_foundation_composition)
         self.assertIn("AI_ANALYSIS_WAKE_PATH", self.runtime_configuration)
         self.assertIn("PCAP_ANALYSIS_WAKE_PATH", self.runtime_configuration)
         self.assertIn("Wake files are an optimization", self.worker_wake_signaling)

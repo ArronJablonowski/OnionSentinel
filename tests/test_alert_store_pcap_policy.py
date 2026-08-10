@@ -9,6 +9,13 @@ ALERT_STORE = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
 APPLICATION_COMPOSITION = (
     REPO_ROOT / "n8n" / "alert_store" / "composition" / "application_composition.js"
 )
+RUNTIME_FOUNDATION_COMPOSITION = (
+    REPO_ROOT
+    / "n8n"
+    / "alert_store"
+    / "composition"
+    / "runtime_foundation_composition.js"
+)
 RUNTIME_CONFIGURATION = (
     REPO_ROOT / "n8n" / "alert_store" / "lib" / "runtime_configuration.js"
 )
@@ -51,11 +58,13 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
     def test_alert_store_auto_queues_pcap_for_configured_levels(self) -> None:
         code = ALERT_STORE.read_text()
         composition = APPLICATION_COMPOSITION.read_text(encoding="utf-8")
+        runtime_foundation = RUNTIME_FOUNDATION_COMPOSITION.read_text(encoding="utf-8")
         persistence = ALERT_PERSISTENCE.read_text(encoding="utf-8")
         routing = AUTOMATIC_RESPONSE_ROUTING.read_text(encoding="utf-8")
         policy = SOC_ANALYSIS_POLICY.read_text()
 
-        self.assertIn("createSocAnalysisPolicy", code)
+        self.assertIn("createRuntimeFoundationComposition", code)
+        self.assertIn("createSocAnalysisPolicy", runtime_foundation)
         self.assertIn("matchesPcap: (level) => socAnalysisPolicy.matchesPcap(level)", code)
         self.assertIn("soc_analyst_pcap_min_severity", policy)
         self.assertIn("pcap_capture_loss_threshold_percent", policy)
