@@ -396,8 +396,9 @@ class AlertStoreResilienceTest(unittest.TestCase):
 
     def test_timestamp_and_json_serialization_have_one_shared_owner(self) -> None:
         self.assertIn("createProjectSerialization", self.code)
-        self.assertIn("function normalizeTimestampValue", self.code)
+        self.assertNotIn("function normalizeTimestampValue", self.code)
         self.assertIn("isoTimestampPattern", self.project_serialization)
+        self.assertIn("function normalizeTimestampValue", self.project_serialization)
         self.assertIn("function canonicalJsonText", self.project_serialization)
 
     def test_alert_value_normalization_has_one_shared_owner(self) -> None:
