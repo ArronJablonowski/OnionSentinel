@@ -737,6 +737,12 @@ decision. It preserves the existing unresolved-reference, corroborating-source,
 confidence, independent-review, shared-memory approval, and role-capability
 gates without gaining persistence or runtime credential access.
 
+`n8n/bin/harness_run_completion.py` owns response-ledger recording, completion
+budget enforcement, post-commit memory/SLO audit events, and terminal success or
+failure settlement. It composes with the run foundation and execution mixins;
+the public `HarnessRun` name and method surface remain unchanged in the
+217-line compatibility facade.
+
 `n8n/bin/harness_store_foundation.py` owns hardened SQLite connection setup,
 read-only preflight of existing schema versions, versioned schema creation and
 migration, owner-only file permissions, committed-event audit mirroring,

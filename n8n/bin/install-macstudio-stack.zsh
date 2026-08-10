@@ -758,6 +758,7 @@ cp "$REPO_DIR/n8n/bin/harness_contracts.py" "$STACK_DIR/bin/harness_contracts.py
 cp "$REPO_DIR/n8n/bin/harness_memory.py" "$STACK_DIR/bin/harness_memory.py"
 cp "$REPO_DIR/n8n/bin/harness_policy.py" "$STACK_DIR/bin/harness_policy.py"
 cp "$REPO_DIR/n8n/bin/harness_query_contract.py" "$STACK_DIR/bin/harness_query_contract.py"
+cp "$REPO_DIR/n8n/bin/harness_run_completion.py" "$STACK_DIR/bin/harness_run_completion.py"
 cp "$REPO_DIR/n8n/bin/harness_run_execution.py" "$STACK_DIR/bin/harness_run_execution.py"
 cp "$REPO_DIR/n8n/bin/harness_run_foundation.py" "$STACK_DIR/bin/harness_run_foundation.py"
 cp "$REPO_DIR/n8n/bin/harness_store_foundation.py" "$STACK_DIR/bin/harness_store_foundation.py"
