@@ -60,22 +60,12 @@ measurement becomes the new baseline. Exceptions identify the owner, cohesive
 reason, risk, and expiration. Generated, vendored, schema, and frozen
 compatibility files are excluded only by a narrow reviewed allowlist.
 
-### ARR-85 remaining file exceptions
+### ARR-85 file-exception ratchet
 
-The final release ratchet removed every obsolete monolith allowance. One
-repository-only or production files remain above the 800-line module limit.
-Their current measured size is the non-growing ceiling; each has one named
-owner, one cohesive reason to change, an explicit risk, and a Linear issue that
-expires the exception.
-
-| File | Owner and cohesive boundary | Risk while retained | Expiration |
-| --- | --- | --- | --- |
-| `operations/benchmark-ollama-cybersecurity.py` (1,164) | repository-only model discovery, bounded execution, scoring, and report generation | benchmark orchestration is harder to review but has no production service authority | ARR-126 |
-
-No exception permits growth, weakens function/complexity gates, or bypasses
-cycle and forbidden-dependency checks. The release gate records these as
-bounded follow-up work rather than silently retaining the original monolith
-allowances.
+The final release ratchet removed every obsolete monolith allowance. No
+repository-only or production file remains above the 800-line module limit.
+The function and complexity baselines remain non-growing ceilings; no exception
+weakens those gates or bypasses cycle and forbidden-dependency checks.
 
 ## Non-Negotiable Invariants
 

@@ -3194,6 +3194,28 @@ configuration values are forwarded only for the duration of a call, preserving
 test and recovery overrides without cross-import state leakage. The Pi installer
 copies all three implementation modules before the wrapper.
 
+## Local Ollama Benchmark
+
+`benchmark-ollama-cybersecurity.py` is the repository-only executable and
+compatibility surface. It owns CLI validation, the immutable synthetic decision
+fixture catalog, exact default model ordering, incremental artifact persistence,
+and exit behavior. At 733 lines it is below the hard review threshold; most of
+its volume is inspectable TEST-NET/example-domain fixture data rather than
+runtime control flow.
+
+`benchmark_ollama_discovery.py` owns size-bounded Ollama JSON transport and exact
+installed-model discovery. `benchmark_ollama_execution.py` owns deterministic
+decision/query prompts, retry timing, chat request limits, and response parsing.
+The executable injects its transport and clock/sleep seams so existing tests and
+callers can still patch the historical flat symbols.
+
+`benchmark_ollama_query_cases.py` owns the immutable generated-query catalog.
+`benchmark_ollama_scoring.py` owns deterministic evidence, syntax, read-only,
+scope, and bound validation. `benchmark_ollama_reporting.py` owns per-category
+aggregation, performance metrics, and Markdown rendering. These are leaf
+modules; none imports the executable or gains access to live alerts,
+credentials, query execution, or production persistence.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:
