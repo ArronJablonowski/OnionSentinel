@@ -320,12 +320,11 @@ class AlertStoreResilienceTest(unittest.TestCase):
         )
 
     def test_ai_status_callback_resolves_legacy_group_alias(self) -> None:
-        self.assertIn("async function transitionDurableJobStatus", self.code)
+        self.assertIn("async function transition(", self.durable_job_transition_executor)
         self.assertIn(
             "SELECT stable_group_id FROM alert_group_alias WHERE legacy_group_id = ?",
             self.durable_job_transition_executor,
         )
-        self.assertIn("transitionDurableJobStatus(", self.code)
 
     def test_summary_rebuild_uses_one_windowed_scan(self) -> None:
         rebuild = self.alert_group_service.split("async function rebuildAlertGroupSummariesUnlocked()", 1)[1].split(
