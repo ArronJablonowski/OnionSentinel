@@ -2336,6 +2336,13 @@ Repositories never call HTTP or background schedulers. Existing database
 schemas, migrations, shadow projection, public routes, health fields, and
 controlled-evaluation allowlists remain compatible.
 
+`composition/controlled_incident_composition.js` owns the construction graph
+for controlled job admission and transitions, durable incident-reanalysis
+ownership and recovery, controlled retirement replay, and manual/frozen
+incident dispatch. It receives persistence, transaction, queue, serialization,
+identity, and runtime ports explicitly; the legacy entry point retains only
+the environment-specific adapters and public compatibility functions.
+
 ## Deployment Map
 
 The current production installer copies individual files. These additions are

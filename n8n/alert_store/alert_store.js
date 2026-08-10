@@ -26,10 +26,6 @@ const {createPipelineMetrics} = require('./lib/pipeline_metrics');
 const {createSocAnalysisPolicy} = require('./lib/soc_analysis_policy');
 const {createRequestDispatcher} = require('./lib/http_dispatch');
 const {createRequestAuthorization} = require('./lib/request_authorization');
-const {createControlledJobIdentity} = require('./lib/controlled_job_identity');
-const controlledRetirementDefinitions = require('./lib/controlled_retirement_identity');
-const {createControlledRetirementProjections} = require('./lib/controlled_retirement_projections');
-const {createManualDispatchIdentity} = require('./lib/manual_dispatch_identity');
 const {createControlledEvaluationSchema} = require('./lib/controlled_evaluation_schema');
 const {
   createAlertStoreSchemaFoundation,
@@ -56,7 +52,6 @@ const {createAlertPersistence} = require('./services/alert_persistence');
 const {createSuppressionPersistence} = require('./services/suppression_persistence');
 const {createRescorePersistence} = require('./services/rescore_persistence');
 const {createAutomaticResponseRouting} = require('./services/automatic_response_routing');
-const {createManualAnalysisDispatch} = require('./services/manual_analysis_dispatch');
 const {createDurableBackgroundDrains} = require('./services/durable_background_drains');
 const {createServiceRuntimeLifecycle} = require('./services/service_runtime_lifecycle');
 const {createHttpRequestBoundary} = require('./services/http_request_boundary');
@@ -72,53 +67,11 @@ const {createAiReviewRepository} = require('./repositories/ai_review_repository'
 const {createPcapRequestRepository} = require('./repositories/pcap_request_repository');
 const {createPcapTransferRepository} = require('./repositories/pcap_transfer_repository');
 const {createAiAnalysisAcceptance} = require('./services/ai_analysis_acceptance');
-const {createControlledJobTransition} = require('./services/controlled_job_transition');
-const {createControlledResultAdmission} = require('./services/controlled_result_admission');
-const {createDurableJobRecovery} = require('./services/durable_job_recovery');
-const {createDurableJobTransitionExecutor} = require('./services/durable_job_transition_executor');
-const {
-  createControlledRetirementCompletedMember,
-} = require('./services/controlled_retirement_completed_member');
-const {
-  createControlledRetirementTargetMember,
-} = require('./services/controlled_retirement_target_member');
-const {
-  createControlledRetirementCensus,
-} = require('./services/controlled_retirement_census');
-const {
-  createControlledRetirementReplay,
-} = require('./services/controlled_retirement_replay');
-const {
-  createControlledRetirementCommand,
-} = require('./services/controlled_retirement_command');
-const {
-  createIncidentReanalysisFrozenDispatch,
-} = require('./services/incident_reanalysis_frozen_dispatch');
-const {
-  createAlertGroupAliasResolution,
-} = require('./services/alert_group_alias_resolution');
-const {
-  createIncidentDurableJobPersistence,
-} = require('./services/incident_durable_job_persistence');
-const {
-  createIncidentReanalysisRequest,
-} = require('./services/incident_reanalysis_request');
-const {
-  createIncidentReanalysisJobOwnership,
-} = require('./services/incident_reanalysis_job_ownership');
-const {
-  createIncidentReanalysisAttemptLifecycle,
-} = require('./services/incident_reanalysis_attempt_lifecycle');
-const {
-  createIncidentReanalysisRecovery,
-} = require('./services/incident_reanalysis_recovery');
-const {
-  createIncidentReanalysisRunPersistence,
-} = require('./services/incident_reanalysis_run_persistence');
-const {createIncidentAnalysisCompletion} = require('./services/incident_analysis_completion');
-const {createIncidentReanalysisBindingService} = require('./services/incident_reanalysis_binding');
 const {createPcapAnalysisCompletion} = require('./services/pcap_analysis_completion');
 const {createRouteComposition} = require('./composition/route_composition');
+const {
+  createControlledIncidentComposition,
+} = require('./composition/controlled_incident_composition');
 const {createNotificationService} = require('./services/notification_service');
 const {createAlertGroupService} = require('./services/alert_group_service');
 const {createScoringPolicy} = require('./lib/scoring_policy');
@@ -841,12 +794,6 @@ const controlledRoutePattern = /^codex-cli:(?:gpt-5\.5|gpt-5\.6-(?:sol|terra|lun
 function controlledRouteModelIdentity(route) {
   return String(route || '').split(':').slice(0, -1).join(':');
 }
-const controlledRetirementSchema = controlledRetirementDefinitions.RETIREMENT_SCHEMA;
-const controlledRetirementReceiptSchema = controlledRetirementDefinitions.RECEIPT_SCHEMA;
-const controlledRetirementEventType = controlledRetirementDefinitions.EVENT_TYPE;
-const controlledRetirementReceiptFields = controlledRetirementDefinitions.RECEIPT_FIELDS;
-const controlledRetirementRequestFields = controlledRetirementDefinitions.REQUEST_FIELDS;
-
 function requestHasOwnField(payload, field) {
   return Boolean(
     payload
@@ -895,49 +842,6 @@ function incidentReanalysisReleaseId() {
   ).replace(/[^A-Za-z0-9._:-]+/g, '-').replace(/^-+|-+$/g, '');
   return candidate || 'unversioned';
 }
-
-const incidentReanalysisRunPersistence = createIncidentReanalysisRunPersistence({
-  get,
-  all,
-  run,
-  nowUtc,
-});
-const incidentReanalysisJobOwnership = createIncidentReanalysisJobOwnership({
-  safeString,
-  validCaseId: validIncidentCaseId,
-  get,
-  all,
-  run,
-  nowUtc,
-  sha256Text: (value) => crypto.createHash('sha256').update(value).digest('hex'),
-  refreshRun: incidentReanalysisRunPersistence.refresh,
-});
-const incidentReanalysisAttemptLifecycle = createIncidentReanalysisAttemptLifecycle({
-  jobPayload: incidentReanalysisJobOwnership.jobPayload,
-  safeString,
-  validCaseId: validIncidentCaseId,
-  attemptId: incidentReanalysisJobOwnership.attemptId,
-  closeStale: incidentReanalysisJobOwnership.closeStale,
-  get,
-  run,
-  nowUtc,
-  refreshRun: incidentReanalysisRunPersistence.refresh,
-});
-const incidentReanalysisRecovery = createIncidentReanalysisRecovery({
-  durableJobsAvailable: () => Boolean(durableJobs),
-  all,
-  get,
-  run,
-  retireCompleted: incidentReanalysisJobOwnership.retireCompleted,
-  retireSuperseded: incidentReanalysisJobOwnership.retireSuperseded,
-  attemptId: incidentReanalysisJobOwnership.attemptId,
-  beginAttempt: incidentReanalysisAttemptLifecycle.begin,
-  safeString,
-  jobPayload: incidentReanalysisJobOwnership.jobPayload,
-  validCaseId: validIncidentCaseId,
-  nowUtc,
-  refreshRun: incidentReanalysisRunPersistence.refresh,
-});
 
 async function drainEnrichmentJobs() {
   return durableBackgroundDrains.drainEnrichment();
@@ -1033,88 +937,6 @@ const aiCorrelationRepository = createAiCorrelationRepository({
   nowUtc,
   compactCorrelationCandidates,
 });
-const incidentReanalysisBindingService = createIncidentReanalysisBindingService({
-  get,
-  run,
-  safeString,
-  parseProjectTimestamp,
-  formatProjectTimestamp,
-  nowUtc,
-  incidentAnalysisProvider: incidentReanalysisJobOwnership.analysisProvider,
-  refreshIncidentReanalysisRun: incidentReanalysisRunPersistence.refresh,
-});
-const incidentAnalysisCompletion = createIncidentAnalysisCompletion({
-  get,
-  run,
-  safeString,
-  jsonText,
-  nowUtc,
-  bindIncidentReanalysisResult: incidentReanalysisBindingService.bindResult,
-});
-const aiAnalysisAcceptance = createAiAnalysisAcceptance({
-  get,
-  run,
-  safeString,
-  jsonText,
-  nowUtc,
-  parseJsonObject,
-  canonicalJsonText,
-  normalizeTimestampValue,
-  supportedAgentRoles,
-  incidentReanalysisBindingAuthority: incidentReanalysisBindingService.bindingAuthority,
-  aiReviewRepository,
-  incidentAnalysisCompletion,
-  aiCorrelationRepository,
-});
-const controlledJobIdentity = createControlledJobIdentity({
-  requestHasOwnField,
-  identityConflict: incidentIdentityConflict,
-  validPinnedStableGroupKey,
-  representativeAlertIdPattern,
-  dispatchIdPattern,
-  controlledRoutePattern,
-  controlledRouteModelIdentity,
-});
-const controlledJobTransitionAuthority = createControlledJobTransition({
-  controlledEvaluationMode,
-  safeString,
-  identityConflict: incidentIdentityConflict,
-  stableGroupIdPattern,
-  parseClaimIdentity: controlledJobIdentity.parseClaim,
-  all,
-  get,
-  incidentReanalysisJobPayload: incidentReanalysisJobOwnership.jobPayload,
-  validPinnedStableGroupKey,
-  cohortIdPattern,
-  dispatchIdPattern,
-  representativeAlertIdPattern,
-  controlledRuntimeReleaseId,
-  controlledRoutePattern,
-  controlledRouteModelIdentity,
-  incidentReanalysisAttemptId: incidentReanalysisJobOwnership.attemptId,
-});
-const controlledEvaluationLeases = controlledJobTransitionAuthority.leases;
-const controlledResultAdmissionAuthority = createControlledResultAdmission({
-  controlledEvaluationMode,
-  safeString,
-  identityConflict: incidentIdentityConflict,
-  claimLeaseKey: controlledJobTransitionAuthority.leaseKey,
-  get,
-  incidentReanalysisJobPayload: incidentReanalysisJobOwnership.jobPayload,
-  parseJsonObject,
-  canonicalJsonText,
-  controlledRoutePattern,
-  controlledRouteModelIdentity,
-  cohortIdPattern,
-  dispatchIdPattern,
-  representativeAlertIdPattern,
-  stableGroupIdPattern,
-  validPinnedStableGroupKey,
-  releaseIdPattern,
-  runtimeReleaseId: runtimeReleaseIdValue,
-  incidentReanalysisAttemptId: incidentReanalysisJobOwnership.attemptId,
-  retireLease: controlledJobTransitionAuthority.retireLease,
-});
 const durableBackgroundDrains = createDurableBackgroundDrains({
   durableJobs: () => durableJobs,
   withWriteTransaction: (task) => (
@@ -1141,59 +963,88 @@ const durableBackgroundDrains = createDurableBackgroundDrains({
   n8nPostCommitTimeoutMs,
   n8nPostCommitBaseRetrySeconds,
 });
-const durableJobRecovery = createDurableJobRecovery({
-  durableJobs: () => durableJobs,
-  withWriteGate: withSqliteWriteGate,
-  withTransaction: withImmediateTransaction,
-  reconcileIncidentAttempts: incidentReanalysisRecovery.reconcile,
-  reconcileAuthorizedActivity: reconcileAuthorizedActivityBacklog,
-  nowUtc,
-  warn: (...args) => console.warn(...args),
-  signalAiWorkers,
-  drainEnrichmentJobs: durableBackgroundDrains.drainEnrichment,
-  drainPostCommitJobs: durableBackgroundDrains.drainPostCommit,
+const {
+  controlledEvaluationLeases,
+  controlledJobTransitionAuthority,
+  controlledResultAdmissionAuthority,
+  controlledRetirementCommandOwner,
+  durableJobRecovery,
+  durableJobTransitionExecutor,
+  incidentAnalysisCompletion,
+  incidentReanalysisBindingService,
+  incidentReanalysisJobOwnership,
+  incidentReanalysisRecovery,
+  incidentReanalysisRequestOwner,
+  manualAnalysisDispatch,
+  manualDispatchIdentityOwner,
+} = createControlledIncidentComposition({
+  persistence: {get, all, run},
+  identity: {
+    safeString,
+    validCaseId: validIncidentCaseId,
+    validPinnedStableGroupKey,
+    stableGroupIdPattern,
+    representativeAlertIdPattern,
+    dispatchIdPattern,
+    cohortIdPattern,
+    releaseIdPattern,
+    controlledRoutePattern,
+    controlledRouteModelIdentity,
+    requestHasOwnField,
+    identityConflict: incidentIdentityConflict,
+  },
+  runtime: {
+    controlledEvaluationMode,
+    runtimeReleaseId: runtimeReleaseIdValue,
+    controlledRuntimeReleaseId,
+    incidentReanalysisReleaseId,
+    aiAnalysisLeaseSeconds,
+    nowUtc,
+    randomUuid: () => crypto.randomUUID(),
+    sha256Text: (value) => crypto.createHash('sha256').update(value).digest('hex'),
+    warn: (...args) => console.warn(...args),
+  },
+  durable: {
+    available: () => Boolean(durableJobs),
+    owner: () => durableJobs,
+    pipelineMetrics: () => pipelineMetrics,
+    enqueue: (...args) => durableJobs.enqueue(...args),
+    retirePendingExact: (options) => durableJobs.retirePendingExact(options),
+    reconcileAuthorizedActivity: reconcileAuthorizedActivityBacklog,
+    recordMetric: (...args) => pipelineMetrics.record(...args),
+    signalAiWorkers,
+  },
+  transaction: {
+    withWriteGate: withSqliteWriteGate,
+    withTransaction: withImmediateTransaction,
+  },
+  drains: {
+    drainEnrichmentJobs: durableBackgroundDrains.drainEnrichment,
+    drainPostCommitJobs: durableBackgroundDrains.drainPostCommit,
+  },
+  serialization: {
+    parseJsonObject,
+    jsonText,
+    canonicalJsonText,
+    parseProjectTimestamp,
+    formatProjectTimestamp,
+  },
 });
-const durableJobTransitionExecutor = createDurableJobTransitionExecutor({
-  controlledEvaluationMode,
-  parseClaimIdentity: controlledJobIdentity.parseClaim,
-  stableGroupIdPattern,
-  identityConflict: incidentIdentityConflict,
+const aiAnalysisAcceptance = createAiAnalysisAcceptance({
   get,
   run,
   safeString,
-  incidentReanalysisJobPayload: incidentReanalysisJobOwnership.jobPayload,
-  controlledRuntimeReleaseId,
-  incidentReanalysisAttemptId: incidentReanalysisJobOwnership.attemptId,
-  aiAnalysisLeaseSeconds,
+  jsonText,
   nowUtc,
-  durableJobs: () => durableJobs,
-  pipelineMetrics: () => pipelineMetrics,
-  retireCompletedIncidentReanalysisJob: incidentReanalysisJobOwnership.retireCompleted,
-  retireSupersededIncidentReanalysisJob: incidentReanalysisJobOwnership.retireSuperseded,
-  updateIncidentReanalysisProgress: incidentReanalysisAttemptLifecycle.update,
-  signalAiWorkers,
+  parseJsonObject,
+  canonicalJsonText,
+  normalizeTimestampValue,
+  supportedAgentRoles,
+  incidentReanalysisBindingAuthority: incidentReanalysisBindingService.bindingAuthority,
+  aiReviewRepository,
+  incidentAnalysisCompletion,
+  aiCorrelationRepository,
 });
-const controlledRetirementIdentityOwner = (
-  controlledRetirementDefinitions.createControlledRetirementIdentity({
-    controlledEvaluationMode,
-    safeString,
-    validIncidentCaseId,
-    cohortIdPattern,
-    dispatchIdPattern,
-    releaseIdPattern,
-    representativeAlertIdPattern,
-    stableGroupIdPattern,
-    validPinnedStableGroupKey,
-    controlledRuntimeReleaseId,
-  })
-);
-const {
-  conflict: controlledRetirementConflict,
-  canonicalJsonText: controlledRetirementCanonicalJsonText,
-  sha256: controlledRetirementSha256,
-  rawSha256: controlledRetirementRawSha256,
-  normalize: controlledRetirementIdentity,
-} = controlledRetirementIdentityOwner;
 const controlledEvaluationSchema = createControlledEvaluationSchema({
   all,
   get,
@@ -1375,160 +1226,6 @@ const startupPersistenceOrchestrator = createStartupPersistenceOrchestrator({
   rebuildAlertGroupSummaries,
   refreshGroupAliases,
 });
-const controlledRetirementProjections = createControlledRetirementProjections({
-  rawSha256: controlledRetirementRawSha256,
-  sha256: controlledRetirementSha256,
-  safeString,
-  parseTimestamp: parseProjectTimestamp,
-});
-const {
-  job: controlledRetirementJobProjection,
-  orderedDispatches: controlledRetirementOrderedDispatches,
-  error: controlledRetirementErrorProjection,
-  run: controlledRetirementRunProjection,
-  runCase: controlledRetirementRunCaseProjection,
-  attempt: controlledRetirementAttemptProjection,
-  completedLifecycleValid: controlledRetirementCompletedJobLifecycleValid,
-  completed: controlledRetirementCompletedProjection,
-} = controlledRetirementProjections;
-const controlledRetirementCompletedMemberOwner = createControlledRetirementCompletedMember({
-  all,
-  get,
-  parseJsonObject,
-  incidentAnalysisProvider: incidentReanalysisJobOwnership.analysisProvider,
-  completedJobLifecycleValid: controlledRetirementCompletedJobLifecycleValid,
-  projectCompleted: controlledRetirementCompletedProjection,
-  conflict: controlledRetirementConflict,
-});
-const controlledRetirementTargetMemberOwner = createControlledRetirementTargetMember({
-  all,
-  safeString,
-  projectJob: controlledRetirementJobProjection,
-  projectRun: controlledRetirementRunProjection,
-  projectRunCase: controlledRetirementRunCaseProjection,
-  projectAttempt: controlledRetirementAttemptProjection,
-  projectError: controlledRetirementErrorProjection,
-  rawSha256: controlledRetirementRawSha256,
-  conflict: controlledRetirementConflict,
-});
-const controlledRetirementCensusOwner = createControlledRetirementCensus({
-  all,
-  orderedDispatches: controlledRetirementOrderedDispatches,
-  parseJobPayload: incidentReanalysisJobOwnership.jobPayload,
-  validIncidentCaseId,
-  stableGroupIdPattern,
-  validPinnedStableGroupKey,
-  representativeAlertIdPattern,
-  parseJsonObject,
-  projectCompleted: controlledRetirementCompletedMemberOwner.project,
-  projectTarget: controlledRetirementTargetMemberOwner.project,
-  conflict: controlledRetirementConflict,
-});
-const controlledRetirementReplayOwner = createControlledRetirementReplay({
-  all,
-  get,
-  eventType: controlledRetirementEventType,
-  receiptFields: controlledRetirementReceiptFields,
-  receiptSchema: controlledRetirementReceiptSchema,
-  dispatchIdPattern,
-  parseJsonObject,
-  canonicalJsonText: controlledRetirementCanonicalJsonText,
-  sha256: controlledRetirementSha256,
-  projectJob: controlledRetirementJobProjection,
-  projectCensus: controlledRetirementCensusOwner.project,
-  conflict: controlledRetirementConflict,
-});
-const controlledRetirementCommandOwner = createControlledRetirementCommand({
-  normalizeIdentity: controlledRetirementIdentity,
-  sha256: controlledRetirementSha256,
-  replay: controlledRetirementReplayOwner.replay,
-  validatePostState: controlledRetirementReplayOwner.validatePostState,
-  projectCensus: controlledRetirementCensusOwner.project,
-  get,
-  all,
-  run,
-  parseJobPayload: incidentReanalysisJobOwnership.jobPayload,
-  projectJob: controlledRetirementJobProjection,
-  parseJsonObject,
-  leaseKey: controlledJobTransitionAuthority.leaseKey,
-  hasLease: (key) => controlledEvaluationLeases.has(key),
-  nowUtc,
-  retirePendingExact: (options) => durableJobs.retirePendingExact(options),
-  refreshRun: incidentReanalysisRunPersistence.refresh,
-  receiptSchema: controlledRetirementReceiptSchema,
-  eventType: controlledRetirementEventType,
-  canonicalJsonText: controlledRetirementCanonicalJsonText,
-  validateReceipt: controlledRetirementReplayOwner.validateReceipt,
-  conflict: controlledRetirementConflict,
-});
-const manualDispatchIdentityOwner = createManualDispatchIdentity({
-  hasOwnField: requestHasOwnField,
-  stableGroupIdPattern,
-  validPinnedStableGroupKey,
-  cohortIdPattern,
-  dispatchIdPattern,
-  releaseIdPattern,
-  controlledRoutePattern,
-  controlledRouteModelIdentity,
-  representativeAlertIdPattern,
-  runtimeReleaseId: controlledRuntimeReleaseId,
-  conflict: incidentIdentityConflict,
-});
-const incidentDurableJobPersistence = createIncidentDurableJobPersistence({
-  get,
-  run,
-  conflict: incidentIdentityConflict,
-});
-const manualAnalysisDispatch = createManualAnalysisDispatch({
-  get,
-  run,
-  safeString,
-  normalizeIdentity: manualDispatchIdentity,
-  conflict: incidentIdentityConflict,
-  rejectProcessingJob: incidentDurableJobPersistence.rejectProcessing,
-  enqueueJob: (...args) => durableJobs.enqueue(...args),
-  recordMetric: (...args) => pipelineMetrics.record(...args),
-  nowUtc,
-  jsonText,
-  sha256Text: (value) => crypto.createHash('sha256').update(value).digest('hex'),
-});
-const alertGroupAliasResolution = createAlertGroupAliasResolution({
-  all,
-  conflict: incidentIdentityConflict,
-});
-const incidentReanalysisFrozenDispatchOwner = createIncidentReanalysisFrozenDispatch({
-  get,
-  all,
-  run,
-  parseJsonObject,
-  loadAliases: alertGroupAliasResolution.loadSnapshot,
-  resolveCanonicalIdentity: alertGroupAliasResolution.resolve,
-  rejectProcessingJob: incidentDurableJobPersistence.rejectProcessing,
-  jsonText,
-  conflict: incidentIdentityConflict,
-});
-const incidentReanalysisRequestOwner = createIncidentReanalysisRequest({
-  validCaseId: validIncidentCaseId,
-  normalizeIdentity: manualDispatchIdentity,
-  controlledEvaluationMode,
-  safeString,
-  replayFrozen: (...args) => incidentReanalysisFrozenDispatchOwner.replay(...args),
-  bindFrozen: (...args) => incidentReanalysisFrozenDispatchOwner.bind(...args),
-  releaseId: incidentReanalysisReleaseId,
-  nowUtc,
-  randomUuid: () => crypto.randomUUID(),
-  all,
-  get,
-  run,
-  supersedeCase: incidentReanalysisRunPersistence.supersedeCase,
-  retirePendingJobs: incidentDurableJobPersistence.retirePendingIncident,
-  enqueueJob: (...args) => durableJobs.enqueue(...args),
-  jsonText,
-  recordMetric: (...args) => pipelineMetrics.record(...args),
-  refreshRun: incidentReanalysisRunPersistence.refresh,
-  conflict: incidentIdentityConflict,
-});
-
 async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppression, campaign = null) {
   return automaticResponseRouting.queuePcap(
     alert, storedRow, inserted, suppression, campaign,

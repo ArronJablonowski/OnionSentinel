@@ -20,6 +20,13 @@ INCIDENT_PAGE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_incident_response_pa
 SHELL_PAGE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_shell_page.py"
 PORTAL_PATH = DASHBOARD_DIR / "report_portal.py"
 ALERT_STORE_PATH = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
+CONTROLLED_INCIDENT_COMPOSITION_PATH = (
+    REPO_ROOT
+    / "n8n"
+    / "alert_store"
+    / "composition"
+    / "controlled_incident_composition.js"
+)
 MANUAL_ANALYSIS_DISPATCH_PATH = (
     REPO_ROOT / "n8n" / "alert_store" / "services" / "manual_analysis_dispatch.js"
 )
@@ -1084,6 +1091,7 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
 
     def test_alert_store_uses_a_distinct_agent_job_and_analysis_role(self) -> None:
         source = ALERT_STORE_PATH.read_text(encoding="utf-8")
+        composition = CONTROLLED_INCIDENT_COMPOSITION_PATH.read_text(encoding="utf-8")
         dispatch = MANUAL_ANALYSIS_DISPATCH_PATH.read_text(encoding="utf-8")
         schema = INCIDENT_ANALYSIS_SCHEMA_PATH.read_text(encoding="utf-8")
         routes = ANALYSIS_REQUEST_ROUTES_PATH.read_text(encoding="utf-8")
@@ -1092,7 +1100,8 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS incident_response_cases", schema)
         self.assertIn("CREATE TABLE IF NOT EXISTS incident_response_events", schema)
         self.assertIn("async function requestIncidentEscalation", source)
-        self.assertIn("createManualAnalysisDispatch", source)
+        self.assertIn("createControlledIncidentComposition", source)
+        self.assertIn("createManualAnalysisDispatch", composition)
         self.assertIn("enqueueJob('incident_response_analysis'", dispatch)
         self.assertIn("agent_role: 'incident-responder'", dispatch)
         self.assertIn("manualReanalysis: false", dispatch)
@@ -1100,6 +1109,7 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
 
     def test_case_bound_reanalysis_has_durable_run_progress_contract(self) -> None:
         source = ALERT_STORE_PATH.read_text(encoding="utf-8")
+        composition = CONTROLLED_INCIDENT_COMPOSITION_PATH.read_text(encoding="utf-8")
         schema = INCIDENT_ANALYSIS_SCHEMA_PATH.read_text(encoding="utf-8")
         request_source = INCIDENT_REANALYSIS_REQUEST_PATH.read_text(encoding="utf-8")
         run_persistence_source = INCIDENT_REANALYSIS_RUN_PERSISTENCE_PATH.read_text(
@@ -1121,7 +1131,8 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS incident_reanalysis_run_cases", schema)
         self.assertIn("CREATE TABLE IF NOT EXISTS incident_reanalysis_attempts", schema)
         self.assertNotIn("async function requestIncidentReanalysis", source)
-        self.assertIn("createIncidentReanalysisRequest", source)
+        self.assertIn("createControlledIncidentComposition", source)
+        self.assertIn("createIncidentReanalysisRequest", composition)
         self.assertIn("async function request(payload", request_source)
         self.assertIn("reanalysis_run_id: context.runId", request_source)
         self.assertIn("case_id: normalized.storedCaseId", request_source)
@@ -1142,7 +1153,7 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
             "WHERE case_id = ? AND status IN ('queued', 'running') AND run_id != ?",
             run_persistence_source,
         )
-        self.assertIn("releaseId: incidentReanalysisReleaseId", source)
+        self.assertIn("releaseId: incidentReanalysisReleaseId", composition)
         self.assertIn("releaseId: releaseId()", request_source)
         self.assertIn("process.env.ONION_SENTINEL_RELEASE_ID || 'unversioned'", source)
         self.assertNotIn("incidentReanalysisReleaseId(payload?.release_id)", source)
