@@ -236,6 +236,52 @@ class AgentMemoryTests(unittest.TestCase):
         self.assertEqual(text.count(MEMORY.MANAGED_START), 1)
         self.assertEqual(text.count(MEMORY.MANAGED_END), 1)
 
+    def test_initializer_refuses_a_partially_managed_file(self) -> None:
+        malformed = self.root / "malformed-memory.md"
+        malformed.write_text(
+            f"# Malformed Memory\n\n{MEMORY.MANAGED_START}\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "refusing to repair malformed"):
+            MEMORY.initialize_memory_file(malformed, "Malformed Memory")
+
+        self.assertEqual(
+            malformed.read_text(encoding="utf-8"),
+            f"# Malformed Memory\n\n{MEMORY.MANAGED_START}\n",
+        )
+
+    def test_atomic_replacement_preserves_owner_only_mode_and_manual_tail(self) -> None:
+        MEMORY.initialize_memory_file(self.role, "SOC Analyst Memory")
+        self.role.write_text(
+            self.role.read_text(encoding="utf-8")
+            + "\n## Operator Tail\n\n- Preserve this tail too.\n",
+            encoding="utf-8",
+        )
+        self.role.chmod(0o600)
+
+        self.persist([self.candidate()])
+
+        text = self.role.read_text(encoding="utf-8")
+        self.assertEqual(self.role.stat().st_mode & 0o777, 0o600)
+        self.assertIn("Preserve this note", text)
+        self.assertIn("Preserve this tail too", text)
+        self.assertEqual(text.count(MEMORY.MANAGED_START), 1)
+        self.assertEqual(text.count(MEMORY.MANAGED_END), 1)
+
+    def test_persisted_record_keeps_bounded_provenance_and_policy_fields(self) -> None:
+        self.persist([self.candidate()], analysis_id="analysis-provenance-1")
+
+        _, records = MEMORY.read_memory_file(self.role)
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["source_agent"], "soc-analyst")
+        self.assertEqual(record["source_analysis_id"], "analysis-provenance-1")
+        self.assertEqual(record["source_artifact_hash"], "40d494b0cdfecb1b")
+        self.assertEqual(record["status"], "model-observed")
+        self.assertEqual(record["confidence"], "medium")
+        self.assertEqual(record["reinforced_count"], 1)
+
     def test_every_agent_role_has_primary_reviewer_and_memory_contracts(self) -> None:
         expected_roles = {
             "soc-analyst",
