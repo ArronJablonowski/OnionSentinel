@@ -468,6 +468,14 @@ reviewer, and resource-monitor test modules until those tests migrate.
 The launchd-facing wrapper keeps the current filename, arguments, lock files,
 wake files, provider lanes, and exit semantics.
 
+The completed ARR-93 entrypoint is a 61-line compatibility facade.
+`scheduler_facade.py` installs its historical public symbol surface from the
+cohesive scheduler modules and binds adapters to the importing module's live
+namespace, so source-loader tests and operational overrides remain effective.
+`scheduler_runtime_compat.py` owns clock projection, owner-only maintenance
+drain validation, wake/dashboard signaling, read-only reconciliation, indexed
+capability detection, and the final application delegate.
+
 `scheduler_application.py` owns the preflight-to-settlement application flow:
 single-process nonblocking lock acquisition, locked initialization, repeated
 selection and processing, controlled-run state projection, and final

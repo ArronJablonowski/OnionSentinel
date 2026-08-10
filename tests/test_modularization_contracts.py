@@ -134,6 +134,15 @@ class ModularizationCompatibilityContractTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_scheduler_runtime_module_tree_is_fully_installed(self) -> None:
+        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        for path in sorted((ROOT / "n8n" / "bin").glob("scheduler_*.py")):
+            with self.subTest(path=path.name):
+                self.assertIn(
+                    f'$REPO_DIR/n8n/bin/{path.name}',
+                    installer,
+                )
+
     def test_harness_job_envelope_has_one_dataclass_boundary(self) -> None:
         contracts = ROOT / "n8n" / "bin" / "harness_contracts.py"
         tree = ast.parse(

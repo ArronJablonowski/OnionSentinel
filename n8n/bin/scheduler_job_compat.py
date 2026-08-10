@@ -8,10 +8,39 @@ from typing import Any, MutableMapping
 RuntimeNamespace = MutableMapping[str, Any]
 
 
-def report_ai_job_status(runtime: RuntimeNamespace, *args: Any) -> bool | str:
+def report_ai_job_status(
+    runtime: RuntimeNamespace,
+    base_url: str,
+    group_id: str,
+    status: str,
+    error: str = "",
+    lease_token: str = "",
+    job_type: str = "ai_analysis",
+    retryable: bool = True,
+    expected_job_id: int = 0,
+    expected_representative_alert_id: str = "",
+    expected_dispatch_id: str = "",
+    expected_stable_group_key: str = "",
+    expected_assigned_route: str = "",
+    expected_reviewer_route: str = "",
+    reviewer_required: bool = False,
+) -> bool | str:
     return runtime["transition_ai_job_status"](
         runtime["scheduler_reporting_sources"](),
-        *args,
+        base_url,
+        group_id,
+        status,
+        error,
+        lease_token,
+        job_type,
+        retryable,
+        expected_job_id,
+        expected_representative_alert_id,
+        expected_dispatch_id,
+        expected_stable_group_key,
+        expected_assigned_route,
+        expected_reviewer_route,
+        reviewer_required,
     )
 
 
