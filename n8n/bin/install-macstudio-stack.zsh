@@ -93,6 +93,7 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/lib/request_authorization.js" \
     "$ALERT_STORE_STAGE_DIR/lib/project_serialization.js" \
     "$ALERT_STORE_STAGE_DIR/lib/runtime_configuration.js" \
+    "$ALERT_STORE_STAGE_DIR/lib/scoring_rules_runtime.js" \
     "$ALERT_STORE_STAGE_DIR/lib/alert_value_normalization.js" \
     "$ALERT_STORE_STAGE_DIR/repositories/health_repository.js" \
     "$ALERT_STORE_STAGE_DIR/repositories/ai_correlation_repository.js" \

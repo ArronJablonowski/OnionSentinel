@@ -134,6 +134,7 @@ const {createAlertIngestRoutes} = require('./routes/alert_ingest_routes');
 const {createNotificationService} = require('./services/notification_service');
 const {createAlertGroupService} = require('./services/alert_group_service');
 const {createScoringPolicy} = require('./lib/scoring_policy');
+const {createScoringRulesRuntime} = require('./lib/scoring_rules_runtime');
 const {createIndicatorExtraction} = require('./lib/indicator_extraction');
 const {createEnrichmentPolicy} = require('./lib/enrichment_policy');
 const {createPcapPolicy} = require('./lib/pcap_policy');
@@ -349,37 +350,14 @@ async function signalAiWorkers(eventName) {
   return workerWakeSignaling.signalAiWorkers(eventName);
 }
 
+const scoringRulesRuntime = createScoringRulesRuntime({
+  fs,
+  scoringRulesPath,
+  logError: (message) => console.error(message),
+});
+
 function loadScoringRules() {
-  // Fallbacks keep ingestion alive if scoring_rules.json is missing or invalid.
-  // Normal tuning should happen in config/scoring_rules.json.
-  const fallback = {
-    thresholds: {medium_min: 40, high_min: 70, critical_min: 85},
-    severity_base: {
-      critical: 85,
-      high: 70,
-      medium: 45,
-      low: 25,
-      numeric_4_or_more: 75,
-      numeric_3: 60,
-      numeric_2: 45,
-      numeric_1: 25,
-      default: 30,
-    },
-    infrastructure_ips: ['192.168.1.7', '10.77.7.225'],
-    direction_adjustments: {inbound: 15, outbound: 10, internal: 3, external: 0, unknown: 0},
-    infrastructure_adjustments: {destination: 15, source: 5},
-    keyword_adjustments: [],
-    rule_adjustments: [],
-    pair_adjustments: [],
-    drop_rules: [],
-    suppress_rules: [],
-  };
-  try {
-    return {...fallback, ...JSON.parse(fs.readFileSync(scoringRulesPath, 'utf8'))};
-  } catch (error) {
-    console.error(`Unable to load scoring rules from ${scoringRulesPath}: ${error.message}`);
-    return fallback;
-  }
+  return scoringRulesRuntime.load();
 }
 
 const scoringRules = loadScoringRules();
