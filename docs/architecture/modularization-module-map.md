@@ -1878,6 +1878,11 @@ existing patchable compatibility surface and the production
 `OnionSentinelHandler` subclass without importing the facade or creating a
 dependency cycle.
 
+`portal_http_read_adapter.py` owns the ordered GET read chain across general,
+Administration, SOC, asynchronous Resource Library, catalog, and static-file
+delivery. The handler retains only HTTP framing, authentication policy, POST
+intake, and delegation.
+
 `portal_admin_form_service.py` owns Administration form parsing, action-token
 ordering, login/password decision flow, session creation/destruction ports,
 action authorization and dispatch, cookie-header projection, and encoded
