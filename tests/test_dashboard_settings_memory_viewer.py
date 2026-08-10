@@ -6,6 +6,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_BUILDER = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "build_soc_alerts_dashboard.py"
+DASHBOARD_BUILDER_RUNTIME = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_builder_runtime.py"
+BUILDER_LAYER_PATHS = tuple(sorted(DASHBOARD_BUILDER.parent.glob("dashboard_builder_*.py")))
 SETTINGS_MODULES = (
     REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_settings_assets.py",
     REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_settings_agent_card.py",
@@ -19,7 +21,7 @@ PORTAL_ROUTES = REPO_ROOT / "onion-sentinel-dashboard" / "portal_request_routes.
 
 def settings_source() -> str:
     """Return the complete Settings implementation across its owned modules."""
-    paths = (DASHBOARD_BUILDER, *SETTINGS_MODULES)
+    paths = (*BUILDER_LAYER_PATHS, *SETTINGS_MODULES)
     return "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
 

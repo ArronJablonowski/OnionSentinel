@@ -10,6 +10,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BUILDER_PATH = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "build_soc_alerts_dashboard.py"
+BUILDER_RUNTIME_PATH = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_builder_runtime.py"
 SHELL_PATH = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_shell_page.py"
 SOC_SHELL_CONTENT_PATH = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_soc_shell_content.py"
 SCRIPT_DIR = REPO_ROOT / "onion-sentinel-dashboard" / "scripts"
@@ -22,7 +23,7 @@ import dashboard_metric_components
 def dashboard_contract_source() -> str:
     shell = SHELL_PATH.read_text(encoding="utf-8")
     soc_content = SOC_SHELL_CONTENT_PATH.read_text(encoding="utf-8")
-    return BUILDER_PATH.read_text(encoding="utf-8") + soc_content + shell.replace("{", "{{").replace("}", "}}")
+    return BUILDER_RUNTIME_PATH.read_text(encoding="utf-8") + soc_content + shell.replace("{", "{{").replace("}", "}}")
 
 
 def load_builder():

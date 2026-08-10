@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_DIR = ROOT / "onion-sentinel-dashboard"
 BUILDER_PATH = DASHBOARD_DIR / "scripts" / "build_soc_alerts_dashboard.py"
+BUILDER_RUNTIME_PATH = DASHBOARD_DIR / "scripts" / "dashboard_builder_runtime.py"
 AC_HUNTER_PAGE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_ac_hunter_page.py"
 INSTALLER_PATH = ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
 
@@ -37,7 +38,10 @@ class AcHunterPageTests(unittest.TestCase):
             "ac_hunter",
             [],
         )
-        cls.builder_source = BUILDER_PATH.read_text(encoding="utf-8")
+        cls.builder_source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(BUILDER_PATH.parent.glob("dashboard_builder_*.py"))
+        )
         cls.page_source = AC_HUNTER_PAGE_PATH.read_text(encoding="utf-8")
         cls.installer_source = INSTALLER_PATH.read_text(encoding="utf-8")
 

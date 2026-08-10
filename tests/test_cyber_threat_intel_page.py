@@ -10,6 +10,7 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_DIR = REPO_ROOT / "onion-sentinel-dashboard"
 BUILDER_PATH = DASHBOARD_DIR / "scripts" / "build_soc_alerts_dashboard.py"
+BUILDER_RUNTIME_PATH = DASHBOARD_DIR / "scripts" / "dashboard_builder_runtime.py"
 MODULE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_cyber_threat_intel_page.py"
 PORTAL_PATH = DASHBOARD_DIR / "report_portal.py"
 INSTALLER_PATH = REPO_ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
@@ -104,7 +105,10 @@ class CyberThreatIntelPageTests(unittest.TestCase):
         self.assertTrue(authorize(Session(True)))
 
     def test_render_dispatch_uses_the_cti_specific_page_and_assets(self):
-        source = BUILDER_PATH.read_text(encoding="utf-8")
+        source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(BUILDER_PATH.parent.glob("dashboard_builder_*.py"))
+        )
         self.assertIn("if page_key == 'cyber_threat_intel':", source)
         self.assertIn("cyber_threat_intel_page_section(reports)", source)
         self.assertIn("inject_cyber_threat_intel_assets", source)

@@ -469,9 +469,12 @@ class ApplicationLogServerContractTests(unittest.TestCase):
 class ApplicationLogPageContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.builder = (
-            DASHBOARD_DIR / "scripts" / "build_soc_alerts_dashboard.py"
-        ).read_text(encoding="utf-8")
+        cls.builder = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(
+                (DASHBOARD_DIR / "scripts").glob("dashboard_builder_*.py")
+            )
+        )
         cls.shell = (
             DASHBOARD_DIR / "scripts" / "dashboard_shell_components.py"
         ).read_text(encoding="utf-8")

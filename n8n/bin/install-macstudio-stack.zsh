@@ -892,6 +892,13 @@ fi
 # may contain an external link to this service and nothing more.
 mkdir -p "$DASHBOARD_RUNTIME_DIR/scripts" "$DASHBOARD_RUNTIME_DIR/assets"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py" "$DASHBOARD_RUNTIME_DIR/scripts/build_soc_alerts_dashboard.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_builder_contract.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_contract.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_builder_settings.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_settings.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_builder_report_core.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_report_core.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_builder_reports.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_reports.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_builder_pages.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_pages.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_builder_publication.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_publication.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_builder_runtime.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_runtime.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_time_format.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_time_format.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_executive_metrics.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_executive_metrics.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_metric_components.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_metric_components.py"

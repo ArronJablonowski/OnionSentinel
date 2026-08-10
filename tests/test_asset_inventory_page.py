@@ -21,6 +21,7 @@ ASSET_WRITE_POLICY_PATH = DASHBOARD_DIR / "portal_asset_write_request.py"
 JSON_WRITE_SERVICE_PATH = DASHBOARD_DIR / "portal_json_write_service.py"
 HTTP_HANDLER_PATH = DASHBOARD_DIR / "portal_http_handler.py"
 BUILDER_PATH = DASHBOARD_DIR / "scripts" / "build_soc_alerts_dashboard.py"
+BUILDER_RUNTIME_PATH = DASHBOARD_DIR / "scripts" / "dashboard_builder_runtime.py"
 ASSET_PAGE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_asset_inventory_page.py"
 INSTALLER_PATH = ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
 
@@ -382,7 +383,10 @@ class AssetInventoryPageTests(unittest.TestCase):
             [],
         )
 
-        builder_source = BUILDER_PATH.read_text(encoding="utf-8")
+        builder_source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(BUILDER_PATH.parent.glob("dashboard_builder_*.py"))
+        )
         asset_page_source = ASSET_PAGE_PATH.read_text(encoding="utf-8")
         installer_source = INSTALLER_PATH.read_text(encoding="utf-8")
         self.assertIn(

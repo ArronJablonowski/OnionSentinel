@@ -10,6 +10,8 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = REPO_ROOT / "onion-sentinel-dashboard" / "scripts"
 MODULE_PATH = SCRIPT_DIR / "build_soc_alerts_dashboard.py"
+RUNTIME_MODULE_PATH = SCRIPT_DIR / "dashboard_builder_runtime.py"
+BUILDER_LAYER_PATHS = tuple(sorted(SCRIPT_DIR.glob("dashboard_builder_*.py")))
 SHELL_MODULE_PATH = SCRIPT_DIR / "dashboard_shell_page.py"
 REPORT_REPOSITORY_PATH = SCRIPT_DIR / "dashboard_report_repository.py"
 
@@ -17,7 +19,10 @@ REPORT_REPOSITORY_PATH = SCRIPT_DIR / "dashboard_report_repository.py"
 def dashboard_contract_source() -> str:
     """Return builder source plus the shell in its former f-string brace form."""
     shell = SHELL_MODULE_PATH.read_text(encoding="utf-8")
-    return MODULE_PATH.read_text(encoding="utf-8") + shell.replace("{", "{{").replace("}", "}}")
+    implementation = "\n".join(
+        path.read_text(encoding="utf-8") for path in BUILDER_LAYER_PATHS
+    )
+    return implementation + shell.replace("{", "{{").replace("}", "}}")
 
 
 def load_builder():

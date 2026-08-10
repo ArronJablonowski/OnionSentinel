@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_DIR = ROOT / "onion-sentinel-dashboard"
 BUILDER_PATH = DASHBOARD_DIR / "scripts" / "build_soc_alerts_dashboard.py"
+BUILDER_RUNTIME_PATH = DASHBOARD_DIR / "scripts" / "dashboard_builder_runtime.py"
 SHELL_COMPONENT_PATH = DASHBOARD_DIR / "scripts" / "dashboard_shell_components.py"
 LOGS_PAGE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_logs_page.py"
 SERVER_PATH = DASHBOARD_DIR / "onion_sentinel_server.py"
@@ -39,7 +40,10 @@ class LogsPageTests(unittest.TestCase):
             "logs",
             [],
         )
-        cls.builder_source = BUILDER_PATH.read_text(encoding="utf-8")
+        cls.builder_source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(BUILDER_PATH.parent.glob("dashboard_builder_*.py"))
+        )
         cls.shell_source = SHELL_COMPONENT_PATH.read_text(encoding="utf-8")
         cls.logs_page_source = LOGS_PAGE_PATH.read_text(encoding="utf-8")
         cls.server_source = SERVER_PATH.read_text(encoding="utf-8")

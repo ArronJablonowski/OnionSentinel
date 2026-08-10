@@ -4,12 +4,13 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_BUILDER = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "build_soc_alerts_dashboard.py"
+DASHBOARD_BUILDER_RUNTIME = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_builder_runtime.py"
 SHELL_PAGE = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_shell_page.py"
 
 
 def dashboard_contract_source() -> str:
     shell = SHELL_PAGE.read_text(encoding="utf-8")
-    return DASHBOARD_BUILDER.read_text(encoding="utf-8") + shell.replace("{", "{{").replace("}", "}}")
+    return DASHBOARD_BUILDER_RUNTIME.read_text(encoding="utf-8") + shell.replace("{", "{{").replace("}", "}}")
 
 
 class DashboardMobileNavigationTest(unittest.TestCase):
