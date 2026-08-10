@@ -2385,6 +2385,13 @@ HTTP resource limits, scheduled workers, and service lifecycle. It consumes
 the existing foundation, application, controlled, evidence, mutable, and
 startup owners and remains below the 300-line entry/composition target.
 
+`composition/application_graph_runtime.js` owns the remaining application
+assembly graph: startup compatibility, PCAP policy, mutable state, evidence,
+controlled incident, application services, acceptance binding, and schema
+initialization. The entrypoint now retains only platform loading, runtime
+configuration, foundation construction, application graph construction, and
+HTTP lifecycle startup.
+
 ## Deployment Map
 
 The current production installer copies individual files. These additions are

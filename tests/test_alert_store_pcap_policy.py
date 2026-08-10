@@ -9,6 +9,13 @@ ALERT_STORE = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
 APPLICATION_COMPOSITION = (
     REPO_ROOT / "n8n" / "alert_store" / "composition" / "application_composition.js"
 )
+APPLICATION_GRAPH_RUNTIME = (
+    REPO_ROOT
+    / "n8n"
+    / "alert_store"
+    / "composition"
+    / "application_graph_runtime.js"
+)
 RUNTIME_FOUNDATION_COMPOSITION = (
     REPO_ROOT
     / "n8n"
@@ -58,6 +65,7 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
     def test_alert_store_auto_queues_pcap_for_configured_levels(self) -> None:
         code = ALERT_STORE.read_text()
         composition = APPLICATION_COMPOSITION.read_text(encoding="utf-8")
+        graph = APPLICATION_GRAPH_RUNTIME.read_text(encoding="utf-8")
         runtime_foundation = RUNTIME_FOUNDATION_COMPOSITION.read_text(encoding="utf-8")
         persistence = ALERT_PERSISTENCE.read_text(encoding="utf-8")
         routing = AUTOMATIC_RESPONSE_ROUTING.read_text(encoding="utf-8")
@@ -65,16 +73,19 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
 
         self.assertIn("createRuntimeFoundationComposition", code)
         self.assertIn("createSocAnalysisPolicy", runtime_foundation)
-        self.assertIn("matchesPcap: (level) => socAnalysisPolicy.matchesPcap(level)", code)
+        self.assertIn(
+            "matchesPcap: (level) => foundation.socAnalysisPolicy.matchesPcap(level)",
+            graph,
+        )
         self.assertIn("soc_analyst_pcap_min_severity", policy)
         self.assertIn("pcap_capture_loss_threshold_percent", policy)
-        self.assertIn("capture_loss_threshold_percent", code)
+        self.assertIn("pcap_capture_loss_threshold_percent", graph)
         self.assertIn(
             "SEVERITY_RANK[normalizedSeverity] >= SEVERITY_RANK[normalizedThreshold]",
             policy,
         )
         self.assertIn("async function queuePcap", routing)
-        self.assertIn("createApplicationComposition", code)
+        self.assertIn("createApplicationComposition", graph)
         self.assertIn("createAutomaticResponseRouting", composition)
         self.assertIn("queueAutomaticPcap: automaticResponseRouting.queuePcap", composition)
         self.assertIn(
@@ -87,11 +98,12 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
 
     def test_automatic_incident_routing_failure_rolls_back_for_upstream_retry(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
+        graph = APPLICATION_GRAPH_RUNTIME.read_text(encoding="utf-8")
         routing = AUTOMATIC_RESPONSE_ROUTING.read_text(encoding="utf-8")
         start = routing.index("async function queueIncident")
         function = routing[start:routing.index("\n  return {queuePcap", start)]
 
-        self.assertIn("queueIncidentResponseForGroup", code)
+        self.assertIn("queueIncidentResponseForGroup", graph)
         self.assertIn("queueIncidentResponseForGroup", function)
         self.assertIn("error.statusCode = Number(error.statusCode || 503)", function)
         self.assertIn("throw error", function)
@@ -181,7 +193,7 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
         self.assertIn("status: 'coalesced'", code)
 
     def test_recovered_analysis_leases_reapply_campaign_admission(self) -> None:
-        composition = ALERT_STORE.read_text(encoding="utf-8")
+        composition = APPLICATION_GRAPH_RUNTIME.read_text(encoding="utf-8")
         recovery = DURABLE_JOB_RECOVERY.read_text(encoding="utf-8")
         self.assertIn("const recovered = await queue.recoverExpired()", recovery)
         self.assertIn(
@@ -194,7 +206,7 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
             recovery.index("signalAiWorkers('ai-lease-recovered')"),
         )
         self.assertIn(
-            "reconcileAuthorizedActivity: reconcileAuthorizedActivityBacklog",
+            "reconcileAuthorizedActivity: () => (",
             composition,
         )
 

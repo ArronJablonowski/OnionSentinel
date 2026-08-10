@@ -381,7 +381,13 @@ class AiCorrelationContextTests(unittest.TestCase):
         )
 
     def test_alert_store_owns_correlation_writes(self) -> None:
-        composition = ALERT_STORE.read_text(encoding="utf-8")
+        composition = (
+            REPO_ROOT
+            / "n8n"
+            / "alert_store"
+            / "composition"
+            / "application_graph_runtime.js"
+        ).read_text(encoding="utf-8")
         application_composition = (
             REPO_ROOT
             / "n8n"
@@ -405,8 +411,8 @@ class AiCorrelationContextTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS ai_analysis_runs", incident_schema)
         self.assertIn("CREATE TABLE IF NOT EXISTS alert_correlations", review_schema)
         self.assertIn("path: '/analysis/result'", result_routes)
-        self.assertIn("withWriteGate: withSqliteWriteGate", composition)
-        self.assertIn("withTransaction: withImmediateTransaction", composition)
+        self.assertIn("withWriteGate,", composition)
+        self.assertIn("withTransaction,", composition)
         self.assertIn("await withWriteGate(async () =>", result_service)
         self.assertIn("await withTransaction(async () =>", result_service)
         self.assertIn("observable.observable_type = 'community_id'", campaign_persistence)

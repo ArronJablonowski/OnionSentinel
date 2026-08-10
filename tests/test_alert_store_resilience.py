@@ -59,6 +59,13 @@ APPLICATION_RUNTIME_PORTS = (
     / "composition"
     / "application_runtime_ports.js"
 )
+APPLICATION_GRAPH_RUNTIME = (
+    REPO_ROOT
+    / "n8n"
+    / "alert_store"
+    / "composition"
+    / "application_graph_runtime.js"
+)
 HTTP_APPLICATION_RUNTIME = (
     REPO_ROOT
     / "n8n"
@@ -132,6 +139,9 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.application_runtime_ports = APPLICATION_RUNTIME_PORTS.read_text(
             encoding="utf-8"
         )
+        cls.application_graph_runtime = APPLICATION_GRAPH_RUNTIME.read_text(
+            encoding="utf-8"
+        )
         cls.http_application_runtime = HTTP_APPLICATION_RUNTIME.read_text(
             encoding="utf-8"
         )
@@ -162,7 +172,10 @@ class AlertStoreResilienceTest(unittest.TestCase):
             self.application_runtime_ports,
         )
         self.assertIn("await enqueueJob('public_enrichment'", self.alert_ingest_orchestrator)
-        self.assertIn("async function drainEnrichmentJobs()", self.code)
+        self.assertIn(
+            "drainEnrichmentJobs: evidenceProcessing.durableBackgroundDrains.drainEnrichment",
+            self.application_graph_runtime,
+        )
         store = self.alert_ingest_orchestrator.split("async function store(rawAlert)", 1)[1]
         self.assertNotIn("await enrichAlert(", store)
 
@@ -182,8 +195,8 @@ class AlertStoreResilienceTest(unittest.TestCase):
             "return withSqliteWriteGate(() => withImmediateTransaction(async () =>",
             self.enrichment_orchestrator,
         )
-        self.assertIn("withWriteGate: withSqliteWriteGate", self.code)
-        self.assertIn("withTransaction: withImmediateTransaction", self.code)
+        self.assertIn("withWriteGate,", self.application_graph_runtime)
+        self.assertIn("withTransaction,", self.application_graph_runtime)
         cached_lookup = self.enrichment_orchestrator.split(
             "async function cachedLookup", 1
         )[1].split(
@@ -208,17 +221,14 @@ class AlertStoreResilienceTest(unittest.TestCase):
 
     def test_sqlite_gate_only_wraps_storage(self) -> None:
         self.assertIn(
-            "withSqliteWriteGate(() => withImmediateTransaction(task))",
-            self.code,
+            "withWriteGate(() => withTransaction(task))",
+            self.application_graph_runtime,
         )
         self.assertIn(
             "withWriteTransaction(async () =>", self.durable_background_drains
         )
-        store_unlocked = self.code.split("async function storeAlertUnlocked(alert)", 1)[1].split(
-            "async function applySuppressionPolicy", 1
-        )[0]
-        self.assertNotIn("enrichAlert(", store_unlocked)
-        self.assertNotIn("maybeNotifyTelegram(", store_unlocked)
+        self.assertNotIn("enrichAlert(", self.alert_ingest_orchestrator)
+        self.assertNotIn("maybeNotifyTelegram(", self.alert_ingest_orchestrator)
 
     def test_notification_failure_does_not_reject_persisted_alert(self) -> None:
         self.assertIn(
@@ -242,7 +252,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         )
 
     def test_analyst_state_is_owned_by_alert_store(self) -> None:
-        self.assertIn("createApplicationComposition", self.code)
+        self.assertIn("createApplicationComposition", self.application_graph_runtime)
         self.assertIn("createAlertStoreSchemaFoundation", self.application_composition)
         self.assertIn(
             "CREATE TABLE IF NOT EXISTS analyst_alert_group_state",
@@ -326,7 +336,10 @@ class AlertStoreResilienceTest(unittest.TestCase):
             "required independent review needs explicit analyst adjudication before resolution",
             self.analyst_decision_persistence,
         )
-        self.assertIn("async function stableGroupHasPendingHumanReview", self.code)
+        self.assertIn(
+            "pendingHumanReview: analystReviewProjection.pendingHumanReview",
+            self.application_composition,
+        )
         self.assertIn(
             "automatic suppression blocked pending explicit analyst adjudication",
             self.suppression_persistence,
@@ -434,7 +447,6 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertNotIn("sqliteWriteGate.catch", self.code)
 
     def test_new_intake_stops_before_the_eighty_percent_disk_ceiling(self) -> None:
-        self.assertIn("function assertDiskWriteAdmission", self.code)
         self.assertIn("80, Math.max(2", self.runtime_configuration)
         self.assertIn("createRuntimeFoundationComposition", self.code)
         self.assertIn("createDiskWriteAdmission", self.runtime_foundation_composition)
@@ -531,7 +543,6 @@ class AlertStoreResilienceTest(unittest.TestCase):
         )
 
     def test_committed_evidence_wakes_local_workers_without_owning_durability(self) -> None:
-        self.assertIn("async function signalWorker", self.code)
         self.assertIn("createWorkerWakeSignaling", self.runtime_foundation_composition)
         self.assertIn("AI_ANALYSIS_WAKE_PATH", self.runtime_configuration)
         self.assertIn("PCAP_ANALYSIS_WAKE_PATH", self.runtime_configuration)
