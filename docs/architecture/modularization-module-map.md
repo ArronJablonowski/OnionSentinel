@@ -1957,6 +1957,12 @@ views. It receives already-collected metrics and formatting callbacks;
 `report_portal.py` retains host probes, configured paths, and compatibility
 function names.
 
+`portal_operational_runtime.py` owns late-bound uptime/fan composition, disk
+usage and bounded inventory probes, backup/update health sources, relative-time
+and Administration outcome labels, cron summary/menu projection, icon policy,
+and passphrase-path redaction. Host paths, process execution, caches, clocks,
+and formatting ports remain injected by the compatibility runtime.
+
 `portal_catalog_delivery.py` owns traversal-safe static and report asset
 resolution, file read and error policy, MIME selection, lazy report lookup,
 report-open redirects, and download response projection. `report_portal.py`

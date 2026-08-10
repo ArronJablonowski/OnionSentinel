@@ -945,6 +945,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_services.py" "$DASHBOARD_RUN
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_disk_inventory.py" "$DASHBOARD_RUNTIME_DIR/portal_disk_inventory.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_hermes_backup_health.py" "$DASHBOARD_RUNTIME_DIR/portal_hermes_backup_health.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_update_health.py" "$DASHBOARD_RUNTIME_DIR/portal_update_health.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_operational_runtime.py" "$DASHBOARD_RUNTIME_DIR/portal_operational_runtime.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_llm_activity.py" "$DASHBOARD_RUNTIME_DIR/portal_llm_activity.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_llm_active_store.py" "$DASHBOARD_RUNTIME_DIR/portal_llm_active_store.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_llm_history.py" "$DASHBOARD_RUNTIME_DIR/portal_llm_history.py"
