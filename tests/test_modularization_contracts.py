@@ -55,6 +55,27 @@ def top_level_function(path: Path, name: str) -> ast.FunctionDef:
 
 
 class ModularizationCompatibilityContractTests(unittest.TestCase):
+    def test_software_inventory_supports_isolated_file_loader_import(self) -> None:
+        inventory = ROOT / "onion-sentinel-dashboard" / "software_inventory.py"
+        script = (
+            "import importlib.util,sys;"
+            f"p={str(inventory)!r};"
+            "s=importlib.util.spec_from_file_location('isolated_software_inventory',p);"
+            "m=importlib.util.module_from_spec(s);"
+            "sys.modules[s.name]=m;"
+            "s.loader.exec_module(m);"
+            "assert callable(m.build_response) and callable(m.load_state)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_report_portal_supports_isolated_file_loader_import(self) -> None:
         portal = ROOT / "onion-sentinel-dashboard" / "report_portal.py"
         script = (

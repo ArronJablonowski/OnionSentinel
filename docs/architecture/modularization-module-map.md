@@ -2815,6 +2815,16 @@ HTTP handler against the exact importing module instance. This keeps same-name
 reload isolation and late-bound test overrides while reducing
 `report_portal.py` to configuration re-export, binding, and startup only.
 
+### Software Inventory state validation
+
+`software_inventory_state.py` owns owner-controlled bounded snapshot reads,
+schema and timestamp validation, evidence provenance enforcement, and normalized
+state projection. `software_inventory.py` remains the package-free compatibility
+facade and owns query/asset response composition; the production installer copies
+both files together. Four unchanged legacy validators retain their exact
+ratcheting complexity/length allowances under the new module path; those
+allowances may shrink but cannot grow and are not approval for new debt.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:

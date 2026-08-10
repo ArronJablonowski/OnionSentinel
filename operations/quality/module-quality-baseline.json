@@ -469,17 +469,17 @@
       "max_complexity": 45,
       "max_lines": 171
     },
-    "onion-sentinel-dashboard/software_inventory.py::_read_bounded_regular_json": {
+    "onion-sentinel-dashboard/software_inventory_state.py::_read_bounded_regular_json": {
       "max_complexity": 21
     },
-    "onion-sentinel-dashboard/software_inventory.py::_sanitize_collection": {
+    "onion-sentinel-dashboard/software_inventory_state.py::_sanitize_collection": {
       "max_complexity": 17
     },
-    "onion-sentinel-dashboard/software_inventory.py::_sanitize_record": {
+    "onion-sentinel-dashboard/software_inventory_state.py::_sanitize_record": {
       "max_complexity": 34,
       "max_lines": 153
     },
-    "onion-sentinel-dashboard/software_inventory.py::_sanitize_source_statuses": {
+    "onion-sentinel-dashboard/software_inventory_state.py::_sanitize_source_statuses": {
       "max_complexity": 17
     },
     "onion-sentinel-dashboard/software_inventory.py::apply_asset_labels": {
