@@ -482,14 +482,14 @@
     "onion-sentinel-dashboard/software_inventory_state.py::_sanitize_source_statuses": {
       "max_complexity": 17
     },
-    "onion-sentinel-dashboard/software_inventory.py::apply_asset_labels": {
+    "onion-sentinel-dashboard/software_inventory_assets.py::apply_asset_labels": {
       "max_complexity": 36
     },
     "onion-sentinel-dashboard/software_inventory.py::build_response": {
       "max_complexity": 48,
       "max_lines": 213
     },
-    "onion-sentinel-dashboard/software_inventory.py::correlate_asset_operating_systems": {
+    "onion-sentinel-dashboard/software_inventory_assets.py::correlate_asset_operating_systems": {
       "max_complexity": 51,
       "max_lines": 180
     },

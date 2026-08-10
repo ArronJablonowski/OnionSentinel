@@ -2830,6 +2830,12 @@ classification, safe public-record projection (including bounded User-Agent
 evidence), and stable unavailable/error response shape. It depends only on the
 state contract and performs no storage or network access.
 
+`software_inventory_assets.py` owns complete-inventory identity labeling and
+fail-closed endpoint operating-system correlation. Passive evidence can receive
+an OS projection only through one current, high-confidence, non-DHCP static
+asset association; conflicts, partial inventories, stale validity, and dynamic
+address claims remain unlabeled or uncorrelated.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:
