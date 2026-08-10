@@ -480,6 +480,12 @@ application services. Its pure builders receive the compatibility facade's
 live namespace, preserving call-time test and operator overrides without
 acquiring database, network, process, or credential authority.
 
+`scheduler_configuration.py` owns queue timestamp/group/severity SQL,
+launchd-facing default projection, CLI policy assembly, AI-settings policy,
+provider-lane resolution, and Codex prompt ceilings. Compatibility delegates
+pass the facade's live constants and environment at call time, so saved settings
+and test overrides retain the exact historical behavior.
+
 `scheduler_cli.py` now owns the launchd-facing argument schema, runtime path
 options, lane and queue controls, numeric bounds, and fail-closed controlled-
 evaluation identity validation. `auto-run-ai-analysis.py` retains a thin

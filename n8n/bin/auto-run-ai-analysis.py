@@ -223,6 +223,19 @@ from scheduler_composition import (
     build_terminal_recovery_sources,
     build_worker_sources,
 )
+from scheduler_configuration import (
+    alert_group_key_sql,
+    alert_time_sql,
+    build_cli_defaults,
+    build_settings_policy,
+    cli_agent_roles as configured_cli_agent_roles,
+    configured_analysis_levels as resolve_configured_analysis_levels,
+    effective_prompt_package_limit as resolve_prompt_package_limit,
+    parse_args as parse_scheduler_configuration,
+    provider_lane_sql as resolve_provider_lane_sql,
+    role_uses_codex_cli as resolve_role_uses_codex_cli,
+    severity_priority_sql as build_severity_priority_sql,
+)
 
 
 HOME = Path.home()
@@ -609,27 +622,6 @@ def require_controlled_release_attestation(
     )
 
 
-def alert_time_sql(alias: str = "") -> str:
-    """Return the newest usable alert timestamp expression for queue priority."""
-    prefix = f"{alias}." if alias else ""
-    return (
-        f"COALESCE(NULLIF({prefix}last_seen, ''), "
-        f"NULLIF({prefix}timestamp, ''), NULLIF({prefix}first_seen, ''))"
-    )
-
-
-def alert_group_key_sql() -> str:
-    """Return SQL for the same duplicate-group key used by the dashboard."""
-    return (
-        "COALESCE(NULLIF(suppression_key, ''), "
-        "COALESCE(triage_level, '') || '|' || "
-        "COALESCE(rule_name, '') || '|' || "
-        "COALESCE(source_ip, '') || '|' || "
-        "COALESCE(destination_ip, '') || '|' || "
-        "COALESCE(NULLIF(filter_status, ''), 'accepted'))"
-    )
-
-
 def severity_priority_sql(column: str = "triage_level") -> str:
     """Return SQL that drains each severity bucket before moving lower.
 
@@ -637,57 +629,16 @@ def severity_priority_sql(column: str = "triage_level") -> str:
     no Medium alert is selected while any eligible Critical or High group
     remains; and so on. Inside each severity bucket, newest alerts go first.
     """
-    cases = "\n            ".join(
-        f"WHEN '{level}' THEN {index}"
-        for index, level in enumerate(SEVERITY_PRIORITY, start=1)
-    )
-    return f"CASE {column}\n            {cases}\n            ELSE {len(SEVERITY_PRIORITY) + 1}\n          END"
+    return build_severity_priority_sql(SEVERITY_PRIORITY, column)
 
 
 def scheduler_cli_defaults() -> SchedulerCliDefaults:
     """Resolve scheduler defaults at parse time for test and environment parity."""
-    return SchedulerCliDefaults(
-        db=DEFAULT_DB,
-        harness_db=DEFAULT_HARNESS_DB,
-        prompt_dir=DEFAULT_PROMPT_DIR,
-        analysis_dir=DEFAULT_ANALYSIS_DIR,
-        pcap_analysis_dir=DEFAULT_PCAP_ANALYSIS_DIR,
-        rollup_dir=DEFAULT_ROLLUP_DIR,
-        agent_memory_dir=DEFAULT_AGENT_MEMORY_DIR,
-        shared_memory_file=DEFAULT_SHARED_MEMORY_FILE,
-        asset_inventory_file=DEFAULT_ASSET_INVENTORY_FILE,
-        incident_evidence_dir=DEFAULT_INCIDENT_EVIDENCE_DIR,
-        incident_evidence_config=DEFAULT_INCIDENT_EVIDENCE_CONFIG,
-        investigation_pivot_dir=DEFAULT_INVESTIGATION_PIVOT_DIR,
-        live_osquery_config=DEFAULT_LIVE_OSQUERY_CONFIG,
-        disagreement_adjudicator_prompt=DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT,
-        ai_settings=DEFAULT_AI_SETTINGS,
-        investigation_harness_policy=DEFAULT_INVESTIGATION_HARNESS_POLICY,
-        detection_playbooks=DEFAULT_DETECTION_PLAYBOOKS,
-        investigation_skills=DEFAULT_INVESTIGATION_SKILLS,
-        lock=DEFAULT_LOCK,
-        drain=DEFAULT_DRAIN,
-        wake=DEFAULT_WAKE,
-        levels=DEFAULT_LEVELS,
-        model=DEFAULT_MODEL,
-        max_prompt_bytes=DEFAULT_MAX_PROMPT_BYTES,
-        portal_wake=DEFAULT_DASHBOARD_WAKE,
-        alert_store_url=os.environ.get(
-            "ALERT_STORE_URL", "http://127.0.0.1:8787"
-        ),
-    )
+    return build_cli_defaults(globals())
 
 
 def parse_args() -> argparse.Namespace:
-    return parse_scheduler_args(
-        scheduler_cli_defaults(),
-        SchedulerCliPolicy(
-            controlled_alert_id=CONTROLLED_ALERT_ID_RE,
-            controlled_dispatch_id=CONTROLLED_DISPATCH_ID_RE,
-            stable_group_key_valid=valid_controlled_stable_group_key,
-            stable_group_key_max_bytes=CONTROLLED_STABLE_GROUP_KEY_MAX_LENGTH,
-        ),
-    )
+    return parse_scheduler_configuration(globals())
 
 
 def project_now() -> str:
@@ -702,17 +653,12 @@ def project_now_precise() -> str:
 
 
 def scheduler_settings_policy() -> SchedulerSettingsPolicy:
-    return SchedulerSettingsPolicy(
-        max_bytes=MAX_AI_SETTINGS_BYTES,
-        agent_roles=AGENT_ROLES,
-        codex_models=CODEX_CLI_MODEL_CATALOG,
-        codex_efforts=CODEX_CLI_REASONING_EFFORTS,
-    )
+    return build_settings_policy(globals())
 
 
 def cli_agent_roles(settings_path: Path) -> set[str]:
     """Compatibility delegate for fail-closed hosted-lane discovery."""
-    return discover_cli_agent_roles(settings_path, scheduler_settings_policy())
+    return configured_cli_agent_roles(globals(), settings_path)
 
 
 def _role_uses_codex_cli(
@@ -721,14 +667,10 @@ def _role_uses_codex_cli(
     agent_role: str = "",
 ) -> bool:
     """Return whether any configured route for this role uses Codex CLI."""
-    role = str(agent_role or "").strip()
-    settings_path = Path(
-        getattr(args, "ai_settings_file", DEFAULT_AI_SETTINGS)
-    )
-    return role_uses_codex_cli(
-        settings_path,
-        scheduler_settings_policy(),
-        role,
+    return resolve_role_uses_codex_cli(
+        globals(),
+        args,
+        agent_role=agent_role,
     )
 
 
@@ -738,13 +680,11 @@ def effective_prompt_package_limit(
     agent_role: str = "",
 ) -> int:
     """Clamp the mutable Codex runner prompt to its transport-safe ceiling."""
-    configured = int(
-        getattr(args, "max_prompt_bytes", DEFAULT_MAX_PROMPT_BYTES)
-        or DEFAULT_MAX_PROMPT_BYTES
+    return resolve_prompt_package_limit(
+        globals(),
+        args,
+        agent_role=agent_role,
     )
-    if _role_uses_codex_cli(args, agent_role=agent_role):
-        return min(configured, CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES)
-    return configured
 
 
 def effective_initial_prompt_package_limit(
@@ -753,13 +693,12 @@ def effective_initial_prompt_package_limit(
     agent_role: str = "",
 ) -> int:
     """Leave deterministic headroom for audited follow-up query evidence."""
-    configured = int(
-        getattr(args, "max_prompt_bytes", DEFAULT_MAX_PROMPT_BYTES)
-        or DEFAULT_MAX_PROMPT_BYTES
+    return resolve_prompt_package_limit(
+        globals(),
+        args,
+        agent_role=agent_role,
+        initial=True,
     )
-    if _role_uses_codex_cli(args, agent_role=agent_role):
-        return min(configured, CODEX_CLI_INITIAL_PROMPT_PACKAGE_BYTES)
-    return configured
 
 
 def configured_analysis_levels(settings_path: Path, configured_levels: str) -> list[str]:
@@ -770,19 +709,16 @@ def configured_analysis_levels(settings_path: Path, configured_levels: str) -> l
     Older settings files retain the historical all-severity analysis behavior
     until the operator explicitly saves the new control.
     """
-    return apply_analysis_level_floor(
+    return resolve_configured_analysis_levels(
+        globals(),
         settings_path,
-        scheduler_settings_policy(),
         configured_levels,
-        SEVERITY_PRIORITY,
     )
 
 
 def provider_lane_sql(args: argparse.Namespace) -> tuple[str, list[object]]:
     """Build an allowlisted SQL predicate for the selected provider lane."""
-    provider_lane = str(getattr(args, "provider_lane", "any") or "any")
-    cli_roles = sorted(cli_agent_roles(Path(getattr(args, "ai_settings_file", DEFAULT_AI_SETTINGS))))
-    return provider_lane_predicate(provider_lane, cli_roles)
+    return resolve_provider_lane_sql(globals(), args)
 
 
 def rows(conn: sqlite3.Connection, sql: str, params: Iterable[object] = ()) -> list[sqlite3.Row]:
