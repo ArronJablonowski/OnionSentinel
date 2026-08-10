@@ -2,10 +2,13 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const path = require('node:path');
 const {
   createPostgresAssetStore,
   normalizeInventoryRecord,
 } = require('../lib/postgres_asset_store');
+
+const schemaPath = path.join(__dirname, '../../postgres/asset-inventory-schema.sql');
 
 function validInventoryRecord(overrides = {}) {
   return {
@@ -151,4 +154,75 @@ test('paged reads clamp bounds and retain allowlisted deterministic ordering', a
   assert.equal(page.page.filtered_total, 1);
   assert.equal(page.assets[0].state, 'current');
   assert.equal(page.storage_backend, 'postgresql');
+});
+
+test('schema initialization executes the checked-in schema and requires version one', async () => {
+  const calls = [];
+  const store = createPostgresAssetStore({
+    pool: {
+      query: async (sql) => {
+        calls.push(String(sql));
+        if (String(sql).includes('SELECT version')) return {rows: [{version: 1}]};
+        return {rows: []};
+      },
+    },
+    schemaPath,
+  });
+  await store.initialize();
+  assert.match(calls[0], /CREATE SCHEMA IF NOT EXISTS onion_sentinel_assets/);
+  assert.match(calls[1], /WHERE component = 'asset_inventory'/);
+
+  const rejected = createPostgresAssetStore({
+    pool: {query: async (sql) => (
+      String(sql).includes('SELECT version') ? {rows: [{version: 2}]} : {rows: []}
+    )},
+    schemaPath,
+  });
+  await assert.rejects(
+    () => rejected.initialize(),
+    /asset inventory PostgreSQL schema version is unsupported/,
+  );
+});
+
+test('snapshot uses bounded all-state pages and preserves inventory schema', async () => {
+  const calls = [];
+  const pool = {
+    query: async (sql, params = []) => {
+      calls.push({sql: String(sql), params});
+      if (String(sql).includes('COUNT(*)::BIGINT AS count')) {
+        return {rows: [{count: '1'}]};
+      }
+      if (String(sql).includes('SELECT record.*')) {
+        return {rows: [{
+          record_id: 1,
+          asset_id: 'asset-1',
+          valid_from: new Date('2026-08-01T18:00:00Z'),
+          valid_until: null,
+          ip_addresses: ['192.0.2.10'],
+          mac_addresses: [],
+          hostnames: ['asset-1.lan'],
+          role: 'workstation',
+          platform: 'macOS',
+          owner_ref: 'owner',
+          criticality: 'high',
+          expected_services: [],
+          expected_behaviors: [],
+          source_type: 'operator',
+          source_ref: 'review',
+          confidence: 'high',
+          share_with_hosted_models: false,
+        }]};
+      }
+      throw new Error(`unexpected query: ${sql}`);
+    },
+  };
+  const store = createPostgresAssetStore({pool, schemaPath: '/unused'});
+  const snapshot = await store.snapshot();
+  const recordQuery = calls.find((call) => call.sql.includes('SELECT record.*'));
+  assert.deepEqual(recordQuery.params.slice(1), [500, 0]);
+  assert.match(recordQuery.sql, /\$1::timestamptz IS NOT NULL/);
+  assert.equal(snapshot.schema, 'onion-sentinel-asset-inventory-v1');
+  assert.equal(snapshot.inventory_status, 'database');
+  assert.equal(snapshot.assets[0].asset_id, 'asset-1');
+  assert.deepEqual(snapshot.assets[0].identifiers.ip_addresses, ['192.0.2.10']);
 });
