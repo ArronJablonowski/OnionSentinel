@@ -2543,6 +2543,22 @@ Unsupported fields, missing coverage, negative evidence, rule identity drift,
 and confidence limiters remain explicit and fail closed. The installer stages
 the complete module set beside every runtime consumer.
 
+## Software Inventory Collector
+
+`n8n/bin/collect-software-inventory.py` is a bounded CLI/import compatibility
+facade. `software_inventory_contract.py` owns schemas, source policy,
+configuration, and bounded primitives; `software_inventory_normalization.py`
+owns record, cursor, tier, freshness, and state validation;
+`software_inventory_transport.py` owns private persistence and bounded
+read-only relay pagination; and `software_inventory_workflow.py` owns source
+collection, snapshot composition, failure states, and CLI orchestration.
+
+Installed, network-observed, and user-agent-inferred records retain distinct
+evidence tiers. Host/OS identity, source timestamps, freshness, confidence, and
+provenance remain explicit, and ambiguous observations are never promoted to
+installed software. The installer stages all modules beside the facade without
+changing runtime configuration or database/API payload contracts.
+
 ## Alert Store
 
 Current owner: `n8n/alert_store/alert_store.js` (12,586 lines). The runtime

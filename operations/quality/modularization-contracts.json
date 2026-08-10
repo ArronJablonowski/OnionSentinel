@@ -1132,6 +1132,61 @@
       ]
     },
     {
+      "path": "n8n/bin/collect-software-inventory.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/collect-software-inventory.py",
+      "required_symbols": [
+        "collect_snapshot",
+        "collect_source",
+        "main",
+        "publish_database_snapshot",
+        "validate_response",
+        "validate_state"
+      ]
+    },
+    {
+      "path": "n8n/bin/software_inventory_contract.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/software_inventory_contract.py",
+      "required_symbols": [
+        "SoftwareInventoryError",
+        "empty_state",
+        "load_config"
+      ]
+    },
+    {
+      "path": "n8n/bin/software_inventory_normalization.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/software_inventory_normalization.py",
+      "required_symbols": [
+        "validate_state"
+      ]
+    },
+    {
+      "path": "n8n/bin/software_inventory_transport.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/software_inventory_transport.py",
+      "required_symbols": [
+        "atomic_write_json",
+        "load_endpoint_cache",
+        "publish_database_snapshot",
+        "query_page",
+        "validate_response"
+      ]
+    },
+    {
+      "path": "n8n/bin/software_inventory_workflow.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/software_inventory_workflow.py",
+      "required_symbols": [
+        "collect_snapshot",
+        "collect_source",
+        "disabled_state",
+        "failed_state",
+        "main"
+      ]
+    },
+    {
       "path": "n8n/bin/pcap_processor_contract.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/pcap_processor_contract.py",

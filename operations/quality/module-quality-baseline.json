@@ -16,7 +16,19 @@
       "max_lines": 997
     },
     "n8n/bin/collect-software-inventory.py": {
-      "max_lines": 1799
+      "max_lines": 250
+    },
+    "n8n/bin/software_inventory_contract.py": {
+      "max_lines": 600
+    },
+    "n8n/bin/software_inventory_normalization.py": {
+      "max_lines": 600
+    },
+    "n8n/bin/software_inventory_transport.py": {
+      "max_lines": 600
+    },
+    "n8n/bin/software_inventory_workflow.py": {
+      "max_lines": 600
     },
     "n8n/bin/detection_validation.py": {
       "max_lines": 250
@@ -183,18 +195,18 @@
       "max_complexity": 20,
       "max_lines": 136
     },
-    "n8n/bin/collect-software-inventory.py::_normalize_record": {
+    "n8n/bin/software_inventory_normalization.py::_normalize_record": {
       "max_complexity": 38,
       "max_lines": 188
     },
-    "n8n/bin/collect-software-inventory.py::load_endpoint_cache": {
+    "n8n/bin/software_inventory_transport.py::load_endpoint_cache": {
       "max_complexity": 23
     },
-    "n8n/bin/collect-software-inventory.py::validate_response": {
+    "n8n/bin/software_inventory_transport.py::validate_response": {
       "max_complexity": 52,
       "max_lines": 161
     },
-    "n8n/bin/collect-software-inventory.py::validate_state": {
+    "n8n/bin/software_inventory_normalization.py::validate_state": {
       "max_complexity": 24
     },
     "n8n/bin/configure-post-commit-env.py::render_env": {
