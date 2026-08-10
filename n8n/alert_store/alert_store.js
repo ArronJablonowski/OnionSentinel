@@ -52,6 +52,9 @@ const {
 const {
   createControlledRetirementCensus,
 } = require('./services/controlled_retirement_census');
+const {
+  createControlledRetirementReplay,
+} = require('./services/controlled_retirement_replay');
 const {createIncidentAnalysisCompletion} = require('./services/incident_analysis_completion');
 const {createIncidentReanalysisBindingService} = require('./services/incident_reanalysis_binding');
 const {createHealthRoutes} = require('./routes/health_routes');
@@ -3747,208 +3750,16 @@ async function controlledRetirementCensus(identity, targetState) {
   return controlledRetirementCensusOwner.project(identity, targetState);
 }
 function validateControlledRetirementReceipt(receipt, identity, retirementId) {
-  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) {
-    throw controlledRetirementConflict(
-      'controlled evaluation retirement receipt is malformed',
-    );
-  }
-  const receiptSha256 = receipt.receipt_sha256;
-  const unsigned = {...receipt};
-  delete unsigned.receipt_sha256;
-  const suppliedFields = Object.keys(receipt).sort();
-  if (
-    suppliedFields.length !== controlledRetirementReceiptFields.length
-    || suppliedFields.some(
-      (field, index) => field !== controlledRetirementReceiptFields[index],
-    )
-    || receipt.schema !== controlledRetirementReceiptSchema
-    || receipt.ok !== true
-    || receipt.status !== 'retired'
-    || receipt.idempotent !== true
-    || receipt.retirement_id !== retirementId
-    || !receipt.target_before
-    || typeof receipt.target_before !== 'object'
-    || Array.isArray(receipt.target_before)
-    || !receipt.target_after
-    || typeof receipt.target_after !== 'object'
-    || Array.isArray(receipt.target_after)
-    || controlledRetirementCanonicalJsonText(receipt.identity)
-      !== controlledRetirementCanonicalJsonText(identity)
-    || !dispatchIdPattern.test(
-      String(receipt.lineage_before_sha256 || ''),
-    )
-    || !dispatchIdPattern.test(
-      String(receipt.lineage_after_sha256 || ''),
-    )
-    || !dispatchIdPattern.test(String(receiptSha256 || ''))
-    || controlledRetirementSha256(unsigned) !== receiptSha256
-  ) {
-    throw controlledRetirementConflict(
-      'controlled evaluation retirement receipt identity changed',
-    );
-  }
-  return receipt;
+  return controlledRetirementReplayOwner.validateReceipt(receipt, identity, retirementId);
 }
 
 async function controlledRetirementReplay(identity, retirementId) {
-  const rows = await all(
-    `SELECT id, detail_json
-     FROM incident_response_events
-     WHERE case_id = ? AND event_type = ?
-     ORDER BY id ASC LIMIT 101`,
-    [identity.case_id, controlledRetirementEventType],
-  );
-  if (rows.length > 100) {
-    throw controlledRetirementConflict(
-      'controlled evaluation retirement event scan exceeded its bound',
-    );
-  }
-  const lineage = [];
-  for (const row of rows) {
-    const receipt = parseJsonObject(row.detail_json);
-    const receiptIdentity = receipt.identity || {};
-    if (
-      receiptIdentity.cohort_id === identity.cohort_id
-      || receiptIdentity.dispatch_id === identity.dispatch_id
-      || receiptIdentity.reanalysis_run_id === identity.reanalysis_run_id
-      || Number(receiptIdentity.job_id || 0) === identity.job_id
-    ) {
-      if (
-        controlledRetirementCanonicalJsonText(receipt)
-        !== row.detail_json
-      ) {
-        throw controlledRetirementConflict(
-          'controlled evaluation retirement receipt is not canonical',
-        );
-      }
-      lineage.push(receipt);
-    }
-  }
-  if (!lineage.length) return null;
-  if (
-    lineage.length !== 1
-    || lineage[0].retirement_id !== retirementId
-  ) {
-    throw controlledRetirementConflict(
-      'controlled evaluation retirement lineage is ambiguous',
-    );
-  }
-  return validateControlledRetirementReceipt(
-    lineage[0],
-    identity,
-    retirementId,
-  );
+  return controlledRetirementReplayOwner.replay(identity, retirementId);
 }
 
-async function validateControlledRetirementPostState(
-  identity,
-  receipt,
-) {
-  const job = await get(
-    'SELECT * FROM durable_jobs WHERE id = ?',
-    [identity.job_id],
-  );
-  const runRow = await get(
-    'SELECT * FROM incident_reanalysis_runs WHERE run_id = ?',
-    [identity.reanalysis_run_id],
-  );
-  const runCase = await get(
-    `SELECT * FROM incident_reanalysis_run_cases
-     WHERE run_id = ? AND case_id = ?`,
-    [identity.reanalysis_run_id, identity.case_id],
-  );
-  const attempt = await get(
-    `SELECT * FROM incident_reanalysis_attempts
-     WHERE attempt_id = ?`,
-    [identity.expected_attempt_id],
-  );
-  const incident = await get(
-    'SELECT * FROM incident_response_cases WHERE case_id = ?',
-    [identity.case_id],
-  );
-  const afterProjection = controlledRetirementJobProjection(job);
-  if (
-    !job
-    || job.job_type !== 'incident_response_analysis'
-    || job.dedupe_key !== identity.stable_group_id
-    || afterProjection.payload_sha256
-      !== identity.expected_job_payload_sha256
-    || job.status !== 'completed'
-    || Number(job.attempt_count || 0) !== identity.expected_attempt_count
-    || job.lease_token !== null
-    || job.lease_expires_at !== null
-    || job.last_error !== null
-    || job.processing_started_at !== null
-    || Number(job.rerun_requested || 0) !== 0
-    || job.completed_at !== receipt.retired_at
-    || job.last_completed_at !== receipt.retired_at
-    || job.updated_at !== receipt.retired_at
-    || controlledRetirementSha256(afterProjection)
-      !== receipt.job_after_sha256
-    || !runRow
-    || runRow.release_id !== identity.retired_release_id
-    || runRow.scope !== 'single_case'
-    || runRow.status !== 'partial'
-    || Number(runRow.total_count || 0) !== 1
-    || runRow.controlled_dispatch_id !== identity.dispatch_id
-    || !runRow.completed_at
-    || !runCase
-    || runCase.group_id !== identity.stable_group_id
-    || runCase.representative_alert_id
-      !== identity.representative_alert_id
-    || runCase.status !== 'skipped'
-    || runCase.skip_reason !== receipt.skip_reason
-    || runCase.latest_error !== null
-    || runCase.latest_attempt_id !== identity.expected_attempt_id
-    || runCase.analysis_id !== null
-    || !attempt
-    || attempt.run_id !== identity.reanalysis_run_id
-    || attempt.case_id !== identity.case_id
-    || attempt.group_id !== identity.stable_group_id
-    || Number(attempt.durable_attempt_count || 0)
-      !== identity.expected_attempt_count
-    || attempt.status !== 'failed'
-    || attempt.analysis_id !== null
-    || !attempt.completed_at
-    || !incident
-    || incident.group_id !== identity.stable_group_id
-    || incident.representative_alert_id
-      !== identity.representative_alert_id
-    || String(incident.latest_analysis_id || '')
-      !== identity.expected_prior_analysis_id
-    || incident.agent_status !== receipt.case_agent_status
-    || (
-      receipt.case_agent_status === 'analyzed'
-      && incident.latest_error !== null
-    )
-    || (
-      receipt.case_agent_status === 'failed'
-      && incident.latest_error !== receipt.skip_reason
-    )
-  ) {
-    throw controlledRetirementConflict(
-      'controlled evaluation retirement post-state changed',
-    );
-  }
-  const lineageAfter = await controlledRetirementCensus(
-    identity,
-    'retired',
-  );
-  if (
-    controlledRetirementSha256(lineageAfter)
-    !== receipt.lineage_after_sha256
-    || controlledRetirementCanonicalJsonText(
-      lineageAfter.members[identity.member_rank - 1],
-    ) !== controlledRetirementCanonicalJsonText(
-      receipt.target_after,
-    )
-  ) {
-    throw controlledRetirementConflict(
-      'controlled evaluation retirement post-lineage changed',
-    );
-  }
+async function validateControlledRetirementPostState(identity, receipt) {
+  return controlledRetirementReplayOwner.validatePostState(identity, receipt);
 }
-
 async function retireControlledEvaluation(payload) {
   const identity = controlledRetirementIdentity(payload);
   const retirementId = controlledRetirementSha256(identity);
@@ -6815,6 +6626,20 @@ const controlledRetirementCensusOwner = createControlledRetirementCensus({
   parseJsonObject,
   projectCompleted: controlledRetirementCompletedMember,
   projectTarget: controlledRetirementTargetMember,
+  conflict: controlledRetirementConflict,
+});
+const controlledRetirementReplayOwner = createControlledRetirementReplay({
+  all,
+  get,
+  eventType: controlledRetirementEventType,
+  receiptFields: controlledRetirementReceiptFields,
+  receiptSchema: controlledRetirementReceiptSchema,
+  dispatchIdPattern,
+  parseJsonObject,
+  canonicalJsonText: controlledRetirementCanonicalJsonText,
+  sha256: controlledRetirementSha256,
+  projectJob: controlledRetirementJobProjection,
+  projectCensus: controlledRetirementCensus,
   conflict: controlledRetirementConflict,
 });
 

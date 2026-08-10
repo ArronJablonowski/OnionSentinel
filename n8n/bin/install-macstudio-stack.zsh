@@ -103,6 +103,7 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/services/controlled_retirement_completed_member.js" \
     "$ALERT_STORE_STAGE_DIR/services/controlled_retirement_target_member.js" \
     "$ALERT_STORE_STAGE_DIR/services/controlled_retirement_census.js" \
+    "$ALERT_STORE_STAGE_DIR/services/controlled_retirement_replay.js" \
     "$ALERT_STORE_STAGE_DIR/services/incident_analysis_completion.js" \
     "$ALERT_STORE_STAGE_DIR/services/incident_reanalysis_binding.js" \
     "$ALERT_STORE_STAGE_DIR/routes/health_routes.js" \
