@@ -1,8 +1,5 @@
 {
   "files": {
-    "n8n/bin/bounded_process.py": {
-      "max_lines": 997
-    },
     "n8n/bin/maintain-investigation-harness.py": {
       "max_lines": 1147
     },
@@ -26,17 +23,6 @@
     },
     "n8n/bin/backup-onion-sentinel-runtime.py::create_bundle": {
       "max_lines": 101
-    },
-    "n8n/bin/bounded_process.py::_DescendantTracker.observe": {
-      "max_complexity": 18
-    },
-    "n8n/bin/bounded_process.py::run_bounded_command": {
-      "max_complexity": 33,
-      "max_lines": 161
-    },
-    "n8n/bin/bounded_process.py::run_bounded_command_to_file": {
-      "max_complexity": 32,
-      "max_lines": 159
     },
     "n8n/bin/check-ai-queue-consistency.py::main": {
       "max_complexity": 21,

@@ -470,6 +470,27 @@ the repository. Characterization tests exercise flat-bin imports, owner-only
 modes, manual-note preservation, malformed-section refusal, provenance,
 concurrent writers, replay idempotency, and quarantine safety.
 
+## Bounded Process Runtime
+
+`n8n/bin/bounded_process.py` is a 166-line flat compatibility facade. It
+preserves the two public execution APIs plus the private process-observation
+and cleanup monkeypatch seams used by safety characterization tests. Ownership
+points inward without cycles:
+
+| Module | Ownership | Authority |
+| --- | --- | --- |
+| `bounded_process_policy.py` | limit validation, inherited capability proof, containment environment, progress timing, pipe-backed stdin | creates owner-only capability FDs; never launches or signals a process |
+| `bounded_process_observation.py` | bounded `ps` capture, PID/start-time/UID/PGID/command identity, descendant discovery | read-only process-table observation |
+| `bounded_process_io.py` | bounded in-memory stdout/stderr and streaming file capture | reads child pipes and owns bounded destination cleanup |
+| `bounded_process_termination.py` | fresh-snapshot signal authorization, TERM/KILL grace, verified exit, cleanup diagnostics | signals only reverified captured identities or the owned root group fallback |
+| `bounded_process_runtime.py` | launch, selector lifecycle, progress callback, timeout, leak detection, result composition | composes the four lower owners; no shell invocation or command widening |
+
+The Mac installer copies the facade and all five owners into the same runtime
+`bin` directory. Tests cover limit validation before launch, output ceilings,
+nonzero exits, post-spawn initialization failure, progress/lease failure,
+nested containment, detached descendants, PID reuse, zombie exclusion,
+verified cleanup, and isolated flat-bin startup.
+
 ## Scheduler and Harness
 
 ### `auto-run-ai-analysis.py`
@@ -2703,6 +2724,7 @@ required before extracted code is imported in production:
 | Source tree | Runtime tree | Deployment rule |
 | --- | --- | --- |
 | `n8n/bin/agent_memory*.py` | `$HOME/n8n-local/bin` | copy the facade plus validation, journal, and promotion owners before running the memory verifier |
+| `n8n/bin/bounded_process*.py` | `$HOME/n8n-local/bin` | copy the facade plus policy, observation, I/O, termination, and runtime owners as one flat-bin unit |
 | `n8n/onion_sentinel` | `$HOME/n8n-local/onion_sentinel` | staged complete-tree copy and atomic replacement |
 | `onion-sentinel-dashboard/portal` | `$HOME/n8n-local/onion-sentinel-dashboard/portal` | staged complete-tree copy |
 | `onion-sentinel-dashboard/pages` and `components` | corresponding dashboard runtime directories | staged complete-tree copy |

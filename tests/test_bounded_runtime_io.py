@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -717,6 +718,11 @@ class InstallerDependencyTests(unittest.TestCase):
         for filename in (
             "bounded_http.py",
             "bounded_process.py",
+            "bounded_process_policy.py",
+            "bounded_process_observation.py",
+            "bounded_process_io.py",
+            "bounded_process_termination.py",
+            "bounded_process_runtime.py",
             "http_json_client.js",
             "http_runtime.py",
             "http_runtime.js",
@@ -725,6 +731,44 @@ class InstallerDependencyTests(unittest.TestCase):
             "dashboard_pcap_request_index.py",
         ):
             self.assertIn(filename, installer)
+
+    def test_bounded_process_facade_imports_from_a_flat_deployment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            deployed_bin = Path(tmp) / "bin"
+            deployed_bin.mkdir()
+            for module in (
+                "bounded_process.py",
+                "bounded_process_policy.py",
+                "bounded_process_observation.py",
+                "bounded_process_io.py",
+                "bounded_process_termination.py",
+                "bounded_process_runtime.py",
+            ):
+                shutil.copy2(BIN_DIR / module, deployed_bin / module)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-c",
+                    (
+                        "import sys; "
+                        f"sys.path.insert(0, {str(deployed_bin)!r}); "
+                        "import bounded_process; "
+                        "result = bounded_process.run_bounded_command("
+                        "['/usr/bin/true'], timeout_seconds=5, "
+                        "max_stdout_bytes=100, max_stderr_bytes=100); "
+                        "assert result.returncode == 0"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                completed.stderr or completed.stdout,
+            )
 
     def test_pi_installer_copies_bounded_process_helper(self) -> None:
         installer = (ROOT / "relay" / "bin" / "install-pi-relay.sh").read_text(encoding="utf-8")
