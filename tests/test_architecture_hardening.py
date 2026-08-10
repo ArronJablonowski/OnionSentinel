@@ -189,12 +189,18 @@ class ArchitectureHardeningTest(unittest.TestCase):
 
     def test_dashboard_generation_is_decoupled_from_local_inference(self):
         scheduler = (ROOT / "n8n/bin/auto-run-ai-analysis.py").read_text(encoding="utf-8")
+        scheduler_runtime = (
+            ROOT / "n8n/bin/scheduler_runtime_compat.py"
+        ).read_text(encoding="utf-8")
         refresher = (ROOT / "n8n/bin/refresh-soc-dashboard.py").read_text(encoding="utf-8")
         plist = (ROOT / "n8n/launchd/com.arron.soc.dashboard-refresh.plist").read_text(encoding="utf-8")
         installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text(encoding="utf-8")
-        self.assertIn("signal_dashboard_refresh", scheduler)
-        self.assertNotIn("def refresh_portal", scheduler)
-        self.assertNotIn("build_soc_alerts_dashboard.py", scheduler)
+        self.assertIn("signal_dashboard_refresh", scheduler_runtime)
+        self.assertNotIn("def refresh_portal", scheduler + scheduler_runtime)
+        self.assertNotIn(
+            "build_soc_alerts_dashboard.py",
+            scheduler + scheduler_runtime,
+        )
         self.assertIn("fcntl.LOCK_NB", refresher)
         self.assertIn("subprocess.TimeoutExpired", refresher)
         self.assertIn("<key>WatchPaths</key>", plist)
@@ -246,7 +252,9 @@ class ArchitectureHardeningTest(unittest.TestCase):
         self.assertNotIn("sync_report_portal.py", dashboard_readme)
 
     def test_worker_wake_markers_are_consumable_and_batches_rearm(self):
-        ai = (ROOT / "n8n/bin/auto-run-ai-analysis.py").read_text(encoding="utf-8")
+        ai = (
+            ROOT / "n8n/bin/scheduler_runtime_compat.py"
+        ).read_text(encoding="utf-8")
         pcap = (ROOT / "n8n/bin/process-pcap-evidence.py").read_text(encoding="utf-8")
         dashboard = (ROOT / "n8n/bin/refresh-soc-dashboard.py").read_text(encoding="utf-8")
         self.assertIn("path.unlink(missing_ok=True)", ai)
