@@ -135,6 +135,7 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/services/controlled_retirement_census.js" \
     "$ALERT_STORE_STAGE_DIR/services/controlled_retirement_replay.js" \
     "$ALERT_STORE_STAGE_DIR/services/controlled_retirement_command.js" \
+    "$ALERT_STORE_STAGE_DIR/services/alert_group_alias_resolution.js" \
     "$ALERT_STORE_STAGE_DIR/services/incident_reanalysis_frozen_dispatch.js" \
     "$ALERT_STORE_STAGE_DIR/services/incident_reanalysis_request.js" \
     "$ALERT_STORE_STAGE_DIR/services/incident_reanalysis_job_ownership.js" \
