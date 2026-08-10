@@ -1001,90 +1001,6 @@ function controlledRuntimeReleaseId() {
   ) ? releaseId : '';
 }
 
-function controlledRetirementConflict(message, statusCode = 409) {
-  return controlledRetirementIdentityOwner.conflict(message, statusCode);
-}
-
-function controlledRetirementCanonicalJsonText(value) {
-  return controlledRetirementIdentityOwner.canonicalJsonText(value);
-}
-
-function controlledRetirementSha256(value) {
-  return controlledRetirementIdentityOwner.sha256(value);
-}
-
-function controlledRetirementRawSha256(value) {
-  return controlledRetirementIdentityOwner.rawSha256(value);
-}
-
-function controlledRetirementIdentity(payload) {
-  return controlledRetirementIdentityOwner.normalize(payload);
-}
-
-function controlledRetirementJobProjection(row) { return controlledRetirementProjections.job(row); }
-function controlledRetirementOrderedDispatches(identity) { return controlledRetirementProjections.orderedDispatches(identity); }
-function controlledRetirementErrorProjection(value) { return controlledRetirementProjections.error(value); }
-function controlledRetirementRunProjection(row, receipt) { return controlledRetirementProjections.run(row, receipt); }
-function controlledRetirementRunCaseProjection(row) { return controlledRetirementProjections.runCase(row); }
-function controlledRetirementAttemptProjection(row) { return controlledRetirementProjections.attempt(row); }
-function controlledRetirementPrimaryProjection(row) { return controlledRetirementProjections.primary(row); }
-function controlledRetirementReviewerProjection(row) { return controlledRetirementProjections.reviewer(row); }
-function controlledRetirementCompletedJobLifecycleValid(job) { return controlledRetirementProjections.completedLifecycleValid(job); }
-function controlledRetirementCompletedProjection(value) { return controlledRetirementProjections.completed(value); }
-
-async function controlledRetirementCompletedMember(
-  identity,
-  member,
-  job,
-  jobPayload,
-  runRow,
-  runReceipt,
-) {
-  return controlledRetirementCompletedMemberOwner.project(
-    identity,
-    member,
-    job,
-    jobPayload,
-    runRow,
-    runReceipt,
-  );
-}
-async function controlledRetirementTargetMember(
-  identity,
-  member,
-  targetState,
-  job,
-  jobPayload,
-  runRow,
-  runReceipt,
-) {
-  return controlledRetirementTargetMemberOwner.project(
-    identity,
-    member,
-    targetState,
-    job,
-    jobPayload,
-    runRow,
-    runReceipt,
-  );
-}
-async function controlledRetirementCensus(identity, targetState) {
-  return controlledRetirementCensusOwner.project(identity, targetState);
-}
-function validateControlledRetirementReceipt(receipt, identity, retirementId) {
-  return controlledRetirementReplayOwner.validateReceipt(receipt, identity, retirementId);
-}
-
-async function controlledRetirementReplay(identity, retirementId) {
-  return controlledRetirementReplayOwner.replay(identity, retirementId);
-}
-
-async function validateControlledRetirementPostState(identity, receipt) {
-  return controlledRetirementReplayOwner.validatePostState(identity, receipt);
-}
-async function retireControlledEvaluation(payload) {
-  return controlledRetirementCommandOwner.retire(payload);
-}
 function manualDispatchIdentity(payload) {
   return manualDispatchIdentityOwner.normalize(payload);
 }
@@ -1475,6 +1391,13 @@ const controlledRetirementIdentityOwner = (
     controlledRuntimeReleaseId,
   })
 );
+const {
+  conflict: controlledRetirementConflict,
+  canonicalJsonText: controlledRetirementCanonicalJsonText,
+  sha256: controlledRetirementSha256,
+  rawSha256: controlledRetirementRawSha256,
+  normalize: controlledRetirementIdentity,
+} = controlledRetirementIdentityOwner;
 const controlledEvaluationSchema = createControlledEvaluationSchema({
   all,
   get,
@@ -1662,6 +1585,16 @@ const controlledRetirementProjections = createControlledRetirementProjections({
   safeString,
   parseTimestamp: parseProjectTimestamp,
 });
+const {
+  job: controlledRetirementJobProjection,
+  orderedDispatches: controlledRetirementOrderedDispatches,
+  error: controlledRetirementErrorProjection,
+  run: controlledRetirementRunProjection,
+  runCase: controlledRetirementRunCaseProjection,
+  attempt: controlledRetirementAttemptProjection,
+  completedLifecycleValid: controlledRetirementCompletedJobLifecycleValid,
+  completed: controlledRetirementCompletedProjection,
+} = controlledRetirementProjections;
 const controlledRetirementCompletedMemberOwner = createControlledRetirementCompletedMember({
   all,
   get,
@@ -1691,8 +1624,8 @@ const controlledRetirementCensusOwner = createControlledRetirementCensus({
   validPinnedStableGroupKey,
   representativeAlertIdPattern,
   parseJsonObject,
-  projectCompleted: controlledRetirementCompletedMember,
-  projectTarget: controlledRetirementTargetMember,
+  projectCompleted: controlledRetirementCompletedMemberOwner.project,
+  projectTarget: controlledRetirementTargetMemberOwner.project,
   conflict: controlledRetirementConflict,
 });
 const controlledRetirementReplayOwner = createControlledRetirementReplay({
@@ -1706,15 +1639,15 @@ const controlledRetirementReplayOwner = createControlledRetirementReplay({
   canonicalJsonText: controlledRetirementCanonicalJsonText,
   sha256: controlledRetirementSha256,
   projectJob: controlledRetirementJobProjection,
-  projectCensus: controlledRetirementCensus,
+  projectCensus: controlledRetirementCensusOwner.project,
   conflict: controlledRetirementConflict,
 });
 const controlledRetirementCommandOwner = createControlledRetirementCommand({
   normalizeIdentity: controlledRetirementIdentity,
   sha256: controlledRetirementSha256,
-  replay: controlledRetirementReplay,
-  validatePostState: validateControlledRetirementPostState,
-  projectCensus: controlledRetirementCensus,
+  replay: controlledRetirementReplayOwner.replay,
+  validatePostState: controlledRetirementReplayOwner.validatePostState,
+  projectCensus: controlledRetirementCensusOwner.project,
   get,
   all,
   run,
@@ -1729,7 +1662,7 @@ const controlledRetirementCommandOwner = createControlledRetirementCommand({
   receiptSchema: controlledRetirementReceiptSchema,
   eventType: controlledRetirementEventType,
   canonicalJsonText: controlledRetirementCanonicalJsonText,
-  validateReceipt: validateControlledRetirementReceipt,
+  validateReceipt: controlledRetirementReplayOwner.validateReceipt,
   conflict: controlledRetirementConflict,
 });
 const manualDispatchIdentityOwner = createManualDispatchIdentity({
@@ -1960,7 +1893,7 @@ const analysisRequestService = createAnalysisRequestService({
   requestAiReanalysis,
   requestIncidentEscalation,
   requestIncidentReanalysis,
-  retireControlledEvaluation,
+  retireControlledEvaluation: controlledRetirementCommandOwner.retire,
   signalAiWorkers,
 });
 modularRoutes.registerAll(createAnalysisRequestRoutes({
