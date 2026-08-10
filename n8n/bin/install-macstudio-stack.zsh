@@ -56,7 +56,7 @@ prepare_alert_store_stage() {
   )"
   chmod 0700 "$ALERT_STORE_STAGE_DIR"
   local tree
-  for tree in lib routes services repositories jobs; do
+  for tree in lib routes services repositories jobs composition; do
     local source="$REPO_DIR/n8n/alert_store/$tree"
     [[ -d "$source" ]] || continue
     if [[ -n "$(find "$source" ! -type d ! -type f -print -quit)" ]]; then
@@ -65,7 +65,7 @@ prepare_alert_store_stage() {
     fi
     cp -R "$source" "$ALERT_STORE_STAGE_DIR/$tree"
   done
-  for tree in lib routes services; do
+  for tree in lib routes services composition; do
     if [[ ! -d "$ALERT_STORE_STAGE_DIR/$tree" ]]; then
       echo "Refusing incomplete staged alert-store module tree: $tree" >&2
       return 1
@@ -167,7 +167,8 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/services/notification_service.js" \
     "$ALERT_STORE_STAGE_DIR/services/alert_group_service.js" \
     "$ALERT_STORE_STAGE_DIR/services/enrichment_provider_client.js" \
-    "$ALERT_STORE_STAGE_DIR/services/enrichment_orchestrator.js"
+    "$ALERT_STORE_STAGE_DIR/services/enrichment_orchestrator.js" \
+    "$ALERT_STORE_STAGE_DIR/composition/route_composition.js"
 }
 
 trap cleanup_alert_store_stage EXIT
@@ -432,7 +433,7 @@ fi
 # Copy source and config into the runtime directory. Runtime data directories are
 # created but not populated from Git.
 cp "$REPO_DIR/n8n/docker-compose.yml" "$STACK_DIR/docker-compose.yml"
-for tree in lib routes services repositories jobs; do
+for tree in lib routes services repositories jobs composition; do
   if [[ -d "$ALERT_STORE_STAGE_DIR/$tree" ]]; then
     mkdir -p "$STACK_DIR/alert_store/$tree"
     /usr/bin/rsync -a --delete \

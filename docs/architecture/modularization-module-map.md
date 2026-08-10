@@ -2319,6 +2319,7 @@ remains CommonJS during this migration.
 | Boundary | Responsibilities |
 | --- | --- |
 | `server.js` / composition root | validate configuration, build repositories/services/routes, start/stop server |
+| `composition/*` | inject already-owned runtime ports and assemble route/service registries without owning policy or persistence |
 | `routes/*` | method/path registration, auth, bounded parsing, response serialization |
 | `services/alerts` | alerts, grouping, state transitions, enrichment coordination |
 | `services/ai_jobs` | queue, claims, leases, completion, reanalysis lineage |
@@ -2345,7 +2346,7 @@ required before extracted code is imported in production:
 | `n8n/onion_sentinel` | `$HOME/n8n-local/onion_sentinel` | staged complete-tree copy and atomic replacement |
 | `onion-sentinel-dashboard/portal` | `$HOME/n8n-local/onion-sentinel-dashboard/portal` | staged complete-tree copy |
 | `onion-sentinel-dashboard/pages` and `components` | corresponding dashboard runtime directories | staged complete-tree copy |
-| `n8n/alert_store/routes`, `services`, `repositories`, `jobs` | corresponding `$HOME/n8n-local/alert_store` directories | install before service restart; reject incomplete tree |
+| `n8n/alert_store/routes`, `services`, `repositories`, `jobs`, `composition` | corresponding `$HOME/n8n-local/alert_store` directories | install before service restart; reject incomplete tree |
 | `operations/onion_sentinel_eval` | evaluation workspace only | not required by production services unless explicitly packaged |
 
 The installer must validate imports and required files from staging before it

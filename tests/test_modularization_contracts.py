@@ -173,7 +173,14 @@ class ModularizationCompatibilityContractTests(unittest.TestCase):
             installer.index("\nprepare_alert_store_stage\n"),
             installer.index("\ncritical_launch_agents_down\n"),
         )
-        for tree in ("lib", "routes", "services", "repositories", "jobs"):
+        for tree in (
+            "lib",
+            "routes",
+            "services",
+            "repositories",
+            "jobs",
+            "composition",
+        ):
             self.assertIn(f"n8n/alert_store/$tree", installer)
             self.assertIn(f'ALERT_STORE_STAGE_DIR/$tree', installer)
         self.assertIn("node --check", installer)
