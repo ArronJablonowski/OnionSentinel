@@ -99,6 +99,7 @@ CONTROLLED_CREDENTIAL_KEYS = {
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
     "N8N_POST_COMMIT_TOKEN",
+    "ASSET_STORE_WRITE_TOKEN",
     "ABUSEIPDB_API_KEY",
     "GREYNOISE_API_KEY",
     "OTX_API_KEY",
@@ -1149,6 +1150,47 @@ class ControlledAlertStoreTests(unittest.TestCase):
                     "controlled evaluation requires loopback",
                 )
 
+    def test_startup_rejects_invalid_mode_identity_and_scoring_file(self) -> None:
+        invalid_mode = sanitized_environment()
+        invalid_mode["ONION_SENTINEL_EVALUATION_MODE"] = "true"
+        self.assert_startup_rejected(
+            invalid_mode,
+            "ONION_SENTINEL_EVALUATION_MODE must be unset, 0, or 1",
+        )
+
+        for label, key, value in (
+            ("release", "ONION_SENTINEL_RELEASE_ID", "not-a-release"),
+            ("token", "ONION_SENTINEL_EVALUATION_TOKEN", "not-a-token"),
+            ("privileged-port", "ALERT_STORE_PORT", "1023"),
+            ("unsafe-port", "ALERT_STORE_PORT", "65536"),
+            ("non-integer-port", "ALERT_STORE_PORT", "not-a-port"),
+        ):
+            with self.subTest(case=label):
+                environment = self.controlled_environment()
+                environment[key] = value
+                self.assert_startup_rejected(
+                    environment,
+                    "controlled evaluation requires loopback",
+                )
+
+        linked_rules = self.runtime / "linked-scoring-rules.json"
+        linked_rules.symlink_to(self.rules)
+        environment = self.controlled_environment()
+        environment["SCORING_RULES_PATH"] = str(linked_rules)
+        self.assert_startup_rejected(
+            environment,
+            "controlled evaluation scoring rules must be an owner-controlled regular file",
+        )
+
+        self.rules.chmod(0o660)
+        try:
+            self.assert_startup_rejected(
+                self.controlled_environment(),
+                "controlled evaluation scoring rules must be an owner-controlled regular file",
+            )
+        finally:
+            self.rules.chmod(0o600)
+
     def test_startup_rejects_sidecars_credentials_and_unsafe_database(self) -> None:
         sidecar = Path(f"{self.db}-journal")
         sidecar.write_bytes(b"")
@@ -1160,10 +1202,7 @@ class ControlledAlertStoreTests(unittest.TestCase):
         finally:
             sidecar.unlink(missing_ok=True)
 
-        for credential_key in (
-            "TELEGRAM_BOT_TOKEN",
-            "N8N_POST_COMMIT_TOKEN",
-        ):
+        for credential_key in sorted(CONTROLLED_CREDENTIAL_KEYS):
             with self.subTest(credential=credential_key):
                 environment = self.controlled_environment()
                 environment[credential_key] = "must-not-enter-evaluation"
