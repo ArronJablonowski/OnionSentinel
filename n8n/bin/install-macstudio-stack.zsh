@@ -981,6 +981,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_group_enrichment.py" "$DASHBOA
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_metrics.py" "$DASHBOARD_RUNTIME_DIR/portal_soc_metrics.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_live_revisions.py" "$DASHBOARD_RUNTIME_DIR/portal_live_revisions.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_read_dispatch.py" "$DASHBOARD_RUNTIME_DIR/portal_soc_read_dispatch.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_sse_stream.py" "$DASHBOARD_RUNTIME_DIR/portal_sse_stream.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_write_request.py" "$DASHBOARD_RUNTIME_DIR/portal_soc_write_request.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_software_inventory_service.py" "$DASHBOARD_RUNTIME_DIR/portal_software_inventory_service.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_asset_inventory_service.py" "$DASHBOARD_RUNTIME_DIR/portal_asset_inventory_service.py"

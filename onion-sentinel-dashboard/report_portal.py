@@ -509,6 +509,7 @@ from portal_soc_action_service import (
     forward_controlled_dispatch_contract,
     queue_soc_alert_analysis,
 )
+from portal_sse_stream import send_soc_alert_events
 from portal_beacon_history import project_beacon_history
 from portal_n8n_container_status import (
     N8nContainerStatusSources,
@@ -5251,33 +5252,13 @@ class PortalHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _send_soc_alert_events(self) -> None:
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "keep-alive")
-        self.send_header("X-Accel-Buffering", "no")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        last_digest = ""
-        # Recycle the stream periodically so browser EventSource reconnect logic
-        # can recover from stale LAN connections without user interaction.
-        for _ in range(60):
-            try:
-                payload = cached_soc_alert_events_snapshot()
-                raw = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-                stable_payload = dict(payload)
-                stable_payload.pop("time", None)
-                digest = _revision_digest(stable_payload)
-                if digest != last_digest:
-                    event_id = str(int(time.time()))
-                    self.wfile.write(f"id: {event_id}\nevent: soc-alerts\ndata: {raw}\n\n".encode("utf-8"))
-                    last_digest = digest
-                else:
-                    self.wfile.write(b": keepalive\n\n")
-                self.wfile.flush()
-                time.sleep(5)
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                return
+        send_soc_alert_events(
+            self,
+            snapshot=cached_soc_alert_events_snapshot,
+            revision_digest=_revision_digest,
+            now_seconds=time.time,
+            sleep=time.sleep,
+        )
 
     def _admin_session_id(self) -> str:
         return parse_cookie_header(self.headers.get("Cookie")).get(ADMIN_SESSION_COOKIE, "")

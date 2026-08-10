@@ -1863,6 +1863,11 @@ cache invalidation signaling. The existing `update_soc_alert_status` function
 retains identifier/status validation, stale-browser safeguards, review gates,
 alert-store transport, and disaster-recovery persistence policy.
 
+`portal_sse_stream.py` owns the bounded SOC-alert server-sent-event lifecycle,
+exact response headers, stable revision projection, keepalive frames, and clean
+socket-disconnect handling. `report_portal.py` injects the cached snapshot,
+digest, clock, and sleep callbacks from its compatibility runtime.
+
 `portal_admin_form_service.py` owns Administration form parsing, action-token
 ordering, login/password decision flow, session creation/destruction ports,
 action authorization and dispatch, cookie-header projection, and encoded
