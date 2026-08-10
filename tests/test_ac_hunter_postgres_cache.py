@@ -43,9 +43,14 @@ class AcHunterPostgresCacheTests(unittest.TestCase):
             self.assertIn(required, installer)
 
     def test_web_read_path_cannot_collect_from_relay(self) -> None:
-        backend = (
-            ROOT / "onion-sentinel-dashboard/ac_hunter_review.py"
-        ).read_text()
+        backend_root = ROOT / "onion-sentinel-dashboard"
+        backend = "\n".join(
+            path.read_text()
+            for path in (
+                backend_root / "ac_hunter_review.py",
+                *sorted(backend_root.glob("ac_hunter_*.py")),
+            )
+        )
         page = (
             ROOT / "onion-sentinel-dashboard/scripts/dashboard_ac_hunter_page.py"
         ).read_text()

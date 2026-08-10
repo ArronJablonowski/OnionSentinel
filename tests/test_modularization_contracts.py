@@ -278,6 +278,29 @@ class ModularizationCompatibilityContractTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_ac_hunter_review_supports_isolated_file_loader_import(self) -> None:
+        review = ROOT / "onion-sentinel-dashboard" / "ac_hunter_review.py"
+        script = (
+            "import importlib.util,sys;"
+            f"p={str(review)!r};"
+            "s=importlib.util.spec_from_file_location('isolated_ac_hunter_review',p);"
+            "m=importlib.util.module_from_spec(s);"
+            "sys.modules[s.name]=m;"
+            "s.loader.exec_module(m);"
+            "assert m.AcHunterReviewService;"
+            "assert callable(m.normalize_collection);"
+            "assert callable(m.database_review_response)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_contract_is_versioned_and_bound_to_a_full_release(self) -> None:
         contract = load_contract()
         self.assertEqual(
