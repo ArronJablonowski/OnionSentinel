@@ -2,6 +2,7 @@
 """Read-only SQLite admission, schema inspection, and alias resolution."""
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
@@ -24,6 +25,7 @@ def connect_read_only(
     if not path.exists() or not path.is_file():
         raise policy.error(f"alert database not found: {path}")
     uri_path = urllib.parse.quote(str(path.resolve()), safe="/")
+    connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(
             f"file:{uri_path}?mode=ro",
@@ -38,6 +40,9 @@ def connect_read_only(
             raise policy.error("SQLite query_only could not be enabled")
         return connection
     except sqlite3.Error as exc:
+        if connection is not None:
+            with contextlib.suppress(sqlite3.Error):
+                connection.close()
         raise policy.error(f"could not open alert database read-only: {exc}") from exc
 
 
