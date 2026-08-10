@@ -26,6 +26,13 @@ VERSIONED_QUERY_FILES = (
     "investigation_query_contract.py",
     "collect-investigation-pivots.py",
 )
+V2_QUERY_DEPENDENCIES = (
+    "investigation_query_schema.py",
+    "investigation_query_normalization.py",
+    "investigation_query_authorization.py",
+    "investigation_query_rendering.py",
+    "investigation_query_response.py",
+)
 HARDENED_BUILDER = "build-ai-investigation-prompt.py"
 HARDENED_BUILDER_DEPENDENCIES = (
     "prompt_alert_group.py",
@@ -204,6 +211,15 @@ def validate_versioned_runtime(directory: Path, expected_contract: str) -> None:
         raise QueryRuntimeInstallError(
             "pivot collector does not import the adjacent contract authority"
         )
+    if expected_contract == V2:
+        dependency_modules = {Path(name).stem for name in V2_QUERY_DEPENDENCIES}
+        reachable = _reachable_adjacent_modules(contract_path, dependency_modules)
+        if not dependency_modules.issubset(reachable):
+            raise QueryRuntimeInstallError(
+                "v2 query contract does not import its adjacent modules"
+            )
+        for name in V2_QUERY_DEPENDENCIES:
+            _module_tree(directory / name)
 
 
 def validate_hardened_builder(path: Path) -> None:
@@ -329,6 +345,8 @@ def install_query_runtime(
         action = "installed_bundled_v1"
     else:
         validate_versioned_runtime(current_source, V2)
+        for name in V2_QUERY_DEPENDENCIES:
+            _atomic_install(current_source / name, runtime_bin / name)
         for name in VERSIONED_QUERY_FILES:
             _atomic_install(current_source / name, runtime_bin / name)
         action = "installed_explicit_v2"

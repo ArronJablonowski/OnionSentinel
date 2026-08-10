@@ -133,6 +133,29 @@ class InvestigationQueryRuntimeInstallTests(unittest.TestCase):
                     encoding="utf-8"
                 ),
             )
+            for name in self.installer.V2_QUERY_DEPENDENCIES:
+                self.assertEqual(
+                    (runtime / name).read_bytes(),
+                    (BIN / name).read_bytes(),
+                )
+
+            script = textwrap.dedent(
+                f"""
+                import sys
+                sys.path.insert(0, {str(runtime)!r})
+                import investigation_query_contract as contract
+                assert contract.INVESTIGATION_QUERY_CONTRACT == {self.installer.V2!r}
+                assert callable(contract.authorize_investigation_query_request)
+                assert callable(contract.validate_investigation_query_response)
+                """
+            )
+            proc = subprocess.run(
+                [sys.executable, "-I", "-c", script],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def test_unknown_contract_fails_before_installing_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
