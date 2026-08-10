@@ -1839,6 +1839,12 @@ service identifier normalization, existing start-service dispatch, and
 200/400/403 response projection. Concrete session lookup, token storage, app
 launching, and live service-status checks remain in `report_portal.py`.
 
+`portal_admin_session_store.py` owns Administration CSRF-token validation and
+private persistence, PBKDF2 password-record validation, hashed session
+persistence and expiry, and strict cookie projection. `report_portal.py`
+retains the configured runtime paths and thin compatibility functions used by
+the Onion Sentinel HTTP adapter.
+
 `portal_resource_library_write.py` owns payload normalization and dispatch for
 the four classified remove, tag, rename, and favorite mutations, including
 their existing 200/400 result mapping. `portal_resource_library_store.py` owns

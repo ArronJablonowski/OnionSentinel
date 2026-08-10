@@ -937,6 +937,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_dashboard_assets.py" "$DASHB
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_versions.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_versions.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_availability.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_availability.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_action_state.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_action_state.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_session_store.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_session_store.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_action_runner.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_action_runner.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_service_probes.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_service_probes.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_services.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_services.py"

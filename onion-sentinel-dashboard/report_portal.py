@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
-import hmac
 import html
 import importlib.util
 import ipaddress
@@ -141,6 +140,20 @@ from portal_admin_action_state import (
 from portal_admin_action_runner import (
     AdminActionRunnerSources,
     start_admin_action as run_admin_action,
+)
+from portal_admin_session_store import (
+    admin_session_cookie_header as compose_admin_session_cookie,
+    admin_session_hash as derive_admin_session_hash,
+    create_admin_session as create_persisted_admin_session,
+    destroy_admin_session as destroy_persisted_admin_session,
+    ensure_admin_token as ensure_persisted_admin_token,
+    expired_admin_session_cookie_header as compose_expired_admin_session_cookie,
+    load_admin_password_record as load_persisted_admin_password_record,
+    load_admin_sessions as load_persisted_admin_sessions,
+    parse_cookie_header as parse_request_cookie_header,
+    prune_admin_sessions as prune_persisted_admin_sessions,
+    save_admin_sessions as save_persisted_admin_sessions,
+    verify_admin_password as verify_persisted_admin_password,
 )
 from portal_admin_service_probes import (
     AdminServiceProbeSources,
@@ -1111,31 +1124,12 @@ def pcap_workflow_health_response() -> dict[str, object]:
 
 def ensure_admin_token() -> str:
     """Return a persistent CSRF token for admin POST actions."""
-    try:
-        token = ADMIN_TOKEN_FILE.read_text(encoding="utf-8").strip()
-        if re.fullmatch(r"[a-f0-9]{64}", token):
-            return token
-    except Exception:
-        pass
-    ADMIN_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    token = os.urandom(32).hex()
-    ADMIN_TOKEN_FILE.write_text(token, encoding="utf-8")
-    try:
-        ADMIN_TOKEN_FILE.chmod(0o600)
-    except Exception:
-        pass
-    return token
+    return ensure_persisted_admin_token(ADMIN_TOKEN_FILE, random_bytes=os.urandom)
 
 
 def load_admin_password_record() -> dict | None:
     """Load the local admin password hash record, if configured."""
-    try:
-        data = json.loads(ADMIN_PASSWORD_FILE.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and data.get("algorithm") == "pbkdf2_sha256":
-            return data
-    except Exception:
-        pass
-    return None
+    return load_persisted_admin_password_record(ADMIN_PASSWORD_FILE)
 
 
 def admin_password_configured() -> bool:
@@ -1143,74 +1137,47 @@ def admin_password_configured() -> bool:
 
 
 def verify_admin_password(password: str) -> bool:
-    record = load_admin_password_record()
-    if not record or not password:
-        return False
-    try:
-        iterations = int(record.get("iterations", 0))
-        salt = bytes.fromhex(str(record.get("salt", "")))
-        expected = bytes.fromhex(str(record.get("hash", "")))
-        if iterations < 200_000 or not salt or not expected:
-            return False
-        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
-        return hmac.compare_digest(actual, expected)
-    except Exception:
-        return False
+    return verify_persisted_admin_password(password, load_admin_password_record())
 
 
 def admin_session_hash(session_id: str) -> str:
-    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    return derive_admin_session_hash(session_id)
 
 
 def load_admin_sessions() -> dict:
-    try:
-        data = json.loads(ADMIN_SESSIONS_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    return load_persisted_admin_sessions(ADMIN_SESSIONS_FILE)
 
 
 def save_admin_sessions(sessions: dict) -> None:
-    ADMIN_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    ADMIN_SESSIONS_FILE.write_text(json.dumps(sessions, indent=2, sort_keys=True), encoding="utf-8")
-    try:
-        ADMIN_SESSIONS_FILE.chmod(0o600)
-    except Exception:
-        pass
+    save_persisted_admin_sessions(ADMIN_STATE_DIR, ADMIN_SESSIONS_FILE, sessions)
 
 
 def prune_admin_sessions(sessions: dict | None = None) -> dict:
     sessions = load_admin_sessions() if sessions is None else sessions
-    now_ts = int(dt.datetime.now().timestamp())
-    pruned = {
-        sid_hash: meta
-        for sid_hash, meta in sessions.items()
-        if isinstance(meta, dict) and int(meta.get("expires_at", 0) or 0) > now_ts
-    }
-    if pruned != sessions:
-        save_admin_sessions(pruned)
-    return pruned
+    return prune_persisted_admin_sessions(
+        sessions,
+        now_timestamp=int(dt.datetime.now().timestamp()),
+        save_sessions=save_admin_sessions,
+    )
 
 
 def create_admin_session(client_ip: str) -> str:
-    now_ts = int(dt.datetime.now().timestamp())
-    session_id = secrets.token_urlsafe(32)
-    sessions = prune_admin_sessions()
-    sessions[admin_session_hash(session_id)] = {
-        "created_at": now_ts,
-        "expires_at": now_ts + ADMIN_SESSION_TTL_SECONDS,
-        "client_ip": client_ip,
-    }
-    save_admin_sessions(sessions)
-    return session_id
+    return create_persisted_admin_session(
+        client_ip,
+        now_timestamp=int(dt.datetime.now().timestamp()),
+        ttl_seconds=ADMIN_SESSION_TTL_SECONDS,
+        new_session_id=lambda: secrets.token_urlsafe(32),
+        load_pruned_sessions=prune_admin_sessions,
+        save_sessions=save_admin_sessions,
+    )
 
 
 def destroy_admin_session(session_id: str) -> None:
-    if not session_id:
-        return
-    sessions = load_admin_sessions()
-    sessions.pop(admin_session_hash(session_id), None)
-    save_admin_sessions(sessions)
+    destroy_persisted_admin_session(
+        session_id,
+        load_sessions=load_admin_sessions,
+        save_sessions=save_admin_sessions,
+    )
 
 
 def resource_library_id_for(path: Path) -> str:
@@ -1330,24 +1297,16 @@ def move_resource_to_removal(resource_id: str, source_path: str = "") -> tuple[b
 
 
 def parse_cookie_header(cookie_header: str | None) -> dict[str, str]:
-    cookies: dict[str, str] = {}
-    if not cookie_header:
-        return cookies
-    for part in cookie_header.split(";"):
-        if "=" not in part:
-            continue
-        name, value = part.split("=", 1)
-        cookies[name.strip()] = value.strip()
-    return cookies
+    return parse_request_cookie_header(cookie_header)
 
 
 def admin_session_cookie_header(session_id: str, max_age: int | None = None) -> str:
     max_age = ADMIN_SESSION_TTL_SECONDS if max_age is None else max_age
-    return f"{ADMIN_SESSION_COOKIE}={session_id}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Strict"
+    return compose_admin_session_cookie(ADMIN_SESSION_COOKIE, session_id, max_age)
 
 
 def expired_admin_session_cookie_header() -> str:
-    return f"{ADMIN_SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
+    return compose_expired_admin_session_cookie(ADMIN_SESSION_COOKIE)
 
 
 def read_prompt_file(path: Path, label: str) -> dict:
