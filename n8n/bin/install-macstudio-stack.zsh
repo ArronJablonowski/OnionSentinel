@@ -462,6 +462,8 @@ cp "$REPO_DIR/n8n/alert_store/lib/postgres_shadow_outbox.js" "$STACK_DIR/alert_s
 cp "$REPO_DIR/n8n/alert_store/lib/postgres_shadow_projector.js" "$STACK_DIR/alert_store/lib/postgres_shadow_projector.js"
 cp "$REPO_DIR/n8n/alert_store/lib/postgres_asset_store.js" "$STACK_DIR/alert_store/lib/postgres_asset_store.js"
 cp "$REPO_DIR/n8n/alert_store/lib/postgres_asset_normalization.js" "$STACK_DIR/alert_store/lib/postgres_asset_normalization.js"
+cp "$REPO_DIR/n8n/alert_store/lib/postgres_asset_read_projection.js" "$STACK_DIR/alert_store/lib/postgres_asset_read_projection.js"
+cp "$REPO_DIR/n8n/alert_store/lib/postgres_asset_schema.js" "$STACK_DIR/alert_store/lib/postgres_asset_schema.js"
 cp "$REPO_DIR/n8n/alert_store/lib/postgres_software_store.js" "$STACK_DIR/alert_store/lib/postgres_software_store.js"
 cp "$REPO_DIR/n8n/alert_store/lib/postgres_ac_hunter_store.js" "$STACK_DIR/alert_store/lib/postgres_ac_hunter_store.js"
 cp "$REPO_DIR/n8n/alert_store/lib/security_logger.js" "$STACK_DIR/alert_store/lib/security_logger.js"

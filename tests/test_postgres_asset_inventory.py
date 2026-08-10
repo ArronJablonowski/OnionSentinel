@@ -9,6 +9,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = ROOT / "n8n" / "postgres" / "asset-inventory-schema.sql"
 STORE = ROOT / "n8n" / "alert_store" / "lib" / "postgres_asset_store.js"
+READ_PROJECTION = (
+    ROOT
+    / "n8n"
+    / "alert_store"
+    / "lib"
+    / "postgres_asset_read_projection.js"
+)
 RUNTIME = ROOT / "n8n" / "alert_store" / "services" / "postgres_auxiliary_store_runtime.js"
 REQUEST_AUTHORIZATION = (
     ROOT / "n8n" / "alert_store" / "lib" / "request_authorization.js"
@@ -71,6 +78,7 @@ class PostgresAssetInventoryTests(unittest.TestCase):
         routes = ROUTES.read_text(encoding="utf-8")
         service = SERVICE.read_text(encoding="utf-8")
         store = STORE.read_text(encoding="utf-8")
+        read_projection = READ_PROJECTION.read_text(encoding="utf-8")
         runtime = RUNTIME.read_text(encoding="utf-8")
         request_authorization = REQUEST_AUTHORIZATION.read_text(encoding="utf-8")
         route_composition = ROUTE_COMPOSITION.read_text(encoding="utf-8")
@@ -112,7 +120,10 @@ class PostgresAssetInventoryTests(unittest.TestCase):
         self.assertIn("/assets/approve-dhcp-ip-change", routes)
         self.assertIn("/assets/update", routes)
         self.assertIn("/assets/demote", routes)
-        self.assertIn("conditions.push('$1::timestamptz IS NOT NULL')", store)
+        self.assertIn(
+            "conditions.push('$1::timestamptz IS NOT NULL')",
+            read_projection,
+        )
         self.assertIn("asset.ip_address_changed_from_dhcp", store)
         self.assertIn("ip_change_approved", store)
         self.assertIn("explicit DHCP IP-change confirmation is required", store)

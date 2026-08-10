@@ -2398,6 +2398,11 @@ and fingerprints, inventory snapshot shaping, and public asset projection.
 The legacy `postgres_asset_store.js` path continues to export
 `normalizeInventoryRecord` for compatibility.
 
+`lib/postgres_asset_schema.js` owns checked-in schema installation and the
+exact supported schema-version gate. `lib/postgres_asset_read_projection.js`
+owns parameterized search/filter pagination, allowlisted ordering, bounded
+snapshot traversal, health counts, and public PostgreSQL asset projections.
+
 ## Deployment Map
 
 The current production installer copies individual files. These additions are
