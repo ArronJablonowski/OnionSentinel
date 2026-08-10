@@ -51,6 +51,7 @@ import portal_soc_query_runtime
 import portal_incident_action_runtime
 import portal_incident_read_runtime
 import portal_soc_record_runtime
+import portal_write_runtime
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
@@ -1784,185 +1785,20 @@ def soc_alert_collapse_detail_sections(detail_html: str) -> str:
 
 
 
-def asset_store_write_token() -> str:
-    """Read the owner-controlled local asset-write credential without exporting it."""
-    return load_asset_store_write_token(
-        os.environ.get("ASSET_STORE_WRITE_TOKEN"),
-        Path(ASSET_STORE_ENV_FILE),
-    )
-
-
-def asset_store_post_json(path: str, payload: dict, timeout: float = 10.0) -> dict:
-    """Send one authenticated asset mutation to the loopback alert-store."""
-    return AssetStoreClient(
-        base_url=SOC_ALERT_STORE_API_URL,
-        maximum_response_bytes=SOC_ALERT_STORE_RESPONSE_MAX_BYTES,
-        token=asset_store_write_token,
-        read_json=read_bounded_json,
-    ).post(path, payload, timeout)
-
-
-def alert_store_post_json(path: str, payload: dict, timeout: float = 5.0) -> dict:
-    """POST to the host alert-store and preserve its bounded error detail."""
-    encoded = json.dumps(payload).encode("utf-8")
-    headers = {
-        "Content-Type": "application/json",
-        "Content-Length": str(len(encoded)),
-    }
-    if SOC_ALERT_STORE_EVALUATION_TOKEN:
-        headers["X-Onion-Sentinel-Evaluation-Token"] = (
-            SOC_ALERT_STORE_EVALUATION_TOKEN
-        )
-    req = urllib_request.Request(
-        f"{SOC_ALERT_STORE_API_URL}{path}",
-        data=encoded,
-        method="POST",
-        headers=headers,
-    )
-    try:
-        with urllib_request.urlopen(req, timeout=timeout) as response:
-            result = read_bounded_json(response, max_bytes=SOC_ALERT_STORE_RESPONSE_MAX_BYTES)
-    except urllib_error.HTTPError as exc:
-        try:
-            error_payload = read_bounded_json(exc, max_bytes=SOC_ALERT_STORE_RESPONSE_MAX_BYTES)
-            detail = str(error_payload.get("reason") or error_payload.get("error") or exc.reason)
-        except (OSError, BoundedResponseError):
-            detail = str(exc.reason)
-        raise AlertStoreRequestError(detail, int(exc.code or 503)) from exc
-    except (OSError, urllib_error.URLError, json.JSONDecodeError) as exc:
-        raise AlertStoreRequestError(str(exc), 503) from exc
-    if not isinstance(result, dict) or not result.get("ok"):
-        raise AlertStoreRequestError(
-            str(result.get("reason") or result.get("error") or "alert-store rejected request"),
-            400,
-        )
-    return result
-
-
-def _normalized_asset_review_payload(
-    payload: object,
-    *,
-    action: str,
-) -> dict:
-    return normalize_asset_review_payload(payload, action=action)
-
-
-def _clear_asset_inventory_cache() -> None:
-    with ASSET_INVENTORY_CACHE_LOCK:
-        ASSET_INVENTORY_CACHE.clear()
-        ASSET_INVENTORY_CACHE.update(
-            {"signature": None, "inventory": None, "expires_at": 0.0}
-        )
-
-
-def asset_dhcp_promotion_response(payload: object) -> tuple[int, dict]:
-    return execute_asset_mutation(
-        payload,
-        normalizer=lambda value: _normalized_asset_review_payload(
-            value, action="promote",
-        ),
-        path="/assets/promote-dhcp",
-        success_status=HTTPStatus.CREATED,
-        write=asset_store_post_json,
-        clear_cache=_clear_asset_inventory_cache,
-    )
-
-
-def asset_dhcp_ip_change_response(payload: object) -> tuple[int, dict]:
-    return execute_asset_mutation(
-        payload,
-        normalizer=lambda value: _normalized_asset_review_payload(
-            value, action="ip_change",
-        ),
-        path="/assets/approve-dhcp-ip-change",
-        success_status=HTTPStatus.CREATED,
-        write=asset_store_post_json,
-        clear_cache=_clear_asset_inventory_cache,
-    )
-
-
-def _normalized_asset_mutation_payload(
-    payload: object,
-    *,
-    action: str,
-) -> dict:
-    return normalize_asset_mutation_payload(
-        payload, action=action, parse_timestamp=parse_iso_timestamp,
-    )
-
-
-def asset_update_response(payload: object) -> tuple[int, dict]:
-    return execute_asset_mutation(
-        payload,
-        normalizer=lambda value: _normalized_asset_mutation_payload(
-            value, action="edit",
-        ),
-        path="/assets/update",
-        success_status=HTTPStatus.OK,
-        write=asset_store_post_json,
-        clear_cache=_clear_asset_inventory_cache,
-    )
-
-
-def asset_demote_response(payload: object) -> tuple[int, dict]:
-    return execute_asset_mutation(
-        payload,
-        normalizer=lambda value: _normalized_asset_mutation_payload(
-            value, action="demote",
-        ),
-        path="/assets/demote",
-        success_status=HTTPStatus.OK,
-        write=asset_store_post_json,
-        clear_cache=_clear_asset_inventory_cache,
-    )
-
-
-def dispatch_asset_write(path: str, payload: object) -> tuple[int, dict]:
-    callbacks = {
-        "/api/assets/promote-dhcp": asset_dhcp_promotion_response,
-        "/api/assets/approve-dhcp-ip-change": asset_dhcp_ip_change_response,
-        "/api/assets/update": asset_update_response,
-        "/api/assets/demote": asset_demote_response,
-    }
-    callback = callbacks.get(path)
-    if callback is None:
-        return HTTPStatus.NOT_FOUND, {"ok": False, "error": "Not found"}
-    return callback(payload)
-
-
-def portal_cti_program_callbacks(
-    audit,
-) -> CtiProgramCallbacks:
-    """Bind current CTI storage functions without defeating test patching."""
-    return CtiProgramCallbacks(
-        load=cti_program.load_program,
-        save=cti_program.save_program,
-        public_response=cti_program.public_response,
-        audit=audit,
-        conflict_error=cti_program.CTIProgramConflict,
-        program_error=cti_program.CTIProgramError,
-    )
-
-
-def alert_store_get_json(path: str, timeout: float = 5.0) -> dict:
-    """Read a bounded, non-secret alert-store operational endpoint."""
-    if not SOC_ALERT_STORE_API_URL:
-        raise RuntimeError("alert-store API URL is not configured")
-    try:
-        req = urllib_request.Request(f"{SOC_ALERT_STORE_API_URL}{path}", method="GET")
-    except ValueError as exc:
-        raise RuntimeError(f"invalid alert-store API URL: {exc}") from exc
-    try:
-        with urllib_request.urlopen(req, timeout=timeout) as response:
-            result = read_bounded_json(response, max_bytes=SOC_ALERT_STORE_RESPONSE_MAX_BYTES)
-    except urllib_error.HTTPError as exc:
-        raise RuntimeError(f"HTTP {exc.code}: {exc.reason}") from exc
-    except (OSError, urllib_error.URLError, json.JSONDecodeError) as exc:
-        raise RuntimeError(str(exc)) from exc
-    if not isinstance(result, dict) or not result.get("ok"):
-        raise RuntimeError(str(result.get("reason") or result.get("error") or "alert-store returned invalid metrics"))
-    return result
-
+_WRITE_RUNTIME = sys.modules[__name__]
+asset_store_write_token = partial(portal_write_runtime.asset_store_write_token, _WRITE_RUNTIME)
+asset_store_post_json = partial(portal_write_runtime.asset_store_post_json, _WRITE_RUNTIME)
+alert_store_post_json = partial(portal_write_runtime.alert_store_post_json, _WRITE_RUNTIME)
+_normalized_asset_review_payload = partial(portal_write_runtime.normalized_asset_review_payload, _WRITE_RUNTIME)
+_clear_asset_inventory_cache = partial(portal_write_runtime.clear_asset_inventory_cache, _WRITE_RUNTIME)
+asset_dhcp_promotion_response = partial(portal_write_runtime.asset_dhcp_promotion_response, _WRITE_RUNTIME)
+asset_dhcp_ip_change_response = partial(portal_write_runtime.asset_dhcp_ip_change_response, _WRITE_RUNTIME)
+_normalized_asset_mutation_payload = partial(portal_write_runtime.normalized_asset_mutation_payload, _WRITE_RUNTIME)
+asset_update_response = partial(portal_write_runtime.asset_update_response, _WRITE_RUNTIME)
+asset_demote_response = partial(portal_write_runtime.asset_demote_response, _WRITE_RUNTIME)
+dispatch_asset_write = partial(portal_write_runtime.dispatch_asset_write, _WRITE_RUNTIME)
+portal_cti_program_callbacks = partial(portal_write_runtime.portal_cti_program_callbacks, _WRITE_RUNTIME)
+alert_store_get_json = partial(portal_write_runtime.alert_store_get_json, _WRITE_RUNTIME)
 
 
 _SOC_STATUS_RUNTIME = sys.modules[__name__]

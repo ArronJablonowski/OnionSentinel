@@ -2725,6 +2725,15 @@ representative-alert resolution. It preserves SQLite and artifact provenance,
 observed analysis state, analyst-review defaults, and late-bound repository,
 clock, cache, policy, and presenter seams.
 
+### Portal write runtime
+
+`portal_write_runtime.py` owns bounded authenticated alert-store GET/POST
+transport, owner-controlled asset-write token loading, asset mutation request
+composition, cache invalidation, dispatch, and CTI callback binding. It
+preserves response-size caps, error/status translation, evaluation-token
+isolation, write-token isolation, and alert-store ownership of production
+mutations.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:
