@@ -57,6 +57,7 @@ import portal_soc_detail_runtime
 import portal_delivery_runtime
 import portal_dashboard_runtime
 import portal_foundation_runtime
+import portal_access_runtime
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
@@ -806,191 +807,36 @@ n8n_beacon_history_response = partial(portal_foundation_runtime.n8n_beacon_histo
 pcap_workflow_health_response = partial(portal_foundation_runtime.pcap_workflow_health_response, _FOUNDATION_RUNTIME)
 
 
-def ensure_admin_token() -> str:
-    """Return a persistent CSRF token for admin POST actions."""
-    return ensure_persisted_admin_token(ADMIN_TOKEN_FILE, random_bytes=os.urandom)
-
-
-def load_admin_password_record() -> dict | None:
-    """Load the local admin password hash record, if configured."""
-    return load_persisted_admin_password_record(ADMIN_PASSWORD_FILE)
-
-
-def admin_password_configured() -> bool:
-    return load_admin_password_record() is not None
-
-
-def verify_admin_password(password: str) -> bool:
-    return verify_persisted_admin_password(password, load_admin_password_record())
-
-
-def admin_session_hash(session_id: str) -> str:
-    return derive_admin_session_hash(session_id)
-
-
-def load_admin_sessions() -> dict:
-    return load_persisted_admin_sessions(ADMIN_SESSIONS_FILE)
-
-
-def save_admin_sessions(sessions: dict) -> None:
-    save_persisted_admin_sessions(ADMIN_STATE_DIR, ADMIN_SESSIONS_FILE, sessions)
-
-
-def prune_admin_sessions(sessions: dict | None = None) -> dict:
-    sessions = load_admin_sessions() if sessions is None else sessions
-    return prune_persisted_admin_sessions(
-        sessions,
-        now_timestamp=int(dt.datetime.now().timestamp()),
-        save_sessions=save_admin_sessions,
-    )
-
-
-def create_admin_session(client_ip: str) -> str:
-    return create_persisted_admin_session(
-        client_ip,
-        now_timestamp=int(dt.datetime.now().timestamp()),
-        ttl_seconds=ADMIN_SESSION_TTL_SECONDS,
-        new_session_id=lambda: secrets.token_urlsafe(32),
-        load_pruned_sessions=prune_admin_sessions,
-        save_sessions=save_admin_sessions,
-    )
-
-
-def destroy_admin_session(session_id: str) -> None:
-    destroy_persisted_admin_session(
-        session_id,
-        load_sessions=load_admin_sessions,
-        save_sessions=save_admin_sessions,
-    )
-
-
-def resource_library_id_for(path: Path) -> str:
-    return derive_resource_library_id(path)
-
-
-def find_resource_library_pdf(resource_id: str, source_path: str = "") -> tuple[Path, str, Path] | None:
-    return locate_resource_library_pdf(resource_id, source_path, RESOURCE_LIBRARY_SOURCES)
-
-
-def unique_destination(path: Path) -> Path:
-    return available_resource_destination(path)
-
-
-def refresh_resource_library() -> None:
-    env = {**os.environ, "PATH": ADMIN_COMMAND_ENV.get("PATH", os.environ.get("PATH", ""))}
-    subprocess.run([sys.executable, str(RESOURCE_LIBRARY_BUILDER)], check=True, timeout=180, env=env, capture_output=True, text=True)
-    subprocess.run([sys.executable, str(RESOURCE_LIBRARY_SYNC)], check=True, timeout=180, env=env, capture_output=True, text=True)
-
-
-def load_resource_library_metadata() -> dict:
-    return load_resource_metadata_file(RESOURCE_LIBRARY_METADATA_FILE)
-
-
-def save_resource_library_metadata(data: dict) -> None:
-    save_resource_metadata_file(RESOURCE_LIBRARY_METADATA_FILE, data)
-
-
-def clean_resource_tags(values) -> list[str]:
-    return normalize_resource_tags(values)
-
-
-def sanitize_resource_filename(name: str, original_suffix: str) -> str:
-    """Return a safe basename while preserving the source file extension.
-
-    Users rename the visible title in the web UI; the actual file on disk must
-    keep its original extension. If they type another extension, strip it and
-    restore the original suffix instead of producing names like `.txt.pdf`.
-    """
-    return normalize_resource_filename(name, original_suffix)
-
-
-def queue_resource_action(record: dict) -> dict:
-    RESOURCE_LIBRARY_REMOVAL_QUEUE.parent.mkdir(parents=True, exist_ok=True)
-    action_id = str(record.get("action_id") or uuid.uuid4())
-    payload = {**record, "action_id": action_id, "queued_at": now_iso_local()}
-    with RESOURCE_LIBRARY_REMOVAL_QUEUE.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(payload, sort_keys=True) + "\n")
-    return {"ok": True, "queued": True, "action_id": action_id, "message": "Resource Library action queued for the Hermes worker."}
-
-
-def trigger_resource_library_worker() -> None:
-    hermes = HOME / ".hermes" / "hermes-agent" / "venv" / "bin" / "hermes"
-    cmd = [str(hermes if hermes.exists() else "hermes"), "cron", "run", RESOURCE_LIBRARY_MUTATION_CRON_ID]
-    try:
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    except Exception:
-        pass
-
-
-def resource_favorites() -> list[str]:
-    return project_resource_favorites(load_resource_library_metadata())
-
-
-def set_resource_favorite(resource_id: str, favorite: bool) -> tuple[bool, dict]:
-    return update_resource_favorite(
-        resource_id,
-        favorite,
-        load_metadata=load_resource_library_metadata,
-        save_metadata=save_resource_library_metadata,
-        queue_action=queue_resource_action,
-        trigger_worker=trigger_resource_library_worker,
-    )
-
-
-def set_resource_tags(resource_id: str, tags) -> tuple[bool, dict]:
-    return update_resource_tags(
-        resource_id,
-        tags,
-        load_metadata=load_resource_library_metadata,
-        save_metadata=save_resource_library_metadata,
-        queue_action=queue_resource_action,
-        trigger_worker=trigger_resource_library_worker,
-    )
-
-
-def rename_resource_file(resource_id: str, source_path: str, new_name: str) -> tuple[bool, dict]:
-    return rename_resource_library_file(
-        resource_id,
-        source_path,
-        new_name,
-        find_pdf=find_resource_library_pdf,
-        load_metadata=load_resource_library_metadata,
-        save_metadata=save_resource_library_metadata,
-        queue_action=queue_resource_action,
-        trigger_worker=trigger_resource_library_worker,
-        refresh_library=refresh_resource_library,
-    )
-
-
-def queue_resource_removal(resource_id: str, source_path: str, error: str) -> dict:
-    data = queue_resource_action({"action": "remove", "id": resource_id, "source": source_path, "portal_error": error})
-    trigger_resource_library_worker()
-    data.update({"message": "Removal queued for the Hermes Resource Library worker.", "source": source_path})
-    return data
-
-
-def move_resource_to_removal(resource_id: str, source_path: str = "") -> tuple[bool, dict]:
-    return move_resource_file_to_removal(
-        resource_id,
-        source_path,
-        removal_dir=RESOURCE_LIBRARY_REMOVAL_DIR,
-        find_pdf=find_resource_library_pdf,
-        queue_removal=queue_resource_removal,
-        refresh_library=refresh_resource_library,
-    )
-
-
-def parse_cookie_header(cookie_header: str | None) -> dict[str, str]:
-    return parse_request_cookie_header(cookie_header)
-
-
-def admin_session_cookie_header(session_id: str, max_age: int | None = None) -> str:
-    max_age = ADMIN_SESSION_TTL_SECONDS if max_age is None else max_age
-    return compose_admin_session_cookie(ADMIN_SESSION_COOKIE, session_id, max_age)
-
-
-def expired_admin_session_cookie_header() -> str:
-    return compose_expired_admin_session_cookie(ADMIN_SESSION_COOKIE)
+_ACCESS_RUNTIME = sys.modules[__name__]
+ensure_admin_token = partial(portal_access_runtime.ensure_admin_token, _ACCESS_RUNTIME)
+load_admin_password_record = partial(portal_access_runtime.load_admin_password_record, _ACCESS_RUNTIME)
+admin_password_configured = partial(portal_access_runtime.admin_password_configured, _ACCESS_RUNTIME)
+verify_admin_password = partial(portal_access_runtime.verify_admin_password, _ACCESS_RUNTIME)
+admin_session_hash = partial(portal_access_runtime.admin_session_hash, _ACCESS_RUNTIME)
+load_admin_sessions = partial(portal_access_runtime.load_admin_sessions, _ACCESS_RUNTIME)
+save_admin_sessions = partial(portal_access_runtime.save_admin_sessions, _ACCESS_RUNTIME)
+prune_admin_sessions = partial(portal_access_runtime.prune_admin_sessions, _ACCESS_RUNTIME)
+create_admin_session = partial(portal_access_runtime.create_admin_session, _ACCESS_RUNTIME)
+destroy_admin_session = partial(portal_access_runtime.destroy_admin_session, _ACCESS_RUNTIME)
+resource_library_id_for = partial(portal_access_runtime.resource_library_id_for, _ACCESS_RUNTIME)
+find_resource_library_pdf = partial(portal_access_runtime.find_resource_library_pdf, _ACCESS_RUNTIME)
+unique_destination = partial(portal_access_runtime.unique_destination, _ACCESS_RUNTIME)
+refresh_resource_library = partial(portal_access_runtime.refresh_resource_library, _ACCESS_RUNTIME)
+load_resource_library_metadata = partial(portal_access_runtime.load_resource_library_metadata, _ACCESS_RUNTIME)
+save_resource_library_metadata = partial(portal_access_runtime.save_resource_library_metadata, _ACCESS_RUNTIME)
+clean_resource_tags = partial(portal_access_runtime.clean_resource_tags, _ACCESS_RUNTIME)
+sanitize_resource_filename = partial(portal_access_runtime.sanitize_resource_filename, _ACCESS_RUNTIME)
+queue_resource_action = partial(portal_access_runtime.queue_resource_action, _ACCESS_RUNTIME)
+trigger_resource_library_worker = partial(portal_access_runtime.trigger_resource_library_worker, _ACCESS_RUNTIME)
+resource_favorites = partial(portal_access_runtime.resource_favorites, _ACCESS_RUNTIME)
+set_resource_favorite = partial(portal_access_runtime.set_resource_favorite, _ACCESS_RUNTIME)
+set_resource_tags = partial(portal_access_runtime.set_resource_tags, _ACCESS_RUNTIME)
+rename_resource_file = partial(portal_access_runtime.rename_resource_file, _ACCESS_RUNTIME)
+queue_resource_removal = partial(portal_access_runtime.queue_resource_removal, _ACCESS_RUNTIME)
+move_resource_to_removal = partial(portal_access_runtime.move_resource_to_removal, _ACCESS_RUNTIME)
+parse_cookie_header = partial(portal_access_runtime.parse_cookie_header, _ACCESS_RUNTIME)
+admin_session_cookie_header = partial(portal_access_runtime.admin_session_cookie_header, _ACCESS_RUNTIME)
+expired_admin_session_cookie_header = partial(portal_access_runtime.expired_admin_session_cookie_header, _ACCESS_RUNTIME)
 
 
 SOC_AI_SETTINGS_LOCK = threading.RLock()

@@ -2778,6 +2778,15 @@ and PCAP workflow health composition. It preserves same-name reload isolation,
 read-source precedence, response bounds, legacy transfer derivation, and
 read-only health dependencies.
 
+### Portal access runtime
+
+`portal_access_runtime.py` owns admin token/password/session compatibility
+wiring and Resource Library metadata, queue, worker trigger, rename, tag,
+favorite, removal, and cookie composition. Password material remains hashed in
+the existing store; session IDs remain server-side; filenames and tags remain
+normalized; resource actions remain append-only Hermes work requests with the
+same admin authorization enforced by the HTTP write adapter.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:
