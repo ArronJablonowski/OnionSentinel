@@ -2658,6 +2658,17 @@ The legacy runner functions remain compatibility delegates and inject runtime
 policy explicitly, preserving existing test seams while keeping review-package
 mutation and reviewer-output admission out of the composition root.
 
+### SOC alert status runtime
+
+`portal_soc_status_runtime.py` owns the late-bound compatibility wiring between
+the report portal and the grouped-alert status repositories, persistence
+service, JSON disaster-recovery mirror, repeat-count projection, manual
+escalation state, and active-group response composition. The runtime object is
+injected so compatibility callers and characterization tests can continue to
+replace database, clock, retry, and repository ports without changing the
+portal's public functions. Production mutations remain owned by alert-store;
+the direct SQLite save path remains limited to the existing offline DR flow.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:

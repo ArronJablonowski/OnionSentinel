@@ -44,6 +44,7 @@ import portal_asset_runtime
 import portal_admin_runtime
 import portal_operational_runtime
 import portal_settings_runtime
+import portal_soc_status_runtime
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
@@ -2069,146 +2070,22 @@ def soc_alert_pcap_request_response(group_id: str, payload: dict) -> tuple[int, 
     )
 
 
-def soc_alert_group_summary_available(conn: sqlite3.Connection) -> bool:
-    """Return true when alert-store has populated the fast grouped summary."""
-    return group_summary_available(soc_alert_status_store_sources(), conn)
-
-
-def soc_alert_group_counts(conn: sqlite3.Connection) -> dict[str, int]:
-    """Return current grouped repeat counts, keyed by group_id."""
-    return load_soc_alert_group_counts(soc_alert_status_store_sources(), conn)
-
-
-def soc_alert_manually_escalated_group_ids(conn: sqlite3.Connection) -> set[str]:
-    """Return every dashboard alias moved manually to Incident Responder."""
-    return load_manually_escalated_group_ids(
-        soc_alert_status_store_sources(), conn
-    )
-
-
-def soc_alert_active_group_ids(
-    conn: sqlite3.Connection,
-    statuses: dict,
-    manually_escalated_group_ids: set[str] | None = None,
-) -> set[str]:
-    """Return grouped detections currently visible in the default active view."""
-    return load_active_soc_group_ids(
-        soc_alert_status_store_sources(),
-        conn,
-        statuses,
-        manually_escalated_group_ids,
-    )
-
-
-def soc_alert_status_store_sources() -> SocAlertStatusStoreSources:
-    return SocAlertStatusStoreSources(
-        table_exists=sqlite_table_exists,
-        group_key_sql=soc_alert_group_key_sql,
-        group_id=soc_alert_group_id,
-        now_iso=now_iso_utc,
-    )
-
-
-def normalize_soc_group_statuses(conn: sqlite3.Connection) -> dict:
-    """Load current group state and hide stale acknowledgements.
-
-    Acknowledged detections should reappear when the matching grouped detection
-    count increases. Suppressed detections remain hidden until explicitly
-    exposed. Production deletion is owned by alert-store; portal reads must not
-    become a second SQLite writer.
-    """
-    return load_soc_group_statuses(soc_alert_status_store_sources(), conn)
-
-
-def soc_alert_status_persistence_sources() -> SocAlertStatusPersistenceSources:
-    store = soc_alert_status_store_sources()
-    return SocAlertStatusPersistenceSources(
-        db_path=SOC_ALERT_STORE_DB,
-        mirror_path=SOC_ALERT_STATUS_FILE,
-        connect_read=soc_alert_db_connect,
-        connect_write=soc_alert_db_write_connect,
-        ensure_schema=ensure_soc_alert_status_table,
-        load_db=normalize_soc_group_statuses,
-        write_one=lambda conn, alert_id, meta: write_soc_group_status(
-            store, conn, alert_id, meta
-        ),
-        write_many=lambda conn, statuses: write_soc_group_statuses(
-            store, conn, statuses
-        ),
-        normalize=normalize_soc_alert_status_meta,
-        now_iso=now_iso_utc,
-        uuid_hex=lambda: uuid.uuid4().hex,
-        lock=SOC_ALERT_DB_WRITE_LOCK,
-        sleep=time.sleep,
-        retry_attempts=SOC_ALERT_DB_WRITE_RETRY_ATTEMPTS,
-        retry_base_seconds=SOC_ALERT_DB_WRITE_RETRY_BASE_SECONDS,
-    )
-
-
-def load_soc_alert_statuses_from_db() -> dict:
-    return load_persisted_soc_alert_statuses_from_db(
-        soc_alert_status_persistence_sources()
-    )
-
-
-def write_soc_alert_status_json_snapshot(statuses: dict) -> None:
-    write_persisted_soc_alert_status_snapshot(
-        soc_alert_status_persistence_sources(), statuses
-    )
-
-
-def save_soc_alert_statuses_to_db(statuses: dict) -> None:
-    """Persist offline DR-test state; production writes through alert-store."""
-    save_persisted_soc_alert_statuses_to_db(
-        soc_alert_status_persistence_sources(), statuses
-    )
-
-
-def load_soc_alert_statuses() -> dict:
-    """Load shared SOC alert status state, using JSON only if SQLite is absent."""
-    return load_persisted_soc_alert_statuses(
-        soc_alert_status_persistence_sources()
-    )
-
-
-def save_soc_alert_statuses(statuses: dict) -> None:
-    save_persisted_soc_alert_statuses(
-        soc_alert_status_persistence_sources(), statuses
-    )
-
-
-def current_soc_alert_group_repeat_count(alert_id: str) -> int:
-    if not SOC_ALERT_STORE_DB.exists():
-        return 0
-    try:
-        with soc_alert_db_connect() as conn:
-            return int(soc_alert_group_counts(conn).get(alert_id, 0) or 0)
-    except Exception:
-        return 0
-
-
-def write_soc_alert_status(alert_id: str, meta: dict) -> None:
-    """Atomically persist one analyst state change, then refresh the JSON mirror."""
-    persist_soc_alert_status(
-        soc_alert_status_persistence_sources(), alert_id, meta
-    )
-
-
-def soc_alert_status_response() -> dict:
-    statuses = load_soc_alert_statuses()
-    try:
-        with soc_alert_db_connect() as conn:
-            group_counts = soc_alert_group_counts(conn)
-            escalated_group_ids = soc_alert_manually_escalated_group_ids(conn)
-            active_group_ids = soc_alert_active_group_ids(conn, statuses, escalated_group_ids)
-    except Exception:
-        return compose_status_payload(statuses)
-    return compose_status_payload(
-        statuses,
-        group_counts=group_counts,
-        escalated_group_ids=escalated_group_ids,
-        active_group_ids=active_group_ids,
-    )
+_SOC_STATUS_RUNTIME = sys.modules[__name__]
+soc_alert_group_summary_available = partial(portal_soc_status_runtime.soc_alert_group_summary_available, _SOC_STATUS_RUNTIME)
+soc_alert_group_counts = partial(portal_soc_status_runtime.soc_alert_group_counts, _SOC_STATUS_RUNTIME)
+soc_alert_manually_escalated_group_ids = partial(portal_soc_status_runtime.soc_alert_manually_escalated_group_ids, _SOC_STATUS_RUNTIME)
+soc_alert_active_group_ids = partial(portal_soc_status_runtime.soc_alert_active_group_ids, _SOC_STATUS_RUNTIME)
+soc_alert_status_store_sources = partial(portal_soc_status_runtime.soc_alert_status_store_sources, _SOC_STATUS_RUNTIME)
+normalize_soc_group_statuses = partial(portal_soc_status_runtime.normalize_soc_group_statuses, _SOC_STATUS_RUNTIME)
+soc_alert_status_persistence_sources = partial(portal_soc_status_runtime.soc_alert_status_persistence_sources, _SOC_STATUS_RUNTIME)
+load_soc_alert_statuses_from_db = partial(portal_soc_status_runtime.load_soc_alert_statuses_from_db, _SOC_STATUS_RUNTIME)
+write_soc_alert_status_json_snapshot = partial(portal_soc_status_runtime.write_soc_alert_status_json_snapshot, _SOC_STATUS_RUNTIME)
+save_soc_alert_statuses_to_db = partial(portal_soc_status_runtime.save_soc_alert_statuses_to_db, _SOC_STATUS_RUNTIME)
+load_soc_alert_statuses = partial(portal_soc_status_runtime.load_soc_alert_statuses, _SOC_STATUS_RUNTIME)
+save_soc_alert_statuses = partial(portal_soc_status_runtime.save_soc_alert_statuses, _SOC_STATUS_RUNTIME)
+current_soc_alert_group_repeat_count = partial(portal_soc_status_runtime.current_soc_alert_group_repeat_count, _SOC_STATUS_RUNTIME)
+write_soc_alert_status = partial(portal_soc_status_runtime.write_soc_alert_status, _SOC_STATUS_RUNTIME)
+soc_alert_status_response = partial(portal_soc_status_runtime.soc_alert_status_response, _SOC_STATUS_RUNTIME)
 
 
 def llm_analysis_log_limit(raw: object) -> int:
