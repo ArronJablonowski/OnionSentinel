@@ -35,6 +35,7 @@ AI_REVIEW_REPOSITORY = REPO_ROOT / "n8n" / "alert_store" / "repositories" / "ai_
 AI_ANALYSIS_ACCEPTANCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "ai_analysis_acceptance.js"
 DURABLE_JOB_TRANSITION_EXECUTOR = REPO_ROOT / "n8n" / "alert_store" / "services" / "durable_job_transition_executor.js"
 DISK_WRITE_ADMISSION = REPO_ROOT / "n8n" / "alert_store" / "services" / "disk_write_admission.js"
+WORKER_WAKE_SIGNALING = REPO_ROOT / "n8n" / "alert_store" / "services" / "worker_wake_signaling.js"
 
 
 class AlertStoreResilienceTest(unittest.TestCase):
@@ -70,6 +71,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.ai_analysis_acceptance = AI_ANALYSIS_ACCEPTANCE.read_text(encoding="utf-8")
         cls.durable_job_transition_executor = DURABLE_JOB_TRANSITION_EXECUTOR.read_text(encoding="utf-8")
         cls.disk_write_admission = DISK_WRITE_ADMISSION.read_text(encoding="utf-8")
+        cls.worker_wake_signaling = WORKER_WAKE_SIGNALING.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
         self.assertIn("require('./lib/provider_scheduler')", self.code)
@@ -347,8 +349,11 @@ class AlertStoreResilienceTest(unittest.TestCase):
 
     def test_committed_evidence_wakes_local_workers_without_owning_durability(self) -> None:
         self.assertIn("async function signalWorker", self.code)
+        self.assertIn("createWorkerWakeSignaling", self.code)
         self.assertIn("AI_ANALYSIS_WAKE_PATH", self.code)
         self.assertIn("PCAP_ANALYSIS_WAKE_PATH", self.code)
+        self.assertIn("Wake files are an optimization", self.worker_wake_signaling)
+        self.assertIn("interval fallback remain authoritative", self.worker_wake_signaling)
         self.assertIn("void signalAiWorkers('enrichment-completed')", self.code)
         self.assertIn("signalPcapWorker: (reason) => signalWorker(pcapAnalysisWakePath, reason)", self.code)
         self.assertIn("void signalPcapWorker('pcap-transfer-completed')", self.pcap_service)

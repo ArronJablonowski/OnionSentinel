@@ -57,6 +57,7 @@ const {createSuppressionPersistence} = require('./services/suppression_persisten
 const {createRescorePersistence} = require('./services/rescore_persistence');
 const {createAutomaticResponseRouting} = require('./services/automatic_response_routing');
 const {createDiskWriteAdmission} = require('./services/disk_write_admission');
+const {createWorkerWakeSignaling} = require('./services/worker_wake_signaling');
 const {createInventoryService} = require('./services/inventory_service');
 const {createInventoryRoutes} = require('./routes/inventory_routes');
 const {createHealthRepository} = require('./repositories/health_repository');
@@ -581,27 +582,21 @@ const supportedAgentRoles = new Set([
   'cyber-threat-intel',
   'threat-hunter',
 ]);
+const workerWakeSignaling = createWorkerWakeSignaling({
+  fs,
+  path,
+  nowUtc,
+  isControlledEvaluation: () => controlledEvaluationMode,
+  aiAnalysisWakePaths,
+  logError: (message) => console.error(message),
+});
+
 async function signalWorker(wakePath, eventName) {
-  if (!wakePath) return false;
-  try {
-    await fs.promises.mkdir(path.dirname(wakePath), {recursive: true, mode: 0o700});
-    const safeEvent = String(eventName || 'work-available').replace(/[^a-z0-9_-]/gi, '-').slice(0, 64);
-    await fs.promises.writeFile(wakePath, `${nowUtc()} ${safeEvent}\n`, {encoding: 'utf8', mode: 0o600});
-    return true;
-  } catch (error) {
-    // Wake files are an optimization. Durable SQLite state and launchd's
-    // interval fallback remain authoritative if the filesystem signal fails.
-    console.error(`${nowUtc()} worker wake signal failed for ${eventName}: ${error.message}`);
-    return false;
-  }
+  return workerWakeSignaling.signalWorker(wakePath, eventName);
 }
 
 async function signalAiWorkers(eventName) {
-  if (controlledEvaluationMode) return false;
-  const results = await Promise.all(
-    aiAnalysisWakePaths.map((wakePath) => signalWorker(wakePath, eventName)),
-  );
-  return results.some(Boolean);
+  return workerWakeSignaling.signalAiWorkers(eventName);
 }
 
 function loadScoringRules() {
