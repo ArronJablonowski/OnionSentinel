@@ -1,9 +1,11 @@
 import importlib
 from email.message import Message
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +15,95 @@ server = importlib.import_module("onion_sentinel_server")
 
 
 class OnionSentinelServerTests(unittest.TestCase):
+    def test_server_release_reader_is_literal_private_and_duplicate_safe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            env_path.write_text(
+                "TOKEN=must-not-be-evaluated\n"
+                "ONION_SENTINEL_RELEASE_ID=release-1234567\n",
+                encoding="utf-8",
+            )
+            os.chmod(env_path, 0o600)
+            self.assertEqual(
+                server.current_runtime_release_id(
+                    environ={},
+                    env_path=env_path,
+                ),
+                "release-1234567",
+            )
+            env_path.write_text(
+                "ONION_SENTINEL_RELEASE_ID=release-1234567\n"
+                "ONION_SENTINEL_RELEASE_ID=release-7654321\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                server.current_runtime_release_id(
+                    environ={},
+                    env_path=env_path,
+                ),
+                "",
+            )
+            os.chmod(env_path, 0o640)
+            self.assertEqual(
+                server.current_runtime_release_id(
+                    environ={},
+                    env_path=env_path,
+                ),
+                "",
+            )
+
+    def test_login_rendering_escapes_message_and_form_token(self):
+        with mock.patch.object(
+            server.runtime,
+            "ensure_admin_token",
+            return_value='token"><script>bad()</script>',
+        ):
+            rendered = server.render_login(
+                '<img src=x onerror="bad()">',
+                error=True,
+            ).decode("utf-8")
+        self.assertNotIn("<img src=x", rendered)
+        self.assertNotIn("<script>bad()", rendered)
+        self.assertIn("&lt;img", rendered)
+        self.assertIn("token&quot;&gt;&lt;script&gt;", rendered)
+        self.assertIn('<p class="error">', rendered)
+
+    def test_controlled_readiness_requires_exact_downstream_identity(self):
+        healthy = {
+            "service": "onion-sentinel-alert-store",
+            "controlled_evaluation": True,
+            "runtime_mode": "controlled-evaluation",
+            "release_id": server.RUNTIME_RELEASE_ID,
+            "listen_host": "127.0.0.1",
+            "listen_port": 8787,
+            "accepting_requests": True,
+        }
+        with (
+            mock.patch.object(
+                server.runtime,
+                "SOC_ALERT_STORE_API_URL",
+                "http://127.0.0.1:8787",
+            ),
+            mock.patch.object(
+                server.runtime,
+                "alert_store_get_json",
+                return_value=healthy,
+            ),
+        ):
+            ready, projection = server.controlled_alert_store_readiness()
+        self.assertTrue(ready)
+        self.assertEqual(projection["status"], "ready")
+
+        healthy["release_id"] = "different-release"
+        with mock.patch.object(
+            server.runtime,
+            "alert_store_get_json",
+            return_value=healthy,
+        ):
+            ready, projection = server.controlled_alert_store_readiness()
+        self.assertFalse(ready)
+        self.assertEqual(projection["status"], "identity_mismatch")
+
     def test_mutating_soc_api_requires_same_origin_json(self):
         headers = Message()
         headers["Content-Type"] = "application/json; charset=utf-8"
