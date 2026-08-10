@@ -13,10 +13,6 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const {createDurableJobQueue} = require('./lib/durable_job_queue');
-const {createPostgresShadowOutbox} = require('./lib/postgres_shadow_outbox');
-const {createPostgresShadowProjector} = require('./lib/postgres_shadow_projector');
-const {createPipelineMetrics} = require('./lib/pipeline_metrics');
 const {createRequestDispatcher} = require('./lib/http_dispatch');
 const analystReviewDefinitions = require('./services/analyst_review_projection');
 const {createDurableBackgroundDrains} = require('./services/durable_background_drains');
@@ -25,7 +21,6 @@ const {createHttpRequestBoundary} = require('./services/http_request_boundary');
 const {createAiCorrelationRepository} = require('./repositories/ai_correlation_repository');
 const {createAiReviewRepository} = require('./repositories/ai_review_repository');
 const {createPcapRequestRepository} = require('./repositories/pcap_request_repository');
-const {createPcapTransferRepository} = require('./repositories/pcap_transfer_repository');
 const {createAiAnalysisAcceptance} = require('./services/ai_analysis_acceptance');
 const {createPcapAnalysisCompletion} = require('./services/pcap_analysis_completion');
 const {createRouteComposition} = require('./composition/route_composition');
@@ -36,6 +31,9 @@ const {createApplicationComposition} = require('./composition/application_compos
 const {
   createRuntimeFoundationComposition,
 } = require('./composition/runtime_foundation_composition');
+const {
+  createMutableRuntimeOwners,
+} = require('./composition/mutable_runtime_owners');
 const {createPcapPolicy} = require('./lib/pcap_policy');
 const {createProjectSerialization} = require('./lib/project_serialization');
 const {createRuntimeConfiguration} = require('./lib/runtime_configuration');
@@ -271,97 +269,6 @@ function writeN8nBeacon(stage, alert = {}, result = null, error = null) {
   return beaconPersistence.writeBeacon(stage, alert, result, error);
 }
 
-let durableJobs;
-let postgresShadowOutbox;
-let postgresShadowProjector;
-let pipelineMetrics;
-let pcapTransferRepository;
-
-function initializeDurableJobs() {
-  durableJobs = createDurableJobQueue({
-    run,
-    get,
-    all,
-    now: nowUtc,
-    transitionLeaseSeconds: aiAnalysisLeaseSeconds,
-  });
-}
-
-function initializePostgresShadowOutbox() {
-  postgresShadowOutbox = createPostgresShadowOutbox({run, get, all});
-}
-
-function initializePostgresShadowProjector() {
-  if (!postgresShadowEnabled || controlledEvaluationMode) return;
-  const requiredKeys = [
-    'ALERT_STORE_POSTGRES_HOST',
-    'ALERT_STORE_POSTGRES_DATABASE',
-    'ALERT_STORE_POSTGRES_USER',
-    'ALERT_STORE_POSTGRES_PASSWORD',
-  ];
-  const missing = requiredKeys.filter(
-    (key) => !String(process.env[key] || '').trim(),
-  );
-  if (missing.length) {
-    throw new Error(
-      `PostgreSQL shadow projection is enabled but missing ${missing.join(', ')}`,
-    );
-  }
-  const {Pool} = require('pg');
-  const pool = new Pool({
-    host: String(process.env.ALERT_STORE_POSTGRES_HOST),
-    port: Number(process.env.ALERT_STORE_POSTGRES_PORT || 5433),
-    database: String(process.env.ALERT_STORE_POSTGRES_DATABASE),
-    user: String(process.env.ALERT_STORE_POSTGRES_USER),
-    password: String(process.env.ALERT_STORE_POSTGRES_PASSWORD),
-    max: 2,
-    connectionTimeoutMillis: 3000,
-    idleTimeoutMillis: 10000,
-    application_name: 'onion-sentinel-shadow-projector',
-  });
-  // An idle pg client reports a database restart/outage through the Pool
-  // "error" event. Without a listener Node treats it as an uncaught error and
-  // exits the authoritative SQLite service. Shadow availability must never
-  // control alert-store availability.
-  pool.on('error', (error) => {
-    console.error(
-      `PostgreSQL shadow idle connection failed: ${String(error.message || error).slice(0, 500)}`,
-    );
-  });
-  postgresShadowProjector = createPostgresShadowProjector({
-    pool,
-    outbox: postgresShadowOutbox,
-    withWriteGate: withSqliteWriteGate,
-    now: nowUtc,
-    batchSize: postgresShadowBatchSize,
-  });
-}
-
-function initializePipelineMetrics() {
-  pipelineMetrics = createPipelineMetrics({
-    run,
-    all,
-    now: nowUtc,
-    diskSnapshot: diskCapacitySnapshot,
-    retentionHours: pipelineEventRetentionHours,
-  });
-  pcapTransferRepository = createPcapTransferRepository({
-    get,
-    run,
-    safeString,
-    nonNegativeIntegerField,
-    nowUtc,
-    formatProjectTimestamp,
-    pcapRequestFromRow,
-    classifyPcapOutcome,
-    pcapOutcomes,
-    pipelineMetrics,
-    claimLeaseSeconds: pcapClaimLeaseSeconds,
-    maxAttempts: pcapTransferMaxAttempts,
-    maxRetrySeconds: pcapTransferMaxRetrySeconds,
-  });
-}
-
 async function assertControlledEvaluationSchema() {
   return controlledEvaluationSchema.assertSchema();
 }
@@ -590,6 +497,37 @@ const {
   maxWindowSeconds: pcapRequestMaxWindowSeconds,
   captureRetentionSeconds: pcapCaptureRetentionSeconds,
 });
+const mutableRuntimeOwners = createMutableRuntimeOwners({
+  database: {get, all, run, withWriteGate: withSqliteWriteGate},
+  runtime: {
+    nowUtc,
+    aiAnalysisLeaseSeconds,
+    postgresShadowEnabled,
+    controlledEvaluationMode,
+    postgresShadowBatchSize,
+    diskCapacitySnapshot,
+    pipelineEventRetentionHours,
+    pcapClaimLeaseSeconds,
+    pcapTransferMaxAttempts,
+    pcapTransferMaxRetrySeconds,
+  },
+  pcap: {
+    safeString,
+    nonNegativeIntegerField,
+    formatProjectTimestamp,
+    pcapRequestFromRow,
+    classifyPcapOutcome,
+    pcapOutcomes,
+  },
+  platform: {
+    env: process.env,
+    console,
+    createPostgresPool: (options) => {
+      const {Pool} = require('pg');
+      return new Pool(options);
+    },
+  },
+});
 const pcapRequestRepository = createPcapRequestRepository({
   get,
   all,
@@ -603,12 +541,12 @@ const pcapRequestRepository = createPcapRequestRepository({
   pcapRetentionError,
   pcapRequestFromRow,
   classifyPcapOutcome,
-  recordMetric: (...args) => pipelineMetrics.record(...args),
+  recordMetric: (...args) => mutableRuntimeOwners.pipelineMetrics().record(...args),
   readCaptureLossThreshold: () => (
     socAnalysisPolicy.read().pcap_capture_loss_threshold_percent
   ),
   requeueStaleClaims: (...args) => (
-    pcapTransferRepository.requeueStaleClaims(...args)
+    mutableRuntimeOwners.pcapTransferRepository().requeueStaleClaims(...args)
   ),
   priorityMaxWaitSeconds: pcapPriorityMaxWaitSeconds,
   captureRetentionSeconds: pcapCaptureRetentionSeconds,
@@ -618,10 +556,10 @@ const pcapAnalysisCompletion = createPcapAnalysisCompletion({
   get,
   safeString,
   nowUtc,
-  recordMetric: (...args) => pipelineMetrics.record(...args),
+  recordMetric: (...args) => mutableRuntimeOwners.pipelineMetrics().record(...args),
   matchesAnalysis: (level) => socAnalysisPolicy.matchesAnalysis(level),
   authorizedCampaignForAlertId,
-  enqueueAiJob: (...args) => durableJobs.enqueue('ai_analysis', ...args),
+  enqueueAiJob: (...args) => mutableRuntimeOwners.durableJobs().enqueue('ai_analysis', ...args),
   severityRank,
 });
 const aiReviewRepository = createAiReviewRepository({
@@ -639,7 +577,7 @@ const aiCorrelationRepository = createAiCorrelationRepository({
   compactCorrelationCandidates,
 });
 const durableBackgroundDrains = createDurableBackgroundDrains({
-  durableJobs: () => durableJobs,
+  durableJobs: mutableRuntimeOwners.durableJobs,
   withWriteTransaction: (task) => (
     withSqliteWriteGate(() => withImmediateTransaction(task))
   ),
@@ -654,7 +592,7 @@ const durableBackgroundDrains = createDurableBackgroundDrains({
   authorizedCampaignForAlertId,
   matchesAnalysis: (level) => socAnalysisPolicy.matchesAnalysis(level),
   severityRank,
-  recordMetric: (...args) => pipelineMetrics.record(...args),
+  recordMetric: (...args) => mutableRuntimeOwners.pipelineMetrics().record(...args),
   signalAiWorkers,
   requestJson,
   safeString,
@@ -706,13 +644,15 @@ const {
     warn: (...args) => console.warn(...args),
   },
   durable: {
-    available: () => Boolean(durableJobs),
-    owner: () => durableJobs,
-    pipelineMetrics: () => pipelineMetrics,
-    enqueue: (...args) => durableJobs.enqueue(...args),
-    retirePendingExact: (options) => durableJobs.retirePendingExact(options),
+    available: () => Boolean(mutableRuntimeOwners.durableJobs()),
+    owner: mutableRuntimeOwners.durableJobs,
+    pipelineMetrics: mutableRuntimeOwners.pipelineMetrics,
+    enqueue: (...args) => mutableRuntimeOwners.durableJobs().enqueue(...args),
+    retirePendingExact: (options) => (
+      mutableRuntimeOwners.durableJobs().retirePendingExact(options)
+    ),
     reconcileAuthorizedActivity: reconcileAuthorizedActivityBacklog,
-    recordMetric: (...args) => pipelineMetrics.record(...args),
+    recordMetric: (...args) => mutableRuntimeOwners.pipelineMetrics().record(...args),
     signalAiWorkers,
   },
   transaction: {
@@ -830,7 +770,9 @@ const {
   services: {
     installEnrichmentCache: () => enrichmentCache.install(),
     backfillPcapOutcomes: () => pcapRequestRepository.backfillOutcomes(),
-    completePendingJobs: (...args) => durableJobs.completePendingByDedupeKeys(...args),
+    completePendingJobs: (...args) => (
+      mutableRuntimeOwners.durableJobs().completePendingByDedupeKeys(...args)
+    ),
     resolveDashboardAlertGroup,
     randomUUID: crypto.randomUUID,
     rebuildGroupSummaries: rebuildAlertGroupSummariesUnlocked,
@@ -839,22 +781,22 @@ const {
     persistStableIdentity,
     refreshGroupSummary: refreshAlertGroupSummary,
     queueNotification: queueTelegramNotification,
-    enqueueJob: (...args) => durableJobs.enqueue(...args),
-    recordMetric: (...args) => pipelineMetrics.record(...args),
+    enqueueJob: (...args) => mutableRuntimeOwners.durableJobs().enqueue(...args),
+    recordMetric: (...args) => mutableRuntimeOwners.pipelineMetrics().record(...args),
     signalAiWorkers,
     drainNotificationOutbox: drainTelegramOutbox,
     drainEnrichmentJobs,
     drainPostCommitJobs: drainN8nPostCommitJobs,
   },
   lifecycle: {
-    initializeDurableJobs,
-    installDurableJobs: () => durableJobs.install(),
-    initializePostgresShadowOutbox,
-    installPostgresShadowOutbox: () => postgresShadowOutbox.install(),
-    initializePostgresShadowProjector,
+    initializeDurableJobs: mutableRuntimeOwners.initializeDurableJobs,
+    installDurableJobs: () => mutableRuntimeOwners.durableJobs().install(),
+    initializePostgresShadowOutbox: mutableRuntimeOwners.initializePostgresShadowOutbox,
+    installPostgresShadowOutbox: () => mutableRuntimeOwners.postgresShadowOutbox().install(),
+    initializePostgresShadowProjector: mutableRuntimeOwners.initializePostgresShadowProjector,
     reconcileRecoveredIncidentAttempts: incidentReanalysisRecovery.reconcile,
-    initializePipelineMetrics,
-    installPipelineMetrics: () => pipelineMetrics.install(),
+    initializePipelineMetrics: mutableRuntimeOwners.initializePipelineMetrics,
+    installPipelineMetrics: () => mutableRuntimeOwners.pipelineMetrics().install(),
     backfillStableGroupIdentity,
     rebuildAlertGroupSummaries,
     refreshGroupAliases,
@@ -890,6 +832,7 @@ function sendJson(response, code, payload) {
 }
 
 async function capturePipelineDiskSample() {
+  const pipelineMetrics = mutableRuntimeOwners.pipelineMetrics();
   if (!pipelineMetrics) return;
   const pageCount = await get('PRAGMA page_count');
   const pageSize = await get('PRAGMA page_size');
@@ -936,14 +879,11 @@ const modularRoutes = createRouteComposition({
       authorizedActivityPolicyCount: authorizedActivityPolicy.policies.length,
       authorizedCampaignReconciliation: authorizedCampaignPersistence.reconciliationState(),
       diskCapacitySnapshot,
-      postgresShadowOutbox,
-      postgresShadowProjector,
+      ...mutableRuntimeOwners.snapshot(),
       postgresShadowEnabled,
       ...postgresAuxiliaryStores.state(),
-      durableJobs,
       serviceMetrics,
       postRequestAdmission,
-      pipelineMetrics,
       nowUtc,
     }),
   },
@@ -959,7 +899,9 @@ const modularRoutes = createRouteComposition({
     controlledTransitionAdmission: controlledJobTransitionAuthority.admit,
     transitionJobStatus: durableJobTransitionExecutor.transition,
     applyControlledTransition: controlledJobTransitionAuthority.apply,
-    completePendingByDedupeKeys: (...args) => durableJobs.completePendingByDedupeKeys(...args),
+    completePendingByDedupeKeys: (...args) => (
+      mutableRuntimeOwners.durableJobs().completePendingByDedupeKeys(...args)
+    ),
   },
   analysisRequest: {
     controlledEvaluationMode: () => controlledEvaluationMode,
@@ -982,10 +924,12 @@ const modularRoutes = createRouteComposition({
   pcap: {
     createRequest: (...args) => pcapRequestRepository.createRequest(...args),
     listRequests: (...args) => pcapRequestRepository.listRequests(...args),
-    claimRequest: (...args) => pcapTransferRepository.claimRequest(...args),
-    completeRequest: (...args) => pcapTransferRepository.completeRequest(...args),
-    updateTransferProgress: (...args) => pcapTransferRepository.updateTransferProgress(...args),
-    retryRequest: (...args) => pcapTransferRepository.retryRequest(...args),
+    claimRequest: (...args) => mutableRuntimeOwners.pcapTransferRepository().claimRequest(...args),
+    completeRequest: (...args) => mutableRuntimeOwners.pcapTransferRepository().completeRequest(...args),
+    updateTransferProgress: (...args) => (
+      mutableRuntimeOwners.pcapTransferRepository().updateTransferProgress(...args)
+    ),
+    retryRequest: (...args) => mutableRuntimeOwners.pcapTransferRepository().retryRequest(...args),
     completeAnalysis: (...args) => pcapAnalysisCompletion.complete(...args),
     requeueRequests: (...args) => pcapRequestRepository.requeueRequests(...args),
     signalPcapWorker: (reason) => signalWorker(pcapAnalysisWakePath, reason),
@@ -1086,13 +1030,13 @@ const serviceRuntimeLifecycle = createServiceRuntimeLifecycle({
     durableRecovery: {intervalMs: durableJobRecoveryIntervalMs, recover: durableJobRecovery.recover},
     pipelineDisk: {intervalMs: pipelineDiskSampleIntervalMs, capture: capturePipelineDiskSample},
     postgresShadow: {
-      enabled: () => Boolean(postgresShadowProjector),
+      enabled: () => Boolean(mutableRuntimeOwners.postgresShadowProjector()),
       intervalMs: postgresShadowIntervalMs,
-      drain: () => postgresShadowProjector.drain(),
+      drain: () => mutableRuntimeOwners.postgresShadowProjector().drain(),
     },
     pipelineMetrics: {
       intervalMs: 60 * 60 * 1000,
-      prune: () => pipelineMetrics.prune(),
+      prune: () => mutableRuntimeOwners.pipelineMetrics().prune(),
       withWriteGate: withSqliteWriteGate,
     },
   },

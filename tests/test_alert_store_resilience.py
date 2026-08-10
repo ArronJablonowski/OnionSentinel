@@ -45,6 +45,13 @@ RUNTIME_FOUNDATION_COMPOSITION = (
     / "composition"
     / "runtime_foundation_composition.js"
 )
+MUTABLE_RUNTIME_OWNERS = (
+    REPO_ROOT
+    / "n8n"
+    / "alert_store"
+    / "composition"
+    / "mutable_runtime_owners.js"
+)
 DISK_WRITE_ADMISSION = REPO_ROOT / "n8n" / "alert_store" / "services" / "disk_write_admission.js"
 WORKER_WAKE_SIGNALING = REPO_ROOT / "n8n" / "alert_store" / "services" / "worker_wake_signaling.js"
 BEACON_PERSISTENCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "beacon_persistence.js"
@@ -107,6 +114,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.runtime_foundation_composition = RUNTIME_FOUNDATION_COMPOSITION.read_text(
             encoding="utf-8"
         )
+        cls.mutable_runtime_owners = MUTABLE_RUNTIME_OWNERS.read_text(encoding="utf-8")
         cls.disk_write_admission = DISK_WRITE_ADMISSION.read_text(encoding="utf-8")
         cls.worker_wake_signaling = WORKER_WAKE_SIGNALING.read_text(encoding="utf-8")
         cls.beacon_persistence = BEACON_PERSISTENCE.read_text(encoding="utf-8")
@@ -128,8 +136,11 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertNotIn("withEnrichmentGate", self.enrichment_orchestrator)
 
     def test_enrichment_is_durable_and_outside_ingest_latency(self) -> None:
-        self.assertIn("require('./lib/durable_job_queue')", self.code)
-        self.assertIn("enqueueJob: (...args) => durableJobs.enqueue(...args)", self.code)
+        self.assertIn("require('../lib/durable_job_queue')", self.mutable_runtime_owners)
+        self.assertIn(
+            "enqueueJob: (...args) => mutableRuntimeOwners.durableJobs().enqueue(...args)",
+            self.code,
+        )
         self.assertIn("await enqueueJob('public_enrichment'", self.alert_ingest_orchestrator)
         self.assertIn("async function drainEnrichmentJobs()", self.code)
         store = self.alert_ingest_orchestrator.split("async function store(rawAlert)", 1)[1]
@@ -417,7 +428,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertLess(heartbeat_index, admission_index)
 
     def test_pipeline_observability_is_bounded_and_outside_network_paths(self) -> None:
-        self.assertIn("require('./lib/pipeline_metrics')", self.code)
+        self.assertIn("require('../lib/pipeline_metrics')", self.mutable_runtime_owners)
         self.assertIn("PIPELINE_EVENT_RETENTION_HOURS", self.runtime_configuration)
         self.assertIn("state.pipelineMetrics.snapshot()", self.health_service)
         self.assertIn("pipelineMetrics.captureDiskSample", self.code)
@@ -482,7 +493,10 @@ class AlertStoreResilienceTest(unittest.TestCase):
             "await enqueueJob('n8n_post_commit'",
             self.alert_ingest_orchestrator,
         )
-        self.assertIn("enqueueJob: (...args) => durableJobs.enqueue(...args)", self.code)
+        self.assertIn(
+            "enqueueJob: (...args) => mutableRuntimeOwners.durableJobs().enqueue(...args)",
+            self.code,
+        )
         self.assertNotIn("requestJson({", transaction)
         self.assertIn("void drainPostCommitJobs();", after_commit)
         self.assertIn("N8N_POST_COMMIT_MAX_ATTEMPTS", self.runtime_configuration)

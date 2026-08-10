@@ -47,7 +47,7 @@ class PostgresQueueMigrationTest(unittest.TestCase):
 
     def test_shadow_pool_outage_cannot_crash_authoritative_service(self):
         service = (
-            ROOT / "n8n/alert_store/alert_store.js"
+            ROOT / "n8n/alert_store/composition/mutable_runtime_owners.js"
         ).read_text(encoding="utf-8")
         self.assertIn("pool.on('error'", service)
         self.assertIn("Shadow availability must never", service)

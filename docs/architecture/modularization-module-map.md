@@ -2356,6 +2356,12 @@ validation remains in the legacy entrypoint and therefore still precedes log
 or database creation; credential-bearing values are passed only to their
 existing bounded adapters.
 
+`composition/mutable_runtime_owners.js` explicitly owns the lazily initialized
+durable-job queue, PostgreSQL shadow outbox/projector, pipeline metrics, and
+PCAP transfer repository. Request, recovery, health, and background-worker
+composition access those instances through owner functions, preserving the
+existing startup sequence without sharing facade-level mutable globals.
+
 ## Deployment Map
 
 The current production installer copies individual files. These additions are
