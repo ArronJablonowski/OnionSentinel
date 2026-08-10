@@ -28,7 +28,7 @@
       "max_lines": 1147
     },
     "n8n/bin/onion_sentinel_harness.py": {
-      "max_lines": 4272
+      "max_lines": 3655
     },
     "n8n/bin/pcap_evidence_query.py": {
       "max_lines": 915
@@ -293,7 +293,7 @@
     "n8n/bin/manage-agent-memory.py::main": {
       "max_lines": 102
     },
-    "n8n/bin/onion_sentinel_harness.py::HarnessPolicy.from_dict": {
+    "n8n/bin/harness_policy.py::HarnessPolicy.from_dict": {
       "max_complexity": 35,
       "max_lines": 130
     },

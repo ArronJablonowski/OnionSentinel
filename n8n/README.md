@@ -42,6 +42,7 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `bin/manage-agent-memory.py` | Query/writeback CLI adapter for SOC Analyst, Incident Responder, SIEM Engineer, Cyber Threat Intel, and Threat Hunter workflows. |
 | `bin/verify-agent-memory.py` | Read-only deployment verifier for every agent prompt, role memory, shared memory, permissions, and retrieval contract. |
 | `bin/onion_sentinel_harness.py` | Disabled-by-default investigation control plane with role policy, budgets, durable state, evidence/model/tool/decision ledgers, memory gates, and a hash-chained audit trace. |
+| `bin/harness_policy.py` | Package-free harness activation, identity, capability, budget, authorization, and policy-file contracts. |
 | `config/investigation_harness_policy.json` | Safe checked-in harness policy template (`enabled: false`, `mode: shadow`); the installer preserves the operator-owned runtime copy. |
 | `config/investigation_harness_policy.schema.json` | Strict JSON Schema for the versioned harness policy contract. |
 | `../operations/evaluate-harness-traces.py` | Read-only integrity and aggregate-quality evaluator for the private runtime harness database. |

@@ -55,6 +55,51 @@ def top_level_function(path: Path, name: str) -> ast.FunctionDef:
 
 
 class ModularizationCompatibilityContractTests(unittest.TestCase):
+    def test_harness_supports_isolated_file_loader_import(self) -> None:
+        harness = ROOT / "n8n" / "bin" / "onion_sentinel_harness.py"
+        script = (
+            "import importlib.util,sys;"
+            f"p={str(harness)!r};"
+            "s=importlib.util.spec_from_file_location('isolated_harness',p);"
+            "m=importlib.util.module_from_spec(s);"
+            "sys.modules[s.name]=m;"
+            "s.loader.exec_module(m);"
+            "assert m.HarnessPolicy and m.HarnessStore and m.HarnessRun;"
+            "assert callable(m.start_harness_run)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_harness_job_envelope_has_one_dataclass_boundary(self) -> None:
+        harness = ROOT / "n8n" / "bin" / "onion_sentinel_harness.py"
+        tree = ast.parse(harness.read_text(encoding="utf-8"), filename=str(harness))
+        envelope = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "JobEnvelope"
+        )
+        self.assertEqual(len(envelope.decorator_list), 1)
+
+        policy_path = ROOT / "n8n" / "bin" / "harness_policy.py"
+        policy_tree = ast.parse(
+            policy_path.read_text(encoding="utf-8"), filename=str(policy_path)
+        )
+        policy_classes = {
+            node.name: node
+            for node in policy_tree.body
+            if isinstance(node, ast.ClassDef)
+        }
+        for name in ("PolicyDecision", "HarnessPolicy"):
+            with self.subTest(name=name):
+                self.assertEqual(len(policy_classes[name].decorator_list), 1)
+
     def test_software_inventory_supports_isolated_file_loader_import(self) -> None:
         inventory = ROOT / "onion-sentinel-dashboard" / "software_inventory.py"
         script = (

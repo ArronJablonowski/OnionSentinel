@@ -708,6 +708,15 @@ SQLite connector and status reporter at call time.
 | Memory promotion decision | `harness.memory` | decision only; promotion remains post-commit |
 | Maintenance/reconciliation | `harness.maintenance` | separate supervised operation |
 
+The first ARR-86 extraction implements the policy boundary as
+`n8n/bin/harness_policy.py`. It owns external-harness exclusion, role/task/run/
+stage/trust identities, capability and approval policy, bounded budgets,
+default-deny policy parsing, immutable authorization decisions, safe disabled
+defaults, and owner-controlled policy-file loading. The legacy harness re-exports
+the exact symbols; SQLite and run execution depend inward on this policy module.
+The unchanged legacy `HarnessPolicy.from_dict` validator retains its exact
+ratcheting allowance under the new owner and may not grow.
+
 Existing SQLite files, schema versions, hash-chain calculations, terminal
 digests, skill attestations, and controlled-evaluation behavior are contracts.
 
