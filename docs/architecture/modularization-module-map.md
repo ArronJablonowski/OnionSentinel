@@ -745,6 +745,12 @@ registration. It composes with the store foundation as a mixin; all writes retai
 `BEGIN IMMEDIATE`, mutable-run checks, idempotency keys, commit-before-audit
 ordering, and the original snapshot return contract.
 
+`n8n/bin/harness_store_decision_repository.py` owns evidence-bound hypothesis
+revision and decision ledger writes. It preserves backward-only revision
+rejection, same-revision collision detection, citation requirements for
+supported/contradicted hypotheses, bounded decision projection, canonical
+response/rationale digests, and commit-before-audit ordering.
+
 Existing SQLite files, schema versions, hash-chain calculations, terminal
 digests, skill attestations, and controlled-evaluation behavior are contracts.
 

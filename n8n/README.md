@@ -46,6 +46,7 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `bin/harness_policy.py` | Package-free harness activation, identity, capability, budget, authorization, and policy-file contracts. |
 | `bin/harness_query_contract.py` | Bounded query-result counting, truncation detection, and provenance-bound per-query status resolution. |
 | `bin/harness_store_foundation.py` | Owner-only SQLite connection/schema lifecycle, audit logging, event insertion, mutability, and stage-update foundation. |
+| `bin/harness_store_decision_repository.py` | Evidence-bound hypothesis revision and decision ledger repository. |
 | `bin/harness_store_run_repository.py` | Atomic run creation, event/stage transitions, and evidence registration repository. |
 | `config/investigation_harness_policy.json` | Safe checked-in harness policy template (`enabled: false`, `mode: shadow`); the installer preserves the operator-owned runtime copy. |
 | `config/investigation_harness_policy.schema.json` | Strict JSON Schema for the versioned harness policy contract. |
