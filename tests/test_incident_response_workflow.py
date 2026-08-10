@@ -36,6 +36,20 @@ INCIDENT_REANALYSIS_RUN_PERSISTENCE_PATH = (
     / "services"
     / "incident_reanalysis_run_persistence.js"
 )
+INCIDENT_REANALYSIS_JOB_OWNERSHIP_PATH = (
+    REPO_ROOT
+    / "n8n"
+    / "alert_store"
+    / "services"
+    / "incident_reanalysis_job_ownership.js"
+)
+INCIDENT_REANALYSIS_ATTEMPT_LIFECYCLE_PATH = (
+    REPO_ROOT
+    / "n8n"
+    / "alert_store"
+    / "services"
+    / "incident_reanalysis_attempt_lifecycle.js"
+)
 ANALYSIS_REQUEST_ROUTES_PATH = (
     REPO_ROOT / "n8n" / "alert_store" / "routes" / "analysis_request_routes.js"
 )
@@ -1091,6 +1105,12 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         run_persistence_source = INCIDENT_REANALYSIS_RUN_PERSISTENCE_PATH.read_text(
             encoding="utf-8"
         )
+        job_ownership_source = INCIDENT_REANALYSIS_JOB_OWNERSHIP_PATH.read_text(
+            encoding="utf-8"
+        )
+        attempt_lifecycle_source = (
+            INCIDENT_REANALYSIS_ATTEMPT_LIFECYCLE_PATH.read_text(encoding="utf-8")
+        )
         routes = ANALYSIS_REQUEST_ROUTES_PATH.read_text(encoding="utf-8")
         binding_source = INCIDENT_REANALYSIS_BINDING_PATH.read_text(encoding="utf-8")
         completion_source = INCIDENT_ANALYSIS_COMPLETION_PATH.read_text(encoding="utf-8")
@@ -1100,16 +1120,20 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS incident_reanalysis_runs", schema)
         self.assertIn("CREATE TABLE IF NOT EXISTS incident_reanalysis_run_cases", schema)
         self.assertIn("CREATE TABLE IF NOT EXISTS incident_reanalysis_attempts", schema)
-        self.assertIn("async function requestIncidentReanalysis", source)
+        self.assertNotIn("async function requestIncidentReanalysis", source)
         self.assertIn("createIncidentReanalysisRequest", source)
+        self.assertIn("async function request(payload", request_source)
         self.assertIn("reanalysis_run_id: context.runId", request_source)
         self.assertIn("case_id: normalized.storedCaseId", request_source)
         self.assertIn("alert_id: normalized.representativeAlertId", request_source)
         self.assertIn("group_id: normalized.groupId", request_source)
         self.assertIn("dashboard_group_id: normalized.dashboardGroupId", request_source)
-        self.assertIn("async function updateIncidentReanalysisProgress", source)
-        self.assertIn("async function bindIncidentReanalysisResult", source)
-        self.assertIn("incidentReanalysisAttemptId(leaseToken)", source)
+        self.assertNotIn("async function updateIncidentReanalysisProgress", source)
+        self.assertNotIn("async function bindIncidentReanalysisResult", source)
+        self.assertNotIn("function incidentReanalysisAttemptId", source)
+        self.assertIn("async function update({job, requestedStatus", attempt_lifecycle_source)
+        self.assertIn("async function bindResult({", binding_source)
+        self.assertIn("function attemptId(leaseToken)", job_ownership_source)
         self.assertIn(
             "WHERE case_id = ? AND status = 'queued' AND run_id != ?",
             run_persistence_source,
