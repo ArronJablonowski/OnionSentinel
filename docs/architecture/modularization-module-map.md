@@ -2769,6 +2769,15 @@ composition. It preserves existing HTML, authentication messaging, password
 setup guidance, metric formatting, cron/admin status seams, and the public
 `render_home(reports, host, port)` compatibility signature.
 
+### Portal foundation runtime
+
+`portal_foundation_runtime.py` owns timestamp normalization, module-instance
+bound asset/DHCP/software compatibility reads, PCAP transfer-duration
+projection, bounded local beacon reads, alert-store pipeline health enrichment,
+and PCAP workflow health composition. It preserves same-name reload isolation,
+read-source precedence, response bounds, legacy transfer derivation, and
+read-only health dependencies.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:

@@ -56,6 +56,7 @@ import portal_soc_core_runtime
 import portal_soc_detail_runtime
 import portal_delivery_runtime
 import portal_dashboard_runtime
+import portal_foundation_runtime
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
@@ -779,222 +780,30 @@ class CronJobSummary:
     sort_key: str
 
 
-def format_iso_timestamp(value: dt.datetime, *, timespec: str = "seconds", utc_z: bool = False) -> str:
-    """Render project timestamps as ISO 8601 with the T separator replaced by two spaces."""
-    if value.tzinfo is None:
-        value = value.astimezone()
-    if utc_z:
-        value = value.astimezone(dt.timezone.utc)
-    rendered = value.isoformat(timespec=timespec).replace("T", "  ")
-    return rendered.replace("+00:00", "Z") if utc_z else rendered
-
-
-def now_iso_local() -> str:
-    return format_iso_timestamp(dt.datetime.now().astimezone())
-
-
-def now_iso_utc() -> str:
-    return format_iso_timestamp(dt.datetime.now(dt.timezone.utc), utc_z=True)
-
-
-def parse_iso_timestamp(value: object) -> dt.datetime:
-    """Parse current and historical ISO timestamp separators."""
-    cleaned = str(value).strip()
-    cleaned = ISO_DATE_TIME_SEPARATOR_RE.sub(r"\1T", cleaned).replace("Z", "+00:00")
-    return dt.datetime.fromisoformat(cleaned)
-
-
-_ASSET_RUNTIME = sys.modules[__name__]
-
-
-def _asset_inventory_module():
-    """Load the shared strict inventory implementation in source and runtime layouts."""
-    return portal_asset_runtime.asset_inventory_module(_ASSET_RUNTIME)
-
-
-def load_asset_inventory_data() -> tuple[dict, str]:
-    """Return the PostgreSQL export used by investigation identity resolution."""
-    return portal_asset_runtime.load_asset_inventory_data(_ASSET_RUNTIME)
-
-
-def _asset_record_state(asset: dict, observed_at: dt.datetime) -> str:
-    return asset_record_state(asset, observed_at, parse_iso_timestamp)
-
-
-def _asset_public_record(asset: dict, state: str) -> dict:
-    return asset_public_record(asset, state)
-
-
-def load_dhcp_asset_discovery_state_data() -> tuple[dict, str]:
-    """Load the bounded collector state without treating absence as an error."""
-    return DhcpStateRepository(
-        database_enabled=ASSET_DATABASE_READ_ENABLED,
-        fetch_json=alert_store_get_json,
-        state_path=Path(DHCP_ASSET_DISCOVERY_STATE_FILE),
-        maximum_bytes=DHCP_ASSET_DISCOVERY_MAX_BYTES,
-    ).load()
-
-
-def _mac_address_scope(value: object) -> str:
-    return mac_address_scope(value)
-
-
-def _annotate_exact_ip_dhcp_macs(records: list[dict], observed_at: dt.datetime) -> dict:
-    return portal_asset_runtime.annotate_exact_ip_dhcp_macs(
-        _ASSET_RUNTIME, records, observed_at
-    )
-
-
-def _dhcp_asset_inventory_overlay(
-    inventory: dict, observed_at: dt.datetime
-) -> tuple[dict[str, dict], list[dict], dict]:
-    return portal_asset_runtime.dhcp_asset_inventory_overlay(
-        _ASSET_RUNTIME, inventory, observed_at
-    )
-
-
-def asset_inventory_response(
-    *,
-    observed_at: dt.datetime | None = None,
-    query: dict[str, list[str]] | None = None,
-) -> tuple[int, dict]:
-    """Return current authoritative asset-to-address assignments."""
-    return portal_asset_runtime.asset_inventory_response(
-        _ASSET_RUNTIME, observed_at=observed_at, query=query
-    )
-
-
-def software_asset_label_snapshot() -> AssetLabelSnapshot:
-    """Load complete public identities before resolving pseudonymous hosts."""
-    return portal_asset_runtime.software_asset_label_snapshot(_ASSET_RUNTIME)
-
-
-def software_inventory_response(
-    *,
-    observed_at: dt.datetime | None = None,
-    query: dict[str, list[str]] | None = None,
-) -> tuple[int, dict]:
-    """Return only the bounded, collector-produced Software Inventory view."""
-    return portal_asset_runtime.software_inventory_response(
-        _ASSET_RUNTIME, observed_at=observed_at, query=query
-    )
-
-
-def resolve_asset_ip(
-    value: object, observed_at: object, inventory: dict | None = None
-) -> dict:
-    return portal_asset_runtime.resolve_asset_ip(
-        _ASSET_RUNTIME, value, observed_at, inventory
-    )
-
-
-def dhcp_asset_discovery_response(
-    *, observed_at: dt.datetime | None = None
-) -> tuple[int, dict]:
-    """Return DHCP candidates reconciled against authoritative inventory."""
-    return portal_asset_runtime.dhcp_asset_discovery_response(
-        _ASSET_RUNTIME, observed_at=observed_at
-    )
-
-
-def pcap_transfer_duration_seconds(
-    row: sqlite3.Row, *, has_transfer_duration: bool
-) -> int | None:
-    """Return persisted PCAP transfer time, deriving legacy rows when possible."""
-    if has_transfer_duration and row["transfer_duration_seconds"] is not None:
-        return max(0, int(row["transfer_duration_seconds"]))
-    if not row["claimed_at"] or not row["completed_at"]:
-        return None
-    try:
-        started = parse_iso_timestamp(row["claimed_at"])
-        completed = parse_iso_timestamp(row["completed_at"])
-        return max(0, round((completed - started).total_seconds()))
-    except (TypeError, ValueError):
-        return None
-
-
-def format_timestamp_text(value: object, *, fallback: str = "unknown time") -> str:
-    if not value:
-        return fallback
-    try:
-        parsed = value if isinstance(value, dt.datetime) else parse_iso_timestamp(value)
-        if parsed.tzinfo is None:
-            parsed = parsed.astimezone()
-        return format_iso_timestamp(parsed.astimezone())
-    except Exception:
-        text = str(value).strip()
-        return ISO_DATE_TIME_SEPARATOR_RE.sub(r"\1  ", text) if text else fallback
-
-
-def _safe_read_json(path: Path, fallback: object) -> object:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return fallback
-
-
-def _freshest_existing_path(paths: list[Path]) -> Path | None:
-    existing = [path for path in paths if path.exists()]
-    if not existing:
-        return None
-    return max(existing, key=lambda path: path.stat().st_mtime)
-
-
-def n8n_beacon_history_response(query: dict[str, list[str]]) -> dict[str, object]:
-    now = dt.datetime.now(dt.timezone.utc)
-    history_path = _freshest_existing_path([
-        SOC_ALERT_N8N_BEACON_HISTORY_FILE,
-        HOME / "SOC Alerts Web" / "n8n-beacon-history.json",
-        HOME / "n8n-local" / "alert_store_data" / "n8n-beacon-history.json",
-    ])
-    raw_history = _safe_read_json(history_path, []) if history_path else []
-    history = raw_history if isinstance(raw_history, list) else []
-    latest_path = _freshest_existing_path([
-        SOC_ALERT_N8N_BEACON_FILE,
-        HOME / "SOC Alerts Web" / "n8n-beacon.json",
-        HOME / "n8n-local" / "alert_store_data" / "n8n-beacon.json",
-    ])
-    if not history and latest_path:
-        latest = _safe_read_json(latest_path, {})
-        if isinstance(latest, dict):
-            history = [latest]
-
-    pipeline: dict[str, object] = {"available": False, "stages": [], "disk": {}}
-    try:
-        metrics_payload = alert_store_get_json("/metrics", timeout=2.0)
-        pipeline = dict((metrics_payload.get("metrics") or {}).get("pipeline") or {})
-        pipeline["available"] = True
-    except RuntimeError as exc:
-        pipeline["error"] = str(exc)
-
-    return project_beacon_history(
-        query, history, now=now, generated_at=now_iso_local(),
-        history_source=str(history_path) if history_path else None,
-        pcap=pcap_workflow_health_response(), pipeline=pipeline,
-        parse_timestamp=parse_iso_timestamp, format_timestamp=format_iso_timestamp,
-    )
-
-
-def pcap_workflow_health_response() -> dict[str, object]:
-    """Return compact PCAP broker/parser health for the System Health page."""
-    sources = PcapHealthSources(
-        store_db=SOC_ALERT_STORE_DB,
-        artifact_dir=SOC_ALERT_PCAP_ARTIFACT_DIR,
-        analysis_dir=SOC_ALERT_PCAP_ANALYSIS_DIR,
-        relay_state_paths=(
-            SOC_ALERT_PCAP_WORKFLOW_STATE_FILE,
-            HOME / "SOC Alerts Web" / "pcap-workflow-state.json",
-            HOME / "n8n-local" / "alert_store_data" / "pcap-workflow-state.json",
-        ),
-        db_connect=soc_alert_db_connect,
-        table_exists=sqlite_table_exists,
-        parse_timestamp=parse_iso_timestamp,
-        format_timestamp=format_iso_timestamp,
-        directory_size=directory_size_bytes,
-        freshest_path=_freshest_existing_path,
-        read_json=_safe_read_json,
-    )
-    return compose_pcap_workflow_health(sources, pcap_transfer_duration_seconds)
+_FOUNDATION_RUNTIME = sys.modules[__name__]
+format_iso_timestamp = partial(portal_foundation_runtime.format_iso_timestamp, _FOUNDATION_RUNTIME)
+now_iso_local = partial(portal_foundation_runtime.now_iso_local, _FOUNDATION_RUNTIME)
+now_iso_utc = partial(portal_foundation_runtime.now_iso_utc, _FOUNDATION_RUNTIME)
+parse_iso_timestamp = partial(portal_foundation_runtime.parse_iso_timestamp, _FOUNDATION_RUNTIME)
+_asset_inventory_module = partial(portal_foundation_runtime.asset_inventory_module, _FOUNDATION_RUNTIME)
+load_asset_inventory_data = partial(portal_foundation_runtime.load_asset_inventory_data, _FOUNDATION_RUNTIME)
+_asset_record_state = partial(portal_foundation_runtime.asset_record_state, _FOUNDATION_RUNTIME)
+_asset_public_record = partial(portal_foundation_runtime.asset_public_record, _FOUNDATION_RUNTIME)
+load_dhcp_asset_discovery_state_data = partial(portal_foundation_runtime.load_dhcp_asset_discovery_state_data, _FOUNDATION_RUNTIME)
+_mac_address_scope = partial(portal_foundation_runtime.mac_address_scope, _FOUNDATION_RUNTIME)
+_annotate_exact_ip_dhcp_macs = partial(portal_foundation_runtime.annotate_exact_ip_dhcp_macs, _FOUNDATION_RUNTIME)
+_dhcp_asset_inventory_overlay = partial(portal_foundation_runtime.dhcp_asset_inventory_overlay, _FOUNDATION_RUNTIME)
+asset_inventory_response = partial(portal_foundation_runtime.asset_inventory_response, _FOUNDATION_RUNTIME)
+software_asset_label_snapshot = partial(portal_foundation_runtime.software_asset_label_snapshot, _FOUNDATION_RUNTIME)
+software_inventory_response = partial(portal_foundation_runtime.software_inventory_response, _FOUNDATION_RUNTIME)
+resolve_asset_ip = partial(portal_foundation_runtime.resolve_asset_ip, _FOUNDATION_RUNTIME)
+dhcp_asset_discovery_response = partial(portal_foundation_runtime.dhcp_asset_discovery_response, _FOUNDATION_RUNTIME)
+pcap_transfer_duration_seconds = partial(portal_foundation_runtime.pcap_transfer_duration_seconds, _FOUNDATION_RUNTIME)
+format_timestamp_text = partial(portal_foundation_runtime.format_timestamp_text, _FOUNDATION_RUNTIME)
+_safe_read_json = partial(portal_foundation_runtime.safe_read_json, _FOUNDATION_RUNTIME)
+_freshest_existing_path = partial(portal_foundation_runtime.freshest_existing_path, _FOUNDATION_RUNTIME)
+n8n_beacon_history_response = partial(portal_foundation_runtime.n8n_beacon_history_response, _FOUNDATION_RUNTIME)
+pcap_workflow_health_response = partial(portal_foundation_runtime.pcap_workflow_health_response, _FOUNDATION_RUNTIME)
 
 
 def ensure_admin_token() -> str:
