@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+import json
 import sys
 import tempfile
 import unittest
 from collections import Counter
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +20,110 @@ SPEC.loader.exec_module(BENCHMARK)
 
 
 class OllamaCybersecurityBenchmarkTests(unittest.TestCase):
+    def test_installed_models_preserves_exact_order_and_bounds_the_tags_response(self) -> None:
+        payload = json.dumps({
+            "models": [
+                {"name": "qwen3:30b"},
+                {"name": " devstral:latest "},
+                {"name": ""},
+                {},
+            ]
+        }).encode("utf-8")
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, size):
+                self.requested_size = size
+                return payload
+
+        response = Response()
+        with mock.patch.object(BENCHMARK.urllib.request, "urlopen", return_value=response) as opener:
+            models = BENCHMARK.installed_models("http://127.0.0.1:11434/", timeout=7)
+
+        self.assertEqual(models, ["qwen3:30b", "devstral:latest"])
+        request = opener.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:11434/api/tags")
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(opener.call_args.kwargs, {"timeout": 7})
+        self.assertEqual(response.requested_size, BENCHMARK.MAX_RESPONSE_BYTES + 1)
+
+    def test_run_batch_retries_with_exact_bounded_chat_contract(self) -> None:
+        cases = list(BENCHMARK.benchmark_cases()[:1])
+        success = {
+            "message": {"content": '{"results":[]}'},
+            "eval_count": 12,
+            "eval_duration": 3_000_000_000,
+        }
+        with (
+            mock.patch.object(
+                BENCHMARK,
+                "_bounded_json_request",
+                side_effect=[TimeoutError("first"), success],
+            ) as request,
+            mock.patch.object(BENCHMARK.time, "sleep") as sleep,
+            mock.patch.object(BENCHMARK.time, "monotonic", side_effect=[1.0, 2.0, 4.0]),
+        ):
+            result = BENCHMARK.run_batch(
+                "http://127.0.0.1:11434/",
+                "model:exact-tag",
+                cases,
+                repetition=2,
+                timeout=17,
+                retries=1,
+                temperature=0.25,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["attempt"], 2)
+        self.assertEqual(result["wall_seconds"], 2.0)
+        self.assertEqual(request.call_count, 2)
+        url, request_payload, timeout = request.call_args.args
+        self.assertEqual(url, "http://127.0.0.1:11434/api/chat")
+        self.assertEqual(timeout, 17)
+        self.assertEqual(request_payload["model"], "model:exact-tag")
+        self.assertEqual(request_payload["options"], {"temperature": 0.25, "num_predict": 3072})
+        self.assertEqual(request_payload["keep_alive"], "10m")
+        self.assertFalse(request_payload["stream"])
+        self.assertFalse(request_payload["think"])
+        sleep.assert_called_once_with(1.0)
+
+    def test_main_filters_models_in_requested_order_and_persists_each_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "benchmark.json"
+            results = [
+                {"model": "model-b", "percent": 90.0, "wall_seconds_total": 1.0},
+                {"model": "model-a", "percent": 80.0, "wall_seconds_total": 2.0},
+            ]
+            with (
+                mock.patch.object(
+                    BENCHMARK,
+                    "installed_models",
+                    return_value=["model-a", "model-b", "unrequested"],
+                ),
+                mock.patch.object(BENCHMARK, "benchmark_model", side_effect=results) as benchmark,
+                mock.patch.object(BENCHMARK, "write_markdown") as markdown,
+                mock.patch.object(sys, "stdout", new_callable=io.StringIO),
+                mock.patch.object(sys, "stderr", new_callable=io.StringIO) as stderr,
+            ):
+                status = BENCHMARK.main([
+                    "--models", "model-b", "missing", "model-a",
+                    "--output", str(output),
+                ])
+
+            self.assertEqual(status, 0)
+            self.assertEqual([call.args[0] for call in benchmark.call_args_list], ["model-b", "model-a"])
+            self.assertEqual(markdown.call_count, 2)
+            persisted = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["requested_models"], ["model-b", "missing", "model-a"])
+            self.assertEqual(persisted["skipped_models"], ["missing"])
+            self.assertEqual([item["model"] for item in persisted["models"]], ["model-b", "model-a"])
+            self.assertIn("Skipping unavailable model(s): missing", stderr.getvalue())
+
     def test_matrix_has_six_balanced_domains_and_unique_ids(self) -> None:
         cases = BENCHMARK.benchmark_cases()
         self.assertEqual(len(cases), 36)
