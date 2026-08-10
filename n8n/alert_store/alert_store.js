@@ -446,6 +446,24 @@ const enrichmentProviderClient = createEnrichmentProviderClient({
   formatProjectTimestamp,
 });
 const {requestJson} = enrichmentProviderClient;
+const sqliteBusyTimeoutMs = Number(process.env.ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS || 30000);
+const sqliteRuntime = createSqliteRuntime({
+  fs,
+  path,
+  processApi: process,
+  sqlite3,
+  dbPath,
+  controlledEvaluationMode,
+  busyTimeoutMs: sqliteBusyTimeoutMs,
+});
+const {
+  database: db,
+  run,
+  get,
+  all,
+  withWriteGate: withSqliteWriteGate,
+  withImmediateTransaction,
+} = sqliteRuntime;
 const {
   queueTelegramNotification,
   drainTelegramOutbox,
@@ -489,17 +507,6 @@ function writeN8nBeacon(stage, alert = {}, result = null, error = null) {
   return beaconPersistence.writeBeacon(stage, alert, result, error);
 }
 
-const sqliteBusyTimeoutMs = Number(process.env.ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS || 30000);
-const sqliteRuntime = createSqliteRuntime({
-  fs,
-  path,
-  processApi: process,
-  sqlite3,
-  dbPath,
-  controlledEvaluationMode,
-  busyTimeoutMs: sqliteBusyTimeoutMs,
-});
-const db = sqliteRuntime.database;
 const sqliteJournalMode = String(process.env.ALERT_STORE_SQLITE_JOURNAL_MODE || 'DELETE').toUpperCase();
 const sqliteSynchronous = String(process.env.ALERT_STORE_SQLITE_SYNCHRONOUS || 'FULL').toUpperCase();
 const sqliteTempStore = String(process.env.ALERT_STORE_SQLITE_TEMP_STORE || 'DEFAULT').toUpperCase();
@@ -554,18 +561,6 @@ const {
   alertGroupKeySql,
 });
 
-function run(sql, params = []) {
-  return sqliteRuntime.run(sql, params);
-}
-
-function get(sql, params = []) {
-  return sqliteRuntime.get(sql, params);
-}
-
-function all(sql, params = []) {
-  return sqliteRuntime.all(sql, params);
-}
-
 const enrichmentScheduler = createProviderScheduler({
   failureThreshold: enrichmentCircuitFailureThreshold,
   resetMs: enrichmentCircuitResetMs,
@@ -603,14 +598,6 @@ const serviceMetrics = {
   ingest_latency_ms_max: 0,
 };
 const postRequestAdmission = createRequestAdmission(httpMaxActivePosts);
-
-function withSqliteWriteGate(task) {
-  return sqliteRuntime.withWriteGate(task);
-}
-
-async function withImmediateTransaction(task) {
-  return sqliteRuntime.withImmediateTransaction(task);
-}
 
 const enrichmentCache = createEnrichmentCache({
   run,

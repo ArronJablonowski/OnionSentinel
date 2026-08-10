@@ -443,6 +443,14 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("function all(sql, params = [])", self.sqlite_runtime)
         self.assertIn("function withWriteGate", self.sqlite_runtime)
         self.assertIn("async function withImmediateTransaction", self.sqlite_runtime)
+        for forwarding_function in (
+            "run",
+            "get",
+            "all",
+            "withSqliteWriteGate",
+            "withImmediateTransaction",
+        ):
+            self.assertNotIn(f"function {forwarding_function}", self.code)
         self.assertIn("await run('BEGIN IMMEDIATE')", self.sqlite_runtime)
         self.assertIn("activeSqliteWrites", self.sqlite_runtime)
 
