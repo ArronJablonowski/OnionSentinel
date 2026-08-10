@@ -56,6 +56,13 @@ third-party certificates or binary fixtures and are not repository content.
 Use `git status --ignored` separately when auditing whether local dependency or
 test-output directories remain correctly ignored.
 
+The sole local-workspace exception is `.codex/config.toml`, and only when it is
+untracked, Git-ignored, a regular non-symlink file, and mode `0600`. The scanner
+still checks that exact ignored file for high-confidence secret patterns and
+reports only a matching filename, never the matching credential text. A tracked,
+unignored, symlinked, non-owner-only, or differently named `.codex` file remains
+forbidden. This exception does not apply to production runtime configuration.
+
 ## Frontend UI QA
 
 The Playwright chaos/regression suites are documented in
