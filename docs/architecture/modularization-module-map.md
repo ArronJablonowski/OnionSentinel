@@ -757,6 +757,12 @@ collisions, enforce-vs-shadow limits, provider/model/path/harness attribution,
 read-only/query coverage, input/output digests, and commit-before-audit stage
 updates retain their existing transaction and idempotency behavior.
 
+`n8n/bin/harness_store_trace_repository.py` owns terminal settlement, bounded
+snapshots, full event/hash/ledger verification, and public trace export. It
+preserves terminal immutability, ledger-manifest version compatibility,
+hypothesis-manifest and payload digests, event-chain continuity, constant-time
+digest comparisons, and verification-before-export behavior.
+
 Existing SQLite files, schema versions, hash-chain calculations, terminal
 digests, skill attestations, and controlled-evaluation behavior are contracts.
 
