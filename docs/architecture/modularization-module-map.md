@@ -1923,6 +1923,12 @@ title/category projection, deduplication, ordering, and SOC-dashboard
 selection. `report_portal.py` retains the configured roots, concrete HTML
 renderers, compatibility function names, response encoding, and socket writes.
 
+`portal_metric_detail_renderer.py` owns the escaped HTML shell and operational
+metric detail projections for update, backup, uptime, disk, and portal-refresh
+views. It receives already-collected metrics and formatting callbacks;
+`report_portal.py` retains host probes, configured paths, and compatibility
+function names.
+
 `portal_catalog_delivery.py` owns traversal-safe static and report asset
 resolution, file read and error policy, MIME selection, lazy report lookup,
 report-open redirects, and download response projection. `report_portal.py`
