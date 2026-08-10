@@ -20,6 +20,9 @@ INCIDENT_PAGE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_incident_response_pa
 SHELL_PAGE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_shell_page.py"
 PORTAL_PATH = DASHBOARD_DIR / "report_portal.py"
 ALERT_STORE_PATH = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
+MANUAL_ANALYSIS_DISPATCH_PATH = (
+    REPO_ROOT / "n8n" / "alert_store" / "services" / "manual_analysis_dispatch.js"
+)
 INCIDENT_ANALYSIS_SCHEMA_PATH = (
     REPO_ROOT / "n8n" / "alert_store" / "services" / "incident_analysis_schema.js"
 )
@@ -1060,6 +1063,7 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
 
     def test_alert_store_uses_a_distinct_agent_job_and_analysis_role(self) -> None:
         source = ALERT_STORE_PATH.read_text(encoding="utf-8")
+        dispatch = MANUAL_ANALYSIS_DISPATCH_PATH.read_text(encoding="utf-8")
         schema = INCIDENT_ANALYSIS_SCHEMA_PATH.read_text(encoding="utf-8")
         routes = ANALYSIS_REQUEST_ROUTES_PATH.read_text(encoding="utf-8")
 
@@ -1067,9 +1071,10 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS incident_response_cases", schema)
         self.assertIn("CREATE TABLE IF NOT EXISTS incident_response_events", schema)
         self.assertIn("async function requestIncidentEscalation", source)
-        self.assertIn("durableJobs.enqueue('incident_response_analysis'", source)
-        self.assertIn("agent_role: 'incident-responder'", source)
-        self.assertIn("manualReanalysis: false", source)
+        self.assertIn("createManualAnalysisDispatch", source)
+        self.assertIn("enqueueJob('incident_response_analysis'", dispatch)
+        self.assertIn("agent_role: 'incident-responder'", dispatch)
+        self.assertIn("manualReanalysis: false", dispatch)
         self.assertIn("'/incidents/escalate'", routes)
 
     def test_case_bound_reanalysis_has_durable_run_progress_contract(self) -> None:
