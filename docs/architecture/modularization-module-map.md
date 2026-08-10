@@ -2716,6 +2716,15 @@ incident read-service dependency bundle. It preserves lazy evidence loading,
 query-digest provenance, output caps, escaping, and the separation between
 durable repository records and presentation.
 
+### SOC record runtime
+
+`portal_soc_record_runtime.py` owns raw-alert projection, page-bounded AI
+artifact correlation, severity eligibility, grouped AI state, review and
+incident metadata joins, evidence metadata, grouped row presentation, and
+representative-alert resolution. It preserves SQLite and artifact provenance,
+observed analysis state, analyst-review defaults, and late-bound repository,
+clock, cache, policy, and presenter seams.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:
