@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -35,6 +36,10 @@ def mode(path: Path) -> int:
     return stat.S_IMODE(path.lstat().st_mode)
 
 
+@unittest.skipUnless(
+    sys.platform == "darwin" and Path("/bin/zsh").is_file(),
+    "Mac Studio SQLite maintenance requires macOS zsh and ACL semantics",
+)
 class AlertStoreSqliteMaintenancePermissionsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
