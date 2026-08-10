@@ -493,7 +493,7 @@
       "max_complexity": 51,
       "max_lines": 180
     },
-    "onion-sentinel-dashboard/software_inventory.py::parse_filters": {
+    "onion-sentinel-dashboard/software_inventory_query.py::parse_filters": {
       "max_complexity": 22
     },
     "operations/benchmark-ollama-cybersecurity.py::_query_validation": {

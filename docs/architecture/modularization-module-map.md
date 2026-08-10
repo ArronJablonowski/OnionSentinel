@@ -2825,6 +2825,11 @@ both files together. Four unchanged legacy validators retain their exact
 ratcheting complexity/length allowances under the new module path; those
 allowances may shrink but cannot grow and are not approval for new debt.
 
+`software_inventory_query.py` owns the fixed public filter contract, freshness
+classification, safe public-record projection (including bounded User-Agent
+evidence), and stable unavailable/error response shape. It depends only on the
+state contract and performs no storage or network access.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:
