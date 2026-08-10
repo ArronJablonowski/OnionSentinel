@@ -116,6 +116,7 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/services/automatic_response_routing.js" \
     "$ALERT_STORE_STAGE_DIR/services/disk_write_admission.js" \
     "$ALERT_STORE_STAGE_DIR/services/worker_wake_signaling.js" \
+    "$ALERT_STORE_STAGE_DIR/services/beacon_persistence.js" \
     "$ALERT_STORE_STAGE_DIR/services/durable_job_recovery.js" \
     "$ALERT_STORE_STAGE_DIR/services/durable_job_transition_executor.js" \
     "$ALERT_STORE_STAGE_DIR/services/controlled_retirement_completed_member.js" \

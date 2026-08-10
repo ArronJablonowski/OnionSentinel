@@ -36,6 +36,7 @@ AI_ANALYSIS_ACCEPTANCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "ai_an
 DURABLE_JOB_TRANSITION_EXECUTOR = REPO_ROOT / "n8n" / "alert_store" / "services" / "durable_job_transition_executor.js"
 DISK_WRITE_ADMISSION = REPO_ROOT / "n8n" / "alert_store" / "services" / "disk_write_admission.js"
 WORKER_WAKE_SIGNALING = REPO_ROOT / "n8n" / "alert_store" / "services" / "worker_wake_signaling.js"
+BEACON_PERSISTENCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "beacon_persistence.js"
 
 
 class AlertStoreResilienceTest(unittest.TestCase):
@@ -72,6 +73,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.durable_job_transition_executor = DURABLE_JOB_TRANSITION_EXECUTOR.read_text(encoding="utf-8")
         cls.disk_write_admission = DISK_WRITE_ADMISSION.read_text(encoding="utf-8")
         cls.worker_wake_signaling = WORKER_WAKE_SIGNALING.read_text(encoding="utf-8")
+        cls.beacon_persistence = BEACON_PERSISTENCE.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
         self.assertIn("require('./lib/provider_scheduler')", self.code)
@@ -332,6 +334,13 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("PIPELINE_EVENT_RETENTION_HOURS", self.code)
         self.assertIn("state.pipelineMetrics.snapshot()", self.health_service)
         self.assertIn("pipelineMetrics.captureDiskSample", self.code)
+
+    def test_beacon_artifacts_have_one_atomic_bounded_persistence_owner(self) -> None:
+        self.assertIn("createBeaconPersistence", self.code)
+        self.assertIn("writeBeacon: writeN8nBeacon", self.code)
+        self.assertIn("function writeJsonAtomic", self.beacon_persistence)
+        self.assertNotIn("function writeJsonAtomic", self.code)
+        self.assertIn("atomic local-only state with no credentials or packet evidence", self.beacon_persistence)
 
     def test_n8n_report_work_is_enqueued_inside_commit_and_delivered_afterward(self) -> None:
         store = self.alert_ingest_orchestrator.split("async function store(rawAlert)", 1)[1]
