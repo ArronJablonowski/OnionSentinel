@@ -1,184 +1,22 @@
 {
   "files": {
-    "n8n/alert_store/alert_store.js": {
-      "max_lines": 12586
-    },
-    "n8n/alert_store/lib/postgres_asset_store.js": {
-      "max_lines": 1367
-    },
     "n8n/bin/agent_memory.py": {
       "max_lines": 812
-    },
-    "n8n/bin/auto-run-ai-analysis.py": {
-      "max_lines": 61
     },
     "n8n/bin/bounded_process.py": {
       "max_lines": 997
     },
-    "n8n/bin/collect-software-inventory.py": {
-      "max_lines": 250
-    },
-    "n8n/bin/software_inventory_contract.py": {
-      "max_lines": 600
-    },
-    "n8n/bin/software_inventory_normalization.py": {
-      "max_lines": 600
-    },
-    "n8n/bin/software_inventory_transport.py": {
-      "max_lines": 600
-    },
-    "n8n/bin/software_inventory_workflow.py": {
-      "max_lines": 600
-    },
-    "n8n/bin/detection_validation.py": {
-      "max_lines": 250
-    },
-    "n8n/bin/detection_validation_rule.py": {
-      "max_lines": 600
-    },
-    "n8n/bin/detection_validation_packet.py": {
-      "max_lines": 600
-    },
-    "n8n/bin/detection_validation_features.py": {
-      "max_lines": 600
-    },
-    "n8n/bin/detection_validation_policy.py": {
-      "max_lines": 600
-    },
-    "n8n/bin/detection_validation_result.py": {
-      "max_lines": 600
-    },
-    "n8n/bin/investigation_query_contract.py": {
-      "max_lines": 250
-    },
-    "n8n/bin/investigation_query_schema.py": {
-      "max_lines": 600
-    },
-    "n8n/bin/investigation_query_normalization.py": {
-      "max_lines": 600
-    },
-    "n8n/bin/investigation_query_authorization.py": {
-      "max_lines": 800
-    },
-    "n8n/bin/investigation_query_rendering.py": {
-      "max_lines": 600
-    },
-    "n8n/bin/investigation_query_response.py": {
-      "max_lines": 800
-    },
     "n8n/bin/maintain-investigation-harness.py": {
       "max_lines": 1147
-    },
-    "n8n/bin/onion_sentinel_harness.py": {
-      "max_lines": 217
     },
     "n8n/bin/pcap_evidence_query.py": {
       "max_lines": 915
     },
-    "n8n/bin/process-pcap-evidence.py": {
-      "max_lines": 250
-    },
-    "n8n/bin/pcap_processor_contract.py": {
-      "max_lines": 600
-    },
-    "n8n/bin/pcap_processor_storage.py": {
-      "max_lines": 600
-    },
-    "n8n/bin/pcap_processor_zeek.py": {
-      "max_lines": 600
-    },
-    "n8n/bin/pcap_processor_tshark.py": {
-      "max_lines": 600
-    },
-    "n8n/bin/pcap_processor_workflow.py": {
-      "max_lines": 600
-    },
-    "onion-sentinel-dashboard/ac_hunter_review.py": {
-      "max_lines": 250
-    },
-    "onion-sentinel-dashboard/ac_hunter_config.py": {
-      "max_lines": 600
-    },
-    "onion-sentinel-dashboard/ac_hunter_transport.py": {
-      "max_lines": 600
-    },
-    "onion-sentinel-dashboard/ac_hunter_normalization.py": {
-      "max_lines": 600
-    },
-    "onion-sentinel-dashboard/ac_hunter_scoring.py": {
-      "max_lines": 600
-    },
-    "onion-sentinel-dashboard/ac_hunter_collection.py": {
-      "max_lines": 600
-    },
-    "onion-sentinel-dashboard/ac_hunter_service.py": {
-      "max_lines": 600
-    },
     "onion-sentinel-dashboard/onion_sentinel_server.py": {
       "max_lines": 979
     },
-    "onion-sentinel-dashboard/report_portal.py": {
-      "max_lines": 5645
-    },
-    "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py": {
-      "max_lines": 250
-    },
-    "onion-sentinel-dashboard/scripts/dashboard_builder_contract.py": {
-      "max_lines": 600
-    },
-    "onion-sentinel-dashboard/scripts/dashboard_builder_pages.py": {
-      "max_lines": 800
-    },
-    "onion-sentinel-dashboard/scripts/dashboard_builder_publication.py": {
-      "max_lines": 250
-    },
-    "onion-sentinel-dashboard/scripts/dashboard_builder_report_core.py": {
-      "max_lines": 600
-    },
-    "onion-sentinel-dashboard/scripts/dashboard_builder_reports.py": {
-      "max_lines": 600
-    },
-    "onion-sentinel-dashboard/scripts/dashboard_builder_runtime.py": {
-      "max_lines": 250
-    },
-    "onion-sentinel-dashboard/scripts/dashboard_builder_settings.py": {
-      "max_lines": 600
-    },
-    "onion-sentinel-dashboard/software_inventory.py": {
-      "max_lines": 1181
-    },
     "operations/benchmark-ollama-cybersecurity.py": {
       "max_lines": 1164
-    },
-    "relay/app/relay.py": {
-      "max_lines": 250
-    },
-    "relay/app/relay_application.py": {
-      "max_lines": 600
-    },
-    "relay/app/relay_core.py": {
-      "max_lines": 600
-    },
-    "relay/app/relay_pcap_delivery.py": {
-      "max_lines": 600
-    },
-    "relay/app/relay_pcap_service.py": {
-      "max_lines": 600
-    },
-    "relay/app/relay_pcap_transport.py": {
-      "max_lines": 800
-    },
-    "relay/app/relay_health_wrapper.py": {
-      "max_lines": 250
-    },
-    "relay/app/relay_health_application.py": {
-      "max_lines": 600
-    },
-    "relay/app/relay_health_contract.py": {
-      "max_lines": 600
-    },
-    "relay/app/relay_health_sanitization.py": {
-      "max_lines": 600
     }
   },
   "functions": {
@@ -237,22 +75,12 @@
       "max_complexity": 20,
       "max_lines": 136
     },
-    "n8n/bin/software_inventory_normalization.py::_normalize_record": {
-      "max_complexity": 38,
-      "max_lines": 188
-    },
-    "n8n/bin/software_inventory_transport.py::load_endpoint_cache": {
-      "max_complexity": 23
-    },
-    "n8n/bin/software_inventory_transport.py::validate_response": {
-      "max_complexity": 52,
-      "max_lines": 161
-    },
-    "n8n/bin/software_inventory_normalization.py::validate_state": {
-      "max_complexity": 24
-    },
     "n8n/bin/configure-post-commit-env.py::render_env": {
       "max_complexity": 16
+    },
+    "n8n/bin/detection_validation_features.py::extract_group_packet_features": {
+      "max_complexity": 43,
+      "max_lines": 266
     },
     "n8n/bin/detection_validation_packet.py::_bounded_application_buffers": {
       "max_complexity": 41,
@@ -261,49 +89,45 @@
     "n8n/bin/detection_validation_packet.py::_content_match_positions": {
       "max_complexity": 37
     },
-    "n8n/bin/detection_validation_policy.py::_evaluate_numeric_predicate": {
-      "max_complexity": 18
-    },
-    "n8n/bin/detection_validation_rule.py::_icmp_from_packet": {
-      "max_complexity": 19
-    },
-    "n8n/bin/detection_validation_policy.py::_infer_stun_response_xbits_state": {
-      "max_complexity": 34
-    },
     "n8n/bin/detection_validation_packet.py::_network_packet_envelope": {
       "max_complexity": 18
     },
     "n8n/bin/detection_validation_packet.py::_ordered_deployed_content_constraints": {
       "max_complexity": 21
     },
-    "n8n/bin/detection_validation_policy.py::_validated_stun_rule_semantics": {
+    "n8n/bin/detection_validation_packet.py::marker_specs": {
+      "max_complexity": 28
+    },
+    "n8n/bin/detection_validation_policy.py::_evaluate_numeric_predicate": {
       "max_complexity": 18
     },
-    "n8n/bin/detection_validation_result.py::build_detection_validation": {
-      "max_complexity": 136,
-      "max_lines": 351
+    "n8n/bin/detection_validation_policy.py::_infer_stun_response_xbits_state": {
+      "max_complexity": 34
     },
-    "n8n/bin/detection_validation_features.py::extract_group_packet_features": {
-      "max_complexity": 43,
-      "max_lines": 266
-    },
-    "n8n/bin/detection_validation_rule.py::extract_rule_context": {
-      "max_complexity": 31,
-      "max_lines": 109
+    "n8n/bin/detection_validation_policy.py::_validated_stun_rule_semantics": {
+      "max_complexity": 18
     },
     "n8n/bin/detection_validation_policy.py::load_detection_playbooks": {
       "max_complexity": 64,
       "max_lines": 116
     },
-    "n8n/bin/detection_validation_packet.py::marker_specs": {
+    "n8n/bin/detection_validation_policy.py::resolve_detection_playbook": {
       "max_complexity": 28
+    },
+    "n8n/bin/detection_validation_result.py::build_detection_validation": {
+      "max_complexity": 136,
+      "max_lines": 351
+    },
+    "n8n/bin/detection_validation_rule.py::_icmp_from_packet": {
+      "max_complexity": 19
+    },
+    "n8n/bin/detection_validation_rule.py::extract_rule_context": {
+      "max_complexity": 31,
+      "max_lines": 109
     },
     "n8n/bin/detection_validation_rule.py::parse_suricata_rule": {
       "max_complexity": 32,
       "max_lines": 146
-    },
-    "n8n/bin/detection_validation_policy.py::resolve_detection_playbook": {
-      "max_complexity": 28
     },
     "n8n/bin/evaluate-investigation-skills-v2.py::evaluate": {
       "max_complexity": 17
@@ -322,6 +146,50 @@
     "n8n/bin/export-adjudicated-analysis-replays.py::replay_case": {
       "max_complexity": 28
     },
+    "n8n/bin/harness_contracts.py::JobEnvelope.from_prompt": {
+      "max_complexity": 18
+    },
+    "n8n/bin/harness_contracts.py::investigation_skill_selection_attestation": {
+      "max_complexity": 30,
+      "max_lines": 128
+    },
+    "n8n/bin/harness_memory.py::memory_promotion_decision": {
+      "max_complexity": 24
+    },
+    "n8n/bin/harness_policy.py::HarnessPolicy.from_dict": {
+      "max_complexity": 35,
+      "max_lines": 130
+    },
+    "n8n/bin/harness_query_contract.py::resolve_query_binding": {
+      "max_complexity": 84,
+      "max_lines": 183
+    },
+    "n8n/bin/harness_run_execution.py::HarnessRunExecution.model_call": {
+      "max_complexity": 18,
+      "max_lines": 123
+    },
+    "n8n/bin/harness_run_execution.py::HarnessRunExecution.query_round": {
+      "max_complexity": 62,
+      "max_lines": 249
+    },
+    "n8n/bin/harness_run_foundation.py::HarnessRunFoundation.preflight_model_call": {
+      "max_complexity": 16,
+      "max_lines": 103
+    },
+    "n8n/bin/harness_store_decision_repository.py::HarnessStoreDecisionRepository.record_decision": {
+      "max_lines": 125
+    },
+    "n8n/bin/harness_store_decision_repository.py::HarnessStoreDecisionRepository.record_hypotheses": {
+      "max_complexity": 25,
+      "max_lines": 173
+    },
+    "n8n/bin/harness_store_foundation.py::HarnessStoreFoundation.initialize": {
+      "max_lines": 237
+    },
+    "n8n/bin/harness_store_trace_repository.py::HarnessStoreTraceRepository.verify_chain": {
+      "max_complexity": 36,
+      "max_lines": 171
+    },
     "n8n/bin/incident_evidence_contract.py::_validate_controls": {
       "max_complexity": 21
     },
@@ -337,6 +205,14 @@
       "max_complexity": 54,
       "max_lines": 140
     },
+    "n8n/bin/investigation_query_authorization.py::authorize_investigation_query_request": {
+      "max_complexity": 41,
+      "max_lines": 199
+    },
+    "n8n/bin/investigation_query_authorization.py::validate_authorized_investigation_query_request": {
+      "max_complexity": 84,
+      "max_lines": 334
+    },
     "n8n/bin/investigation_query_normalization.py::_normalize_event_tuple": {
       "max_complexity": 19
     },
@@ -350,14 +226,6 @@
     "n8n/bin/investigation_query_response.py::_validate_pivot_result": {
       "max_complexity": 61,
       "max_lines": 138
-    },
-    "n8n/bin/investigation_query_authorization.py::authorize_investigation_query_request": {
-      "max_complexity": 41,
-      "max_lines": 199
-    },
-    "n8n/bin/investigation_query_authorization.py::validate_authorized_investigation_query_request": {
-      "max_complexity": 84,
-      "max_lines": 334
     },
     "n8n/bin/investigation_query_response.py::validate_investigation_query_response": {
       "max_complexity": 20
@@ -413,50 +281,6 @@
     "n8n/bin/manage-agent-memory.py::main": {
       "max_lines": 102
     },
-    "n8n/bin/harness_policy.py::HarnessPolicy.from_dict": {
-      "max_complexity": 35,
-      "max_lines": 130
-    },
-    "n8n/bin/harness_run_execution.py::HarnessRunExecution.model_call": {
-      "max_complexity": 18,
-      "max_lines": 123
-    },
-    "n8n/bin/harness_run_foundation.py::HarnessRunFoundation.preflight_model_call": {
-      "max_complexity": 16,
-      "max_lines": 103
-    },
-    "n8n/bin/harness_run_execution.py::HarnessRunExecution.query_round": {
-      "max_complexity": 62,
-      "max_lines": 249
-    },
-    "n8n/bin/harness_store_foundation.py::HarnessStoreFoundation.initialize": {
-      "max_lines": 237
-    },
-    "n8n/bin/harness_store_decision_repository.py::HarnessStoreDecisionRepository.record_decision": {
-      "max_lines": 125
-    },
-    "n8n/bin/harness_store_decision_repository.py::HarnessStoreDecisionRepository.record_hypotheses": {
-      "max_complexity": 25,
-      "max_lines": 173
-    },
-    "n8n/bin/harness_store_trace_repository.py::HarnessStoreTraceRepository.verify_chain": {
-      "max_complexity": 36,
-      "max_lines": 171
-    },
-    "n8n/bin/harness_contracts.py::JobEnvelope.from_prompt": {
-      "max_complexity": 18
-    },
-    "n8n/bin/harness_contracts.py::investigation_skill_selection_attestation": {
-      "max_complexity": 30,
-      "max_lines": 128
-    },
-    "n8n/bin/harness_memory.py::memory_promotion_decision": {
-      "max_complexity": 24
-    },
-    "n8n/bin/harness_query_contract.py::resolve_query_binding": {
-      "max_complexity": 84,
-      "max_lines": 183
-    },
     "n8n/bin/pcap_evidence_query.py::_filter_matches": {
       "max_complexity": 20
     },
@@ -466,13 +290,9 @@
     "n8n/bin/pcap_evidence_query.py::query_derived_pcap_evidence": {
       "max_complexity": 22
     },
-    "n8n/bin/pcap_tool_runtime.py::stream_isolated_lines": {
-      "max_complexity": 23,
-      "max_lines": 101
-    },
-    "n8n/bin/pcap_processor_workflow.py::build_markdown": {
-      "max_complexity": 18,
-      "max_lines": 124
+    "n8n/bin/pcap_processor_contract.py::maxmind_geoip_summary": {
+      "max_complexity": 31,
+      "max_lines": 129
     },
     "n8n/bin/pcap_processor_storage.py::fetch_remote_artifact": {
       "max_complexity": 20
@@ -480,13 +300,8 @@
     "n8n/bin/pcap_processor_storage.py::materialize_pcap_files": {
       "max_complexity": 19
     },
-    "n8n/bin/pcap_processor_contract.py::maxmind_geoip_summary": {
-      "max_complexity": 31,
-      "max_lines": 129
-    },
-    "n8n/bin/pcap_processor_workflow.py::process_one": {
-      "max_complexity": 29,
-      "max_lines": 123
+    "n8n/bin/pcap_processor_storage.py::signature_context_for_request": {
+      "max_lines": 114
     },
     "n8n/bin/pcap_processor_tshark.py::run_tshark": {
       "max_complexity": 49,
@@ -496,11 +311,20 @@
       "max_complexity": 88,
       "max_lines": 239
     },
+    "n8n/bin/pcap_processor_workflow.py::build_markdown": {
+      "max_complexity": 18,
+      "max_lines": 124
+    },
+    "n8n/bin/pcap_processor_workflow.py::process_one": {
+      "max_complexity": 29,
+      "max_lines": 123
+    },
     "n8n/bin/pcap_processor_zeek.py::run_zeek": {
       "max_complexity": 23
     },
-    "n8n/bin/pcap_processor_storage.py::signature_context_for_request": {
-      "max_lines": 114
+    "n8n/bin/pcap_tool_runtime.py::stream_isolated_lines": {
+      "max_complexity": 23,
+      "max_lines": 101
     },
     "n8n/bin/promote-dhcp-asset.py::promote": {
       "max_complexity": 24,
@@ -519,6 +343,20 @@
     "n8n/bin/run-recovery-restore-drill.py::verify_bundle": {
       "max_complexity": 32
     },
+    "n8n/bin/software_inventory_normalization.py::_normalize_record": {
+      "max_complexity": 38,
+      "max_lines": 188
+    },
+    "n8n/bin/software_inventory_normalization.py::validate_state": {
+      "max_complexity": 24
+    },
+    "n8n/bin/software_inventory_transport.py::load_endpoint_cache": {
+      "max_complexity": 23
+    },
+    "n8n/bin/software_inventory_transport.py::validate_response": {
+      "max_complexity": 52,
+      "max_lines": 161
+    },
     "n8n/bin/verify-agent-memory.py::verify_setup": {
       "max_complexity": 20
     },
@@ -526,8 +364,15 @@
       "max_complexity": 22,
       "max_lines": 289
     },
-    "onion-sentinel-dashboard/ac_hunter_transport.py::AcHunterApiClient._authenticate": {
-      "max_complexity": 16
+    "onion-sentinel-dashboard/ac_hunter_collection.py::normalize_collection": {
+      "max_complexity": 40,
+      "max_lines": 280
+    },
+    "onion-sentinel-dashboard/ac_hunter_config.py::_secure_file_bytes": {
+      "max_complexity": 20
+    },
+    "onion-sentinel-dashboard/ac_hunter_config.py::load_config": {
+      "max_lines": 108
     },
     "onion-sentinel-dashboard/ac_hunter_normalization.py::_normalize_finding": {
       "max_complexity": 26,
@@ -537,18 +382,11 @@
       "max_complexity": 41,
       "max_lines": 143
     },
-    "onion-sentinel-dashboard/ac_hunter_config.py::_secure_file_bytes": {
-      "max_complexity": 20
-    },
     "onion-sentinel-dashboard/ac_hunter_service.py::_validate_cache_tree": {
       "max_complexity": 18
     },
-    "onion-sentinel-dashboard/ac_hunter_config.py::load_config": {
-      "max_lines": 108
-    },
-    "onion-sentinel-dashboard/ac_hunter_collection.py::normalize_collection": {
-      "max_complexity": 40,
-      "max_lines": 280
+    "onion-sentinel-dashboard/ac_hunter_transport.py::AcHunterApiClient._authenticate": {
+      "max_complexity": 16
     },
     "onion-sentinel-dashboard/cti_program.py::normalize_program": {
       "max_complexity": 20
@@ -567,27 +405,26 @@
     "onion-sentinel-dashboard/onion_sentinel_server.py::main": {
       "max_complexity": 27
     },
-    "onion-sentinel-dashboard/report_portal.py::PortalHandler.do_GET": {
-      "max_complexity": 17
-    },
-    "onion-sentinel-dashboard/report_portal.py::_incident_query_linked_finding": {
-      "max_complexity": 17
-    },
-    "onion-sentinel-dashboard/report_portal.py::category_for": {
-      "max_complexity": 28
-    },
-    "onion-sentinel-dashboard/report_portal.py::find_resource_library_pdf": {
-      "max_complexity": 24
-    },
-    "onion-sentinel-dashboard/report_portal.py::scan_reports": {
-      "max_complexity": 17
-    },
     "onion-sentinel-dashboard/scripts/dashboard_pcap_components.py::render_pcap_evidence_markdown": {
       "max_complexity": 22
     },
     "onion-sentinel-dashboard/scripts/dashboard_timeline_components.py::alert_seen_timeline_html": {
       "max_complexity": 45,
       "max_lines": 171
+    },
+    "onion-sentinel-dashboard/software_inventory_assets.py::apply_asset_labels": {
+      "max_complexity": 36
+    },
+    "onion-sentinel-dashboard/software_inventory_assets.py::correlate_asset_operating_systems": {
+      "max_complexity": 51,
+      "max_lines": 180
+    },
+    "onion-sentinel-dashboard/software_inventory_query.py::parse_filters": {
+      "max_complexity": 22
+    },
+    "onion-sentinel-dashboard/software_inventory_response.py::build_response": {
+      "max_complexity": 48,
+      "max_lines": 213
     },
     "onion-sentinel-dashboard/software_inventory_state.py::_read_bounded_regular_json": {
       "max_complexity": 21
@@ -601,20 +438,6 @@
     },
     "onion-sentinel-dashboard/software_inventory_state.py::_sanitize_source_statuses": {
       "max_complexity": 17
-    },
-    "onion-sentinel-dashboard/software_inventory_assets.py::apply_asset_labels": {
-      "max_complexity": 36
-    },
-    "onion-sentinel-dashboard/software_inventory_response.py::build_response": {
-      "max_complexity": 48,
-      "max_lines": 213
-    },
-    "onion-sentinel-dashboard/software_inventory_assets.py::correlate_asset_operating_systems": {
-      "max_complexity": 51,
-      "max_lines": 180
-    },
-    "onion-sentinel-dashboard/software_inventory_query.py::parse_filters": {
-      "max_complexity": 22
     },
     "operations/benchmark-ollama-cybersecurity.py::_query_validation": {
       "max_complexity": 21
@@ -666,35 +489,18 @@
     "relay/app/process_io.py::run_bounded_command": {
       "max_complexity": 18
     },
-    "relay/app/relay_pcap_service.py::_process_pcap_requests_unlocked": {
-      "max_complexity": 44,
-      "max_lines": 273
-    },
-    "relay/app/relay_pcap_transport.py::capture_protection_decision": {
-      "max_complexity": 18
-    },
     "relay/app/relay_application.py::drain_alert_outbox": {
       "max_complexity": 25
     },
     "relay/app/relay_application.py::main": {
       "max_lines": 112
     },
-    "relay/app/relay_pcap_delivery.py::pcap_outcome_from_error": {
-      "max_complexity": 17
-    },
-    "relay/app/relay_pcap_transport.py::streamed_spool_artifact": {
-      "max_complexity": 30,
-      "max_lines": 138
-    },
-    "relay/app/relay_pcap_delivery.py::upload_pcap_artifact_via_rsync": {
-      "max_complexity": 26
-    },
-    "relay/app/relay_health_contract.py::classify_child_diagnostic": {
-      "max_complexity": 22
-    },
     "relay/app/relay_health_application.py::main": {
       "max_complexity": 43,
       "max_lines": 221
+    },
+    "relay/app/relay_health_contract.py::classify_child_diagnostic": {
+      "max_complexity": 22
     },
     "relay/app/relay_health_sanitization.py::sanitize_pcap_summary": {
       "max_complexity": 20
@@ -705,10 +511,27 @@
     "relay/app/relay_health_sanitization.py::sanitized_child_result": {
       "max_complexity": 21
     },
+    "relay/app/relay_pcap_delivery.py::pcap_outcome_from_error": {
+      "max_complexity": 17
+    },
+    "relay/app/relay_pcap_delivery.py::upload_pcap_artifact_via_rsync": {
+      "max_complexity": 26
+    },
+    "relay/app/relay_pcap_service.py::_process_pcap_requests_unlocked": {
+      "max_complexity": 44,
+      "max_lines": 273
+    },
+    "relay/app/relay_pcap_transport.py::capture_protection_decision": {
+      "max_complexity": 18
+    },
+    "relay/app/relay_pcap_transport.py::streamed_spool_artifact": {
+      "max_complexity": 30,
+      "max_lines": 138
+    },
     "relay/app/storage_health.py::main": {
       "max_complexity": 32
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "466f1ec9f5bee05d9b14693cd504285767d58973"
+  "source_release": "cc9ea8fbc9877e7ad5f95886b83980332eee3dac"
 }
