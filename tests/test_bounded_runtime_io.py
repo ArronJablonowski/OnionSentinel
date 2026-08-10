@@ -290,6 +290,49 @@ class BoundedProcessTests(unittest.TestCase):
             self.assertEqual(destination.stat().st_size, 1048576)
             self.assertEqual(result.stdout, "")
 
+    def test_file_variant_preserves_nonzero_exit_and_bounded_stderr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "capture.bin"
+            result = run_bounded_command_to_file(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stdout.write('body'); sys.stderr.write('detail'); sys.exit(7)",
+                ],
+                destination,
+                timeout_seconds=5,
+                max_stdout_bytes=100,
+                max_stderr_bytes=100,
+            )
+            self.assertEqual(result.returncode, 7)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr, "detail")
+            self.assertEqual(destination.read_text(encoding="utf-8"), "body")
+
+    def test_invalid_limits_fail_before_launch_for_both_variants(self) -> None:
+        cases = (
+            {"timeout_seconds": 0, "max_stdout_bytes": 1, "max_stderr_bytes": 1},
+            {"timeout_seconds": 1, "max_stdout_bytes": 0, "max_stderr_bytes": 1},
+            {"timeout_seconds": 1, "max_stdout_bytes": 1, "max_stderr_bytes": 0},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "capture.bin"
+            for options in cases:
+                with self.subTest(options=options), mock.patch.object(
+                    bounded_process_module.subprocess,
+                    "Popen",
+                ) as popen:
+                    with self.assertRaises(ValueError):
+                        run_bounded_command(["ignored"], **options)
+                    with self.assertRaises(ValueError):
+                        run_bounded_command_to_file(
+                            ["ignored"],
+                            destination,
+                            **options,
+                        )
+                    popen.assert_not_called()
+                    self.assertFalse(destination.exists())
+
     def test_file_stream_overflow_removes_partial_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             destination = Path(tmp) / "capture.bin"
