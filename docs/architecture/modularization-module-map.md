@@ -2752,6 +2752,15 @@ section transformation. It preserves group IDs/SQL, provenance ordering, path
 symlink exclusions, layout version/order, and the rule that live PCAP evidence
 cannot append a duplicate out-of-order detail section.
 
+### Portal delivery runtime
+
+`portal_delivery_runtime.py` owns bounded JSON snapshot reads, SSE revision-only
+signals, SOC event snapshot composition, acknowledgement response shaping, and
+late-bound SOC/general-read/JSON-write callback bundles. It preserves cache
+keys, route callback schemas, lazy query/detail delivery, same-origin and admin
+authorization callbacks, alert-store write dispatch, and the rule that live
+revisions contain digests rather than incident or asset records.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:

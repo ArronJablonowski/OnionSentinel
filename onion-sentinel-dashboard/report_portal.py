@@ -54,6 +54,7 @@ import portal_soc_record_runtime
 import portal_write_runtime
 import portal_soc_core_runtime
 import portal_soc_detail_runtime
+import portal_delivery_runtime
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
@@ -1834,130 +1835,20 @@ soc_alert_metrics_response = partial(portal_soc_query_runtime.soc_alert_metrics_
 soc_alert_suppressions_response = partial(portal_soc_query_runtime.soc_alert_suppressions_response, _SOC_QUERY_RUNTIME)
 
 
-def read_soc_alert_json_file(path: Path) -> dict:
-    try:
-        if path.exists() and path.is_file():
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-    return {}
-
-
-def soc_alert_events_snapshot() -> dict:
-    analyst_status = soc_alert_status_response()
-    static_status = read_soc_alert_json_file(SOC_ALERT_STATIC_STATUS_FILE)
-    current_analysis = read_llm_current_analysis()
-    beacon = read_soc_alert_json_file(SOC_ALERT_N8N_BEACON_FILE)
-    # Event snapshots drive live nav badges and metric cards. Keep them aligned
-    # with the default SOC Alerts table/counts instead of a time-windowed view,
-    # otherwise older still-active groups disappear from the live metrics.
-    metrics_status, metrics = soc_alert_metrics_response({"since": [""]})
-    if metrics_status != 200:
-        metrics = {"ok": False, "error": metrics.get("error", "SOC alert metrics unavailable")}
-    return {
-        "ok": True,
-        "event": "soc-alerts",
-        "time": now_iso_utc(),
-        "revisions": dashboard_live_revisions(),
-        "counts": analyst_status.get("counts", {}),
-        "statuses": analyst_status.get("statuses", {}),
-        "ai": merge_live_llm_activity(static_status.get("ai", {}), current_analysis),
-        "reports": static_status.get("reports", {}),
-        "status_updated_at": static_status.get("updated_at"),
-        "metrics": metrics,
-        "beacon": beacon,
-    }
-
-
-def asset_inventory_live_revision() -> str:
-    """Track the public inventory view, including time-scoped assignments."""
-    _status, payload = asset_inventory_response()
-    stable = dict(payload)
-    stable.pop("observed_at", None)
-    return _revision_digest(stable)
-
-
-def dhcp_asset_discovery_live_revision(asset_revision: str) -> str:
-    """Track collector output and inventory-driven reconciliation changes."""
-    state_revision = _bounded_file_revision(
-        Path(DHCP_ASSET_DISCOVERY_STATE_FILE),
-        DHCP_ASSET_DISCOVERY_MAX_BYTES,
-    )
-    return _revision_digest((state_revision, asset_revision))
-
-
-def software_inventory_live_revision() -> str:
-    """Track the local last-known-good software evidence snapshot."""
-    return _bounded_file_revision(
-        Path(SOFTWARE_INVENTORY_STATE_FILE),
-        SOFTWARE_INVENTORY_MAX_BYTES,
-    )
-
-
-def incident_response_live_revision() -> str:
-    """Fingerprint only records capable of changing the Incident Responder UI."""
-    try:
-        with soc_alert_db_connect() as conn:
-            return incident_response_revision(
-                conn,
-                RevisionSchemaDependencies(
-                    table_exists=sqlite_table_exists,
-                    table_columns=sqlite_table_columns,
-                ),
-            )
-    except (FileNotFoundError, sqlite3.Error):
-        return _revision_digest(("unavailable",))
-
-
-def dashboard_live_revisions() -> dict[str, str]:
-    """Return revision-only signals; never include incident or asset records."""
-    asset_revision = asset_inventory_live_revision()
-    return {
-        "incidents": incident_response_live_revision(),
-        "asset_inventory": asset_revision,
-        "dhcp_asset_discovery": dhcp_asset_discovery_live_revision(asset_revision),
-        "software_inventory": software_inventory_live_revision(),
-        "ac_hunter": ac_hunter_live_revision(),
-    }
-
-
-def ac_hunter_live_revision() -> str:
-    """Return only the PostgreSQL AC Hunter dataset digest for SSE updates."""
-
-    try:
-        payload = alert_store_get_json("/ac-hunter/snapshot", timeout=2.0)
-        cache = payload.get("cache")
-        if isinstance(cache, dict):
-            digest = str(cache.get("dataset_digest") or "").strip().lower()
-            if re.fullmatch(r"[0-9a-f]{64}", digest):
-                return digest
-    except RuntimeError:
-        pass
-    return _revision_digest(("unavailable",))
-
-
-def cached_soc_alert_events_snapshot() -> dict:
-    """Share one bounded-cost live snapshot across concurrent SSE clients."""
-    return SOC_ALERT_EVENTS_CACHE.get_or_compute("soc-alert-events", soc_alert_events_snapshot)
-
-
-def ack_soc_alert_store_id(alert_id: str, payload: dict) -> tuple[int, dict]:
-    alert_id = valid_soc_alert_store_id(alert_id)
-    if not alert_id:
-        return soc_alert_api_error("Invalid SOC alert id")
-    payload = {**payload, "id": alert_id}
-    ok, data = update_soc_alert_status(payload)
-    status = HTTPStatus.OK if ok else int(data.get("status") or HTTPStatus.BAD_REQUEST)
-    if ok:
-        alert_status = load_soc_alert_statuses().get(alert_id, {})
-        data = {
-            **data,
-            "alert_id": alert_id,
-            "analyst_status": alert_status.get("status", "open") if isinstance(alert_status, dict) else "open",
-            "analyst_status_reason": alert_status.get("reason", "") if isinstance(alert_status, dict) else "",
-        }
-    return int(status), data
+_DELIVERY_RUNTIME = sys.modules[__name__]
+read_soc_alert_json_file = partial(portal_delivery_runtime.read_soc_alert_json_file, _DELIVERY_RUNTIME)
+soc_alert_events_snapshot = partial(portal_delivery_runtime.soc_alert_events_snapshot, _DELIVERY_RUNTIME)
+asset_inventory_live_revision = partial(portal_delivery_runtime.asset_inventory_live_revision, _DELIVERY_RUNTIME)
+dhcp_asset_discovery_live_revision = partial(portal_delivery_runtime.dhcp_asset_discovery_live_revision, _DELIVERY_RUNTIME)
+software_inventory_live_revision = partial(portal_delivery_runtime.software_inventory_live_revision, _DELIVERY_RUNTIME)
+incident_response_live_revision = partial(portal_delivery_runtime.incident_response_live_revision, _DELIVERY_RUNTIME)
+dashboard_live_revisions = partial(portal_delivery_runtime.dashboard_live_revisions, _DELIVERY_RUNTIME)
+ac_hunter_live_revision = partial(portal_delivery_runtime.ac_hunter_live_revision, _DELIVERY_RUNTIME)
+cached_soc_alert_events_snapshot = partial(portal_delivery_runtime.cached_soc_alert_events_snapshot, _DELIVERY_RUNTIME)
+ack_soc_alert_store_id = partial(portal_delivery_runtime.ack_soc_alert_store_id, _DELIVERY_RUNTIME)
+portal_soc_read_callbacks = partial(portal_delivery_runtime.portal_soc_read_callbacks, _DELIVERY_RUNTIME)
+portal_general_read_callbacks = partial(portal_delivery_runtime.portal_general_read_callbacks, _DELIVERY_RUNTIME)
+portal_json_write_callbacks = partial(portal_delivery_runtime.portal_json_write_callbacks, _DELIVERY_RUNTIME)
 
 
 PORTAL_SOC_WRITE_CALLBACKS = SocWriteCallbacks(
@@ -1971,75 +1862,6 @@ PORTAL_SOC_WRITE_CALLBACKS = SocWriteCallbacks(
     incident_reanalyze=soc_incident_reanalysis_response,
     incident_reanalyze_all=soc_incident_bulk_reanalysis_response,
 )
-
-def portal_soc_read_callbacks() -> SocReadCallbacks:
-    """Bind portal adapters late so tests and runtime overrides remain visible."""
-    return SocReadCallbacks(
-        llm_current=read_llm_current_analysis,
-        llm_logs=llm_analysis_logs_response,
-        alert_status=soc_alert_status_response,
-        settings_prompt=read_settings_prompt,
-        agent_memory=read_agent_memory,
-        ai_settings=read_soc_ai_settings,
-        ollama_models=ollama_models_response,
-        alerts=cached_soc_alerts_query_response,
-        alert_metrics=soc_alert_metrics_response,
-        alert_suppressions=soc_alert_suppressions_response,
-        incidents=soc_incidents_query_response,
-        reanalysis_runs=soc_incident_reanalysis_runs_response,
-        incident_case_group=_soc_incident_case_group_id,
-        api_error=soc_alert_api_error,
-        adjudication_history=soc_adjudication_history_response,
-        incident_detail=soc_incident_detail_response,
-        alert_detail_fragment=soc_alert_detail_fragment_response,
-        alert_detail=soc_alert_detail_response,
-    )
-
-
-def portal_general_read_callbacks(home: Callable[[], bytes]) -> GeneralReadCallbacks:
-    def cti_program_read() -> tuple[int, dict]:
-        result = read_cti_program(portal_cti_program_callbacks(lambda _program: None))
-        return result.status, result.payload
-    return GeneralReadCallbacks(
-        home=home,
-        health=lambda: compose_portal_health(
-            scan_reports(), SCAN_ROOTS, local_address=local_ip(), generated_at=now_iso_local(),
-        ),
-        resource_favorites=resource_favorites,
-        system_health_beacons=n8n_beacon_history_response,
-        asset_inventory=lambda query: asset_inventory_response(query=query),
-        dhcp_asset_discovery=dhcp_asset_discovery_response,
-        software_inventory=lambda query: software_inventory_response(query=query),
-        cti_program=cti_program_read,
-    )
-
-
-def portal_json_write_callbacks(handler) -> JsonWriteCallbacks:
-    return JsonWriteCallbacks(
-        same_origin_authorized=lambda: handler._soc_review_write_authorized(),
-        cti_admin_authenticated=lambda: handler._cti_program_write_authorized(),
-        cti_program=portal_cti_program_callbacks(
-            lambda program: handler._cti_program_mutation_audit(program),
-        ),
-        asset_admin_authenticated=lambda: handler._admin_authenticated(),
-        asset_dispatcher=dispatch_asset_write,
-        soc_dispatcher=dispatch_authorized_soc_write,
-        soc=PORTAL_SOC_WRITE_CALLBACKS,
-        clear_soc_cache=SOC_ALERT_RESPONSE_CACHE.clear,
-        status_update=update_soc_alert_status,
-        settings_admin_authenticated=lambda: handler._soc_settings_write_authorized(),
-        settings=SocSettingsWriteCallbacks(
-            save_prompt=save_settings_prompt,
-            save_ai_settings=save_soc_ai_settings,
-            save_agent_model=save_soc_agent_model,
-        ),
-        admin_authenticated=lambda: handler._admin_authenticated(),
-        admin_service=AdminServiceWriteCallbacks(ensure_admin_token, start_admin_service),
-        resource_library=ResourceLibraryWriteCallbacks(
-            move_resource_to_removal, set_resource_tags,
-            rename_resource_file, set_resource_favorite,
-        ),
-    )
 
 
 PortalHandler = build_portal_handler(
