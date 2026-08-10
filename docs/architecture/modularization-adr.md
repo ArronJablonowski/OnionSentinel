@@ -62,7 +62,7 @@ compatibility files are excluded only by a narrow reviewed allowlist.
 
 ### ARR-85 remaining file exceptions
 
-The final release ratchet removed every obsolete monolith allowance. Two
+The final release ratchet removed every obsolete monolith allowance. One
 repository-only or production files remain above the 800-line module limit.
 Their current measured size is the non-growing ceiling; each has one named
 owner, one cohesive reason to change, an explicit risk, and a Linear issue that
@@ -70,7 +70,6 @@ expires the exception.
 
 | File | Owner and cohesive boundary | Risk while retained | Expiration |
 | --- | --- | --- | --- |
-| `onion-sentinel-dashboard/onion_sentinel_server.py` (979) | HTTP application composition, health, static/portal dispatch, and lifecycle | routing and service supervision still share one entry module | ARR-125 |
 | `operations/benchmark-ollama-cybersecurity.py` (1,164) | repository-only model discovery, bounded execution, scoring, and report generation | benchmark orchestration is harder to review but has no production service authority | ARR-126 |
 
 No exception permits growth, weakens function/complexity gates, or bypasses

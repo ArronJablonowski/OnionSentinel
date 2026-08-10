@@ -2237,6 +2237,27 @@ The following remain stable: method/path bindings, response schemas, status
 codes, request limits, token/authorization requirements, cache headers, and
 service identity at `/healthz`.
 
+## Dedicated Onion Sentinel Web Service
+
+`onion_sentinel_server.py` retains the stable executable/import surface,
+declarative route allowlists, security headers, bounded static streaming,
+request logging, and HTTP server identity. `onion_sentinel_release.py` owns
+literal owner-only release-ID loading without evaluating the runtime env file.
+
+`onion_sentinel_request_routes.py` owns exact HEAD/GET/POST dispatch,
+controlled-evaluation route/token admission, health/readiness composition,
+admin and application-log gates, same-origin SOC delegation, and AC Hunter
+refresh validation. It receives the importing facade module at call time so
+existing same-name loaders and late-bound operational/test overrides retain
+their exact scope without creating an import cycle.
+
+`onion_sentinel_application.py` owns CLI defaults, controlled listener/content/
+downstream admission, runtime-path setup, bounded server construction, ready
+logging, and lifecycle start. The installer stages all three implementation
+modules before the 583-line server surface. Public paths, methods, statuses,
+schemas, authentication, resource bounds, service identity, and recovery
+behavior remain unchanged.
+
 ## Static Dashboard Builder
 
 Current owner:

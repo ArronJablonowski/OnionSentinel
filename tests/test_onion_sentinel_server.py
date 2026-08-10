@@ -319,6 +319,23 @@ class OnionSentinelServerTests(unittest.TestCase):
         refresh = (ROOT / "n8n/bin/refresh-soc-dashboard.py").read_text(encoding="utf-8")
         self.assertIn('DASHBOARD_RUNTIME_DIR="${STACK_DIR}/onion-sentinel-dashboard"', installer)
         self.assertIn("dashboard_executive_metrics.py", installer)
+        facade_copy = (
+            'cp "$REPO_DIR/onion-sentinel-dashboard/'
+            'onion_sentinel_server.py"'
+        )
+        for module in (
+            "onion_sentinel_release.py",
+            "onion_sentinel_application.py",
+            "onion_sentinel_request_routes.py",
+        ):
+            module_copy = (
+                'cp "$REPO_DIR/onion-sentinel-dashboard/' + module + '"'
+            )
+            self.assertIn(module_copy, installer)
+            self.assertLess(
+                installer.index(module_copy),
+                installer.index(facade_copy),
+            )
         self.assertNotIn("HERMES_SCRIPT_DIR", installer)
         self.assertNotIn("HERMES_ASSET_DIR", installer)
         self.assertNotIn('PORTAL_DIR="${HOME}/report_portal"', installer)

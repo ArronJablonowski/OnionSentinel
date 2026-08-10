@@ -1,0 +1,321 @@
+"""HTTP method dispatch for the dedicated Onion Sentinel service."""
+
+from __future__ import annotations
+
+import json
+from http import HTTPStatus
+from types import ModuleType
+from urllib.parse import parse_qs, urlparse
+
+
+JSON_TYPE = "application/json; charset=utf-8"
+
+
+def do_head(handler: object, c: ModuleType) -> None:
+    path = urlparse(handler.path).path
+    if c.CONTROLLED_EVALUATION_MODE and handler.path != "/healthz":
+        handler.send_response(HTTPStatus.FORBIDDEN)
+        handler.end_headers()
+        return
+    if c.is_application_log_get_api(path):
+        status = (
+            HTTPStatus.OK
+            if handler._admin_authenticated()
+            else HTTPStatus.FORBIDDEN
+        )
+        return _send_head(handler, status)
+    target = c.resolve_dashboard_target(handler.dashboard_root, handler.path)
+    if (
+        path in ("/healthz", "/admin", "/admin/login")
+        or c.is_soc_get_api(path)
+        or target
+    ):
+        return _send_head(handler, HTTPStatus.OK)
+    handler.send_response(HTTPStatus.NOT_FOUND)
+    handler.end_headers()
+
+
+def _send_head(handler: object, status: int) -> None:
+    handler.send_response(status)
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    for key, value in handler._security_headers().items():
+        handler.send_header(key, value)
+    handler.end_headers()
+
+
+def do_get(handler: object, c: ModuleType) -> None:
+    parsed = urlparse(handler.path)
+    path = parsed.path
+    if c.CONTROLLED_EVALUATION_MODE and handler.path != "/healthz":
+        return _json_error(
+            handler,
+            HTTPStatus.FORBIDDEN,
+            "route is disabled in controlled evaluation mode",
+        )
+    if path == "/healthz":
+        return _health(handler, c)
+    log_id = c.application_log_route_identifier(path)
+    if path == c.APPLICATION_LOG_API_PATH or log_id is not None:
+        return _application_logs(handler, c, parsed, log_id)
+    if path == "/api/ac-hunter/deep-review":
+        status, data = c.ac_hunter_review.deep_review_response(
+            force_refresh=False
+        )
+        return _json_response(handler, status, data, indent=2)
+    if path == "/admin/login":
+        if handler._admin_authenticated():
+            return handler._redirect("/admin")
+        return handler._send(HTTPStatus.OK, c.render_login())
+    if path == "/admin":
+        if not handler._admin_authenticated():
+            return handler._redirect("/admin/login")
+        return handler._send(HTTPStatus.OK, c.render_admin_status())
+    if c.is_soc_get_api(path):
+        return c.runtime.PortalHandler.do_GET(handler)
+    target = c.resolve_dashboard_target(handler.dashboard_root, handler.path)
+    if target is not None:
+        return handler._serve_file(target)
+    return handler._send(
+        HTTPStatus.NOT_FOUND,
+        b"Not found",
+        "text/plain; charset=utf-8",
+    )
+
+
+def _health(handler: object, c: ModuleType) -> None:
+    dashboard_ready = (handler.dashboard_root / "index.html").is_file()
+    alert_store_ready = c.runtime.SOC_ALERT_STORE_DB.is_file()
+    health: dict[str, object] = {
+        "status": (
+            "local_database_ready"
+            if alert_store_ready
+            else "local_database_missing"
+        ),
+    }
+    if c.CONTROLLED_EVALUATION_MODE:
+        downstream_ready, health = c.controlled_alert_store_readiness()
+        alert_store_ready = alert_store_ready and downstream_ready
+    data = {
+        "ok": dashboard_ready and alert_store_ready,
+        "service": "onion-sentinel",
+        "controlled_evaluation": c.CONTROLLED_EVALUATION_MODE,
+        "release_id": c.RUNTIME_RELEASE_ID or "unversioned",
+        "listen_host": handler.server.server_address[0],
+        "listen_port": handler.server.server_address[1],
+        "alert_store_origin": c.runtime.SOC_ALERT_STORE_API_URL,
+        "dispatch_route_patterns": (
+            list(c.CONTROLLED_EVALUATION_DISPATCH_ROUTES)
+            if c.CONTROLLED_EVALUATION_MODE
+            else []
+        ),
+        "dashboard_ready": dashboard_ready,
+        "alert_store_ready": alert_store_ready,
+        "alert_store_health": health,
+        "time": c.runtime.now_iso_local(),
+        "http_runtime": handler.server.runtime_snapshot(),
+    }
+    status = HTTPStatus.OK if data["ok"] else HTTPStatus.SERVICE_UNAVAILABLE
+    return _json_response(handler, status, data, indent=2)
+
+
+def _application_logs(
+    handler: object,
+    c: ModuleType,
+    parsed: object,
+    log_id: str | None,
+) -> None:
+    if not handler._admin_authenticated():
+        return handler._send(
+            HTTPStatus.FORBIDDEN,
+            json.dumps(
+                {
+                    "ok": False,
+                    "authentication_required": True,
+                    "error": (
+                        "Administration sign-in is required to view "
+                        "application logs"
+                    ),
+                }
+            ).encode(),
+            JSON_TYPE,
+        )
+    try:
+        data = _application_log_data(c, parsed, log_id)
+        return _json_response(handler, HTTPStatus.OK, data, indent=2)
+    except c.application_logs.ApplicationLogError as exc:
+        return _json_response(
+            handler,
+            exc.status,
+            {"ok": False, "error": exc.message},
+        )
+    except Exception as exc:
+        c.APPLICATION_LOGGER.log(
+            "error",
+            "application_logs.read_failed",
+            request_id=getattr(handler, "application_request_id", ""),
+            log_id=log_id or "catalog",
+            error_type=type(exc).__name__,
+        )
+        return _json_response(
+            handler,
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            {"ok": False, "error": "Application logs are unavailable"},
+        )
+
+
+def _application_log_data(
+    c: ModuleType,
+    parsed: object,
+    log_id: str | None,
+) -> dict[str, object]:
+    if log_id is None:
+        return c.application_logs.catalog_response()
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    raw_lines = (
+        query.get("lines") or [str(c.application_logs.DEFAULT_TAIL_LINES)]
+    )[0]
+    try:
+        lines = int(raw_lines)
+    except (TypeError, ValueError) as exc:
+        raise c.application_logs.ApplicationLogError(
+            HTTPStatus.BAD_REQUEST,
+            "lines must be an integer",
+        ) from exc
+    lines = max(1, min(c.application_logs.MAX_TAIL_LINES, lines))
+    member = str((query.get("member") or [""])[0])
+    return c.application_logs.content_response(
+        str(log_id),
+        member=member,
+        lines=lines,
+    )
+
+
+def do_post(handler: object, c: ModuleType) -> None:
+    path = urlparse(handler.path).path
+    if c.CONTROLLED_EVALUATION_MODE and (
+        not c.is_controlled_evaluation_dispatch(path) or handler.path != path
+    ):
+        return _json_error(
+            handler,
+            HTTPStatus.FORBIDDEN,
+            "route is disabled in controlled evaluation mode",
+        )
+    if c.CONTROLLED_EVALUATION_MODE and not c.hmac.compare_digest(
+        str(handler.headers.get("X-Onion-Sentinel-Evaluation-Token", "")),
+        c.CONTROLLED_EVALUATION_TOKEN,
+    ):
+        handler.close_connection = True
+        return _json_error(
+            handler,
+            HTTPStatus.FORBIDDEN,
+            "controlled evaluation authorization failed",
+        )
+    if path in ("/admin/login", "/admin/logout"):
+        return _admin_post(handler, c, path)
+    if c.is_soc_post_api(path):
+        return _soc_post(handler, c, path)
+    return handler._send(
+        HTTPStatus.NOT_FOUND,
+        b"Not found",
+        "text/plain; charset=utf-8",
+    )
+
+
+def _admin_post(handler: object, c: ModuleType, path: str) -> None:
+    try:
+        length = int(handler.headers.get("Content-Length", "0"))
+    except ValueError:
+        length = 0
+    if length <= 0 or length > 8192:
+        return handler._send(
+            HTTPStatus.BAD_REQUEST,
+            c.render_login("Invalid request size.", True),
+        )
+    form = parse_qs(
+        handler.rfile.read(length).decode("utf-8", errors="replace"),
+        keep_blank_values=True,
+    )
+    if form.get("token", [""])[0] != c.runtime.ensure_admin_token():
+        return handler._send(
+            HTTPStatus.FORBIDDEN,
+            c.render_login("Form token validation failed.", True),
+        )
+    if path == "/admin/logout":
+        c.runtime.destroy_admin_session(handler._admin_session_id())
+        return handler._redirect(
+            "/admin/login",
+            {"Set-Cookie": c.runtime.expired_admin_session_cookie_header()},
+        )
+    if not c.runtime.admin_password_configured():
+        return handler._send(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            c.render_login(
+                "An Onion Sentinel admin password has not been configured.",
+                True,
+            ),
+        )
+    if not c.runtime.verify_admin_password(form.get("password", [""])[0]):
+        return handler._send(
+            HTTPStatus.UNAUTHORIZED,
+            c.render_login("Invalid password.", True),
+        )
+    session_id = c.runtime.create_admin_session(handler.client_address[0])
+    return handler._redirect(
+        "/admin",
+        {"Set-Cookie": c.runtime.admin_session_cookie_header(session_id)},
+    )
+
+
+def _soc_post(handler: object, c: ModuleType, path: str) -> None:
+    valid, status, message = c.is_same_origin_json_request(handler.headers)
+    if not valid:
+        return _json_error(handler, status, message)
+    if path == "/api/ac-hunter/refresh":
+        return _ac_hunter_refresh(handler, c)
+    return c.runtime.PortalHandler.do_POST(handler)
+
+
+def _ac_hunter_refresh(handler: object, c: ModuleType) -> None:
+    try:
+        length = int(handler.headers.get("Content-Length", "0"))
+    except ValueError:
+        length = 0
+    if length <= 0 or length > 1024:
+        return _json_error(
+            handler,
+            HTTPStatus.BAD_REQUEST,
+            "Invalid AC Hunter refresh request size.",
+        )
+    try:
+        payload = json.loads(
+            handler.rfile.read(length).decode("utf-8", errors="strict")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        payload = None
+    if not isinstance(payload, dict) or payload:
+        return _json_error(
+            handler,
+            HTTPStatus.BAD_REQUEST,
+            "AC Hunter refresh requires an empty JSON object.",
+        )
+    status, data = c.ac_hunter_review.deep_review_response(force_refresh=False)
+    return _json_response(handler, status, data, indent=2)
+
+
+def _json_error(handler: object, status: int, message: str) -> None:
+    return _json_response(handler, status, {"ok": False, "error": message})
+
+
+def _json_response(
+    handler: object,
+    status: int,
+    data: object,
+    *,
+    indent: int | None = None,
+) -> None:
+    return handler._send(
+        status,
+        json.dumps(data, indent=indent).encode(),
+        JSON_TYPE,
+    )

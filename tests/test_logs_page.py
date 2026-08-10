@@ -47,6 +47,9 @@ class LogsPageTests(unittest.TestCase):
         cls.shell_source = SHELL_COMPONENT_PATH.read_text(encoding="utf-8")
         cls.logs_page_source = LOGS_PAGE_PATH.read_text(encoding="utf-8")
         cls.server_source = SERVER_PATH.read_text(encoding="utf-8")
+        cls.server_route_source = (
+            DASHBOARD_DIR / "onion_sentinel_request_routes.py"
+        ).read_text(encoding="utf-8")
         cls.installer_source = INSTALLER_PATH.read_text(encoding="utf-8")
 
     def test_navigation_and_page_identity_are_generated(self) -> None:
@@ -133,10 +136,22 @@ class LogsPageTests(unittest.TestCase):
         self.assertIn('APPLICATION_LOG_API_PATH = "/api/application-logs"', self.server_source)
         self.assertIn("def application_log_route_identifier(path: str)", self.server_source)
         self.assertIn("application_logs.is_application_log_id(identifier)", self.server_source)
-        self.assertIn("if not self._admin_authenticated():", self.server_source)
-        self.assertIn("application_logs.catalog_response()", self.server_source)
-        self.assertIn("application_logs.content_response(", self.server_source)
-        self.assertIn("min(application_logs.MAX_TAIL_LINES, lines)", self.server_source)
+        self.assertIn(
+            "if not handler._admin_authenticated():",
+            self.server_route_source,
+        )
+        self.assertIn(
+            "application_logs.catalog_response()",
+            self.server_route_source,
+        )
+        self.assertIn(
+            "application_logs.content_response(",
+            self.server_route_source,
+        )
+        self.assertIn(
+            "min(c.application_logs.MAX_TAIL_LINES, lines)",
+            self.server_route_source,
+        )
 
     def test_render_dispatch_builds_the_logs_specific_page(self) -> None:
         self.assertIn(
