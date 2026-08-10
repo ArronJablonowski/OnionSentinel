@@ -1917,8 +1917,11 @@ synthetic responses, content headers, and socket writes.
 `portal_catalog_read_service.py` owns public report-index projection and lazy
 dispatch of operational metric renderers. Ordinary metrics never scan the
 report catalog; only the catalog index and portal-update metric invoke the
-injected scan port. Report discovery and concrete HTML renderers remain in
-`report_portal.py`, along with response encoding and socket writes.
+injected scan port. `portal_report_catalog.py` owns bounded read-only HTML
+discovery, excluded-directory filtering, stable report identity,
+title/category projection, deduplication, ordering, and SOC-dashboard
+selection. `report_portal.py` retains the configured roots, concrete HTML
+renderers, compatibility function names, response encoding, and socket writes.
 
 `portal_catalog_delivery.py` owns traversal-safe static and report asset
 resolution, file read and error policy, MIME selection, lazy report lookup,

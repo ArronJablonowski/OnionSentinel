@@ -338,6 +338,18 @@ from portal_request_routes import (
     head_content_type,
     is_head_route,
 )
+from portal_report_catalog import (
+    Report,
+    category_for as classify_report_category,
+    human_size as format_human_size,
+    is_daily_threat_brief_file as classify_daily_threat_brief,
+    report_id as derive_report_id,
+    scan_reports as discover_reports,
+    should_skip_dir as exclude_report_directory,
+    soc_alerts_default_path as project_soc_alerts_default_path,
+    soc_alerts_report as select_soc_alerts_report,
+    title_from_html as read_report_title,
+)
 from portal_soc_read_dispatch import (
     SocReadCallbacks,
     dispatch_soc_read,
@@ -727,18 +739,6 @@ ADMIN_ACTIONS = {
 }
 STANDALONE_HTML: list[Path] = []
 ISO_DATE_TIME_SEPARATOR_RE = re.compile(r"(\d{4}-\d{2}-\d{2})(?:T|\s+)(?=\d{2}:\d{2}:\d{2})")
-
-@dataclass(frozen=True)
-class Report:
-    rid: str
-    title: str
-    path: Path
-    rel: str
-    category: str
-    size: int
-    mtime: float
-    is_index: bool
-
 
 @dataclass(frozen=True)
 class CronJobSummary:
@@ -1845,139 +1845,46 @@ def local_ip() -> str:
 
 
 def title_from_html(path: Path) -> str:
-    name_title = path.stem.replace("_", " ").strip()
-    try:
-        data = path.read_text(errors="ignore")[:20000]
-        import re
-        m = re.search(r"<title[^>]*>(.*?)</title>", data, flags=re.I | re.S)
-        if m:
-            t = html.unescape(re.sub(r"\s+", " ", m.group(1)).strip())
-            if t:
-                return t
-        h = re.search(r"<h1[^>]*>(.*?)</h1>", data, flags=re.I | re.S)
-        if h:
-            t = html.unescape(re.sub(r"<[^>]+>", "", h.group(1))).strip()
-            if t:
-                return t
-    except Exception:
-        pass
-    return name_title or path.name
+    return read_report_title(path)
 
 
 def category_for(path: Path) -> str:
-    sp = str(path)
-    if "/report_portal/library/Threat Intel/" in sp or "Daily Threat Intel Briefs" in sp:
-        return "Threat Intel"
-    if "/report_portal/library/Threat Hunting/" in sp or "/ThreatHunting/ATHF/" in sp:
-        return "Threat Hunting"
-    if "/report_portal/library/Product Research/" in sp or "entrepreneurial_product_research_reports" in sp or "entrepreneurial_research" in sp:
-        return "Product Research"
-    if "/report_portal/library/Projects/" in sp:
-        try:
-            rel = path.relative_to(HOME / "report_portal" / "library" / "Projects")
-            return f"Project: {rel.parts[0]}" if rel.parts else "Projects"
-        except Exception:
-            return "Projects"
-    if "/gitProjects/" in sp:
-        try:
-            rel = path.relative_to(HOME / "gitProjects")
-            return f"Project: {rel.parts[0]}" if rel.parts else "Projects"
-        except Exception:
-            return "Projects"
-    if "/report_portal/library/Cybersecurity Library/" in sp or "Cybersecurity Library Web" in sp:
-        return "Cybersecurity"
-    if "/report_portal/library/Cybersecurity/" in sp or "Sigma Learning Web" in sp:
-        return "Cybersecurity"
-    if "/report_portal/library/Resource Library/" in sp or "Resource Library Web" in sp:
-        return "Cybersecurity"
-    if "/report_portal/library/Portal Operations/" in sp or "LAN Portal Web Server Architecture" in path.name:
-        return "Portal Operations"
-    if "/report_portal/library/Web App Projects/" in sp or "Web App Projects Web" in sp:
-        return "Web App Projects"
-    if "/report_portal/library/Prototype Web App/" in sp or "forest_room" in path.name.lower():
-        return "Prototype: Web app"
-    if "/report_portal/library/Local AI/" in sp or "Local LLM Benchmark Dashboard" in path.name:
-        return "Local AI"
-    return "Reports"
+    return classify_report_category(path, HOME)
 
 
 def should_skip_dir(path: Path) -> bool:
-    return path.name in EXCLUDE_DIR_NAMES or path.name.startswith(".")
+    return exclude_report_directory(path, EXCLUDE_DIR_NAMES)
 
 
 def report_id(path: Path) -> str:
-    return hashlib.sha1(str(path).encode()).hexdigest()[:16]
+    return derive_report_id(path)
 
 
 def scan_reports() -> list[Report]:
-    paths: list[Path] = []
-    for root in SCAN_ROOTS:
-        if not root.exists():
-            continue
-        if root.is_file() and root.suffix.lower() in (".html", ".htm"):
-            paths.append(root)
-            continue
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if not should_skip_dir(Path(dirpath) / d)]
-            for filename in filenames:
-                if filename.lower().endswith((".html", ".htm")):
-                    paths.append(Path(dirpath) / filename)
-    for f in STANDALONE_HTML:
-        if f.exists():
-            paths.append(f)
-    seen = set()
-    reports = []
-    for p in paths:
-        try:
-            p = p.resolve()
-            if p in seen or not p.is_file():
-                continue
-            seen.add(p)
-            st = p.stat()
-            try:
-                rel = str(p.relative_to(HOME))
-            except Exception:
-                rel = str(p)
-            reports.append(Report(
-                rid=report_id(p),
-                title=title_from_html(p),
-                path=p,
-                rel=rel,
-                category=category_for(p),
-                size=st.st_size,
-                mtime=st.st_mtime,
-                is_index=p.name.lower() in ("index.html", "index.htm"),
-            ))
-        except Exception:
-            continue
-    return sorted(reports, key=lambda r: (r.mtime, r.title.lower()), reverse=True)
+    return discover_reports(
+        home=HOME,
+        scan_roots=SCAN_ROOTS,
+        standalone_html=STANDALONE_HTML,
+        excluded_names=EXCLUDE_DIR_NAMES,
+    )
 
 
 def soc_alerts_report(reports: list[Report]) -> Report | None:
     """Return the SOC Alerts dashboard report used as the LAN Portal default page."""
-    return next((r for r in reports if r.title == "SOC Alerts" or "Cybersecurity/SOC Alerts/index.html" in r.rel), None)
+    return select_soc_alerts_report(reports)
 
 
 def soc_alerts_default_path(reports: list[Report]) -> str | None:
-    report = soc_alerts_report(reports)
-    return f"/view/{report.rid}/" if report else None
+    return project_soc_alerts_default_path(reports)
 
 
 def is_daily_threat_brief_file(report: Report) -> bool:
     """Return True for individual daily brief HTML files now grouped under the dashboard."""
-    return (
-        report.category == "Threat Intel"
-        and not report.is_index
-        and report.path.name.endswith(" - Daily Threat Intel Brief.html")
-    )
+    return classify_daily_threat_brief(report)
 
 
 def human_size(n: int) -> str:
-    for unit in ["B", "KB", "MB", "GB", "TB"]:
-        if n < 1024 or unit == "TB":
-            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
-        n /= 1024
-    return f"{n:.1f} TB"
+    return format_human_size(n)
 
 
 def artifact_library_disk_usage() -> int:
