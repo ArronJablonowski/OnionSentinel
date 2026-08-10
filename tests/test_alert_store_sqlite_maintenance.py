@@ -89,9 +89,21 @@ class AlertStoreSqliteMaintenancePermissionsTests(unittest.TestCase):
     def test_successful_backup_and_retained_files_are_owner_only(self) -> None:
         self.create_valid_database()
         self.backup_dir.mkdir(mode=0o755)
+        subprocess.run(
+            ["chmod", "+a", "everyone allow read", str(self.backup_dir)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         retained = self.backup_dir / "alerts.sqlite3.retained.backup"
         retained.write_bytes(b"retained")
         retained.chmod(0o644)
+        subprocess.run(
+            ["chmod", "+a", "everyone allow read", str(retained)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         external = self.root / "external-evidence"
         external.write_bytes(b"external")
         external.chmod(0o644)
@@ -101,9 +113,23 @@ class AlertStoreSqliteMaintenancePermissionsTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(mode(self.backup_dir), 0o700)
+        directory_acl = subprocess.run(
+            ["ls", "-lde", str(self.backup_dir)],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        self.assertNotIn("everyone allow read", directory_acl)
         backups = sorted(self.backup_dir.glob("alerts.sqlite3.*.backup"))
         self.assertGreaterEqual(len(backups), 2)
         self.assert_owner_only_regular_files(self.backup_dir)
+        retained_acl = subprocess.run(
+            ["ls", "-lde", str(retained)],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        self.assertNotIn("everyone allow read", retained_acl)
         self.assertEqual(mode(external), 0o644)
 
     def test_recovery_artifacts_are_owner_only(self) -> None:
@@ -159,7 +185,10 @@ class AlertStoreSqliteMaintenancePermissionsTests(unittest.TestCase):
         completed = self.run_maintenance()
 
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("symbolic link", completed.stderr)
+        self.assertIn("symbolic link", completed.stdout + completed.stderr)
+        state = self.log_dir / "alert-store-sqlite-maintenance-state.json"
+        self.assertTrue(state.is_file())
+        self.assertIn('"status": "failed"', state.read_text(encoding="utf-8"))
         self.assertEqual(list(external.iterdir()), [])
 
     def test_temporary_and_auto_recovery_artifacts_are_secured_in_order(self) -> None:

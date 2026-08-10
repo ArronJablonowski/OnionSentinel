@@ -1,5 +1,6 @@
 #!/bin/zsh
 set -euo pipefail
+umask 077
 
 # Verify and back up the Onion Sentinel alert-store SQLite database.
 #
@@ -32,10 +33,7 @@ RECOVERY_RUNTIME_STOPPED=0
 [[ "$BACKUP_ATTEMPTS" == <-> ]] || BACKUP_ATTEMPTS=5
 (( BACKUP_ATTEMPTS >= 1 )) || BACKUP_ATTEMPTS=5
 
-mkdir -p "$BACKUP_DIR" "$LOG_DIR"
-# Interrupted or lock-failed runs can leave an empty temporary target. Never
-# touch a current run, but remove stale partials before evaluating retention.
-find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.backup.tmp' -mmin +30 -delete 2>/dev/null || true
+mkdir -p "$LOG_DIR"
 
 log() {
   print -r -- "[$(date '+%Y-%m-%d  %H:%M:%S%z')] $*" | tee -a "$LOG_FILE"
@@ -111,6 +109,35 @@ fail() {
   exit 1
 }
 
+secure_regular_file() {
+  local candidate="$1"
+  if [[ -L "$candidate" || ! -f "$candidate" ]]; then
+    fail "refusing to secure a non-regular backup artifact: $candidate"
+  fi
+  chmod -N "$candidate" || fail "could not remove backup artifact ACL: $candidate"
+  chmod 0600 "$candidate" || fail "could not secure backup artifact: $candidate"
+}
+
+prepare_backup_directory() {
+  if [[ -L "$BACKUP_DIR" ]]; then
+    fail "alert-store backup directory must not be a symbolic link: $BACKUP_DIR"
+  fi
+  mkdir -p "$BACKUP_DIR" || fail "could not create alert-store backup directory: $BACKUP_DIR"
+  if [[ ! -d "$BACKUP_DIR" || -L "$BACKUP_DIR" ]]; then
+    fail "alert-store backup path must be a real directory: $BACKUP_DIR"
+  fi
+  chmod -N "$BACKUP_DIR" || fail "could not remove alert-store backup directory ACL"
+  chmod 0700 "$BACKUP_DIR" || fail "could not secure alert-store backup directory"
+  # Retained recovery material predates this permission contract on some hosts.
+  # Normalize only direct regular files and never follow a symlink out of the
+  # owner-only directory.
+  find -P "$BACKUP_DIR" -maxdepth 1 -type f -exec chmod -N {} + -exec chmod 0600 {} + \
+    || fail "could not secure retained alert-store backup artifacts"
+  # Interrupted or lock-failed runs can leave an empty temporary target. Never
+  # touch a current run, but remove stale partials before evaluating retention.
+  find -P "$BACKUP_DIR" -maxdepth 1 -type f -name '*.backup.tmp' -mmin +30 -delete 2>/dev/null || true
+}
+
 require_sqlite() {
   if ! command -v sqlite3 >/dev/null 2>&1; then
     fail "sqlite3 is not installed or not in PATH"
@@ -130,6 +157,7 @@ verified_backup() {
   rm -f "$backup_tmp"
   while (( attempt <= BACKUP_ATTEMPTS )); do
     if backup_error="$(sqlite3 -cmd ".timeout $SQLITE_BUSY_TIMEOUT_MS" "$DB_PATH" ".backup '$backup_tmp'" 2>&1)"; then
+      secure_regular_file "$backup_tmp"
       break
     fi
     rm -f "$backup_tmp"
@@ -147,6 +175,7 @@ verified_backup() {
     fail "backup failed quick_check: $backup_check"
   fi
   mv "$backup_tmp" "$backup"
+  secure_regular_file "$backup"
   log "backup_ok path=$backup"
 }
 
@@ -258,8 +287,12 @@ recover_candidate() {
   local recovered="$BACKUP_DIR/alerts.sqlite3.$STAMP.recovered"
 
   cp -p "$DB_PATH" "$corrupt_copy"
+  secure_regular_file "$corrupt_copy"
   sqlite3 "$DB_PATH" '.recover' > "$sql_file" 2> "$err_file" || true
   sqlite3 "$recovered" < "$sql_file"
+  secure_regular_file "$sql_file"
+  secure_regular_file "$err_file"
+  secure_regular_file "$recovered"
   local recovered_check
   recovered_check="$(quick_check "$recovered")"
   if [[ "$recovered_check" != "ok" ]]; then
@@ -280,7 +313,9 @@ recover_candidate() {
     launchctl bootout "gui/$(id -u)/com.arron.soc.alert-store" >/dev/null 2>&1 || true
     launchctl bootout "gui/$(id -u)/com.arron.onion-sentinel.web" >/dev/null 2>&1 || true
     mv "$DB_PATH" "$BACKUP_DIR/alerts.sqlite3.$STAMP.malformed-swapped-out"
+    secure_regular_file "$BACKUP_DIR/alerts.sqlite3.$STAMP.malformed-swapped-out"
     cp -p "$recovered" "$DB_PATH"
+    secure_regular_file "$DB_PATH"
     rm -f "$DB_PATH-wal" "$DB_PATH-shm"
     if ! restart_recovery_runtime; then
       fail "database swap completed but one or more runtime services failed to restart"
@@ -311,6 +346,7 @@ prune_backups() {
 }
 
 main() {
+  prepare_backup_directory
   require_sqlite
   if [[ ! -f "$DB_PATH" ]]; then
     fail "DB not found: $DB_PATH"
