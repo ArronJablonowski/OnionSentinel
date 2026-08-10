@@ -152,6 +152,44 @@ class PcapEvidencePivotTest(unittest.TestCase):
             ]
         }
 
+    def test_empty_request_preserves_minimal_compatibility_response(self) -> None:
+        self.assertEqual(
+            queries.query_derived_pcap_evidence(self.context, None),
+            {"executed": [], "results": []},
+        )
+
+    def test_duplicate_records_are_deduplicated_before_audit_counts(self) -> None:
+        duplicate = {
+            "source": "zeek",
+            "record_type": "dns",
+            "query": "duplicate.example",
+        }
+        context = {
+            "parsed_evidence": [
+                {"_local_query_index": {"dns": [duplicate, duplicate]}}
+            ]
+        }
+        result = queries.query_derived_pcap_evidence(
+            context,
+            [{"operation": "dns", "limit": 1}],
+        )
+        item = result["results"][0]
+        self.assertEqual(item["records"], [duplicate])
+        self.assertEqual(item["audit"]["candidate_records_scanned"], 2)
+        self.assertEqual(item["audit"]["unique_records_matched"], 1)
+        self.assertFalse(item["audit"]["result_truncated"])
+
+    def test_result_budget_failure_remains_fail_closed(self) -> None:
+        with mock.patch.object(queries, "MAX_QUERY_RESULT_BYTES", 1):
+            with self.assertRaisesRegex(
+                queries.PcapEvidenceQueryError,
+                "output budget",
+            ):
+                queries.query_derived_pcap_evidence(
+                    self.context,
+                    [{"operation": "coverage"}],
+                )
+
     def test_multi_field_flow_and_time_filters_exclude_timeless_aggregates(self) -> None:
         result = queries.query_derived_pcap_evidence(
             self.context,
