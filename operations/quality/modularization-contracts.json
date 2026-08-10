@@ -3594,6 +3594,51 @@
         "drain_alert_outbox",
         "main"
       ]
+    },
+    {
+      "path": "relay/app/relay_health_wrapper.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/relay_health_wrapper.py",
+      "required_symbols": [
+        "classify_child_diagnostic",
+        "main",
+        "run_pcap_broker",
+        "sanitize_health_state"
+      ]
+    },
+    {
+      "path": "relay/app/relay_health_contract.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/relay_health_contract.py",
+      "required_symbols": [
+        "classify_child_diagnostic",
+        "load_state",
+        "persist_component_state",
+        "send_relay_health_event",
+        "send_telegram"
+      ]
+    },
+    {
+      "path": "relay/app/relay_health_sanitization.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/relay_health_sanitization.py",
+      "required_symbols": [
+        "sanitize_health_state",
+        "sanitize_pcap_summary",
+        "sanitize_storage_summary",
+        "summarize_output"
+      ]
+    },
+    {
+      "path": "relay/app/relay_health_application.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/relay_health_application.py",
+      "required_symbols": [
+        "main",
+        "run_pcap_broker",
+        "run_relay",
+        "run_storage_health"
+      ]
     }
   ],
   "python_package_trees": [

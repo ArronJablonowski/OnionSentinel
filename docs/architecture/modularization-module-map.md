@@ -3078,6 +3078,24 @@ copies all five implementation modules before the executable facade. External
 investigation systems remain read-only; allowlists, limits, timeouts,
 redaction, fail-closed behavior, HTTP schemas, and exit behavior are unchanged.
 
+### Relay health supervision
+
+`relay_health_contract.py` owns environment/configuration defaults, persisted
+component-state compatibility, bounded Telegram/webhook notification delivery,
+numeric validation, and allowlisted diagnostic classification.
+`relay_health_sanitization.py` owns secret-safe child-result projection,
+PCAP/storage summary validation, persisted-state cleansing, and bounded
+human-readable summaries.
+
+`relay_health_application.py` owns bounded component subprocess probes,
+capture-protection recovery proof, failure debounce/recovery transitions, safe
+notification orchestration, component-specific state files, CLI parsing, and
+exit semantics. `relay_health_wrapper.py` remains the systemd executable and
+flat compatibility facade at below 250 lines. Its late-bound hooks and
+configuration values are forwarded only for the duration of a call, preserving
+test and recovery overrides without cross-import state leakage. The Pi installer
+copies all three implementation modules before the wrapper.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:
