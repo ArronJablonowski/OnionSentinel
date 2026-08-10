@@ -62,6 +62,7 @@ const {createBeaconPersistence} = require('./services/beacon_persistence');
 const {
   createPostgresAuxiliaryStoreRuntime,
 } = require('./services/postgres_auxiliary_store_runtime');
+const {createSqliteRuntime} = require('./services/sqlite_runtime');
 const {createInventoryService} = require('./services/inventory_service');
 const {createInventoryRoutes} = require('./routes/inventory_routes');
 const {createHealthRepository} = require('./repositories/health_repository');
@@ -794,40 +795,17 @@ function enrichmentRecord(alert) {
   return alertValueNormalization.enrichmentRecord(alert);
 }
 
-if (controlledEvaluationMode) {
-  const databasePath = path.resolve(dbPath);
-  const databaseMetadata = fs.lstatSync(databasePath);
-  const databaseOwner = typeof process.getuid === 'function'
-    ? process.getuid()
-    : databaseMetadata.uid;
-  if (
-    databasePath !== dbPath
-    || fs.realpathSync(databasePath) !== databasePath
-    || !databaseMetadata.isFile()
-    || databaseMetadata.isSymbolicLink()
-    || databaseMetadata.uid !== databaseOwner
-    || (databaseMetadata.mode & 0o022) !== 0
-  ) {
-    throw new Error(
-      'controlled evaluation database must be an owner-controlled regular file',
-    );
-  }
-  const recoverySidecar = ['-journal', '-wal', '-shm'].find(
-    (suffix) => fs.existsSync(`${databasePath}${suffix}`),
-  );
-  if (recoverySidecar) {
-    throw new Error(
-      `controlled evaluation refuses database recovery sidecar ${recoverySidecar}`,
-    );
-  }
-} else {
-  fs.mkdirSync(path.dirname(dbPath), {recursive: true});
-}
-const db = controlledEvaluationMode
-  ? new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE)
-  : new sqlite3.Database(dbPath);
 const sqliteBusyTimeoutMs = Number(process.env.ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS || 30000);
-db.configure('busyTimeout', sqliteBusyTimeoutMs);
+const sqliteRuntime = createSqliteRuntime({
+  fs,
+  path,
+  processApi: process,
+  sqlite3,
+  dbPath,
+  controlledEvaluationMode,
+  busyTimeoutMs: sqliteBusyTimeoutMs,
+});
+const db = sqliteRuntime.database;
 const sqliteJournalMode = String(process.env.ALERT_STORE_SQLITE_JOURNAL_MODE || 'DELETE').toUpperCase();
 const sqliteSynchronous = String(process.env.ALERT_STORE_SQLITE_SYNCHRONOUS || 'FULL').toUpperCase();
 const sqliteTempStore = String(process.env.ALERT_STORE_SQLITE_TEMP_STORE || 'DEFAULT').toUpperCase();
@@ -887,35 +865,17 @@ const {
 });
 
 function run(sql, params = []) {
-  // Promise wrappers let the HTTP handlers use async/await with sqlite3.
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function onRun(error) {
-      if (error) reject(error);
-      else resolve(this);
-    });
-  });
+  return sqliteRuntime.run(sql, params);
 }
 
 function get(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (error, row) => {
-      if (error) reject(error);
-      else resolve(row);
-    });
-  });
+  return sqliteRuntime.get(sql, params);
 }
 
 function all(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (error, rows) => {
-      if (error) reject(error);
-      else resolve(rows);
-    });
-  });
+  return sqliteRuntime.all(sql, params);
 }
 
-let sqliteWriteGate = Promise.resolve();
-let activeSqliteWrites = 0;
 const enrichmentScheduler = createProviderScheduler({
   failureThreshold: enrichmentCircuitFailureThreshold,
   resetMs: enrichmentCircuitResetMs,
@@ -957,32 +917,11 @@ const serviceMetrics = {
 const postRequestAdmission = createRequestAdmission(httpMaxActivePosts);
 
 function withSqliteWriteGate(task) {
-  // sqlite3 serializes individual statements, but HTTP handlers can still
-  // interleave multi-statement workflows. Queue alert-ingest write workflows so
-  // suppression state, raw alert rows, and group summaries stay coherent during
-  // bursts from n8n.
-  const next = sqliteWriteGate.catch(() => undefined).then(async () => {
-    activeSqliteWrites += 1;
-    try {
-      return await task();
-    } finally {
-      activeSqliteWrites -= 1;
-    }
-  });
-  sqliteWriteGate = next.catch(() => undefined);
-  return next;
+  return sqliteRuntime.withWriteGate(task);
 }
 
 async function withImmediateTransaction(task) {
-  await run('BEGIN IMMEDIATE');
-  try {
-    const result = await task();
-    await run('COMMIT');
-    return result;
-  } catch (error) {
-    await run('ROLLBACK').catch(() => undefined);
-    throw error;
-  }
+  return sqliteRuntime.withImmediateTransaction(task);
 }
 
 const enrichmentCache = createEnrichmentCache({
@@ -2870,7 +2809,7 @@ const healthService = createHealthService({
     runtimeReleaseId: runtimeReleaseIdValue,
     host,
     port,
-    activeSqliteWrites,
+    activeSqliteWrites: sqliteRuntime.activeWrites(),
     telegramOutboxSnapshot,
     enrichmentScheduler,
     enrichmentCache,
