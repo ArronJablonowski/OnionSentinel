@@ -59,6 +59,13 @@ APPLICATION_RUNTIME_PORTS = (
     / "composition"
     / "application_runtime_ports.js"
 )
+HTTP_APPLICATION_RUNTIME = (
+    REPO_ROOT
+    / "n8n"
+    / "alert_store"
+    / "composition"
+    / "http_application_runtime.js"
+)
 DISK_WRITE_ADMISSION = REPO_ROOT / "n8n" / "alert_store" / "services" / "disk_write_admission.js"
 WORKER_WAKE_SIGNALING = REPO_ROOT / "n8n" / "alert_store" / "services" / "worker_wake_signaling.js"
 BEACON_PERSISTENCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "beacon_persistence.js"
@@ -123,6 +130,9 @@ class AlertStoreResilienceTest(unittest.TestCase):
         )
         cls.mutable_runtime_owners = MUTABLE_RUNTIME_OWNERS.read_text(encoding="utf-8")
         cls.application_runtime_ports = APPLICATION_RUNTIME_PORTS.read_text(
+            encoding="utf-8"
+        )
+        cls.http_application_runtime = HTTP_APPLICATION_RUNTIME.read_text(
             encoding="utf-8"
         )
         cls.disk_write_admission = DISK_WRITE_ADMISSION.read_text(encoding="utf-8")
@@ -390,8 +400,8 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertNotIn("refreshAlertGroupSummary(", rebuild)
 
     def test_oversized_payload_returns_413_without_socket_destroy(self) -> None:
-        self.assertIn("return readJsonObject(request, {", self.code)
-        self.assertIn("maxBytes: maxRequestBytes,", self.code)
+        self.assertIn("readJsonObject(request, {", self.http_application_runtime)
+        self.assertIn("maxBytes: runtime.maxRequestBytes,", self.http_application_runtime)
         self.assertIn("statusError(`payload exceeds ${limit} byte limit`, 413)", self.http_runtime)
         self.assertNotIn("request.destroy", self.http_runtime)
 
@@ -401,13 +411,14 @@ class AlertStoreResilienceTest(unittest.TestCase):
             self.service_runtime_lifecycle,
         )
         self.assertIn(
-            "httpCreateServer: (listener) => http.createServer(listener)", self.code
+            "httpCreateServer: (listener) => require('http').createServer(listener)",
+            self.code,
         )
         self.assertIn("server.requestTimeout", self.http_runtime)
         self.assertIn("server.headersTimeout", self.http_runtime)
         self.assertIn("server.maxRequestsPerSocket", self.http_runtime)
         self.assertIn("server.maxConnections", self.http_runtime)
-        self.assertIn("createRequestDispatcher({", self.code)
+        self.assertIn("createRequestDispatcher({", self.http_application_runtime)
         self.assertIn("postRequestAdmission.tryAcquire()", self.http_dispatch)
 
     def test_controlled_shutdown_uses_the_sqlite_runtime_owner(self) -> None:
@@ -416,7 +427,8 @@ class AlertStoreResilienceTest(unittest.TestCase):
             "getActiveSqliteWrites() !== 0", self.service_runtime_lifecycle
         )
         self.assertIn(
-            "waitForSqliteWrites: () => sqliteRuntime.waitForWrites()", self.code
+            "waitForSqliteWrites: database.sqliteRuntime.waitForWrites",
+            self.http_application_runtime,
         )
         self.assertIn("waitForWrites", self.sqlite_runtime)
         self.assertNotIn("sqliteWriteGate.catch", self.code)
@@ -441,11 +453,15 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("require('../lib/pipeline_metrics')", self.mutable_runtime_owners)
         self.assertIn("PIPELINE_EVENT_RETENTION_HOURS", self.runtime_configuration)
         self.assertIn("state.pipelineMetrics.snapshot()", self.health_service)
-        self.assertIn("pipelineMetrics.captureDiskSample", self.code)
+        self.assertIn(
+            "pipelineMetrics.captureDiskSample", self.http_application_runtime
+        )
 
     def test_beacon_artifacts_have_one_atomic_bounded_persistence_owner(self) -> None:
         self.assertIn("createBeaconPersistence", self.runtime_foundation_composition)
-        self.assertIn("writeBeacon: writeN8nBeacon", self.code)
+        self.assertIn(
+            "foundation.beaconPersistence.writeBeacon", self.http_application_runtime
+        )
         self.assertIn("function writeJsonAtomic", self.beacon_persistence)
         self.assertNotIn("function writeJsonAtomic", self.code)
         self.assertIn("atomic local-only state with no credentials or packet evidence", self.beacon_persistence)
@@ -525,7 +541,10 @@ class AlertStoreResilienceTest(unittest.TestCase):
             "void signalAiWorkers('enrichment-completed')",
             self.durable_background_drains,
         )
-        self.assertIn("signalPcapWorker: (reason) => signalWorker(pcapAnalysisWakePath, reason)", self.code)
+        self.assertIn(
+            "foundation.workerWakeSignaling.signalWorker(runtime.pcapAnalysisWakePath, reason)",
+            self.http_application_runtime,
+        )
         self.assertIn("void signalPcapWorker('pcap-transfer-completed')", self.pcap_service)
         self.assertIn("void signalAiWorkers('pcap-analysis-completed')", self.pcap_service)
 

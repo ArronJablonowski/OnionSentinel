@@ -2379,6 +2379,12 @@ ports consumed by application composition. Lazy durable, metrics, and shadow
 owners are resolved only when their existing startup or request action runs;
 the entrypoint no longer duplicates that adapter graph.
 
+`composition/http_application_runtime.js` owns the exact public route graph,
+controlled request boundary, bounded dispatcher, health runtime projection,
+HTTP resource limits, scheduled workers, and service lifecycle. It consumes
+the existing foundation, application, controlled, evidence, mutable, and
+startup owners and remains below the 300-line entry/composition target.
+
 ## Deployment Map
 
 The current production installer copies individual files. These additions are

@@ -8,16 +8,11 @@
 //   1. GET /health from inside the n8n Docker network.
 //   2. Inspect /data/alerts.sqlite3 for alert/filter state.
 //   3. Inspect /app/config/scoring_rules.json for tuning rules.
-const http = require('http');
 const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const {createRequestDispatcher} = require('./lib/http_dispatch');
 const analystReviewDefinitions = require('./services/analyst_review_projection');
-const {createServiceRuntimeLifecycle} = require('./services/service_runtime_lifecycle');
-const {createHttpRequestBoundary} = require('./services/http_request_boundary');
-const {createRouteComposition} = require('./composition/route_composition');
 const {
   createControlledIncidentComposition,
 } = require('./composition/controlled_incident_composition');
@@ -37,6 +32,9 @@ const {
 const {
   createApplicationRuntimePorts,
 } = require('./composition/application_runtime_ports');
+const {
+  createHttpApplicationRuntime,
+} = require('./composition/http_application_runtime');
 const {createPcapPolicy} = require('./lib/pcap_policy');
 const {createProjectSerialization} = require('./lib/project_serialization');
 const {createRuntimeConfiguration} = require('./lib/runtime_configuration');
@@ -70,7 +68,6 @@ const {
   validPinnedStableGroupKey,
 } = require('./lib/group_identity');
 const {buildAlertObservables, compactCorrelationCandidates} = require('./lib/correlation_context');
-const {configureHttpServer, readJsonObject} = require('./lib/http_runtime');
 const {requestJson: boundedRequestJson} = require('./lib/http_json_client');
 let sqlite3;
 try {
@@ -106,27 +103,12 @@ const {
   scoringRulesPath,
   authorizedActivityPolicyPath,
   authorizedActivityPolicy,
-  host,
-  port,
   postgresShadowEnabled,
-  postgresShadowIntervalMs,
   postgresShadowBatchSize,
-  assetPostgresEnabled,
-  softwarePostgresEnabled,
-  acHunterPostgresEnabled,
   controlledEvaluationMode,
   runtimeReleaseIdValue,
   maxRequestBytes,
-  httpRequestTimeoutMs,
-  httpHeadersTimeoutMs,
-  httpKeepAliveTimeoutMs,
-  httpMaxRequestsPerSocket,
-  httpMaxConnections,
-  telegramOutboxIntervalMs,
-  telegramOutboxAutostart,
-  enrichmentCacheCleanupIntervalMs,
   enrichmentTimeoutMs,
-  enrichmentWorkerIntervalMs,
   enrichmentWorkerMaxAttempts,
   pcapRequestMaxWindowSeconds,
   pcapRequestDefaultWindowSeconds,
@@ -136,19 +118,45 @@ const {
   pcapTransferMaxAttempts,
   pcapTransferMaxRetrySeconds,
   pipelineEventRetentionHours,
-  pipelineDiskSampleIntervalMs,
   n8nPostCommitUrl,
   n8nPostCommitToken,
-  n8nPostCommitIntervalMs,
   n8nPostCommitTimeoutMs,
   n8nPostCommitMaxAttempts,
   n8nPostCommitBaseRetrySeconds,
-  durableJobRecoveryIntervalMs,
   aiAnalysisLeaseSeconds,
   pcapAnalysisWakePath,
   analystStatusReasonMaxLength,
   analystAdjudicationTextMaxLength,
 } = runtimeConfiguration;
+const runtimeFoundation = createRuntimeFoundationComposition({
+  runtime: runtimeConfiguration,
+  platform: {
+    fs,
+    path,
+    processApi: process,
+    sqlite3,
+    crypto,
+    createPostgresPool: (config) => {
+      const {Pool} = require('pg');
+      return new Pool(config);
+    },
+  },
+  serialization: {
+    nowUtc,
+    normalizeTimestampValue,
+    formatProjectTimestamp,
+    parseProjectTimestamp,
+  },
+  normalization: {
+    nestedField,
+    integerField,
+    nonNegativeIntegerField,
+    normalizeTriageLevel,
+    safeString,
+    parseJsonObject,
+  },
+  network: {boundedRequestJson, isRelayHeartbeat},
+});
 const {
   alertGroupId,
   alertGroupKeySql,
@@ -180,35 +188,7 @@ const {
   sqliteTempStore,
   supportedAgentRoles,
   workerWakeSignaling,
-} = createRuntimeFoundationComposition({
-  runtime: runtimeConfiguration,
-  platform: {
-    fs,
-    path,
-    processApi: process,
-    sqlite3,
-    crypto,
-    createPostgresPool: (config) => {
-      const {Pool} = require('pg');
-      return new Pool(config);
-    },
-  },
-  serialization: {
-    nowUtc,
-    normalizeTimestampValue,
-    formatProjectTimestamp,
-    parseProjectTimestamp,
-  },
-  normalization: {
-    nestedField,
-    integerField,
-    nonNegativeIntegerField,
-    normalizeTriageLevel,
-    safeString,
-    parseJsonObject,
-  },
-  network: {boundedRequestJson, isRelayHeartbeat},
-});
+} = runtimeFoundation;
 const {
   reviewerAutomationAuthorization,
   conservativeReviewerTelemetry,
@@ -336,10 +316,6 @@ async function updateAnalystStatus(payload) {
   return analystDecisionPersistence.updateStatus(payload);
 }
 
-async function storeAlert(rawAlert) {
-  return alertIngestOrchestrator.store(rawAlert);
-}
-
 const cohortIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$/;
 const stableGroupIdPattern = /^[a-f0-9]{20}$/;
 const dispatchIdPattern = /^[a-f0-9]{64}$/;
@@ -416,15 +392,6 @@ async function storeAlertUnlocked(alert) {
 
 async function applySuppressionPolicy(alert, now) {
   return suppressionPersistence.apply(alert, now);
-}
-
-async function rescoreAlertsUnlocked() {
-  return rescorePersistence.rescore();
-}
-
-async function rescoreAlerts() {
-  // Maintenance writes must not interleave with multi-statement ingestion.
-  return withSqliteWriteGate(rescoreAlertsUnlocked);
 }
 
 const {
@@ -535,21 +502,7 @@ const {
   pcapAnalysisCompletion,
   durableBackgroundDrains,
 } = evidenceProcessing;
-const {
-  controlledEvaluationLeases,
-  controlledJobTransitionAuthority,
-  controlledResultAdmissionAuthority,
-  controlledRetirementCommandOwner,
-  durableJobRecovery,
-  durableJobTransitionExecutor,
-  incidentAnalysisCompletion,
-  incidentReanalysisBindingService,
-  incidentReanalysisJobOwnership,
-  incidentReanalysisRecovery,
-  incidentReanalysisRequestOwner,
-  manualAnalysisDispatch,
-  manualDispatchIdentityOwner,
-} = createControlledIncidentComposition({
+const controlledIncident = createControlledIncidentComposition({
   persistence: {get, all, run},
   identity: {
     safeString,
@@ -604,6 +557,14 @@ const {
     formatProjectTimestamp,
   },
 });
+const {
+  incidentAnalysisCompletion,
+  incidentReanalysisBindingService,
+  incidentReanalysisJobOwnership,
+  incidentReanalysisRecovery,
+  manualAnalysisDispatch,
+  manualDispatchIdentityOwner,
+} = controlledIncident;
 const aiAnalysisAcceptance = evidenceProcessing.createAiAcceptance({
   bindingAuthority: incidentReanalysisBindingService.bindingAuthority,
   analysisCompletion: incidentAnalysisCompletion,
@@ -632,23 +593,7 @@ const applicationRuntimePorts = createApplicationRuntimePorts({
     refreshGroupAliases,
   },
 });
-const {
-  aiReviewSchema,
-  alertIngestOrchestrator,
-  alertPersistence,
-  alertStoreSchemaFoundation,
-  analystDecisionPersistence,
-  analystReviewProjection,
-  authorizedCampaignPersistence,
-  automaticResponseRouting,
-  controlledEvaluationSchema,
-  incidentAnalysisSchema,
-  notificationEnrichmentSchema,
-  pcapSchema,
-  rescorePersistence,
-  startupPersistenceOrchestrator,
-  suppressionPersistence,
-} = createApplicationComposition({
+const applicationOwners = createApplicationComposition({
   database: {
     get,
     all,
@@ -717,6 +662,19 @@ const {
   lifecycle: applicationRuntimePorts.lifecycle,
   serialization: {nowUtc, parseJsonObject, jsonText, normalizeTimestampValue},
 });
+const {
+  aiReviewSchema,
+  alertPersistence,
+  alertStoreSchemaFoundation,
+  analystDecisionPersistence,
+  analystReviewProjection,
+  authorizedCampaignPersistence,
+  incidentAnalysisSchema,
+  notificationEnrichmentSchema,
+  pcapSchema,
+  startupPersistenceOrchestrator,
+  suppressionPersistence,
+} = applicationOwners;
 const initDb = startupPersistenceCompatibility.createSchemaInitializer({
   alertStoreSchemaFoundation,
   incidentAnalysisSchema,
@@ -725,243 +683,39 @@ const initDb = startupPersistenceCompatibility.createSchemaInitializer({
   pcapSchema,
   startupPersistenceOrchestrator,
 });
-async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppression, campaign = null) {
-  return automaticResponseRouting.queuePcap(
-    alert, storedRow, inserted, suppression, campaign,
-  );
-}
-
-async function maybeQueueAutomaticIncidentResponse(alert, storedRow, inserted, suppression, campaign = null) {
-  return automaticResponseRouting.queueIncident(
-    alert, storedRow, inserted, suppression, campaign,
-  );
-}
-
-function readJsonBody(request, includeBodySha256 = false) {
-  return readJsonObject(request, {
-    maxBytes: maxRequestBytes,
-    includeBodySha256,
-  });
-}
-
-function sendJson(response, code, payload) {
-  const body = JSON.stringify(payload);
-  response.writeHead(code, {
-    'Content-Type': 'application/json',
-    'Content-Length': Buffer.byteLength(body),
-  });
-  response.end(body);
-}
-
-async function capturePipelineDiskSample() {
-  const pipelineMetrics = mutableRuntimeOwners.pipelineMetrics();
-  if (!pipelineMetrics) return;
-  const pageCount = await get('PRAGMA page_count');
-  const pageSize = await get('PRAGMA page_size');
-  const sqliteBytes = Number(pageCount?.page_count || 0) * Number(pageSize?.page_size || 0);
-  await withSqliteWriteGate(() => pipelineMetrics.captureDiskSample(sqliteBytes));
-}
-
-const controlledEvaluationRequests = new Set([
-  'GET /health',
-  'POST /ai/request',
-  'POST /analysis/result',
-  'POST /controlled-evaluations/retire',
-  'POST /incidents/reanalyze',
-  'POST /jobs/status',
-]);
-
-const modularRoutes = createRouteComposition({
-  http: {readJsonBody, sendJson},
-  transaction: {
-    withWriteGate: withSqliteWriteGate,
-    withTransaction: withImmediateTransaction,
+const httpApplicationRuntime = createHttpApplicationRuntime({
+  runtime: runtimeConfiguration,
+  platform: {
+    httpCreateServer: (listener) => require('http').createServer(listener),
+    processLike: process,
+    consoleLike: console,
+    dateNow: Date.now,
+    randomUUID: crypto.randomUUID,
+    monotonicNow: process.hrtime.bigint,
+    setIntervalFn: setInterval,
+    setTimeoutFn: setTimeout,
   },
-  inventory: {
-    requireAcHunterStore: postgresAuxiliaryStores.requireAcHunterStore,
-    requireSoftwareStore: postgresAuxiliaryStores.requireSoftwareStore,
-    requireAssetStore: postgresAuxiliaryStores.requireAssetStore,
-    authorizeWrite: requestAuthorization.requireAssetWrite,
-  },
-  health: {
+  database: {
+    db,
     get,
     all,
-    runtime: () => ({
-      controlledEvaluationMode,
-      controlledEvaluationLeases,
-      controlledRoutes: controlledEvaluationRequests,
-      runtimeReleaseId: runtimeReleaseIdValue,
-      host,
-      port,
-      activeSqliteWrites: sqliteRuntime.activeWrites(),
-      telegramOutboxSnapshot,
-      enrichmentScheduler,
-      enrichmentCache,
-      authorizedActivityPolicyPath,
-      authorizedActivityPolicyCount: authorizedActivityPolicy.policies.length,
-      authorizedCampaignReconciliation: authorizedCampaignPersistence.reconciliationState(),
-      diskCapacitySnapshot,
-      ...mutableRuntimeOwners.snapshot(),
-      postgresShadowEnabled,
-      ...postgresAuxiliaryStores.state(),
-      serviceMetrics,
-      postRequestAdmission,
-      nowUtc,
-    }),
+    withWriteGate: withSqliteWriteGate,
+    withTransaction: withImmediateTransaction,
+    sqliteRuntime,
   },
-  analystState: {
-    analystStatusSnapshot,
-    updateAnalystStatus,
-    analystAdjudicationSnapshot,
-    recordAnalystAdjudication,
-    updateIncidentCaseStatus,
-  },
-  durableJob: {
+  foundation: runtimeFoundation,
+  application: applicationOwners,
+  controlled: controlledIncident,
+  evidence: {...evidenceProcessing, aiAnalysisAcceptance},
+  mutable: mutableRuntimeOwners,
+  startup: {initDb},
+  serialization: {
+    nowUtc,
     safeString,
-    controlledTransitionAdmission: controlledJobTransitionAuthority.admit,
-    transitionJobStatus: durableJobTransitionExecutor.transition,
-    applyControlledTransition: controlledJobTransitionAuthority.apply,
-    completePendingByDedupeKeys: (...args) => (
-      mutableRuntimeOwners.durableJobs().completePendingByDedupeKeys(...args)
-    ),
-  },
-  analysisRequest: {
-    controlledEvaluationMode: () => controlledEvaluationMode,
-    identityConflict: incidentIdentityConflict,
-    requestAiReanalysis,
-    requestIncidentEscalation,
-    requestIncidentReanalysis: incidentReanalysisRequestOwner.request,
-    retireControlledEvaluation: controlledRetirementCommandOwner.retire,
-    signalAiWorkers,
-  },
-  analysisResult: {
-    controlledEvaluationMode: () => controlledEvaluationMode,
-    requestHasOwnField,
-    identityConflict: incidentIdentityConflict,
-    controlledResultAdmission: controlledResultAdmissionAuthority.admit,
-    recordAnalysisResult: recordAiAnalysisResult,
-    transitionJobStatus: durableJobTransitionExecutor.transition,
-    applyControlledResultAdmission: controlledResultAdmissionAuthority.apply,
-  },
-  pcap: {
-    createRequest: (...args) => pcapRequestRepository.createRequest(...args),
-    listRequests: (...args) => pcapRequestRepository.listRequests(...args),
-    claimRequest: (...args) => mutableRuntimeOwners.pcapTransferRepository().claimRequest(...args),
-    completeRequest: (...args) => mutableRuntimeOwners.pcapTransferRepository().completeRequest(...args),
-    updateTransferProgress: (...args) => (
-      mutableRuntimeOwners.pcapTransferRepository().updateTransferProgress(...args)
-    ),
-    retryRequest: (...args) => mutableRuntimeOwners.pcapTransferRepository().retryRequest(...args),
-    completeAnalysis: (...args) => pcapAnalysisCompletion.complete(...args),
-    requeueRequests: (...args) => pcapRequestRepository.requeueRequests(...args),
-    signalPcapWorker: (reason) => signalWorker(pcapAnalysisWakePath, reason),
-    signalAiWorkers,
-  },
-  enrichment: {
-    assertDiskWriteAdmission,
-    enrichAlert,
-    cachedInvestigationEnrichment,
-    queryInvestigationEnrichment,
-    authorizeInvestigation: requestAuthorization.requireAssetWrite,
-  },
-  maintenance: {rescore: rescoreAlerts, refreshGroups: rebuildAlertGroupSummaries},
-  alertIngest: {
-    metrics: serviceMetrics,
-    now: Date.now,
-    readJsonBody,
-    writeBeacon: writeN8nBeacon,
     isRelayHeartbeat,
-    assertDiskWriteAdmission,
-    storeAlert,
+    incidentIdentityConflict,
+    requestHasOwnField,
   },
 });
 
-function controlledEvaluationRequestAuthorized(request) {
-  return requestAuthorization.controlledEvaluationAuthorized(request);
-}
-
-const httpRequestBoundary = createHttpRequestBoundary({
-  controlledEvaluationMode,
-  controlledRequests: controlledEvaluationRequests,
-  isShutdownStarted: () => serviceRuntimeLifecycle.isShutdownStarted(),
-  controlledRequestAuthorized: controlledEvaluationRequestAuthorized,
-  routeRegistry: modularRoutes,
-  sendJson,
-  serviceMetrics,
-  writeBeacon: writeN8nBeacon,
-});
-
-async function handleRequest(request, response) {
-  return httpRequestBoundary.handle(request, response);
-}
-
-const dispatchRequest = createRequestDispatcher({
-  handleRequest,
-  postRequestAdmission,
-  logger: applicationLogger,
-  sendJson,
-  randomUUID: crypto.randomUUID,
-  monotonicNow: process.hrtime.bigint,
-});
-
-const serviceRuntimeLifecycle = createServiceRuntimeLifecycle({
-  initDb,
-  initializePostgresAssetStore: postgresAuxiliaryStores.initializeAssetStore,
-  initializePostgresSoftwareStore: postgresAuxiliaryStores.initializeSoftwareStore,
-  initializePostgresAcHunterStore: postgresAuxiliaryStores.initializeAcHunterStore,
-  getPostgresStoreState: () => postgresAuxiliaryStores.state(),
-  applicationLogger,
-  databaseLogFields: {
-    database_path: dbPath,
-    postgres_shadow_enabled: postgresShadowEnabled,
-    asset_postgres_enabled: assetPostgresEnabled,
-    software_postgres_enabled: softwarePostgresEnabled,
-    ac_hunter_postgres_enabled: acHunterPostgresEnabled,
-  },
-  httpCreateServer: (listener) => http.createServer(listener),
-  configureHttpServer,
-  dispatchRequest,
-  sendJson,
-  httpConfiguration: {
-    requestTimeoutMs: httpRequestTimeoutMs,
-    headersTimeoutMs: httpHeadersTimeoutMs,
-    keepAliveTimeoutMs: httpKeepAliveTimeoutMs,
-    maxRequestsPerSocket: httpMaxRequestsPerSocket,
-    maxConnections: httpMaxConnections,
-  },
-  host,
-  port,
-  dbPath,
-  controlledEvaluationMode,
-  processLike: process,
-  consoleLike: console,
-  database: db,
-  waitForSqliteWrites: () => sqliteRuntime.waitForWrites(),
-  getActiveSqliteWrites: () => sqliteRuntime.activeWrites(),
-  setIntervalFn: setInterval,
-  setTimeoutFn: setTimeout,
-  workers: {
-    telegram: {
-      enabled: telegramOutboxAutostart,
-      intervalMs: telegramOutboxIntervalMs,
-      drain: drainTelegramOutbox,
-    },
-    enrichment: {intervalMs: enrichmentWorkerIntervalMs, drain: drainEnrichmentJobs},
-    enrichmentCache: {intervalMs: enrichmentCacheCleanupIntervalMs, prune: () => enrichmentCache.prune()},
-    n8nPostCommit: {intervalMs: n8nPostCommitIntervalMs, drain: drainN8nPostCommitJobs},
-    durableRecovery: {intervalMs: durableJobRecoveryIntervalMs, recover: durableJobRecovery.recover},
-    pipelineDisk: {intervalMs: pipelineDiskSampleIntervalMs, capture: capturePipelineDiskSample},
-    postgresShadow: {
-      enabled: () => Boolean(mutableRuntimeOwners.postgresShadowProjector()),
-      intervalMs: postgresShadowIntervalMs,
-      drain: () => mutableRuntimeOwners.postgresShadowProjector().drain(),
-    },
-    pipelineMetrics: {
-      intervalMs: 60 * 60 * 1000,
-      prune: () => mutableRuntimeOwners.pipelineMetrics().prune(),
-      withWriteGate: withSqliteWriteGate,
-    },
-  },
-});
-
-serviceRuntimeLifecycle.run();
+httpApplicationRuntime.run();

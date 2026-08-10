@@ -73,7 +73,7 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
             "SEVERITY_RANK[normalizedSeverity] >= SEVERITY_RANK[normalizedThreshold]",
             policy,
         )
-        self.assertIn("async function maybeQueueAutomaticPcapRequest", code)
+        self.assertIn("async function queuePcap", routing)
         self.assertIn("createApplicationComposition", code)
         self.assertIn("createAutomaticResponseRouting", composition)
         self.assertIn("queueAutomaticPcap: automaticResponseRouting.queuePcap", composition)
