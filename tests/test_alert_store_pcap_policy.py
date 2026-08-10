@@ -12,6 +12,9 @@ PCAP_SCHEMA = REPO_ROOT / "n8n" / "alert_store" / "services" / "pcap_schema.js"
 ALERT_PERSISTENCE = (
     REPO_ROOT / "n8n" / "alert_store" / "services" / "alert_persistence.js"
 )
+AUTOMATIC_RESPONSE_ROUTING = (
+    REPO_ROOT / "n8n" / "alert_store" / "services" / "automatic_response_routing.js"
+)
 DURABLE_JOB_RECOVERY = (
     REPO_ROOT / "n8n" / "alert_store" / "services" / "durable_job_recovery.js"
 )
@@ -42,10 +45,11 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
     def test_alert_store_auto_queues_pcap_for_configured_levels(self) -> None:
         code = ALERT_STORE.read_text()
         persistence = ALERT_PERSISTENCE.read_text(encoding="utf-8")
+        routing = AUTOMATIC_RESPONSE_ROUTING.read_text(encoding="utf-8")
         policy = SOC_ANALYSIS_POLICY.read_text()
 
         self.assertIn("createSocAnalysisPolicy", code)
-        self.assertIn("socAnalysisPolicy.matchesPcap(level)", code)
+        self.assertIn("matchesPcap: (level) => socAnalysisPolicy.matchesPcap(level)", code)
         self.assertIn("soc_analyst_pcap_min_severity", policy)
         self.assertIn("pcap_capture_loss_threshold_percent", policy)
         self.assertIn("capture_loss_threshold_percent", code)
@@ -54,21 +58,23 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
             policy,
         )
         self.assertIn("async function maybeQueueAutomaticPcapRequest", code)
+        self.assertIn("createAutomaticResponseRouting", code)
         self.assertIn("queueAutomaticPcap: maybeQueueAutomaticPcapRequest", code)
         self.assertIn(
             "const pcap = await queueAutomaticPcap(alert, row, inserted, suppression, campaign);",
             persistence,
         )
-        self.assertIn("status: 'coalesced_campaign'", code)
+        self.assertIn("status: 'coalesced_campaign'", routing)
         self.assertIn("campaign, pcap, incident", persistence)
-        self.assertIn("Automatic PCAP request for ${level} alert", code)
+        self.assertIn("Automatic PCAP request for ${level} alert", routing)
 
     def test_automatic_incident_routing_failure_rolls_back_for_upstream_retry(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
-        start = code.index("async function maybeQueueAutomaticIncidentResponse")
-        end = code.index("function readJsonBody", start)
-        function = code[start:end]
+        routing = AUTOMATIC_RESPONSE_ROUTING.read_text(encoding="utf-8")
+        start = routing.index("async function queueIncident")
+        function = routing[start:routing.index("\n  return {queuePcap", start)]
 
+        self.assertIn("queueIncidentResponseForGroup", code)
         self.assertIn("queueIncidentResponseForGroup", function)
         self.assertIn("error.statusCode = Number(error.statusCode || 503)", function)
         self.assertIn("throw error", function)
@@ -152,7 +158,7 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
         self.assertIn('"failed"', worker)
 
     def test_automatic_pcap_requests_coalesce_pending_group_work(self) -> None:
-        code = ALERT_STORE.read_text(encoding="utf-8")
+        code = AUTOMATIC_RESPONSE_ROUTING.read_text(encoding="utf-8")
         self.assertIn("existingPending", code)
         self.assertIn("status = 'pending'", code)
         self.assertIn("status: 'coalesced'", code)
