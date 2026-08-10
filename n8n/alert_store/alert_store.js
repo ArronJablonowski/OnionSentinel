@@ -62,6 +62,9 @@ const {
 const {
   createIncidentReanalysisFrozenDispatch,
 } = require('./services/incident_reanalysis_frozen_dispatch');
+const {
+  createIncidentReanalysisRequest,
+} = require('./services/incident_reanalysis_request');
 const {createIncidentAnalysisCompletion} = require('./services/incident_analysis_completion');
 const {createIncidentReanalysisBindingService} = require('./services/incident_reanalysis_binding');
 const {createHealthRoutes} = require('./routes/health_routes');
@@ -4322,343 +4325,8 @@ async function supersedeIncidentReanalysisCase(caseId, replacementRunId, updated
 }
 
 async function requestIncidentReanalysis(payload, requestedCaseId = '') {
-  const caseId = requestedCaseId ? validIncidentCaseId(requestedCaseId) : '';
-  if (requestedCaseId && !caseId) {
-    const error = new Error('valid incident case_id is required');
-    error.statusCode = 400;
-    throw error;
-  }
-  const identity = manualDispatchIdentity(payload);
-  const controlledIdentitySupplied = Boolean(
-    identity.representativeAlertIdSupplied
-    || identity.stableGroupIdSupplied
-    || identity.stableGroupKeySupplied
-    || identity.cohortId,
-  );
-  const controlledIncidentDispatch = Boolean(
-    controlledEvaluationMode && identity.cohortId,
-  );
-  if (!caseId && controlledIdentitySupplied) {
-    const error = new Error(
-      'frozen dispatch identity is supported only for single-case reanalysis',
-    );
-    error.statusCode = 409;
-    throw error;
-  }
-  const requestedBy = safeString(payload?.requested_by || 'dashboard', 100);
-  const reason = safeString(
-    payload?.reason || (
-      caseId
-        ? 'Analyst requested fresh Incident Responder analysis'
-        : 'Analyst requested fresh analysis of all incident cases'
-    ),
-    1000,
-  );
-  if (caseId && controlledIncidentDispatch) {
-    const replay = await incidentReanalysisFrozenDispatchOwner.replay(
-      identity,
-      caseId,
-      requestedBy,
-      reason,
-    );
-    if (replay) return replay;
-  }
-  // Release lineage is server-owned deployment metadata. Never allow a
-  // dashboard/API caller to spoof the code revision attributed to a run.
-  const releaseId = incidentReanalysisReleaseId();
-  const requestedAt = nowUtc();
-  const runId = `irr-${crypto.randomUUID()}`;
-  const scope = caseId ? 'single_case' : 'all_cases';
-  const cases = caseId
-    ? await all(
-      `SELECT c.*, CASE WHEN a.alert_id IS NULL THEN 0 ELSE 1 END AS representative_exists,
-              a.stable_group_id AS representative_group_id,
-              a.stable_group_key AS representative_group_key
-       FROM incident_response_cases AS c
-       LEFT JOIN alerts AS a ON a.alert_id = c.representative_alert_id
-       WHERE c.case_id = ?`,
-      [caseId],
-    )
-    : await all(
-      `SELECT c.*, CASE WHEN a.alert_id IS NULL THEN 0 ELSE 1 END AS representative_exists,
-              a.stable_group_id AS representative_group_id,
-              a.stable_group_key AS representative_group_key
-       FROM incident_response_cases AS c
-       LEFT JOIN alerts AS a ON a.alert_id = c.representative_alert_id
-       ORDER BY c.escalated_at ASC, c.case_id ASC`,
-    );
-  if (caseId && !cases.length) {
-    const error = new Error('incident case not found');
-    error.statusCode = 404;
-    throw error;
-  }
-  if (caseId && controlledIdentitySupplied) {
-    await incidentReanalysisFrozenDispatchOwner.bind(
-      identity,
-      caseId,
-      cases[0],
-      requestedAt,
-      requestedBy,
-    );
-  }
-  await run(
-    `INSERT INTO incident_reanalysis_runs (
-       run_id, release_id, scope, status, requested_by, reason,
-       total_count, created_at, updated_at, controlled_dispatch_id
-     ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)`,
-    [
-      runId,
-      releaseId,
-      scope,
-      requestedBy,
-      reason,
-      cases.length,
-      requestedAt,
-      requestedAt,
-      controlledIncidentDispatch ? identity.dispatchId : null,
-    ],
-  );
-  for (const incident of cases) {
-    const storedCaseId = validIncidentCaseId(incident.case_id);
-    const storedGroupId = safeString(incident.group_id, 64).toLowerCase();
-    const representativeGroupId = safeString(
-      incident.representative_group_id,
-      64,
-    ).toLowerCase();
-    const groupId = representativeGroupId || storedGroupId;
-    const dashboardGroupId = safeString(incident.dashboard_group_id, 64).toLowerCase();
-    const representativeAlertId = safeString(incident.representative_alert_id, 256);
-    const identityDrift = Boolean(
-      representativeGroupId && representativeGroupId !== storedGroupId,
-    );
-    let skipReason = '';
-    if (!storedCaseId) skipReason = 'Stored case identifier is invalid';
-    else if (!groupId) skipReason = 'Stored stable group identifier is missing';
-    else if (!representativeAlertId || !Number(incident.representative_exists || 0)) {
-      skipReason = 'Stored representative alert no longer exists';
-    }
-    if (skipReason) {
-      await run(
-        `INSERT INTO incident_reanalysis_run_cases (
-           run_id, case_id, group_id, dashboard_group_id,
-           representative_alert_id, status, skip_reason, completed_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, 'skipped', ?, ?, ?)`,
-        [
-          runId,
-          String(incident.case_id || ''),
-          groupId,
-          dashboardGroupId,
-          representativeAlertId,
-          skipReason,
-          requestedAt,
-          requestedAt,
-        ],
-      );
-      continue;
-    }
-    if (identityDrift) {
-      const conflictingCase = await get(
-        `SELECT case_id FROM incident_response_cases
-         WHERE group_id = ? AND case_id != ?`,
-        [representativeGroupId, storedCaseId],
-      );
-      if (conflictingCase) {
-        const error = new Error(
-          'representative alert identity now belongs to another incident case',
-        );
-        error.statusCode = 409;
-        throw error;
-      }
-      await run(
-        `UPDATE incident_response_cases
-         SET group_id = ?, updated_at = ?
-         WHERE case_id = ? AND group_id = ?`,
-        [representativeGroupId, requestedAt, storedCaseId, storedGroupId],
-      );
-      const representativeGroupKey = safeString(
-        incident.representative_group_key,
-        2048,
-      );
-      if (storedGroupId && representativeGroupKey) {
-        await run(
-          `INSERT INTO alert_group_alias (
-             legacy_group_id, stable_group_id, stable_group_key, updated_at
-           ) VALUES (?, ?, ?, ?)
-           ON CONFLICT(legacy_group_id) DO UPDATE SET
-             stable_group_id = excluded.stable_group_id,
-             stable_group_key = excluded.stable_group_key,
-             updated_at = excluded.updated_at`,
-          [
-            storedGroupId,
-            representativeGroupId,
-            representativeGroupKey,
-            requestedAt,
-          ],
-        );
-      }
-    }
-    await supersedeIncidentReanalysisCase(storedCaseId, runId, requestedAt);
-    const controlledLegacyJobGroupId = safeString(
-      incident.controlled_legacy_job_group_id,
-      64,
-    ).toLowerCase();
-    if (controlledLegacyJobGroupId) {
-      // The in-memory frozen-basis rebind above intentionally makes
-      // identityDrift false. Preserve and retire the former pending queue owner
-      // explicitly before the canonical job is enqueued.
-      await retirePendingIncidentJobs(
-        [controlledLegacyJobGroupId],
-        requestedAt,
-      );
-    }
-    if (identityDrift && storedGroupId) {
-      // Pending work under the former stable identity can no longer join an
-      // authoritative alert row. Retire it atomically with the new queue
-      // owner. A processing lease is intentionally left alone: its immutable
-      // attempt may finish non-authoritatively while this new run stays queued.
-      await run(
-        `UPDATE durable_jobs
-         SET status = 'completed', lease_expires_at = NULL, lease_token = NULL,
-             last_error = NULL, completed_at = COALESCE(completed_at, ?),
-             last_completed_at = COALESCE(last_completed_at, ?),
-             processing_started_at = NULL, rerun_requested = 0, updated_at = ?
-         WHERE job_type = 'incident_response_analysis'
-           AND dedupe_key = ? AND status = 'pending'`,
-        [
-          requestedAt,
-          requestedAt,
-          requestedAt,
-          storedGroupId,
-        ],
-      );
-    }
-    await run(
-      `INSERT INTO incident_reanalysis_run_cases (
-         run_id, case_id, group_id, dashboard_group_id,
-         representative_alert_id, status, queued_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)`,
-      [
-        runId,
-        storedCaseId,
-        groupId,
-        dashboardGroupId,
-        representativeAlertId,
-        requestedAt,
-        requestedAt,
-      ],
-    );
-    await durableJobs.enqueue('incident_response_analysis', groupId, {
-      agent_role: 'incident-responder',
-      case_id: storedCaseId,
-      alert_id: representativeAlertId,
-      group_id: groupId,
-      dashboard_group_id: dashboardGroupId,
-      ...(identity.representativeAlertIdSupplied ? {
-        representative_alert_id: representativeAlertId,
-      } : {}),
-      ...(identity.stableGroupIdSupplied ? {
-        stable_group_id: groupId,
-      } : {}),
-      ...(identity.stableGroupKeySupplied ? {
-        stable_group_key: identity.stableGroupKey,
-      } : {}),
-      ...(identity.cohortId ? {
-        cohort_id: identity.cohortId,
-        dispatch_id: identity.dispatchId,
-        release_id: identity.releaseId,
-        expected_assigned_route: identity.expectedAssignedRoute,
-        expected_reviewer_route: identity.expectedReviewerRoute,
-        reviewer_required: identity.reviewerRequired,
-      } : {}),
-      reanalysis_run_id: runId,
-      reanalysis_release_id: releaseId,
-      manual_reanalysis: true,
-      requested_by: requestedBy,
-      requested_at: requestedAt,
-      reason,
-      related_limit: 500,
-      pcap_analysis_limit: 25,
-    }, {priority: 1200, maxAttempts: 12});
-    await run(
-      `UPDATE incident_response_cases
-       SET agent_status = 'queued', latest_error = NULL, updated_at = ?
-       WHERE case_id = ?`,
-      [requestedAt, storedCaseId],
-    );
-    await run(
-      `INSERT INTO incident_response_events (
-         case_id, event_type, actor, detail_json, created_at
-       ) VALUES (?, 'reanalysis_queued', ?, ?, ?)`,
-      [
-        storedCaseId,
-        requestedBy,
-        jsonText({
-          run_id: runId,
-          release_id: releaseId,
-          ...(identity.representativeAlertIdSupplied ? {
-            representative_alert_id: representativeAlertId,
-          } : {}),
-          ...(identity.stableGroupIdSupplied ? {
-            stable_group_id: groupId,
-          } : {}),
-          ...(identity.stableGroupKeySupplied ? {
-            stable_group_key: identity.stableGroupKey,
-          } : {}),
-          ...(identity.cohortId ? {
-            cohort_id: identity.cohortId,
-            dispatch_id: identity.dispatchId,
-            expected_assigned_route: identity.expectedAssignedRoute,
-            expected_reviewer_route: identity.expectedReviewerRoute,
-            reviewer_required: identity.reviewerRequired,
-          } : {}),
-          reason,
-        }),
-        requestedAt,
-      ],
-    );
-    await pipelineMetrics.record('incident_response_analysis', 'enqueued', groupId, {
-      eventKey: `incident_response_analysis:reanalysis:${runId}:${storedCaseId}`,
-    });
-  }
-  const receipt = {
-    ok: true,
-    ...(await refreshIncidentReanalysisRun(runId)),
-    ...(identity.representativeAlertIdSupplied ? {
-      representative_alert_id: identity.representativeAlertId,
-    } : {}),
-    ...(identity.stableGroupIdSupplied ? {
-      stable_group_id: identity.stableGroupId,
-    } : {}),
-    ...(identity.stableGroupKeySupplied ? {
-      stable_group_key: identity.stableGroupKey,
-    } : {}),
-    ...(identity.cohortId ? {
-      ...(controlledIncidentDispatch ? {case_id: caseId} : {}),
-      cohort_id: identity.cohortId,
-      dispatch_id: identity.dispatchId,
-      release_id: identity.releaseId,
-      expected_assigned_route: identity.expectedAssignedRoute,
-      expected_reviewer_route: identity.expectedReviewerRoute,
-      reviewer_required: identity.reviewerRequired,
-    } : {}),
-  };
-  if (controlledIncidentDispatch) {
-    const storedReceipt = await run(
-      `UPDATE incident_reanalysis_runs
-       SET controlled_receipt_json = ?
-       WHERE run_id = ? AND controlled_dispatch_id = ?
-         AND controlled_receipt_json IS NULL`,
-      [jsonText(receipt), runId, identity.dispatchId],
-    );
-    if (Number(storedReceipt.changes || 0) !== 1) {
-      throw incidentIdentityConflict(
-        'controlled incident dispatch receipt could not be sealed',
-      );
-    }
-  }
-  return receipt;
+  return incidentReanalysisRequestOwner.request(payload, requestedCaseId);
 }
-
 function incidentReanalysisJobPayload(job) {
   if (!job?.payload_json) return {};
   try {
@@ -6033,6 +5701,27 @@ const incidentReanalysisFrozenDispatchOwner = createIncidentReanalysisFrozenDisp
   resolveCanonicalIdentity: resolveCanonicalAlertGroupIdentity,
   rejectProcessingJob: rejectProcessingControlledJob,
   jsonText,
+  conflict: incidentIdentityConflict,
+});
+const incidentReanalysisRequestOwner = createIncidentReanalysisRequest({
+  validCaseId: validIncidentCaseId,
+  normalizeIdentity: manualDispatchIdentity,
+  controlledEvaluationMode,
+  safeString,
+  replayFrozen: (...args) => incidentReanalysisFrozenDispatchOwner.replay(...args),
+  bindFrozen: (...args) => incidentReanalysisFrozenDispatchOwner.bind(...args),
+  releaseId: incidentReanalysisReleaseId,
+  nowUtc,
+  randomUuid: () => crypto.randomUUID(),
+  all,
+  get,
+  run,
+  supersedeCase: supersedeIncidentReanalysisCase,
+  retirePendingJobs: retirePendingIncidentJobs,
+  enqueueJob: (...args) => durableJobs.enqueue(...args),
+  jsonText,
+  recordMetric: (...args) => pipelineMetrics.record(...args),
+  refreshRun: refreshIncidentReanalysisRun,
   conflict: incidentIdentityConflict,
 });
 
