@@ -2762,11 +2762,15 @@ required before extracted code is imported in production:
 | --- | --- | --- |
 | `n8n/bin/agent_memory*.py` | `$HOME/n8n-local/bin` | copy the facade plus validation, journal, and promotion owners before running the memory verifier |
 | `n8n/bin/bounded_process*.py` | `$HOME/n8n-local/bin` | copy the facade plus policy, observation, I/O, termination, and runtime owners as one flat-bin unit |
+| `n8n/bin/maintain-investigation-harness.py` and `harness_maintenance*.py` | `$HOME/n8n-local/bin` | copy all maintenance owners before the package-free compatibility facade |
+| `n8n/bin/pcap_evidence_query*.py` | `$HOME/n8n-local/bin` | copy validation, matching, selection, projection, and response owners before the policy facade |
 | `n8n/onion_sentinel` | `$HOME/n8n-local/onion_sentinel` | staged complete-tree copy and atomic replacement |
+| `onion-sentinel-dashboard/onion_sentinel_server.py` and `onion_sentinel_{release,application,request_routes}.py` | `$HOME/n8n-local/onion-sentinel-dashboard` | stage the three implementation owners before the stable web-service surface |
 | `onion-sentinel-dashboard/portal` | `$HOME/n8n-local/onion-sentinel-dashboard/portal` | staged complete-tree copy |
 | `onion-sentinel-dashboard/pages` and `components` | corresponding dashboard runtime directories | staged complete-tree copy |
 | `n8n/alert_store/routes`, `services`, `repositories`, `jobs`, `composition` | corresponding `$HOME/n8n-local/alert_store` directories | install before service restart; reject incomplete tree |
 | `operations/onion_sentinel_eval` | evaluation workspace only | not required by production services unless explicitly packaged |
+| `operations/benchmark-ollama-cybersecurity.py` and `benchmark_ollama_*.py` | repository operations workspace only | do not deploy with production services; keep the executable and leaf modules together for operator benchmarks |
 
 The installer must validate imports and required files from staging before it
 stops consumers. Runtime backup/restore, secret scanning, release identity, and
