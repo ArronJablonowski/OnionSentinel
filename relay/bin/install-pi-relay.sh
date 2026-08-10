@@ -60,6 +60,9 @@ install -o root -g root -m 0644 \
 install -o root -g root -m 0755 \
   "$REPO_DIR/relay/bin/run-ac-hunter-broker" \
   /usr/local/sbin/run-ac-hunter-broker
+install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/relay_health_contract.py" /opt/so-alert-relay/app/relay_health_contract.py
+install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/relay_health_sanitization.py" /opt/so-alert-relay/app/relay_health_sanitization.py
+install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/relay_health_application.py" /opt/so-alert-relay/app/relay_health_application.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay_health_wrapper.py" /opt/so-alert-relay/app/relay_health_wrapper.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/storage_health.py" /opt/so-alert-relay/app/storage_health.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/config/config.example.json" /opt/so-alert-relay/app/config.json

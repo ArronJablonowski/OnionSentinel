@@ -90,6 +90,28 @@ class ModularizationCompatibilityContractTests(unittest.TestCase):
                     installer,
                 )
 
+    def test_relay_health_wrapper_supports_isolated_file_loader_import(self) -> None:
+        wrapper = ROOT / "relay" / "app" / "relay_health_wrapper.py"
+        script = (
+            "import importlib.util,sys;"
+            f"p={str(wrapper)!r};"
+            "s=importlib.util.spec_from_file_location('isolated_relay_health',p);"
+            "m=importlib.util.module_from_spec(s);"
+            "sys.modules[s.name]=m;"
+            "s.loader.exec_module(m);"
+            "assert callable(m.main) and callable(m.run_pcap_broker);"
+            "assert callable(m.sanitize_health_state)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_extracted_harness_modules_have_no_undefined_globals(self) -> None:
         allowed = set(dir(builtins)) | {
             "__conditional_annotations__",
