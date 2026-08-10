@@ -43,6 +43,13 @@ SQLITE_RUNTIME = REPO_ROOT / "n8n" / "alert_store" / "services" / "sqlite_runtim
 RUNTIME_CONFIGURATION = (
     REPO_ROOT / "n8n" / "alert_store" / "lib" / "runtime_configuration.js"
 )
+DURABLE_BACKGROUND_DRAINS = (
+    REPO_ROOT
+    / "n8n"
+    / "alert_store"
+    / "services"
+    / "durable_background_drains.js"
+)
 
 
 class AlertStoreResilienceTest(unittest.TestCase):
@@ -84,6 +91,9 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.alert_value_normalization = ALERT_VALUE_NORMALIZATION.read_text(encoding="utf-8")
         cls.sqlite_runtime = SQLITE_RUNTIME.read_text(encoding="utf-8")
         cls.runtime_configuration = RUNTIME_CONFIGURATION.read_text(encoding="utf-8")
+        cls.durable_background_drains = DURABLE_BACKGROUND_DRAINS.read_text(
+            encoding="utf-8"
+        )
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
         self.assertIn("require('./lib/provider_scheduler')", self.code)
@@ -141,8 +151,11 @@ class AlertStoreResilienceTest(unittest.TestCase):
 
     def test_sqlite_gate_only_wraps_storage(self) -> None:
         self.assertIn(
-            "withSqliteWriteGate(() => withImmediateTransaction(async () =>",
+            "withSqliteWriteGate(() => withImmediateTransaction(task))",
             self.code,
+        )
+        self.assertIn(
+            "withWriteTransaction(async () =>", self.durable_background_drains
         )
         store_unlocked = self.code.split("async function storeAlertUnlocked(alert)", 1)[1].split(
             "async function applySuppressionPolicy", 1
@@ -398,7 +411,10 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("PCAP_ANALYSIS_WAKE_PATH", self.runtime_configuration)
         self.assertIn("Wake files are an optimization", self.worker_wake_signaling)
         self.assertIn("interval fallback remain authoritative", self.worker_wake_signaling)
-        self.assertIn("void signalAiWorkers('enrichment-completed')", self.code)
+        self.assertIn(
+            "void signalAiWorkers('enrichment-completed')",
+            self.durable_background_drains,
+        )
         self.assertIn("signalPcapWorker: (reason) => signalWorker(pcapAnalysisWakePath, reason)", self.code)
         self.assertIn("void signalPcapWorker('pcap-transfer-completed')", self.pcap_service)
         self.assertIn("void signalAiWorkers('pcap-analysis-completed')", self.pcap_service)

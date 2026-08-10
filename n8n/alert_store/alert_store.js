@@ -57,6 +57,7 @@ const {createSuppressionPersistence} = require('./services/suppression_persisten
 const {createRescorePersistence} = require('./services/rescore_persistence');
 const {createAutomaticResponseRouting} = require('./services/automatic_response_routing');
 const {createManualAnalysisDispatch} = require('./services/manual_analysis_dispatch');
+const {createDurableBackgroundDrains} = require('./services/durable_background_drains');
 const {createDiskWriteAdmission} = require('./services/disk_write_admission');
 const {createWorkerWakeSignaling} = require('./services/worker_wake_signaling');
 const {createBeaconPersistence} = require('./services/beacon_persistence');
@@ -619,8 +620,6 @@ const enrichmentScheduler = createProviderScheduler({
   maxResetMs: enrichmentCircuitMaxResetMs,
   formatTimestamp: formatProjectTimestamp,
 });
-let enrichmentDrainActive = false;
-let n8nPostCommitDrainActive = false;
 let durableJobs;
 let postgresShadowOutbox;
 let postgresShadowProjector;
@@ -1445,127 +1444,15 @@ async function bindIncidentReanalysisResult({
 }
 
 async function drainEnrichmentJobs() {
-  if (enrichmentDrainActive || !durableJobs) return;
-  enrichmentDrainActive = true;
-  try {
-    // One provider bundle at a time prevents free-tier bursts. The interval
-    // immediately runs again after completion, so ingest never waits on it.
-    const job = await withSqliteWriteGate(() => withImmediateTransaction(
-      () => durableJobs.claim('public_enrichment', Math.ceil(enrichmentTimeoutMs * 20 / 1000)),
-    ));
-    if (!job) return;
-    let wakeAi = false;
-    try {
-      const row = await get('SELECT alert_json FROM alerts WHERE alert_id = ?', [job.payload.alert_id]);
-      if (!row) throw new Error('alert no longer exists');
-      const alert = JSON.parse(row.alert_json);
-      const result = await enrichAlert(alert);
-      if (!result.ok || !result.alert) throw new Error(result.reason || 'enrichment returned no alert');
-      await withSqliteWriteGate(() => withImmediateTransaction(async () => {
-        await run(
-          'UPDATE alerts SET enrichment_json = ?, alert_json = ? WHERE alert_id = ?',
-          [jsonText(enrichmentRecord(result.alert)), jsonText(result.alert), job.payload.alert_id],
-        );
-        const updatedRow = await get('SELECT * FROM alerts WHERE alert_id = ?', [job.payload.alert_id]);
-        if (updatedRow) {
-          await indexAlertObservables(result.alert, updatedRow);
-          const groupKey = updatedRow.stable_group_key || alertGroupKeyFromRow(updatedRow);
-          const groupId = updatedRow.stable_group_id || alertGroupId(groupKey);
-          const level = String(updatedRow.triage_level || 'informational').toLowerCase();
-          const campaign = await authorizedCampaignForAlertId(updatedRow.alert_id);
-          const campaignOwnsIncidentInvestigation = campaign?.investigation_mode
-            === 'incident_response_only';
-          if (socAnalysisPolicy.matchesAnalysis(level) && !campaignOwnsIncidentInvestigation) {
-            await durableJobs.enqueue('ai_analysis', groupId, {
-              group_id: groupId,
-              group_key: groupKey,
-              representative_alert_id: updatedRow.alert_id,
-            }, {priority: severityRank[level] ?? 0, maxAttempts: 8});
-            await pipelineMetrics.record('ai_analysis', 'enqueued', groupId, {
-              eventKey: `ai_analysis:enqueued:${groupId}:enrichment:${job.id}:${job.attempt_count}`,
-            });
-            wakeAi = true;
-          }
-        }
-        const completed = await durableJobs.complete(job);
-        if (completed) {
-          await pipelineMetrics.record('public_enrichment', 'completed', job.payload.alert_id, {
-            eventKey: `public_enrichment:completed:${job.id}:${job.attempt_count}`,
-            sizeBytes: Buffer.byteLength(JSON.stringify(enrichmentRecord(result.alert) || {})),
-          });
-        }
-      }));
-      if (wakeAi) void signalAiWorkers('enrichment-completed');
-    } catch (error) {
-      let enrichmentExhausted = false;
-      await withSqliteWriteGate(() => withImmediateTransaction(async () => {
-        await durableJobs.fail(job, error.message);
-        const failedJob = await get('SELECT status FROM durable_jobs WHERE id = ?', [job.id]);
-        enrichmentExhausted = failedJob?.status === 'failed';
-        await pipelineMetrics.record('public_enrichment', 'failed', job.payload.alert_id, {
-          eventKey: `public_enrichment:failed:${job.id}:${job.attempt_count}`,
-        });
-      }));
-      if (enrichmentExhausted) void signalAiWorkers('enrichment-exhausted');
-    }
-  } finally {
-    enrichmentDrainActive = false;
-  }
+  return durableBackgroundDrains.drainEnrichment();
 }
 
 function n8nPostCommitResult(body) {
-  const candidates = Array.isArray(body) ? body : [body];
-  for (const candidate of candidates) {
-    if (!candidate || typeof candidate !== 'object') continue;
-    const payload = candidate.json && typeof candidate.json === 'object' ? candidate.json : candidate;
-    if (payload.ok === false || ['rejected', 'error'].includes(String(payload.status || '').toLowerCase())) {
-      return {ok: false, reason: safeString(payload.reason || payload.error || payload.status, 500)};
-    }
-    if (payload.report_written === true) return {ok: true, payload};
-  }
-  return {ok: false, reason: 'n8n did not confirm the committed alert report write'};
+  return durableBackgroundDrains.postCommitResult(body);
 }
 
 async function drainN8nPostCommitJobs() {
-  if (n8nPostCommitDrainActive || !durableJobs || !n8nPostCommitUrl || !n8nPostCommitToken) return;
-  n8nPostCommitDrainActive = true;
-  try {
-    const job = await withSqliteWriteGate(() => withImmediateTransaction(
-      () => durableJobs.claim('n8n_post_commit', Math.ceil(n8nPostCommitTimeoutMs * 3 / 1000)),
-    ));
-    if (!job) return;
-    try {
-      const response = await requestJson({
-        method: 'POST',
-        url: n8nPostCommitUrl,
-        headers: {'X-Relay-Token': n8nPostCommitToken},
-        body: job.payload,
-        timeoutMs: n8nPostCommitTimeoutMs,
-      });
-      const result = n8nPostCommitResult(response.body);
-      if (response.statusCode < 200 || response.statusCode >= 300 || !result.ok) {
-        throw new Error(result.reason || `n8n returned HTTP ${response.statusCode}`);
-      }
-      await withSqliteWriteGate(() => withImmediateTransaction(async () => {
-        const completed = await durableJobs.complete(job);
-        if (completed) {
-          await pipelineMetrics.record('n8n_post_commit', 'completed', job.dedupe_key, {
-            eventKey: `n8n_post_commit:completed:${job.id}:${job.attempt_count}`,
-            sizeBytes: Buffer.byteLength(JSON.stringify(job.payload || {})),
-          });
-        }
-      }));
-    } catch (error) {
-      await withSqliteWriteGate(() => withImmediateTransaction(async () => {
-        await durableJobs.fail(job, error.message, n8nPostCommitBaseRetrySeconds);
-        await pipelineMetrics.record('n8n_post_commit', 'failed', job.dedupe_key, {
-          eventKey: `n8n_post_commit:failed:${job.id}:${job.attempt_count}`,
-        });
-      }));
-    }
-  } finally {
-    n8nPostCommitDrainActive = false;
-  }
+  return durableBackgroundDrains.drainPostCommit();
 }
 
 async function storeAlertUnlocked(alert) {
@@ -1743,6 +1630,32 @@ const controlledResultAdmissionAuthority = createControlledResultAdmission({
   runtimeReleaseId: runtimeReleaseIdValue,
   incidentReanalysisAttemptId,
   retireLease: controlledJobTransitionAuthority.retireLease,
+});
+const durableBackgroundDrains = createDurableBackgroundDrains({
+  durableJobs: () => durableJobs,
+  withWriteTransaction: (task) => (
+    withSqliteWriteGate(() => withImmediateTransaction(task))
+  ),
+  get,
+  run,
+  enrichAlert,
+  enrichmentRecord,
+  jsonText,
+  indexAlertObservables,
+  groupKeyFromRow: alertGroupKeyFromRow,
+  groupIdFromKey: alertGroupId,
+  authorizedCampaignForAlertId,
+  matchesAnalysis: (level) => socAnalysisPolicy.matchesAnalysis(level),
+  severityRank,
+  recordMetric: (...args) => pipelineMetrics.record(...args),
+  signalAiWorkers,
+  requestJson,
+  safeString,
+  enrichmentTimeoutMs,
+  n8nPostCommitUrl,
+  n8nPostCommitToken,
+  n8nPostCommitTimeoutMs,
+  n8nPostCommitBaseRetrySeconds,
 });
 const durableJobRecovery = createDurableJobRecovery({
   durableJobs: () => durableJobs,
