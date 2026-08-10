@@ -241,6 +241,24 @@ class ArchitectureHardeningTest(unittest.TestCase):
             'cp "$REPO_DIR/n8n/bin/maintain-investigation-harness.py"',
             installer,
         )
+        for module in (
+            "harness_maintenance_contract.py",
+            "harness_maintenance_integrity.py",
+            "harness_maintenance_recovery.py",
+            "harness_maintenance_retention.py",
+            "harness_maintenance_reporting.py",
+            "harness_maintenance_cli.py",
+        ):
+            self.assertIn(
+                f'cp "$REPO_DIR/n8n/bin/{module}"',
+                installer,
+            )
+            self.assertLess(
+                installer.index(f'cp "$REPO_DIR/n8n/bin/{module}"'),
+                installer.index(
+                    'cp "$REPO_DIR/n8n/bin/maintain-investigation-harness.py"'
+                ),
+            )
         self.assertIn(
             "com.arron.onion-sentinel.harness-maintenance.plist",
             installer,

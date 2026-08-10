@@ -24,7 +24,7 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `bin/` | Local AI prompt, analysis, scheduler, rollup, and stack management scripts. |
 | `bin/maintain-alert-store-sqlite.zsh` | Hourly SQLite `quick_check`, verified backup, and recovery-candidate maintenance. |
 | `bin/backup-onion-sentinel-runtime.py` | Daily atomic SQLite, PostgreSQL, and secret-bearing runtime recovery bundle. |
-| `bin/maintain-investigation-harness.py` | Owner-only harness trace integrity, bounded retention, WAL checkpoint, and disk-accounting pass. |
+| `bin/maintain-investigation-harness.py` + `bin/harness_maintenance_*.py` | Owner-only harness trace integrity, crash recovery, bounded retention, WAL checkpoint, disk accounting, and atomic reporting behind a stable CLI. |
 | `bin/report-production-soak.py` | Read-only 48-hour SLO coverage and acceptance reporter. |
 | `bin/run-recovery-restore-drill.py` | Full SQLite and network-isolated disposable PostgreSQL restore qualification. |
 | `bin/ensure-onion-sentinel-web.py` | One-minute service-identity guard that safely recovers the dedicated dashboard port, bootstraps the exact allowlisted LaunchAgent if launchd lost the job, and refuses unknown listeners. |

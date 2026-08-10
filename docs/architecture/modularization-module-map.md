@@ -3092,6 +3092,24 @@ coverage truthfulness, warnings, and revision projection. The 61-line
 `software_inventory.py` facade re-exports the legacy public and private symbols
 used by the portal and tests while performing no storage or response work.
 
+## Investigation Harness Maintenance
+
+`maintain-investigation-harness.py` remains the package-free executable and
+compatibility facade. `harness_maintenance_contract.py` owns stable policy
+defaults, timestamp/digest helpers, bounded numeric validation, and
+cwd-independent harness-runtime loading. `harness_maintenance_integrity.py`
+owns owner/permission checks, SQLite accounting and validation, event-ledger
+verification, and hash-verified recovery-bundle admission.
+
+`harness_maintenance_recovery.py` owns durable-job correlation, non-blocking
+worker-lock exclusion, and hash-chained stale-run terminalization.
+`harness_maintenance_retention.py` owns terminal-only selection, backup-covered
+deletion, transaction rollback, incremental vacuum, WAL checkpointing, and
+follow-up accounting. `harness_maintenance_reporting.py` owns private atomic
+report writes, while `harness_maintenance_cli.py` composes paths, policy,
+locking, preview/backup/apply ordering, report schemas, and exit codes. The Mac
+Studio installer copies every implementation module before the facade.
+
 ## Relay Runtime
 
 `relay.py` is the package-free, executable compatibility facade for the
