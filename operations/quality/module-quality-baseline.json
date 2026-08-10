@@ -1,8 +1,5 @@
 {
   "files": {
-    "n8n/bin/pcap_evidence_query.py": {
-      "max_lines": 915
-    },
     "onion-sentinel-dashboard/onion_sentinel_server.py": {
       "max_lines": 979
     },
@@ -236,15 +233,6 @@
     },
     "n8n/bin/manage-agent-memory.py::main": {
       "max_lines": 102
-    },
-    "n8n/bin/pcap_evidence_query.py::_filter_matches": {
-      "max_complexity": 20
-    },
-    "n8n/bin/pcap_evidence_query.py::_normalize_filters": {
-      "max_complexity": 19
-    },
-    "n8n/bin/pcap_evidence_query.py::query_derived_pcap_evidence": {
-      "max_complexity": 22
     },
     "n8n/bin/pcap_processor_contract.py::maxmind_geoip_summary": {
       "max_complexity": 31,

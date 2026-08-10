@@ -9,14 +9,21 @@ validated here and compared in Python against a bounded local evidence index.
 """
 from __future__ import annotations
 
-import hashlib
-import ipaddress
-import json
-import math
 import re
-from typing import Any, Iterable
+import sys
+from pathlib import Path
+from typing import Any
+
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
 
 from pcap_analysis_core import sanitize_evidence_text, sanitize_evidence_value
+import pcap_evidence_query_matching as _matching
+import pcap_evidence_query_projection as _projection
+import pcap_evidence_query_response as _response
+import pcap_evidence_query_selection as _selection
+import pcap_evidence_query_validation as _validation
 
 
 MAX_QUERY_REQUESTS = 4
@@ -534,284 +541,150 @@ class PcapEvidenceQueryError(ValueError):
 
 
 def _nested(record: dict[str, Any], path: tuple[str, ...]) -> Any:
-    current: Any = record
-    for key in path:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(key)
-    return current
+    return _selection.nested(record, path)
 
 
 def _text(value: Any, field: str, max_chars: int = MAX_REQUEST_TEXT_CHARS) -> str:
-    if not isinstance(value, (str, int, float)):
-        raise PcapEvidenceQueryError(f"PCAP evidence filter {field} must be a scalar")
-    text = str(value).strip()
-    if not text:
-        raise PcapEvidenceQueryError(f"PCAP evidence filter {field} cannot be empty")
-    if len(text) > max_chars:
-        raise PcapEvidenceQueryError(f"PCAP evidence filter {field} exceeds {max_chars} characters")
-    if CONTROL_OR_ESCAPE.search(text):
-        raise PcapEvidenceQueryError(f"PCAP evidence filter {field} contains control characters")
-    return text
+    return _validation.text_filter(
+        value,
+        field,
+        max_chars,
+        control_pattern=CONTROL_OR_ESCAPE,
+        error=PcapEvidenceQueryError,
+    )
 
 
 def _integer(value: Any, field: str, minimum: int, maximum: int) -> int:
-    if isinstance(value, bool):
-        raise PcapEvidenceQueryError(f"PCAP evidence filter {field} must be an integer")
-    try:
-        converted = int(value)
-    except (TypeError, ValueError) as exc:
-        raise PcapEvidenceQueryError(f"PCAP evidence filter {field} must be an integer") from exc
-    if str(value).strip() not in {str(converted), f"+{converted}"} and not isinstance(value, int):
-        raise PcapEvidenceQueryError(f"PCAP evidence filter {field} must be an integer")
-    if converted < minimum or converted > maximum:
-        raise PcapEvidenceQueryError(
-            f"PCAP evidence filter {field} must be between {minimum} and {maximum}"
-        )
-    return converted
+    return _validation.integer_filter(
+        value,
+        field,
+        minimum,
+        maximum,
+        error=PcapEvidenceQueryError,
+    )
 
 
 def _epoch(value: Any, field: str) -> float:
-    if isinstance(value, bool):
-        raise PcapEvidenceQueryError(f"PCAP evidence filter {field} must be a finite epoch number")
-    try:
-        converted = float(value)
-    except (TypeError, ValueError) as exc:
-        raise PcapEvidenceQueryError(f"PCAP evidence filter {field} must be a finite epoch number") from exc
-    if not math.isfinite(converted) or converted < 0 or converted > 4_102_444_800:
-        raise PcapEvidenceQueryError(
-            f"PCAP evidence filter {field} must be a finite epoch between 1970 and 2100"
-        )
-    return converted
+    return _validation.epoch_filter(
+        value,
+        field,
+        error=PcapEvidenceQueryError,
+    )
 
 
 def _normalize_filters(operation: str, raw: Any) -> dict[str, Any]:
-    if raw in (None, ""):
-        return {}
-    if not isinstance(raw, dict):
-        raise PcapEvidenceQueryError("PCAP evidence query filters must be an object")
-    unknown = set(raw).difference(FILTERS_BY_OPERATION[operation])
-    if unknown:
-        raise PcapEvidenceQueryError(
-            f"unsupported {operation} filter fields: {', '.join(sorted(str(item) for item in unknown))}"
-        )
-    normalized: dict[str, Any] = {}
-    for field, value in raw.items():
-        if field in IP_FILTERS:
-            text = _text(value, field, 64)
-            try:
-                normalized[field] = str(ipaddress.ip_address(text))
-            except ValueError as exc:
-                raise PcapEvidenceQueryError(f"PCAP evidence filter {field} must be an IP address") from exc
-        elif field in INTEGER_FILTER_RANGES:
-            normalized[field] = _integer(value, field, *INTEGER_FILTER_RANGES[field])
-        elif field in TIME_FILTERS:
-            normalized[field] = _epoch(value, field)
-        elif field in BOOLEAN_FILTERS:
-            if not isinstance(value, bool):
-                raise PcapEvidenceQueryError(f"PCAP evidence filter {field} must be true or false")
-            normalized[field] = value
-        else:
-            normalized[field] = _text(value, field)
-    start = normalized.get("start_epoch")
-    end = normalized.get("end_epoch")
-    if start is not None and end is not None and start > end:
-        raise PcapEvidenceQueryError("PCAP evidence start_epoch cannot be after end_epoch")
-    for lower, upper in (
-        ("frame_length_min", "frame_length_max"),
-        ("payload_length_min", "payload_length_max"),
-    ):
-        if lower in normalized and upper in normalized and normalized[lower] > normalized[upper]:
-            raise PcapEvidenceQueryError(f"PCAP evidence {lower} cannot exceed {upper}")
-    return normalized
+    return _validation.normalize_filters(
+        operation,
+        raw,
+        filters_by_operation=FILTERS_BY_OPERATION,
+        ip_filters=IP_FILTERS,
+        integer_ranges=INTEGER_FILTER_RANGES,
+        time_filters=TIME_FILTERS,
+        boolean_filters=BOOLEAN_FILTERS,
+        parse_text=_text,
+        parse_integer=_integer,
+        parse_epoch=_epoch,
+        max_text_chars=MAX_REQUEST_TEXT_CHARS,
+        error=PcapEvidenceQueryError,
+    )
 
 
-def _iter_scalars(value: Any) -> Iterable[Any]:
-    if isinstance(value, dict):
-        for item in value.values():
-            yield from _iter_scalars(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from _iter_scalars(item)
-    elif value not in (None, ""):
-        yield value
+def _iter_scalars(value: Any):
+    return _matching.iter_scalars(value)
 
 
 def _field_values(value: Any, aliases: set[str]) -> list[Any]:
-    found: list[Any] = []
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if str(key) in aliases:
-                found.extend(_iter_scalars(item))
-            if isinstance(item, (dict, list)):
-                found.extend(_field_values(item, aliases))
-    elif isinstance(value, list):
-        for item in value:
-            found.extend(_field_values(item, aliases))
-    return found
+    return _matching.field_values(value, aliases)
 
 
 def _equals(candidate: Any, expected: Any) -> bool:
-    if isinstance(expected, bool):
-        return candidate is expected or str(candidate).strip().casefold() == str(expected).casefold()
-    if isinstance(expected, int):
-        try:
-            return int(candidate) == expected and float(candidate) == expected
-        except (TypeError, ValueError, OverflowError):
-            return False
-    return sanitize_evidence_text(candidate, MAX_REQUEST_TEXT_CHARS).casefold() == str(expected).casefold()
+    return _matching.equals(
+        candidate,
+        expected,
+        sanitize_text=sanitize_evidence_text,
+        max_text_chars=MAX_REQUEST_TEXT_CHARS,
+    )
 
 
 def _numeric_values(candidate: Any, field: str) -> list[float]:
-    values = _field_values(candidate, FILTER_FIELD_ALIASES[field])
-    output: list[float] = []
-    for value in values:
-        try:
-            converted = float(value)
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(converted):
-            output.append(converted)
-    return output
+    return _matching.numeric_values(
+        candidate,
+        field,
+        aliases=FILTER_FIELD_ALIASES,
+    )
 
 
 def _filter_matches(candidate: Any, field: str, expected: Any) -> bool:
-    if field in IP_FILTERS:
-        if field == "endpoint_ip":
-            aliases = FILTER_FIELD_ALIASES["source_ip"] | FILTER_FIELD_ALIASES["destination_ip"]
-        else:
-            aliases = FILTER_FIELD_ALIASES[field]
-        values = _field_values(candidate, aliases)
-        for value in values:
-            try:
-                if str(ipaddress.ip_address(str(value).strip())) == expected:
-                    return True
-            except ValueError:
-                continue
-        return False
-    if field == "port":
-        values = _field_values(
-            candidate,
-            FILTER_FIELD_ALIASES["source_port"] | FILTER_FIELD_ALIASES["destination_port"],
-        )
-        return any(_equals(value, expected) for value in values)
-    if field in {"start_epoch", "end_epoch"}:
-        timestamps = _numeric_values(candidate, field)
-        if not timestamps:
-            # A time-bounded query must not silently admit timeless aggregate
-            # rows; only records with explicit timestamps can satisfy it.
-            return False
-        return any(value >= expected for value in timestamps) if field == "start_epoch" else any(
-            value <= expected for value in timestamps
-        )
-    if field.endswith("_min"):
-        return any(value >= expected for value in _numeric_values(candidate, field))
-    if field.endswith("_max"):
-        return any(value <= expected for value in _numeric_values(candidate, field))
-    if field == "uri_prefix":
-        values = _field_values(candidate, FILTER_FIELD_ALIASES["uri"])
-        prefix = str(expected).casefold()
-        return any(sanitize_evidence_text(value, MAX_REQUEST_TEXT_CHARS).casefold().startswith(prefix) for value in values)
-    values = _field_values(candidate, FILTER_FIELD_ALIASES[field])
-    return any(_equals(value, expected) for value in values)
+    return _matching.filter_matches(
+        candidate,
+        field,
+        expected,
+        ip_filters=IP_FILTERS,
+        aliases=FILTER_FIELD_ALIASES,
+        compare=_equals,
+        numeric=_numeric_values,
+        sanitize_text=sanitize_evidence_text,
+        max_text_chars=MAX_REQUEST_TEXT_CHARS,
+    )
 
 
 def _matches_indicator(value: Any, indicator: str) -> bool:
-    if not indicator:
-        return True
-    return any(
-        sanitize_evidence_text(item, MAX_REQUEST_TEXT_CHARS).casefold() == indicator.casefold()
-        for item in _iter_scalars(value)
+    return _matching.matches_indicator(
+        value,
+        indicator,
+        sanitize_text=sanitize_evidence_text,
+        max_text_chars=MAX_REQUEST_TEXT_CHARS,
     )
 
 
 def _scrub_nested(value: Any, container: str = "") -> Any:
     """Defend in depth against raw/parser fields inside an approved container."""
-    if isinstance(value, dict):
-        allowed = NESTED_OUTPUT_FIELDS.get(container)
-        return {
-            sanitize_evidence_text(key, 128): _scrub_nested(item, str(key))
-            for key, item in value.items()
-            if not _forbidden_output_key(key)
-            and (allowed is None or str(key) in allowed)
-        }
-    if isinstance(value, list):
-        return [_scrub_nested(item, container) for item in value[:64]]
-    return sanitize_evidence_value(value, max_chars=512, max_items=64)
+    return _projection.scrub_nested(
+        value,
+        container,
+        nested_output_fields=NESTED_OUTPUT_FIELDS,
+        forbidden=_forbidden_output_key,
+        sanitize_text=sanitize_evidence_text,
+        sanitize_value=sanitize_evidence_value,
+    )
 
 
 def _forbidden_output_key(key: Any) -> bool:
-    lowered = str(key).strip().lower()
-    if lowered in FORBIDDEN_OUTPUT_KEYS:
-        return True
-    # Length/count facts are safe; payload contents are not.
-    return "payload" in lowered and not lowered.endswith(("_length", "_bytes", "_count"))
+    return _projection.forbidden_output_key(key, FORBIDDEN_OUTPUT_KEYS)
 
 
 def _project_coverage(value: Any) -> Any:
     """Keep coverage telemetry without trusting arbitrary coverage keys."""
-    if isinstance(value, dict):
-        output: dict[str, Any] = {}
-        for key, item in value.items():
-            key_text = str(key)
-            if key_text in COVERAGE_SCALAR_FIELDS:
-                output[key_text] = sanitize_evidence_value(item, max_chars=128, max_items=16)
-            elif key_text == "per_log" and isinstance(item, dict):
-                output[key_text] = {
-                    sanitize_evidence_text(log_name, 40): _project_coverage(log_coverage)
-                    for log_name, log_coverage in list(item.items())[:16]
-                }
-            elif key_text == "per_file" and isinstance(item, list):
-                output[key_text] = [_project_coverage(record) for record in item[:256]]
-        return output
-    return {}
+    return _projection.project_coverage(
+        value,
+        scalar_fields=COVERAGE_SCALAR_FIELDS,
+        sanitize_text=sanitize_evidence_text,
+        sanitize_value=sanitize_evidence_value,
+    )
 
 
 def _project_record(operation: str, candidate: Any) -> Any:
-    if operation == "coverage":
-        return _project_coverage(candidate)
-    output_operation = "packet_facts" if operation == "packet_samples" else (
-        "icmp_facts" if operation == "icmp_anomalies" else operation
+    return _projection.project_record(
+        operation,
+        candidate,
+        output_fields=OUTPUT_FIELDS_BY_OPERATION,
+        project_coverage_record=_project_coverage,
+        scrub=_scrub_nested,
+        forbidden=_forbidden_output_key,
+        sanitize_text=sanitize_evidence_text,
     )
-    allowed = OUTPUT_FIELDS_BY_OPERATION[output_operation]
-    if not isinstance(candidate, dict):
-        return {}
-    projected = {
-        sanitize_evidence_text(key, 128): _scrub_nested(value, str(key))
-        for key, value in candidate.items()
-        if str(key) in allowed
-        and not _forbidden_output_key(key)
-    }
-    return projected
 
 
 def _query_candidates(
     evidence: list[Any],
     operation: str,
 ) -> tuple[list[Any], list[str], bool]:
-    candidates: list[Any] = []
-    sources: list[str] = []
-    scan_truncated = False
-    for item in evidence:
-        if not isinstance(item, dict):
-            continue
-        for path in QUERY_PATHS[operation]:
-            value = _nested(item, path)
-            if value is None:
-                continue
-            sources.append(".".join(path))
-            records = value if isinstance(value, list) else [value]
-            remaining = MAX_QUERY_SCAN_RECORDS - len(candidates)
-            if remaining <= 0:
-                scan_truncated = True
-                break
-            candidates.extend(records[:remaining])
-            if len(records) > remaining:
-                scan_truncated = True
-        if len(candidates) >= MAX_QUERY_SCAN_RECORDS:
-            scan_truncated = True
-            break
-    return candidates, sorted(set(sources)), scan_truncated
+    return _selection.query_candidates(
+        evidence,
+        operation,
+        query_paths=QUERY_PATHS,
+        max_scan_records=MAX_QUERY_SCAN_RECORDS,
+    )
 
 
 def query_derived_pcap_evidence(pcap_context: dict[str, Any], requests: Any) -> dict[str, Any]:
@@ -828,88 +701,62 @@ def query_derived_pcap_evidence(pcap_context: dict[str, Any], requests: Any) -> 
     executed: list[dict[str, Any]] = []
     results: list[dict[str, Any]] = []
     for raw in requests:
-        if not isinstance(raw, dict):
-            raise PcapEvidenceQueryError("each PCAP evidence query must be an object")
-        operation = str(raw.get("operation") or "").strip().lower()
-        if operation not in QUERY_PATHS:
-            raise PcapEvidenceQueryError(f"unsupported PCAP evidence operation: {operation or 'missing'}")
-        unknown = set(raw).difference({"operation", "indicator", "filters", "limit"})
-        if unknown:
-            raise PcapEvidenceQueryError(
-                f"unsupported PCAP evidence query fields: {', '.join(sorted(str(item) for item in unknown))}"
-            )
-        indicator = ""
-        if raw.get("indicator") not in (None, ""):
-            indicator = _text(raw.get("indicator"), "indicator", 253)
-        filters = _normalize_filters(operation, raw.get("filters"))
-        limit = _integer(raw.get("limit", 10), "limit", 1, MAX_QUERY_LIMIT)
-
-        candidates, source_views, scan_truncated = _query_candidates(evidence, operation)
-        found: list[Any] = []
-        seen: set[str] = set()
-        matched = 0
-        for candidate in candidates:
-            if not _matches_indicator(candidate, indicator):
-                continue
-            if not all(_filter_matches(candidate, field, expected) for field, expected in filters.items()):
-                continue
-            sanitized = _project_record(operation, candidate)
-            if sanitized in ({}, [], None, ""):
-                continue
-            fingerprint = json.dumps(sanitized, sort_keys=True, separators=(",", ":"), default=str)
-            if fingerprint in seen:
-                continue
-            seen.add(fingerprint)
-            matched += 1
-            if len(found) < limit:
-                found.append(sanitized)
-
-        request = {"operation": operation, "filters": filters, "indicator": indicator, "limit": limit}
-        query_digest = hashlib.sha256(
-            json.dumps(
-                {"contract": QUERY_CONTRACT, "request": request},
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
-        result_digest = hashlib.sha256(
-            json.dumps(found, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
+        request = _normalize_request(raw)
         executed.append(request)
-        results.append(
-            {
-                "query": request,
-                "query_digest": query_digest,
-                "result_digest": result_digest,
-                "evidence_ref": f"derived-pcap-zeek:{query_digest[:20]}",
-                "records": found,
-                "audit": {
-                    "candidate_records_scanned": len(candidates),
-                    "unique_records_matched": matched,
-                    "records_returned": len(found),
-                    "result_truncated": matched > len(found),
-                    "index_scan_truncated": scan_truncated,
-                    "derived_views_considered": source_views,
-                    "time_filter_requires_timestamped_record": bool(
-                        {"start_epoch", "end_epoch"}.intersection(filters)
-                    ),
-                },
-            }
+        results.append(_execute_request(evidence, request))
+    return _response.compose_payload(
+        contract=QUERY_CONTRACT,
+        executed=executed,
+        results=results,
+        max_result_bytes=MAX_QUERY_RESULT_BYTES,
+        error=PcapEvidenceQueryError,
+    )
+
+
+def _normalize_request(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise PcapEvidenceQueryError(
+            "each PCAP evidence query must be an object"
         )
-    payload = {
-        "schema": QUERY_CONTRACT,
-        "executed": executed,
-        "results": results,
-        "source": "sanitized-derived-pcap-evidence",
-        "provenance": {
-            "raw_pcap_access": False,
-            "raw_payloads_included": False,
-            "parser_or_shell_invocation": False,
-            "network_access": False,
-            "evidence_scope": "bounded-derived-index; sampled or aggregated records are investigative leads, not completeness proof",
-        },
+    operation = str(raw.get("operation") or "").strip().lower()
+    if operation not in QUERY_PATHS:
+        raise PcapEvidenceQueryError(
+            f"unsupported PCAP evidence operation: {operation or 'missing'}"
+        )
+    unknown = set(raw).difference(
+        {"operation", "indicator", "filters", "limit"}
+    )
+    if unknown:
+        fields = ", ".join(sorted(str(item) for item in unknown))
+        raise PcapEvidenceQueryError(
+            f"unsupported PCAP evidence query fields: {fields}"
+        )
+    indicator = ""
+    if raw.get("indicator") not in (None, ""):
+        indicator = _text(raw.get("indicator"), "indicator", 253)
+    return {
+        "operation": operation,
+        "filters": _normalize_filters(operation, raw.get("filters")),
+        "indicator": indicator,
+        "limit": _integer(raw.get("limit", 10), "limit", 1, MAX_QUERY_LIMIT),
     }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    if len(encoded) > MAX_QUERY_RESULT_BYTES:
-        raise PcapEvidenceQueryError("PCAP evidence query result exceeded its output budget")
-    return payload
+
+
+def _execute_request(
+    evidence: list[Any],
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    candidates, source_views, scan_truncated = _query_candidates(
+        evidence,
+        request["operation"],
+    )
+    return _response.execute_request(
+        request,
+        candidates,
+        source_views=source_views,
+        scan_truncated=scan_truncated,
+        contract=QUERY_CONTRACT,
+        matches_indicator=_matches_indicator,
+        filter_matches=_filter_matches,
+        project_record=_project_record,
+    )
