@@ -55,6 +55,7 @@ import portal_write_runtime
 import portal_soc_core_runtime
 import portal_soc_detail_runtime
 import portal_delivery_runtime
+import portal_dashboard_runtime
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
@@ -1403,146 +1404,19 @@ redact_sensitive_text = partial(portal_operational_runtime.redact_sensitive_text
 read_macos_update_status = partial(portal_operational_runtime.read_macos_update_status, _OPERATIONAL_RUNTIME)
 
 
-def backup_inventory() -> tuple[list[dict], dict]:
-    return compose_backup_inventory(hermes_backup_sources())
+_DASHBOARD_RUNTIME = sys.modules[__name__]
+backup_inventory = partial(portal_dashboard_runtime.backup_inventory, _DASHBOARD_RUNTIME)
+metric_detail_shell = partial(portal_dashboard_runtime.metric_detail_shell, _DASHBOARD_RUNTIME)
+render_macos_updates_detail = partial(portal_dashboard_runtime.render_macos_updates_detail, _DASHBOARD_RUNTIME)
+render_prioritized_updates_detail = partial(portal_dashboard_runtime.render_prioritized_updates_detail, _DASHBOARD_RUNTIME)
+render_hermes_backups_detail = partial(portal_dashboard_runtime.render_hermes_backups_detail, _DASHBOARD_RUNTIME)
+render_system_uptime_detail = partial(portal_dashboard_runtime.render_system_uptime_detail, _DASHBOARD_RUNTIME)
+render_local_disk_detail = partial(portal_dashboard_runtime.render_local_disk_detail, _DASHBOARD_RUNTIME)
+render_portal_update_detail = partial(portal_dashboard_runtime.render_portal_update_detail, _DASHBOARD_RUNTIME)
+render_admin_login = partial(portal_dashboard_runtime.render_admin_login, _DASHBOARD_RUNTIME)
+render_admin_dashboard = partial(portal_dashboard_runtime.render_admin_dashboard, _DASHBOARD_RUNTIME)
+render_home = partial(portal_dashboard_runtime.render_home, _DASHBOARD_RUNTIME)
 
-
-def metric_detail_shell(title: str, kicker: str, body_html: str, hero_extra_html: str = "") -> bytes:
-    return render_metric_detail_shell(title, kicker, body_html, hero_extra_html)
-
-
-def render_macos_updates_detail() -> bytes:
-    return render_macos_update_metrics(
-        read_macos_update_status(), MACOS_UPDATE_STATUS_FILE
-    )
-
-
-def render_prioritized_updates_detail() -> bytes:
-    return render_prioritized_update_metrics(
-        prioritized_updates_metric(),
-        macos_update_metric(),
-        brew_update_source_metric(),
-        hermes_update_source_metric(),
-    )
-
-
-def render_hermes_backups_detail() -> bytes:
-    rows, meta = backup_inventory()
-    return render_hermes_backup_metrics(
-        rows,
-        meta,
-        format_timestamp=format_iso_timestamp,
-        human_size=human_size,
-        relative_time=relative_time_label,
-    )
-
-
-def render_system_uptime_detail() -> bytes:
-    return render_system_uptime_metrics(
-        system_uptime_metric(), macs_fan_control_status(), socket.gethostname()
-    )
-
-
-def render_local_disk_detail() -> bytes:
-    return render_local_disk_metrics(
-        local_disk_usage_metric(),
-        local_disk_inventory(),
-        home=HOME,
-        human_size=human_size,
-        format_timestamp=format_iso_timestamp,
-        directory_rows=disk_inventory_rows,
-        file_rows=disk_file_inventory_rows,
-    )
-
-
-def render_portal_update_detail(reports: list[Report]) -> bytes:
-    return render_portal_update_metrics(
-        len(reports),
-        portal_last_updated(reports),
-        marker_file=LAST_UPDATED_FILE,
-        from_timestamp=dt.datetime.fromtimestamp,
-        now=dt.datetime.now,
-        update_time_label=update_time_label,
-        format_timestamp=format_iso_timestamp,
-    )
-
-
-def render_admin_login(message: str = "", error: bool = False) -> bytes:
-    token = ensure_admin_token()
-    configured = admin_password_configured()
-    message_html = ""
-    if message:
-        message_html = f'<section class="section"><span class="badge {"warn" if error else ""}">{"Authentication blocked" if error else "Authentication"}</span><p>{html.escape(message)}</p></section>'
-    setup_html = "" if configured else f'''
-<section class="section"><span class="badge warn">Password not configured</span><p>Set the local admin password before using the Administration dashboard:</p><pre>{html.escape(str(HOME / "report_portal" / "set_admin_password.py"))}</pre><p>The password is stored only as a salted PBKDF2-HMAC-SHA256 hash at <code>{html.escape(str(ADMIN_PASSWORD_FILE))}</code>.</p></section>'''
-    disabled_attr = "" if configured else " disabled"
-    body = f'''
-<style>
-.login-card {{ max-width:520px; border:1px solid var(--line); border-radius:22px; background:linear-gradient(145deg, rgba(18,26,41,.94), rgba(10,16,27,.90)); padding:20px; box-shadow:0 14px 40px rgba(0,0,0,.18) }}
-.login-card form {{ display:grid; gap:12px }}
-.login-card label {{ display:grid; gap:8px; color:#d7e5f8; font-size:13px; font-weight:900 }}
-.login-card input {{ width:100%; border:1px solid rgba(35,211,238,.28); border-radius:14px; padding:12px 13px; color:#fff; background:rgba(2,6,23,.62); font:inherit }}
-.login-card button {{ border:0; border-radius:14px; padding:12px 14px; font-weight:950; color:#061018; background:linear-gradient(135deg, var(--cyan), var(--blue)); cursor:pointer }}
-.login-card button:disabled {{ cursor:not-allowed; opacity:.48; filter:saturate(.45); background:linear-gradient(135deg, #64748b, #334155); color:#dbeafe }}
-</style>
-{message_html}
-{setup_html}
-<section class="login-card">
-  <form method="post" action="/admin/login">
-    <input type="hidden" name="token" value="{html.escape(token)}" />
-    <label>Admin password<input name="password" type="password" autocomplete="current-password" autofocus /></label>
-    <button type="submit"{disabled_attr}>Sign in</button>
-  </form>
-</section>
-<section class="section"><p>Administration uses a password form, local salted password hash, server-side session cookie, CSRF validation, POST-only actions, and the existing typed reboot confirmation.</p></section>'''
-    return metric_detail_shell("Administration sign in", "Protected administration", body)
-
-
-def render_admin_dashboard(message: str = "", error: bool = False) -> bytes:
-    """Render the Administration dashboard through its modular view model."""
-    sources = AdminDashboardSources(
-        ensure_token=ensure_admin_token,
-        running_action=running_admin_action,
-        latest_outcome=latest_admin_action_outcome,
-        service_statuses=admin_service_statuses,
-        actions=ADMIN_ACTIONS,
-        read_action_status=read_admin_action_status,
-        last_performed_label=admin_last_performed_label,
-        check_action_available=check_admin_action_available,
-        action_version_info=admin_action_version_info,
-        state_dir=ADMIN_STATE_DIR,
-        human_size=human_size,
-        format_timestamp=format_iso_timestamp,
-        tail_file=tail_file,
-        admin_log_path=admin_log_path,
-        render_cron_failure=render_cron_failure_log_section,
-        render_cron_menu=render_cron_menu,
-    )
-    view = compose_admin_dashboard(sources)
-    return render_admin_dashboard_view(
-        view,
-        message,
-        error,
-        metric_detail_shell,
-    )
-
-
-def render_home(reports: list[Report], host: str, port: int) -> bytes:
-    """Render the home dashboard through its modular view model."""
-    del host, port  # Retained in the public API for route compatibility.
-    sources = HomeDashboardSources(
-        system_uptime=system_uptime_metric,
-        portal_last_updated=portal_last_updated,
-        prioritized_updates=prioritized_updates_metric,
-        latest_hermes_backup=latest_hermes_backup_metric,
-        local_disk_usage=local_disk_usage_metric,
-        human_size=human_size,
-        relative_time=relative_time_label,
-        format_timestamp=format_iso_timestamp,
-        soc_alerts_report=soc_alerts_report,
-        now=lambda: dt.datetime.now().astimezone(),
-    )
-    return render_home_dashboard(compose_home_dashboard(reports, sources))
 
 _SOC_DETAIL_RUNTIME = sys.modules[__name__]
 normalize_soc_alert_status_meta = partial(portal_soc_detail_runtime.normalize_soc_alert_status_meta, _SOC_DETAIL_RUNTIME)

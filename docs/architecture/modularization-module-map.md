@@ -2761,6 +2761,14 @@ keys, route callback schemas, lazy query/detail delivery, same-origin and admin
 authorization callbacks, alert-store write dispatch, and the rule that live
 revisions contain digests rather than incident or asset records.
 
+### Portal dashboard runtime
+
+`portal_dashboard_runtime.py` owns metric-detail composition, protected admin
+login rendering, modular administration view-model binding, and home dashboard
+composition. It preserves existing HTML, authentication messaging, password
+setup guidance, metric formatting, cron/admin status seams, and the public
+`render_home(reports, host, port)` compatibility signature.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:
