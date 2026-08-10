@@ -437,9 +437,12 @@ class AlertStoreResilienceTest(unittest.TestCase):
 
     def test_sqlite_runtime_owns_admission_promises_and_transaction_serialization(self) -> None:
         self.assertIn("createSqliteRuntime", self.code)
-        self.assertIn("function withSqliteWriteGate", self.code)
         self.assertIn("controlled evaluation refuses database recovery sidecar", self.sqlite_runtime)
+        self.assertIn("function run(sql, params = [])", self.sqlite_runtime)
+        self.assertIn("function get(sql, params = [])", self.sqlite_runtime)
+        self.assertIn("function all(sql, params = [])", self.sqlite_runtime)
         self.assertIn("function withWriteGate", self.sqlite_runtime)
+        self.assertIn("async function withImmediateTransaction", self.sqlite_runtime)
         self.assertIn("await run('BEGIN IMMEDIATE')", self.sqlite_runtime)
         self.assertIn("activeSqliteWrites", self.sqlite_runtime)
 
