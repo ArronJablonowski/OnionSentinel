@@ -2734,6 +2734,15 @@ preserves response-size caps, error/status translation, evaluation-token
 isolation, write-token isolation, and alert-store ownership of production
 mutations.
 
+### SOC core runtime
+
+`portal_soc_core_runtime.py` owns SOC analyst-status write wiring, strict alert
+identifier validation, read-only and serialized fallback SQLite connection
+boundaries, time/severity/page parsing, visible severity projection, and
+allowlisted sorting/cursors. Read connections remain URI read-only; fallback
+writes preserve the database owner's journal mode, full transaction rollback,
+busy timeout, and process-local serialization.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:

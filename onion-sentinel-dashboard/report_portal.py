@@ -52,6 +52,7 @@ import portal_incident_action_runtime
 import portal_incident_read_runtime
 import portal_soc_record_runtime
 import portal_write_runtime
+import portal_soc_core_runtime
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
@@ -1858,171 +1859,22 @@ LLM_AGENT_ACTIVITY_CACHE = ResponseCache(
 
 
 
-def soc_alert_suppression_review_state(alert_id: str) -> dict:
-    try:
-        with soc_alert_db_connect() as conn:
-            return soc_alert_review_state_for_group(conn, alert_id)
-    except (FileNotFoundError, sqlite3.Error):
-        return _soc_review_defaults()
-
-
-def soc_alert_status_write_sources() -> SocAlertStatusWriteSources:
-    return SocAlertStatusWriteSources(
-        now_iso=now_iso_utc,
-        validate_store_id=valid_soc_alert_store_id,
-        status_response=soc_alert_status_response,
-        current_repeat_count=current_soc_alert_group_repeat_count,
-        suppression_review_state=soc_alert_suppression_review_state,
-        write_offline_status=write_soc_alert_status,
-        post_alert_store=alert_store_post_json,
-        alert_store_error=AlertStoreRequestError,
-        alert_store_configured=bool(SOC_ALERT_STORE_API_URL),
-        direct_write_allowed=SOC_ALERT_STORE_DIRECT_WRITE_ALLOWED,
-    )
-
-
-def update_soc_alert_status(payload: dict) -> tuple[bool, dict]:
-    return apply_soc_alert_status_update(soc_alert_status_write_sources(), payload)
-
-
-def valid_soc_alert_store_id(value: object) -> str:
-    alert_id = str(value or "").strip()
-    # Security Onion/Elastic alert ids include index:id forms. Keep this URL-safe
-    # and forbid path separators/control characters because ids are accepted from
-    # dynamic API routes.
-    if 1 <= len(alert_id) <= 256 and re.fullmatch(r"[A-Za-z0-9._:@=-]+", alert_id):
-        return alert_id
-    return ""
-
-
-def soc_alert_api_error(message: str, status: int = 400) -> tuple[int, dict]:
-    return status, {"ok": False, "error": message}
-
-
-@contextmanager
-def soc_alert_db_connect():
-    if not SOC_ALERT_STORE_DB.exists():
-        raise FileNotFoundError(f"SOC alert store DB not found: {SOC_ALERT_STORE_DB}")
-    conn = sqlite3.connect(
-        f"file:{SOC_ALERT_STORE_DB}?mode=ro",
-        uri=True,
-        timeout=SOC_ALERT_DB_BUSY_TIMEOUT_SECONDS,
-    )
-    conn.row_factory = sqlite3.Row
-    conn.execute(f"PRAGMA busy_timeout = {SOC_ALERT_DB_BUSY_TIMEOUT_MS}")
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-
-@contextmanager
-def soc_alert_db_write_connect():
-    if not SOC_ALERT_STORE_DB.exists():
-        raise FileNotFoundError(f"SOC alert store DB not found: {SOC_ALERT_STORE_DB}")
-    # Portal-side writes are infrequent administrative fallbacks. Serialize
-    # their complete connection lifetime so concurrent requests cannot race
-    # journal-mode setup, idempotent DDL, or transaction start. SQLite's busy
-    # timeout remains the cross-process contention boundary.
-    with SOC_ALERT_DB_WRITE_LOCK:
-        conn = sqlite3.connect(
-            SOC_ALERT_STORE_DB,
-            timeout=SOC_ALERT_DB_BUSY_TIMEOUT_SECONDS,
-        )
-        conn.row_factory = sqlite3.Row
-        conn.execute(f"PRAGMA busy_timeout = {SOC_ALERT_DB_BUSY_TIMEOUT_MS}")
-        # Preserve the journal mode selected by the database owner. Changing
-        # it per request requires an exclusive lock and can fail when alert
-        # store readers are already attached.
-        conn.execute("PRAGMA synchronous = FULL")
-        conn.execute("PRAGMA wal_autocheckpoint = 1000")
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-
-
-def parse_soc_alert_since(value: str) -> str:
-    raw = str(value or "").strip().lower()
-    if not raw:
-        return ""
-    match = re.fullmatch(r"(\d{1,4})([mhdw])", raw)
-    if match:
-        amount = int(match.group(1))
-        unit = match.group(2)
-        delta = {
-            "m": dt.timedelta(minutes=amount),
-            "h": dt.timedelta(hours=amount),
-            "d": dt.timedelta(days=amount),
-            "w": dt.timedelta(weeks=amount),
-        }[unit]
-        return format_iso_timestamp(dt.datetime.now(dt.timezone.utc) - delta, utc_z=True)
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}t\d{2}:\d{2}(:\d{2})?z?", raw):
-        return ISO_DATE_TIME_SEPARATOR_RE.sub(r"\1  ", raw.upper() if raw.endswith("z") else raw.upper() + "Z")
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
-        return raw + "  00:00:00Z"
-    return ""
-
-
-def soc_alert_level_names(raw: str) -> list[str]:
-    levels: list[str] = []
-    for part in str(raw or "").split(","):
-        level = part.strip().lower()
-        if level in SOC_ALERT_LEVEL_RANK:
-            levels.append("informational" if level == "info" else level)
-    return sorted(set(levels), key=lambda x: SOC_ALERT_LEVEL_RANK.get(x, 0), reverse=True)
-
-
-def soc_alert_row_level(row: sqlite3.Row) -> str:
-    """Normalize an alert row severity for API-wide visible severity metrics."""
-    level = str(row["triage_level"] or row["severity_label"] or "informational").strip().lower()
-    if level == "info":
-        level = "informational"
-    if level in SOC_ALERT_LEVEL_RANK:
-        return level
-    severity = row["severity"] if "severity" in row.keys() else None
-    if severity == 1:
-        return "high"
-    if severity == 2:
-        return "medium"
-    if severity == 3:
-        return "low"
-    return "informational"
-
-
-def soc_alert_visible_severity_summary(rows: list[sqlite3.Row]) -> dict:
-    """Summarize severity across all filtered/visible grouped alerts, before paging."""
-    counts = {level: 0 for level in ("critical", "high", "medium", "low", "informational")}
-    highest = "none"
-    highest_rank = 0
-    for row in rows:
-        level = soc_alert_row_level(row)
-        counts[level] = counts.get(level, 0) + 1
-        rank = SOC_ALERT_LEVEL_RANK.get(level, 0)
-        if rank > highest_rank:
-            highest = level
-            highest_rank = rank
-    return {"counts": counts, "highest": highest}
-
-
-def soc_alert_limit(raw: object, default: int = 100) -> int:
-    try:
-        value = int(str(raw or default))
-    except ValueError:
-        value = default
-    return max(1, min(SOC_ALERT_API_MAX_LIMIT, value))
-
-
-def soc_alert_page(raw: object) -> int:
-    try:
-        value = int(str(raw or 1))
-    except ValueError:
-        value = 1
-    return max(1, value)
+_SOC_CORE_RUNTIME = sys.modules[__name__]
+soc_alert_suppression_review_state = partial(portal_soc_core_runtime.soc_alert_suppression_review_state, _SOC_CORE_RUNTIME)
+soc_alert_status_write_sources = partial(portal_soc_core_runtime.soc_alert_status_write_sources, _SOC_CORE_RUNTIME)
+update_soc_alert_status = partial(portal_soc_core_runtime.update_soc_alert_status, _SOC_CORE_RUNTIME)
+valid_soc_alert_store_id = partial(portal_soc_core_runtime.valid_soc_alert_store_id, _SOC_CORE_RUNTIME)
+soc_alert_api_error = partial(portal_soc_core_runtime.soc_alert_api_error, _SOC_CORE_RUNTIME)
+soc_alert_db_connect = partial(portal_soc_core_runtime.soc_alert_db_connect, _SOC_CORE_RUNTIME)
+soc_alert_db_write_connect = partial(portal_soc_core_runtime.soc_alert_db_write_connect, _SOC_CORE_RUNTIME)
+parse_soc_alert_since = partial(portal_soc_core_runtime.parse_soc_alert_since, _SOC_CORE_RUNTIME)
+soc_alert_level_names = partial(portal_soc_core_runtime.soc_alert_level_names, _SOC_CORE_RUNTIME)
+soc_alert_row_level = partial(portal_soc_core_runtime.soc_alert_row_level, _SOC_CORE_RUNTIME)
+soc_alert_visible_severity_summary = partial(portal_soc_core_runtime.soc_alert_visible_severity_summary, _SOC_CORE_RUNTIME)
+soc_alert_limit = partial(portal_soc_core_runtime.soc_alert_limit, _SOC_CORE_RUNTIME)
+soc_alert_page = partial(portal_soc_core_runtime.soc_alert_page, _SOC_CORE_RUNTIME)
+soc_alert_sort_clause = partial(portal_soc_core_runtime.soc_alert_sort_clause, _SOC_CORE_RUNTIME)
+soc_alert_cursor_parts = partial(portal_soc_core_runtime.soc_alert_cursor_parts, _SOC_CORE_RUNTIME)
 
 
 SOC_ALERT_SORT_SQL = {
@@ -2041,29 +1893,6 @@ SOC_ALERT_SORT_SQL = {
     "risk": "COALESCE(triage_score, 0)",
 }
 
-
-def soc_alert_sort_clause(query: dict[str, list[str]], *, fallback: bool = False) -> tuple[str, str, str]:
-    """Return an allowlisted ORDER BY clause for grouped alert table sorting."""
-    raw_sort = str((query.get("sort") or ["last_seen"])[0]).strip().lower().replace("-", "_")
-    direction = str((query.get("direction") or query.get("dir") or ["desc"])[0]).strip().lower()
-    if direction not in {"asc", "desc"}:
-        direction = "desc"
-    if raw_sort not in SOC_ALERT_SORT_SQL:
-        raw_sort = "last_seen"
-    expression = SOC_ALERT_SORT_SQL[raw_sort]
-    if fallback:
-        expression = "COALESCE(payload_size_bytes, LENGTH(COALESCE(alert_json, '')), 0)" if raw_sort == "size" else expression
-    tie = "ASC" if direction == "asc" else "DESC"
-    id_column = "group_key" if fallback else "group_id"
-    return raw_sort, direction, f"{expression} {direction.upper()}, replace(replace(COALESCE(last_seen, timestamp, first_seen), 'T', ' '), 'Z', '') DESC, {id_column} {tie}"
-
-
-def soc_alert_cursor_parts(raw: str) -> tuple[str, str]:
-    cursor = str(raw or "")
-    if "|" not in cursor:
-        return "", ""
-    last_seen, alert_id = cursor.split("|", 1)
-    return (last_seen.strip(), valid_soc_alert_store_id(alert_id))
 
 
 SOC_ALERT_DETECTION_OUTCOME_LABELS = {
