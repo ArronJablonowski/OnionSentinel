@@ -27,6 +27,18 @@ class ArchitectureHardeningTest(unittest.TestCase):
             installer[:builder_copy],
         )
 
+    def test_dashboard_builder_module_tree_is_fully_installed(self) -> None:
+        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text(
+            encoding="utf-8"
+        )
+        scripts = ROOT / "onion-sentinel-dashboard/scripts"
+        for path in sorted(scripts.glob("dashboard_builder_*.py")):
+            with self.subTest(path=path.name):
+                self.assertIn(
+                    f'$REPO_DIR/onion-sentinel-dashboard/scripts/{path.name}',
+                    installer,
+                )
+
     def test_group_identity_excludes_mutable_workflow_state(self):
         code = (ROOT / "n8n/alert_store/lib/group_identity.js").read_text(encoding="utf-8")
         self.assertIn("'v2'", code)

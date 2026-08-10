@@ -20,6 +20,7 @@ dependency.
 | `artifact_cache.py` | Thread-safe, single-flight cache for parsed Markdown/JSON artifacts. |
 | `response_cache.py` | Short-lived, bounded cache for serialized read-only API responses. |
 | `scripts/build_soc_alerts_dashboard.py` | Builds the static dashboard pages from SQLite/report artifacts. |
+| `scripts/dashboard_builder_*.py` | Bounded builder contract, settings, report/detail, page-composition, publication, and runtime layers. |
 | `scripts/dashboard_executive_metrics.py` | Bounded read-only Home metrics for exact hourly alert intake and enrichment-cache efficiency. |
 | `scripts/dashboard_metric_components.py` | Small tested render helpers for the SOC Alerts metric cards. |
 | `scripts/dashboard_timeline_components.py` | Grouped-observation timeline rendering, including single-observation reports. |

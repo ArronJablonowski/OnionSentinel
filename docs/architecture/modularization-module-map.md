@@ -2199,8 +2199,13 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (4,440
-lines).
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` is an
+99-line compatibility entrypoint. Its implementation is split across bounded
+`dashboard_builder_contract.py`, `dashboard_builder_settings.py`,
+`dashboard_builder_report_core.py`, `dashboard_builder_reports.py`,
+`dashboard_builder_pages.py`, `dashboard_builder_publication.py`, and
+`dashboard_builder_runtime.py` modules. Every layer is below 800 lines and is
+installed beside the entrypoint.
 
 | Boundary | Responsibilities |
 | --- | --- |
@@ -2223,6 +2228,11 @@ Page builders receive view models. They do not read SQLite, PostgreSQL,
 configuration, log files, or subprocess state. Existing public page filenames,
 API URLs, form field names, accessibility behavior, and navigation remain
 stable. Shared CSS and JavaScript have one source of truth.
+
+The ARR-80 compatibility facade forwards runtime-path and collaborator
+overrides into each layer. This preserves legacy imports and runtime injection
+while page renderers continue to receive validated view models and publication
+remains behind one deterministic orchestration boundary.
 
 First extraction checkpoint:
 `onion-sentinel-dashboard/scripts/dashboard_shell_components.py` owns the

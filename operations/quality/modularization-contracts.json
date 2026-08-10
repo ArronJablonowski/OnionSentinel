@@ -2693,6 +2693,69 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_builder_contract.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_contract.py",
+      "required_symbols": [
+        "AlertReport",
+        "load_analyst_group_statuses"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_builder_settings.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_settings.py",
+      "required_symbols": [
+        "load_soc_ai_settings",
+        "current_soc_analysis_model"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_builder_report_core.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_report_core.py",
+      "required_symbols": [
+        "load_reports",
+        "ai_activity_state"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_builder_reports.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_reports.py",
+      "required_symbols": [
+        "reports_page_section",
+        "ALERTS_PAGE_SCROLL_STABILIZER"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_builder_pages.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_pages.py",
+      "required_symbols": [
+        "build_html",
+        "settings_page_section"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_builder_publication.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_publication.py",
+      "required_symbols": [
+        "render_static_page",
+        "write_site_pages",
+        "main"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_builder_runtime.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_runtime.py",
+      "required_symbols": [
+        "BUILDER_MODULES"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_time_format.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_time_format.py",
