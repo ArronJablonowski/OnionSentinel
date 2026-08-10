@@ -30,6 +30,7 @@ const {createRequestAuthorization} = require('./lib/request_authorization');
 const {createControlledJobIdentity} = require('./lib/controlled_job_identity');
 const controlledRetirementDefinitions = require('./lib/controlled_retirement_identity');
 const {createControlledRetirementProjections} = require('./lib/controlled_retirement_projections');
+const {createManualDispatchIdentity} = require('./lib/manual_dispatch_identity');
 const {createInventoryService} = require('./services/inventory_service');
 const {createInventoryRoutes} = require('./routes/inventory_routes');
 const {createHealthRepository} = require('./repositories/health_repository');
@@ -3864,181 +3865,8 @@ async function loadAlertGroupAliasSnapshot() {
 }
 
 function manualDispatchIdentity(payload) {
-  const representativeAlertIdSupplied = requestHasOwnField(
-    payload,
-    'representative_alert_id',
-  );
-  const stableGroupIdSupplied = requestHasOwnField(payload, 'stable_group_id');
-  const stableGroupKeySupplied = requestHasOwnField(payload, 'stable_group_key');
-  const cohortIdSupplied = requestHasOwnField(payload, 'cohort_id');
-  const dispatchIdSupplied = requestHasOwnField(payload, 'dispatch_id');
-  const releaseIdSupplied = requestHasOwnField(payload, 'release_id');
-  const expectedAssignedRouteSupplied = requestHasOwnField(
-    payload,
-    'expected_assigned_route',
-  );
-  const expectedReviewerRouteSupplied = requestHasOwnField(
-    payload,
-    'expected_reviewer_route',
-  );
-  const reviewerRequiredSupplied = requestHasOwnField(
-    payload,
-    'reviewer_required',
-  );
-  const representativeAlertId = representativeAlertIdSupplied
-    && typeof payload.representative_alert_id === 'string'
-    ? payload.representative_alert_id
-    : '';
-  const stableGroupId = stableGroupIdSupplied
-    && typeof payload.stable_group_id === 'string'
-    ? payload.stable_group_id
-    : '';
-  const stableGroupKey = stableGroupKeySupplied
-    && typeof payload.stable_group_key === 'string'
-    ? payload.stable_group_key
-    : '';
-  const cohortId = cohortIdSupplied && typeof payload.cohort_id === 'string'
-    ? payload.cohort_id
-    : '';
-  const dispatchId = dispatchIdSupplied && typeof payload.dispatch_id === 'string'
-    ? payload.dispatch_id
-    : '';
-  const releaseId = releaseIdSupplied && typeof payload.release_id === 'string'
-    ? payload.release_id
-    : '';
-  const expectedAssignedRoute = expectedAssignedRouteSupplied
-    && typeof payload.expected_assigned_route === 'string'
-    ? payload.expected_assigned_route
-    : '';
-  const expectedReviewerRoute = expectedReviewerRouteSupplied
-    && typeof payload.expected_reviewer_route === 'string'
-    ? payload.expected_reviewer_route
-    : '';
-
-  if (
-    stableGroupIdSupplied
-    && (
-      typeof payload.stable_group_id !== 'string'
-      || !stableGroupIdPattern.test(stableGroupId)
-    )
-  ) {
-    const error = new Error('requested stable_group_id is invalid');
-    error.statusCode = 409;
-    throw error;
-  }
-  if (stableGroupKeySupplied && !validPinnedStableGroupKey(payload.stable_group_key)) {
-    const error = new Error('requested stable_group_key is invalid');
-    error.statusCode = 409;
-    throw error;
-  }
-  if (
-    cohortIdSupplied !== dispatchIdSupplied
-    || (cohortIdSupplied && !releaseIdSupplied)
-    || (
-      cohortIdSupplied
-      && (
-        !expectedAssignedRouteSupplied
-        || !expectedReviewerRouteSupplied
-        || !reviewerRequiredSupplied
-      )
-    )
-    || (
-      !cohortIdSupplied
-      && (
-        expectedAssignedRouteSupplied
-        || expectedReviewerRouteSupplied
-        || reviewerRequiredSupplied
-      )
-    )
-  ) {
-    const error = new Error(
-      'controlled cohort identity and route contract must be supplied together',
-    );
-    error.statusCode = 409;
-    throw error;
-  }
-  if (
-    cohortIdSupplied
-    && (
-      typeof payload.cohort_id !== 'string'
-      || typeof payload.dispatch_id !== 'string'
-      || typeof payload.release_id !== 'string'
-      || !cohortIdPattern.test(cohortId)
-      || !dispatchIdPattern.test(dispatchId)
-      || !releaseIdPattern.test(releaseId)
-    )
-  ) {
-    const error = new Error('cohort dispatch identity is invalid');
-    error.statusCode = 409;
-    throw error;
-  }
-  if (cohortIdSupplied) {
-    if (
-      typeof payload.expected_assigned_route !== 'string'
-      || typeof payload.expected_reviewer_route !== 'string'
-      || !controlledRoutePattern.test(expectedAssignedRoute)
-      || !controlledRoutePattern.test(expectedReviewerRoute)
-      || controlledRouteModelIdentity(expectedAssignedRoute)
-        === controlledRouteModelIdentity(expectedReviewerRoute)
-      || payload.reviewer_required !== true
-    ) {
-      throw incidentIdentityConflict(
-        'controlled cohort route contract is invalid',
-      );
-    }
-    const runtimeReleaseId = controlledRuntimeReleaseId();
-    if (!runtimeReleaseId) {
-      throw incidentIdentityConflict(
-        'controlled cohort dispatch requires an exact deployed runtime release',
-      );
-    }
-    if (releaseId !== runtimeReleaseId) {
-      throw incidentIdentityConflict(
-        'controlled cohort dispatch release_id does not match the deployed runtime',
-      );
-    }
-  }
-  if (
-    cohortIdSupplied
-    && (
-      !representativeAlertIdSupplied
-      || !stableGroupIdSupplied
-      || !stableGroupKeySupplied
-    )
-  ) {
-    const error = new Error(
-      'cohort dispatch requires representative_alert_id, stable_group_id, and stable_group_key pins',
-    );
-    error.statusCode = 409;
-    throw error;
-  }
-  if (
-    representativeAlertIdSupplied
-    && (
-      typeof payload.representative_alert_id !== 'string'
-      || !representativeAlertIdPattern.test(representativeAlertId)
-    )
-  ) {
-    const error = new Error('requested representative_alert_id is invalid');
-    error.statusCode = 409;
-    throw error;
-  }
-  return {
-    representativeAlertIdSupplied,
-    stableGroupIdSupplied,
-    stableGroupKeySupplied,
-    representativeAlertId,
-    stableGroupId,
-    stableGroupKey,
-    cohortId,
-    dispatchId,
-    releaseId,
-    expectedAssignedRoute,
-    expectedReviewerRoute,
-    reviewerRequired: payload?.reviewer_required === true,
-  };
+  return manualDispatchIdentityOwner.normalize(payload);
 }
-
 async function resolveDashboardAlertGroup(dashboardGroupId, identity = {}) {
   let representative = await get(
     `SELECT a.alert_id, a.stable_group_id, a.stable_group_key
@@ -6385,6 +6213,19 @@ const controlledRetirementCommandOwner = createControlledRetirementCommand({
   canonicalJsonText: controlledRetirementCanonicalJsonText,
   validateReceipt: validateControlledRetirementReceipt,
   conflict: controlledRetirementConflict,
+});
+const manualDispatchIdentityOwner = createManualDispatchIdentity({
+  hasOwnField: requestHasOwnField,
+  stableGroupIdPattern,
+  validPinnedStableGroupKey,
+  cohortIdPattern,
+  dispatchIdPattern,
+  releaseIdPattern,
+  controlledRoutePattern,
+  controlledRouteModelIdentity,
+  representativeAlertIdPattern,
+  runtimeReleaseId: controlledRuntimeReleaseId,
+  conflict: incidentIdentityConflict,
 });
 
 async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppression, campaign = null) {
