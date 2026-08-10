@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = ROOT / "n8n" / "postgres" / "asset-inventory-schema.sql"
 STORE = ROOT / "n8n" / "alert_store" / "lib" / "postgres_asset_store.js"
+RUNTIME = ROOT / "n8n" / "alert_store" / "services" / "postgres_auxiliary_store_runtime.js"
 ENTRYPOINT = ROOT / "n8n" / "alert_store" / "alert_store.js"
 ROUTES = ROOT / "n8n" / "alert_store" / "routes" / "inventory_routes.js"
 SERVICE = ROOT / "n8n" / "alert_store" / "services" / "inventory_service.js"
@@ -54,12 +55,17 @@ class PostgresAssetInventoryTests(unittest.TestCase):
         routes = ROUTES.read_text(encoding="utf-8")
         service = SERVICE.read_text(encoding="utf-8")
         store = STORE.read_text(encoding="utf-8")
+        runtime = RUNTIME.read_text(encoding="utf-8")
         self.assertIn("path: '/assets/inventory'", routes)
         self.assertIn("parsedUrl.searchParams.get('limit')", routes)
         self.assertIn("authorizeWrite(request)", routes)
         self.assertIn("requireAssetStoreWriteAuthorization", entrypoint)
         self.assertIn("crypto.timingSafeEqual", entrypoint)
         self.assertIn("ASSET_STORE_WRITE_TOKEN", entrypoint)
+        self.assertIn("createPostgresAuxiliaryStoreRuntime", entrypoint)
+        self.assertIn("PostgreSQL asset inventory is unavailable", runtime)
+        self.assertIn("asset_store.postgres_idle_error", runtime)
+        self.assertNotIn("ASSET_STORE_WRITE_TOKEN", runtime)
         self.assertIn("assetStore().putDhcpState", service)
         self.assertIn("assetStore().promoteDhcp", service)
         self.assertIn("assetStore().approveDhcpIpChange", service)

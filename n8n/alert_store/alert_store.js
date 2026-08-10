@@ -59,6 +59,9 @@ const {createAutomaticResponseRouting} = require('./services/automatic_response_
 const {createDiskWriteAdmission} = require('./services/disk_write_admission');
 const {createWorkerWakeSignaling} = require('./services/worker_wake_signaling');
 const {createBeaconPersistence} = require('./services/beacon_persistence');
+const {
+  createPostgresAuxiliaryStoreRuntime,
+} = require('./services/postgres_auxiliary_store_runtime');
 const {createInventoryService} = require('./services/inventory_service');
 const {createInventoryRoutes} = require('./routes/inventory_routes');
 const {createHealthRepository} = require('./repositories/health_repository');
@@ -924,13 +927,24 @@ let n8nPostCommitDrainActive = false;
 let durableJobs;
 let postgresShadowOutbox;
 let postgresShadowProjector;
-let postgresAssetPool;
-let postgresAssetStore;
-let postgresAssetStoreError = '';
-let postgresSoftwareStore;
-let postgresSoftwareStoreError = '';
-let postgresAcHunterStore;
-let postgresAcHunterStoreError = '';
+const postgresAuxiliaryStores = createPostgresAuxiliaryStoreRuntime({
+  env: process.env,
+  controlledEvaluationMode,
+  assetPostgresEnabled,
+  softwarePostgresEnabled,
+  acHunterPostgresEnabled,
+  assetSchemaPath: assetPostgresSchemaPath,
+  softwareSchemaPath: softwarePostgresSchemaPath,
+  acHunterSchemaPath: acHunterPostgresSchemaPath,
+  createPool: (config) => {
+    const {Pool} = require('pg');
+    return new Pool(config);
+  },
+  createAssetStore: (options) => createPostgresAssetStore(options),
+  createSoftwareStore: (options) => createPostgresSoftwareStore(options),
+  createAcHunterStore: (options) => createPostgresAcHunterStore(options),
+  logger: applicationLogger,
+});
 let pipelineMetrics;
 let pcapTransferRepository;
 const serviceMetrics = {
@@ -1072,181 +1086,27 @@ function initializePostgresShadowProjector() {
 }
 
 async function initializePostgresAssetStore() {
-  if (
-    (!assetPostgresEnabled && !softwarePostgresEnabled && !acHunterPostgresEnabled)
-    || controlledEvaluationMode
-  ) return;
-  const requiredKeys = [
-    'ALERT_STORE_POSTGRES_HOST',
-    'ALERT_STORE_POSTGRES_DATABASE',
-    'ALERT_STORE_POSTGRES_USER',
-    'ALERT_STORE_POSTGRES_PASSWORD',
-  ];
-  const missing = requiredKeys.filter(
-    (key) => !String(process.env[key] || '').trim(),
-  );
-  if (missing.length) {
-    postgresAssetStoreError = `missing ${missing.join(', ')}`;
-    postgresSoftwareStoreError = `missing ${missing.join(', ')}`;
-    postgresAcHunterStoreError = `missing ${missing.join(', ')}`;
-    return;
-  }
-  try {
-    const {Pool} = require('pg');
-    postgresAssetPool = new Pool({
-      host: String(process.env.ALERT_STORE_POSTGRES_HOST),
-      port: Number(process.env.ALERT_STORE_POSTGRES_PORT || 5433),
-      database: String(process.env.ALERT_STORE_POSTGRES_DATABASE),
-      user: String(process.env.ALERT_STORE_POSTGRES_USER),
-      password: String(process.env.ALERT_STORE_POSTGRES_PASSWORD),
-      max: Math.max(2, Math.min(20, Number(process.env.ASSET_POSTGRES_POOL_SIZE || 8))),
-      connectionTimeoutMillis: Math.max(
-        1000,
-        Number(process.env.ASSET_POSTGRES_CONNECT_TIMEOUT_MS || 3000),
-      ),
-      idleTimeoutMillis: 10000,
-      application_name: 'onion-sentinel-postgres-store',
-    });
-    postgresAssetPool.on('error', (error) => {
-      postgresAssetStoreError = String(error.message || error).slice(0, 500);
-      postgresSoftwareStoreError = postgresAssetStoreError;
-      postgresAcHunterStoreError = postgresAssetStoreError;
-      applicationLogger.log('error', 'asset_store.postgres_idle_error', {
-        error_message: postgresAssetStoreError,
-      });
-    });
-    if (assetPostgresEnabled) {
-      postgresAssetStore = createPostgresAssetStore({
-        pool: postgresAssetPool,
-        schemaPath: assetPostgresSchemaPath,
-        logger: applicationLogger,
-      });
-      await postgresAssetStore.initialize();
-      postgresAssetStoreError = '';
-      applicationLogger.log('info', 'asset_store.ready', {
-        backend: 'postgresql',
-        schema_version: 1,
-      });
-    }
-  } catch (error) {
-    postgresAssetStore = null;
-    postgresAssetStoreError = String(error.message || error).slice(0, 500);
-    postgresSoftwareStoreError = postgresAssetStoreError;
-    postgresAcHunterStoreError = postgresAssetStoreError;
-    applicationLogger.log('error', 'asset_store.initialization_failed', {
-      error_message: postgresAssetStoreError,
-    });
-  }
+  return postgresAuxiliaryStores.initializeAssetStore();
 }
 
 async function initializePostgresAcHunterStore() {
-  if (!acHunterPostgresEnabled || controlledEvaluationMode) return;
-  if (!postgresAssetPool) {
-    postgresAcHunterStoreError = 'shared PostgreSQL pool is unavailable';
-    return;
-  }
-  try {
-    postgresAcHunterStore = createPostgresAcHunterStore({
-      pool: postgresAssetPool,
-      schemaPath: acHunterPostgresSchemaPath,
-      logger: applicationLogger,
-    });
-    await postgresAcHunterStore.initialize();
-    postgresAcHunterStoreError = '';
-    applicationLogger.log('info', 'ac_hunter_store.ready', {
-      backend: 'postgresql',
-      schema_version: 1,
-      retention_seconds: 86400,
-      scheduled_minute: 35,
-    });
-  } catch (error) {
-    postgresAcHunterStore = null;
-    postgresAcHunterStoreError = String(error.message || error).slice(0, 500);
-    applicationLogger.log('error', 'ac_hunter_store.initialization_failed', {
-      error_message: postgresAcHunterStoreError,
-    });
-  }
+  return postgresAuxiliaryStores.initializeAcHunterStore();
 }
 
 async function initializePostgresSoftwareStore() {
-  if (!softwarePostgresEnabled || controlledEvaluationMode) return;
-  if (!postgresAssetPool) {
-    postgresSoftwareStoreError = (
-      'shared PostgreSQL pool is unavailable; enable the PostgreSQL asset store'
-    );
-    return;
-  }
-  try {
-    postgresSoftwareStore = createPostgresSoftwareStore({
-      pool: postgresAssetPool,
-      schemaPath: softwarePostgresSchemaPath,
-      logger: applicationLogger,
-    });
-    await postgresSoftwareStore.initialize();
-    postgresSoftwareStoreError = '';
-    applicationLogger.log('info', 'software_inventory_store.ready', {
-      backend: 'postgresql',
-      schema_version: 1,
-    });
-  } catch (error) {
-    postgresSoftwareStore = null;
-    postgresSoftwareStoreError = String(error.message || error).slice(0, 500);
-    applicationLogger.log('error', 'software_inventory_store.initialization_failed', {
-      error_message: postgresSoftwareStoreError,
-    });
-  }
+  return postgresAuxiliaryStores.initializeSoftwareStore();
 }
 
 function requirePostgresAssetStore() {
-  if (!assetPostgresEnabled) {
-    const error = new Error('PostgreSQL asset inventory is disabled');
-    error.statusCode = 503;
-    throw error;
-  }
-  if (!postgresAssetStore) {
-    const error = new Error(
-      `PostgreSQL asset inventory is unavailable${postgresAssetStoreError ? `: ${postgresAssetStoreError}` : ''}`,
-    );
-    error.statusCode = 503;
-    throw error;
-  }
-  return postgresAssetStore;
+  return postgresAuxiliaryStores.requireAssetStore();
 }
 
 function requirePostgresSoftwareStore() {
-  if (!softwarePostgresEnabled) {
-    const error = new Error('PostgreSQL software inventory is disabled');
-    error.statusCode = 503;
-    throw error;
-  }
-  if (!postgresSoftwareStore) {
-    const error = new Error(
-      `PostgreSQL software inventory is unavailable${
-        postgresSoftwareStoreError ? `: ${postgresSoftwareStoreError}` : ''
-      }`,
-    );
-    error.statusCode = 503;
-    throw error;
-  }
-  return postgresSoftwareStore;
+  return postgresAuxiliaryStores.requireSoftwareStore();
 }
 
 function requirePostgresAcHunterStore() {
-  if (!acHunterPostgresEnabled) {
-    const error = new Error('PostgreSQL AC Hunter cache is disabled');
-    error.statusCode = 503;
-    throw error;
-  }
-  if (!postgresAcHunterStore) {
-    const error = new Error(
-      `PostgreSQL AC Hunter cache is unavailable${
-        postgresAcHunterStoreError ? `: ${postgresAcHunterStoreError}` : ''
-      }`,
-    );
-    error.statusCode = 503;
-    throw error;
-  }
-  return postgresAcHunterStore;
+  return postgresAuxiliaryStores.requireAcHunterStore();
 }
 
 function assetStoreWriteAuthorized(request) {
@@ -3021,15 +2881,7 @@ const healthService = createHealthService({
     postgresShadowOutbox,
     postgresShadowProjector,
     postgresShadowEnabled,
-    postgresAssetStore,
-    assetPostgresEnabled,
-    postgresAssetStoreError,
-    postgresSoftwareStore,
-    softwarePostgresEnabled,
-    postgresSoftwareStoreError,
-    postgresAcHunterStore,
-    acHunterPostgresEnabled,
-    postgresAcHunterStoreError,
+    ...postgresAuxiliaryStores.state(),
     durableJobs,
     serviceMetrics,
     postRequestAdmission,
@@ -3256,15 +3108,16 @@ initDb().then(async () => {
   await initializePostgresAssetStore();
   await initializePostgresSoftwareStore();
   await initializePostgresAcHunterStore();
+  const postgresStoreState = postgresAuxiliaryStores.state();
   applicationLogger.log('info', 'database.initialized', {
     database_path: dbPath,
     postgres_shadow_enabled: postgresShadowEnabled,
     asset_postgres_enabled: assetPostgresEnabled,
-    asset_postgres_available: Boolean(postgresAssetStore),
+    asset_postgres_available: Boolean(postgresStoreState.postgresAssetStore),
     software_postgres_enabled: softwarePostgresEnabled,
-    software_postgres_available: Boolean(postgresSoftwareStore),
+    software_postgres_available: Boolean(postgresStoreState.postgresSoftwareStore),
     ac_hunter_postgres_enabled: acHunterPostgresEnabled,
-    ac_hunter_postgres_available: Boolean(postgresAcHunterStore),
+    ac_hunter_postgres_available: Boolean(postgresStoreState.postgresAcHunterStore),
   });
   const server = configureHttpServer(http.createServer((request, response) => {
     void dispatchRequest(request, response).catch((error) => {
