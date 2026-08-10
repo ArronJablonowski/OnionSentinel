@@ -39,6 +39,7 @@ if str(PORTAL_SOURCE_DIR) not in sys.path:
 import soc_alert_api
 import software_inventory
 import cti_program
+import portal_asset_runtime
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
@@ -788,51 +789,15 @@ def parse_iso_timestamp(value: object) -> dt.datetime:
 
 def _asset_inventory_module():
     """Load the shared strict inventory implementation in source and runtime layouts."""
-    existing = sys.modules.get("_onion_sentinel_asset_inventory")
-    if existing is not None:
-        return existing
-    candidates = (
-        PORTAL_SOURCE_DIR / "asset_inventory.py",
-        PORTAL_SOURCE_DIR.parent / "n8n" / "bin" / "asset_inventory.py",
-        HOME / "n8n-local" / "bin" / "asset_inventory.py",
-    )
-    for candidate in candidates:
-        if not candidate.is_file():
-            continue
-        spec = importlib.util.spec_from_file_location(
-            "_onion_sentinel_asset_inventory",
-            candidate,
-        )
-        if spec is None or spec.loader is None:
-            continue
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
-        return module
-    raise RuntimeError("asset inventory validator is unavailable")
+    return portal_asset_runtime.asset_inventory_module(sys.modules[__name__])
 
 
 def load_asset_inventory_data() -> tuple[dict, str]:
     """Return the PostgreSQL export used by investigation identity resolution."""
-    validator = _asset_inventory_module()
-    repository = AssetInventoryRepository(
-        database_enabled=ASSET_DATABASE_READ_ENABLED,
-        cache=ASSET_INVENTORY_CACHE,
-        cache_lock=ASSET_INVENTORY_CACHE_LOCK,
-        epoch_seconds=time.time,
-        fetch_json=alert_store_get_json,
-        validate_inventory=validator.validate_asset_inventory,
-        load_inventory_file=validator.load_asset_inventory,
-        inventory_path=Path(ASSET_INVENTORY_FILE),
-        maximum_bytes=ASSET_INVENTORY_MAX_BYTES,
-    )
-    return repository.load()
+    return portal_asset_runtime.load_asset_inventory_data(sys.modules[__name__])
 
 
-def _asset_record_state(
-    asset: dict,
-    observed_at: dt.datetime,
-) -> str:
+def _asset_record_state(asset: dict, observed_at: dt.datetime) -> str:
     return asset_record_state(asset, observed_at, parse_iso_timestamp)
 
 
@@ -854,23 +819,17 @@ def _mac_address_scope(value: object) -> str:
     return mac_address_scope(value)
 
 
-def _annotate_exact_ip_dhcp_macs(
-    records: list[dict],
-    observed_at: dt.datetime,
-) -> dict:
-    state, state_error = load_dhcp_asset_discovery_state_data()
-    return annotate_exact_ip_dhcp_macs(
-        records, observed_at, state, state_error, parse_iso_timestamp,
+def _annotate_exact_ip_dhcp_macs(records: list[dict], observed_at: dt.datetime) -> dict:
+    return portal_asset_runtime.annotate_exact_ip_dhcp_macs(
+        sys.modules[__name__], records, observed_at
     )
 
 
 def _dhcp_asset_inventory_overlay(
-    inventory: dict,
-    observed_at: dt.datetime,
+    inventory: dict, observed_at: dt.datetime
 ) -> tuple[dict[str, dict], list[dict], dict]:
-    state, state_error = load_dhcp_asset_discovery_state_data()
-    return dhcp_asset_inventory_overlay(
-        inventory, observed_at, state, state_error, parse_iso_timestamp,
+    return portal_asset_runtime.dhcp_asset_inventory_overlay(
+        sys.modules[__name__], inventory, observed_at
     )
 
 
@@ -880,58 +839,14 @@ def asset_inventory_response(
     query: dict[str, list[str]] | None = None,
 ) -> tuple[int, dict]:
     """Return current authoritative asset-to-address assignments."""
-    if ASSET_DATABASE_READ_ENABLED and observed_at is None:
-        encoded = urlencode(asset_database_query_parameters(query))
-        try:
-            payload = alert_store_get_json(
-                f"/assets/inventory?{encoded}",
-                timeout=5.0,
-            )
-        except RuntimeError as exc:
-            return HTTPStatus.SERVICE_UNAVAILABLE, asset_database_unavailable_payload(exc)
-        now = dt.datetime.now(dt.timezone.utc)
-        records = payload.get("assets")
-        discovery_status = (
-            _annotate_exact_ip_dhcp_macs(records, now)
-            if isinstance(records, list)
-            else {"status": "unavailable"}
-        )
-        payload["dhcp_discovery"] = discovery_status
-        payload.setdefault("discovered_asset_count", 0)
-        return HTTPStatus.OK, payload
-
-    now = observed_at or dt.datetime.now(dt.timezone.utc)
-    if now.tzinfo is None:
-        now = now.astimezone()
-    now = now.astimezone(dt.timezone.utc)
-    inventory, error = load_asset_inventory_data()
-    records, state_counts = current_asset_projection(
-        inventory, now, parse_iso_timestamp,
-    )
-    overlays, discovered, discovery_status = _dhcp_asset_inventory_overlay(
-        inventory,
-        now,
-    )
-    records = apply_asset_overlays(records, overlays, discovered)
-    return compose_local_asset_inventory_response(
-        inventory=inventory,
-        error=error,
-        observed_at=now,
-        records=records,
-        state_counts=state_counts,
-        discovered=discovered,
-        discovery_status=discovery_status,
-        format_timestamp=format_iso_timestamp,
+    return portal_asset_runtime.asset_inventory_response(
+        sys.modules[__name__], observed_at=observed_at, query=query
     )
 
 
 def software_asset_label_snapshot() -> AssetLabelSnapshot:
     """Load complete public identities before resolving pseudonymous hosts."""
-    return load_asset_label_snapshot(
-        lambda page_query: asset_inventory_response(query=page_query),
-        page_size=software_inventory.ASSET_LABEL_PAGE_SIZE,
-        maximum_pages=software_inventory.ASSET_LABEL_MAX_PAGES,
-        maximum_records=software_inventory.ASSET_LABEL_MAX_RECORDS)
+    return portal_asset_runtime.software_asset_label_snapshot(sys.modules[__name__])
 
 
 def software_inventory_response(
@@ -940,97 +855,27 @@ def software_inventory_response(
     query: dict[str, list[str]] | None = None,
 ) -> tuple[int, dict]:
     """Return only the bounded, collector-produced Software Inventory view."""
-    snapshot = software_asset_label_snapshot()
-
-    if SOFTWARE_DATABASE_READ_ENABLED:
-        allowed = database_query_parameters(
-            query, observed_at, software_inventory._utc_iso,
-        )
-        try:
-            payload = alert_store_get_json(
-                f"/software-inventory?{urlencode(allowed)}",
-                timeout=10.0,
-            )
-        except RuntimeError as exc:
-            filters = software_inventory.parse_filters(query)
-            return HTTPStatus.SERVICE_UNAVAILABLE, software_inventory._empty_payload(
-                observed_at or dt.datetime.now(dt.timezone.utc),
-                filters,
-                error=f"PostgreSQL software inventory unavailable: {exc}",
-            )
-        return HTTPStatus.OK, enrich_database_payload(
-            payload,
-            snapshot,
-            observed_at=observed_at or dt.datetime.now(dt.timezone.utc),
-            apply_asset_labels=software_inventory.apply_asset_labels,
-            correlate_operating_systems=(
-                software_inventory.correlate_asset_operating_systems
-            ),
-        )
-
-    status, payload = software_inventory.build_response(
-        Path(SOFTWARE_INVENTORY_STATE_FILE),
-        query,
-        observed_at=observed_at,
-        maximum_bytes=SOFTWARE_INVENTORY_MAX_BYTES,
-        assets=snapshot.assets,
-        asset_inventory_complete=snapshot.complete,
+    return portal_asset_runtime.software_inventory_response(
+        sys.modules[__name__], observed_at=observed_at, query=query
     )
-    if status != HTTPStatus.OK or not isinstance(payload.get("items"), list):
-        return status, payload
-    append_incomplete_asset_warning(payload, snapshot.complete)
-    return status, payload
 
 
 def resolve_asset_ip(
-    value: object,
-    observed_at: object,
-    inventory: dict | None = None,
+    value: object, observed_at: object, inventory: dict | None = None
 ) -> dict:
-    return resolve_asset_ip_record(
-        value,
-        observed_at,
-        inventory,
-        parse_timestamp=parse_iso_timestamp,
-        load_inventory=load_asset_inventory_data,
+    return portal_asset_runtime.resolve_asset_ip(
+        sys.modules[__name__], value, observed_at, inventory
     )
 
 
 def dhcp_asset_discovery_response(
-    *,
-    observed_at: dt.datetime | None = None,
+    *, observed_at: dt.datetime | None = None
 ) -> tuple[int, dict]:
     """Return DHCP candidates reconciled against authoritative inventory."""
-    now = observed_at or dt.datetime.now(dt.timezone.utc)
-    if now.tzinfo is None:
-        now = now.astimezone()
-    now = now.astimezone(dt.timezone.utc)
-    state, state_error = load_dhcp_asset_discovery_state_data()
-    dependencies = DhcpDiscoveryDependencies(
-        asset_record_state=_asset_record_state,
-        asset_public_record=_asset_public_record,
-        parse_timestamp=parse_iso_timestamp,
-        format_timestamp=format_iso_timestamp,
-        mac_address_scope=_mac_address_scope,
+    return portal_asset_runtime.dhcp_asset_discovery_response(
+        sys.modules[__name__], observed_at=observed_at
     )
-    if state_error:
-        return compose_dhcp_discovery_response(
-            state=state,
-            state_error=state_error,
-            inventory={},
-            inventory_error="",
-            observed_at=now,
-            dependencies=dependencies,
-        )
-    inventory, inventory_error = load_asset_inventory_data()
-    return compose_dhcp_discovery_response(
-        state=state,
-        state_error="",
-        inventory=inventory,
-        inventory_error=inventory_error,
-        observed_at=now,
-        dependencies=dependencies,
-    )
+
 
 def pcap_transfer_duration_seconds(
     row: sqlite3.Row, *, has_transfer_duration: bool

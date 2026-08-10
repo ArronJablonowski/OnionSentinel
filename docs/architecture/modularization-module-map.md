@@ -1785,8 +1785,11 @@ stable-identity matching, and conflict-safe provisional asset policy. Passive
 DHCP evidence remains distinct from authoritative identifiers: an unambiguous
 hostname or MAC may update the displayed current address, while IP-only or
 conflicting claims remain review-only. `report_portal.py` retains bounded
-file/database loading, runtime clocks, timestamp compatibility, and the public
-facade functions used by existing integrations.
+runtime configuration, timestamp compatibility, and public facade functions
+used by existing integrations. `portal_asset_runtime.py` owns the remaining
+asset, DHCP, and software read orchestration while resolving all host paths,
+clocks, transport, and patchable compatibility callbacks through the injected
+portal runtime.
 
 `portal_asset_repository.py` owns PostgreSQL snapshot caching and validation,
 bounded disaster-recovery file reads, explicit missing/invalid/unavailable

@@ -53,6 +53,9 @@ SERVICE = ROOT / "n8n" / "alert_store" / "services" / "inventory_service.js"
 COLLECTOR = ROOT / "n8n" / "bin" / "collect-dhcp-asset-discovery.py"
 PLIST = ROOT / "n8n" / "launchd" / "com.arron.soc.dhcp-asset-discovery.plist"
 PORTAL = ROOT / "onion-sentinel-dashboard" / "report_portal.py"
+PORTAL_ASSET_RUNTIME = (
+    ROOT / "onion-sentinel-dashboard" / "portal_asset_runtime.py"
+)
 BUILDER = (
     ROOT
     / "onion-sentinel-dashboard"
@@ -365,8 +368,9 @@ class PostgresAssetInventoryTests(unittest.TestCase):
 
     def test_dashboard_uses_server_side_paging(self) -> None:
         portal = PORTAL.read_text(encoding="utf-8")
+        asset_runtime = PORTAL_ASSET_RUNTIME.read_text(encoding="utf-8")
         asset_page = ASSET_PAGE.read_text(encoding="utf-8")
-        self.assertIn('"/assets/inventory?', portal)
+        self.assertIn('"/assets/inventory?', asset_runtime)
         self.assertIn("ASSET_DATABASE_READ_ENABLED", portal)
         self.assertIn("asset-page-previous", asset_page)
         self.assertIn("asset-page-next", asset_page)
