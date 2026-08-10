@@ -236,6 +236,24 @@ from scheduler_configuration import (
     role_uses_codex_cli as resolve_role_uses_codex_cli,
     severity_priority_sql as build_severity_priority_sql,
 )
+from scheduler_controlled_compat import (
+    alert_store_mutation_headers as build_alert_store_mutation_headers,
+    build_controlled_recovery_policy,
+    consume_controlled_evaluation_token as consume_evaluation_token,
+    controlled_canonical_digest,
+    controlled_evaluation_runtime as resolve_controlled_evaluation_runtime,
+    controlled_recovery_spool_pending as recovery_spool_pending,
+    controlled_recovery_terminal_success as prove_recovery_terminal_success,
+    current_runtime_release_id as resolve_runtime_release_id,
+    load_owner_private_json as load_controlled_private_json,
+    owner_private_directory as validate_private_recovery_directory,
+    post_controlled_recovery_result as submit_controlled_recovery_result,
+    recover_controlled_evaluation_spool as recover_evaluation_spool,
+    require_controlled_release_attestation as attest_runtime_release,
+    settle_controlled_frozen_memory_artifacts as settle_frozen_memory_artifacts,
+    valid_controlled_stable_group_key as validate_stable_group_key,
+    validate_controlled_recovery_payload as validate_recovery_payload,
+)
 
 
 HOME = Path.home()
@@ -352,101 +370,33 @@ def controlled_evaluation_runtime(
     args: argparse.Namespace,
 ) -> Path | None:
     """Compatibility delegate for frozen controlled-runtime admission."""
-    return validate_controlled_evaluation_runtime(
-        args,
-        ControlledRuntimePolicy(
-            home=HOME,
-            release_environment_key=RUNTIME_RELEASE_ENV_KEY,
-            token_environment_key=CONTROLLED_EVALUATION_TOKEN_ENV,
-            release_pattern=CONTROLLED_RELEASE_ID_RE,
-            token_pattern=CONTROLLED_EVALUATION_TOKEN_RE,
-        ),
-        ControlledRuntimeSources(
-            environment=os.environ,
-            effective_uid=os.getuid,
-            pin_tmpdir=pin_controlled_tmpdir,
-            validate_incident_evidence_route=(
-                validate_controlled_incident_evidence_route
-            ),
-            role_prompt_file=role_prompt_file,
-            role_second_opinion_prompt_file=(
-                role_second_opinion_prompt_file
-            ),
-            role_memory_file=role_memory_file,
-            isolation_error=ControlledEvaluationIsolationError,
-        ),
-    )
+    return resolve_controlled_evaluation_runtime(globals(), args)
+
+
 def valid_controlled_stable_group_key(value: object) -> bool:
     """Return whether a frozen group key has one safe bounded UTF-8 encoding."""
-    if not isinstance(value, str) or not value or "\x00" in value:
-        return False
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError:
-        return False
-    return len(encoded) <= CONTROLLED_STABLE_GROUP_KEY_MAX_LENGTH
-
-
-def controlled_canonical_digest(value: object, *, ensure_ascii: bool = True) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=ensure_ascii,
-        ).encode("utf-8")
-    ).hexdigest()
+    return validate_stable_group_key(
+        value,
+        CONTROLLED_STABLE_GROUP_KEY_MAX_LENGTH,
+    )
 
 
 def consume_controlled_evaluation_token(enabled: bool) -> str:
     """Keep the mutation credential out of unrelated child environments."""
-    global _CONTROLLED_EVALUATION_TOKEN
-    supplied = str(
-        os.environ.pop(CONTROLLED_EVALUATION_TOKEN_ENV, "") or ""
-    ).strip()
-    if enabled:
-        if not CONTROLLED_EVALUATION_TOKEN_RE.fullmatch(supplied):
-            raise SystemExit(
-                "controlled evaluation requires an exact ephemeral "
-                "authorization token"
-            )
-        _CONTROLLED_EVALUATION_TOKEN = supplied
-    else:
-        _CONTROLLED_EVALUATION_TOKEN = ""
-    return _CONTROLLED_EVALUATION_TOKEN
+    return consume_evaluation_token(globals(), enabled)
 
 
 def alert_store_mutation_headers(*, user_agent: str = "") -> dict[str, str]:
     """Attach the ephemeral token only inside controlled evaluation mode."""
-    headers = {"Content-Type": "application/json"}
-    if user_agent:
-        headers["User-Agent"] = user_agent
-    supplied_token = str(
-        os.environ.get(CONTROLLED_EVALUATION_TOKEN_ENV) or ""
-    ).strip()
-    evaluation_token = (
-        supplied_token
-        if CONTROLLED_EVALUATION_TOKEN_RE.fullmatch(supplied_token)
-        else _CONTROLLED_EVALUATION_TOKEN
+    return build_alert_store_mutation_headers(
+        globals(),
+        user_agent=user_agent,
     )
-    if (
-        str(
-            os.environ.get("ONION_SENTINEL_EVALUATION_MODE") or ""
-        ).strip()
-        == "1"
-        and CONTROLLED_EVALUATION_TOKEN_RE.fullmatch(evaluation_token)
-    ):
-        headers[CONTROLLED_EVALUATION_TOKEN_HEADER] = evaluation_token
-    return headers
 
 
 def owner_private_directory(path: Path, runtime_root: Path) -> bool:
     """Compatibility delegate for owner-private recovery directories."""
-    return private_recovery_directory(
-        path,
-        runtime_root,
-        effective_uid=os.getuid(),
-    )
+    return validate_private_recovery_directory(globals(), path, runtime_root)
 
 
 def load_owner_private_json(
@@ -456,11 +406,11 @@ def load_owner_private_json(
     max_bytes: int,
 ) -> dict[str, Any]:
     """Compatibility delegate for bounded owner-private JSON loading."""
-    return load_private_recovery_json(
+    return load_controlled_private_json(
+        globals(),
         path,
         runtime_root,
         max_bytes=max_bytes,
-        effective_uid=os.getuid(),
     )
 
 
@@ -471,27 +421,8 @@ def post_controlled_recovery_result(
     attempts: int = CONTROLLED_RESULT_SUBMISSION_ATTEMPTS,
 ) -> dict[str, Any]:
     """Compatibility delegate for bounded exact result replay."""
-    return post_controlled_result(
-        ControlledResultClientSources(
-            mutation_headers=lambda user_agent: alert_store_mutation_headers(
-                user_agent=user_agent
-            ),
-            open_url=urllib.request.urlopen,
-            read_bounded_json=read_bounded_json,
-            sleep=time.sleep,
-            transport_errors=(
-                urllib.error.URLError,
-                TimeoutError,
-                OSError,
-                BoundedHttpError,
-            ),
-        ),
-        ControlledResultClientPolicy(
-            indeterminate_marker=(
-                CONTROLLED_RESULT_SUBMISSION_INDETERMINATE
-            ),
-            max_response_bytes=DEFAULT_MAX_CONTROL_RESPONSE_BYTES,
-        ),
+    return submit_controlled_recovery_result(
+        globals(),
         payload,
         alert_store_url,
         attempts=attempts,
@@ -503,20 +434,8 @@ def validate_controlled_recovery_payload(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     """Compatibility delegate for exact controlled payload validation."""
-    return validate_controlled_payload(
-        ControlledPayloadPolicy(
-            lease_token_pattern=CONTROLLED_LEASE_TOKEN_RE,
-            cohort_id_pattern=CONTROLLED_COHORT_ID_RE,
-            model_route_pattern=CONTROLLED_MODEL_ROUTE_RE,
-            analysis_id_pattern=CONTROLLED_ANALYSIS_ID_RE,
-        ),
-        ControlledPayloadSources(
-            current_release_id=current_runtime_release_id,
-            incident_attempt_id=incident_reanalysis_attempt_id,
-            canonical_digest=controlled_canonical_digest,
-            storage_canonical_digest=controlled_storage_canonical_digest,
-            expected_accepted_fields=controlled_expected_accepted_fields,
-        ),
+    return validate_recovery_payload(
+        globals(),
         payload,
         args,
     )
@@ -527,11 +446,10 @@ def settle_controlled_frozen_memory_artifacts(
     recovery: dict[str, Any],
 ) -> None:
     """Compatibility delegate for exact frozen-memory settlement."""
-    settle_frozen_memory(
+    settle_frozen_memory_artifacts(
+        globals(),
         runtime_root,
         recovery,
-        policy=FrozenMemoryPolicy(),
-        effective_uid=os.getuid(),
     )
 
 
@@ -541,12 +459,7 @@ def controlled_recovery_sources() -> ControlledRecoverySources:
 
 
 def controlled_recovery_policy() -> ControlledRecoveryPolicy:
-    return ControlledRecoveryPolicy(
-        max_spool_bytes=MAX_CONTROLLED_RESULT_SPOOL_BYTES,
-        indeterminate_submission_marker=(
-            CONTROLLED_RESULT_SUBMISSION_INDETERMINATE
-        ),
-    )
+    return build_controlled_recovery_policy(globals())
 
 
 def recover_controlled_evaluation_spool(
@@ -554,9 +467,8 @@ def recover_controlled_evaluation_spool(
     runtime_root: Path,
 ) -> bool:
     """Compatibility delegate for exact controlled result recovery."""
-    return replay_controlled_result_spool(
-        controlled_recovery_sources(),
-        controlled_recovery_policy(),
+    return recover_evaluation_spool(
+        globals(),
         args,
         runtime_root,
     )
@@ -564,10 +476,7 @@ def recover_controlled_evaluation_spool(
 
 def controlled_recovery_spool_pending(runtime_root: Path) -> bool:
     """Compatibility delegate for fail-closed spool presence checks."""
-    return controlled_spool_pending(
-        runtime_root,
-        effective_uid=os.getuid,
-    )
+    return recovery_spool_pending(globals(), runtime_root)
 
 
 def controlled_terminal_proof_sources() -> ControlledTerminalProofSources:
@@ -580,11 +489,7 @@ def controlled_recovery_terminal_success(
     recovery: dict[str, Any],
 ) -> bool:
     """Compatibility delegate for immutable terminal database proof."""
-    return prove_controlled_terminal_success(
-        controlled_terminal_proof_sources(),
-        args.db,
-        recovery,
-    )
+    return prove_recovery_terminal_success(globals(), args, recovery)
 
 
 def current_runtime_release_id(
@@ -593,14 +498,9 @@ def current_runtime_release_id(
     env_path: Path | None = None,
 ) -> str:
     """Compatibility delegate for literal deployed release loading."""
-    return load_runtime_release_id(
-        ControlledReleasePolicy(
-            environment_key=RUNTIME_RELEASE_ENV_KEY,
-            default_env_path=DEFAULT_RUNTIME_ENV_PATH,
-            max_env_bytes=MAX_RUNTIME_ENV_BYTES,
-            release_pattern=CONTROLLED_RELEASE_ID_RE,
-        ),
-        environ=os.environ if environ is None else environ,
+    return resolve_runtime_release_id(
+        globals(),
+        environ=environ,
         env_path=env_path,
     )
 
@@ -609,16 +509,9 @@ def require_controlled_release_attestation(
     claimed_payload: dict[str, object],
 ) -> str:
     """Compatibility delegate for durable release attestation."""
-    return attest_controlled_release(
-        ControlledReleasePolicy(
-            environment_key=RUNTIME_RELEASE_ENV_KEY,
-            default_env_path=DEFAULT_RUNTIME_ENV_PATH,
-            max_env_bytes=MAX_RUNTIME_ENV_BYTES,
-            release_pattern=CONTROLLED_RELEASE_ID_RE,
-        ),
+    return attest_runtime_release(
+        globals(),
         claimed_payload,
-        current_runtime_release_id(),
-        ControlledClaimRejected,
     )
 
 

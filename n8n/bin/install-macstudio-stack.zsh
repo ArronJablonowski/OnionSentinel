@@ -809,6 +809,7 @@ cp "$REPO_DIR/n8n/bin/auto-run-ai-analysis.py" "$STACK_DIR/bin/auto-run-ai-analy
 cp "$REPO_DIR/n8n/bin/scheduler_application.py" "$STACK_DIR/bin/scheduler_application.py"
 cp "$REPO_DIR/n8n/bin/scheduler_composition.py" "$STACK_DIR/bin/scheduler_composition.py"
 cp "$REPO_DIR/n8n/bin/scheduler_configuration.py" "$STACK_DIR/bin/scheduler_configuration.py"
+cp "$REPO_DIR/n8n/bin/scheduler_controlled_compat.py" "$STACK_DIR/bin/scheduler_controlled_compat.py"
 cp "$REPO_DIR/n8n/bin/scheduler_claim.py" "$STACK_DIR/bin/scheduler_claim.py"
 cp "$REPO_DIR/n8n/bin/scheduler_claim_snapshot.py" "$STACK_DIR/bin/scheduler_claim_snapshot.py"
 cp "$REPO_DIR/n8n/bin/scheduler_cli.py" "$STACK_DIR/bin/scheduler_cli.py"

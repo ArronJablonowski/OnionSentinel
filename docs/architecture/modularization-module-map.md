@@ -486,6 +486,13 @@ provider-lane resolution, and Codex prompt ceilings. Compatibility delegates
 pass the facade's live constants and environment at call time, so saved settings
 and test overrides retain the exact historical behavior.
 
+`scheduler_controlled_compat.py` owns the facade-level controlled-evaluation
+policy assembly: frozen-runtime admission, ephemeral mutation-token containment,
+bounded recovery transport and payload binding, owner-private artifact access,
+terminal proof delegation, frozen-memory settlement, and deployed-release
+attestation. Extracted controlled services remain the enforcement owners; this
+module preserves their legacy signatures and call-time dependency seams.
+
 `scheduler_cli.py` now owns the launchd-facing argument schema, runtime path
 options, lane and queue controls, numeric bounds, and fail-closed controlled-
 evaluation identity validation. `auto-run-ai-analysis.py` retains a thin
