@@ -370,6 +370,20 @@ from portal_cti_program_service import (
 from portal_soc_settings_write import SocSettingsWriteCallbacks
 from portal_admin_service_write import AdminServiceWriteCallbacks
 from portal_resource_library_write import ResourceLibraryWriteCallbacks
+from portal_resource_library_store import (
+    clean_resource_tags as normalize_resource_tags,
+    find_resource_library_pdf as locate_resource_library_pdf,
+    load_resource_library_metadata as load_resource_metadata_file,
+    move_resource_to_removal as move_resource_file_to_removal,
+    rename_resource_file as rename_resource_library_file,
+    resource_favorites as project_resource_favorites,
+    resource_library_id_for as derive_resource_library_id,
+    sanitize_resource_filename as normalize_resource_filename,
+    save_resource_library_metadata as save_resource_metadata_file,
+    set_resource_favorite as update_resource_favorite,
+    set_resource_tags as update_resource_tags,
+    unique_destination as available_resource_destination,
+)
 from portal_admin_form_service import AdminFormCallbacks, prepare_admin_form
 from portal_admin_read_service import prepare_admin_read
 from portal_health_read_service import compose_portal_health
@@ -1200,54 +1214,15 @@ def destroy_admin_session(session_id: str) -> None:
 
 
 def resource_library_id_for(path: Path) -> str:
-    return hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:12]
+    return derive_resource_library_id(path)
 
 
 def find_resource_library_pdf(resource_id: str, source_path: str = "") -> tuple[Path, str, Path] | None:
-    if not re.fullmatch(r"[a-f0-9]{12}", resource_id or ""):
-        return None
-
-    # Preferred path: the static Resource Library card posts its exact source path.
-    # This avoids macOS launchd/TCC cases where the portal process can access a
-    # specific file path but cannot enumerate ~/Documents recursively.
-    if source_path:
-        try:
-            candidate = Path(source_path).expanduser().resolve()
-        except Exception:
-            candidate = None
-        if candidate and candidate.suffix.lower() == ".pdf" and candidate.name and not candidate.name.startswith("._"):
-            for category, root in RESOURCE_LIBRARY_SOURCES:
-                try:
-                    rel = candidate.relative_to(root.resolve())
-                except ValueError:
-                    continue
-                if resource_library_id_for(candidate) == resource_id and candidate.is_file():
-                    return candidate, category, rel
-
-    # Fallback for interactive/local runs where recursive Documents access works.
-    for category, root in RESOURCE_LIBRARY_SOURCES:
-        if not root.exists():
-            continue
-        for src in root.rglob("*.pdf"):
-            if any(part == "__MACOSX" for part in src.parts) or src.name.startswith("._") or not src.is_file():
-                continue
-            rel = src.relative_to(root)
-            if category == "CheatSheets" and rel.parts and rel.parts[0] == "SANS_Posters":
-                continue
-            if resource_library_id_for(src) == resource_id:
-                return src, category, rel
-    return None
+    return locate_resource_library_pdf(resource_id, source_path, RESOURCE_LIBRARY_SOURCES)
 
 
 def unique_destination(path: Path) -> Path:
-    if not path.exists():
-        return path
-    stem, suffix = path.stem, path.suffix
-    for i in range(1, 1000):
-        candidate = path.with_name(f"{stem} ({i}){suffix}")
-        if not candidate.exists():
-            return candidate
-    raise RuntimeError(f"Could not find unique removal destination for {path.name}")
+    return available_resource_destination(path)
 
 
 def refresh_resource_library() -> None:
@@ -1257,37 +1232,15 @@ def refresh_resource_library() -> None:
 
 
 def load_resource_library_metadata() -> dict:
-    try:
-        data = json.loads(RESOURCE_LIBRARY_METADATA_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    return load_resource_metadata_file(RESOURCE_LIBRARY_METADATA_FILE)
 
 
 def save_resource_library_metadata(data: dict) -> None:
-    RESOURCE_LIBRARY_METADATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = RESOURCE_LIBRARY_METADATA_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(RESOURCE_LIBRARY_METADATA_FILE)
+    save_resource_metadata_file(RESOURCE_LIBRARY_METADATA_FILE, data)
 
 
 def clean_resource_tags(values) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    if isinstance(values, str):
-        values = re.split(r"[,;\n]+", values)
-    if not isinstance(values, list):
-        return []
-    for value in values:
-        tag = re.sub(r"\s+", " ", str(value)).strip()[:40]
-        if not tag:
-            continue
-        key = tag.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(tag)
-    return out[:12]
+    return normalize_resource_tags(values)
 
 
 def sanitize_resource_filename(name: str, original_suffix: str) -> str:
@@ -1297,20 +1250,7 @@ def sanitize_resource_filename(name: str, original_suffix: str) -> str:
     keep its original extension. If they type another extension, strip it and
     restore the original suffix instead of producing names like `.txt.pdf`.
     """
-    suffix = original_suffix if original_suffix.startswith(".") else f".{original_suffix}"
-    suffix = suffix or ".pdf"
-    cleaned = re.sub(r"[/:\\]+", "-", name).strip().strip(".")
-    cleaned = re.sub(r"\s+", " ", cleaned)[:120].strip()
-    if not cleaned:
-        raise ValueError("New filename is empty")
-    if Path(cleaned).suffix:
-        cleaned = cleaned[: -len(Path(cleaned).suffix)].rstrip(" .")
-    if not cleaned:
-        raise ValueError("New filename is empty")
-    cleaned = f"{cleaned}{suffix}"
-    if cleaned.startswith("._") or cleaned in {".", ".."}:
-        raise ValueError("Invalid filename")
-    return cleaned
+    return normalize_resource_filename(name, original_suffix)
 
 
 def queue_resource_action(record: dict) -> dict:
@@ -1332,82 +1272,43 @@ def trigger_resource_library_worker() -> None:
 
 
 def resource_favorites() -> list[str]:
-    data = load_resource_library_metadata()
-    favs = data.get("_favorites", [])
-    if not isinstance(favs, list):
-        return []
-    return sorted({str(x) for x in favs if re.fullmatch(r"[a-f0-9]{12}", str(x))})
+    return project_resource_favorites(load_resource_library_metadata())
 
 
 def set_resource_favorite(resource_id: str, favorite: bool) -> tuple[bool, dict]:
-    if not re.fullmatch(r"[a-f0-9]{12}", resource_id or ""):
-        return False, {"ok": False, "error": "Invalid resource id"}
-    data = load_resource_library_metadata()
-    favs = set(resource_favorites())
-    if favorite:
-        favs.add(resource_id)
-    else:
-        favs.discard(resource_id)
-    data["_favorites"] = sorted(favs)
-    save_resource_library_metadata(data)
-    queue_resource_action({"action": "refresh", "reason": "favorite", "id": resource_id})
-    trigger_resource_library_worker()
-    return True, {"ok": True, "favorite": favorite, "favorites": sorted(favs)}
+    return update_resource_favorite(
+        resource_id,
+        favorite,
+        load_metadata=load_resource_library_metadata,
+        save_metadata=save_resource_library_metadata,
+        queue_action=queue_resource_action,
+        trigger_worker=trigger_resource_library_worker,
+    )
 
 
 def set_resource_tags(resource_id: str, tags) -> tuple[bool, dict]:
-    if not re.fullmatch(r"[a-f0-9]{12}", resource_id or ""):
-        return False, {"ok": False, "error": "Invalid resource id"}
-    cleaned = clean_resource_tags(tags)
-    data = load_resource_library_metadata()
-    entry = data.get(resource_id, {}) if isinstance(data.get(resource_id, {}), dict) else {}
-    entry["custom_tags"] = cleaned
-    data[resource_id] = entry
-    save_resource_library_metadata(data)
-    queue_resource_action({"action": "refresh", "reason": "tags", "id": resource_id})
-    trigger_resource_library_worker()
-    return True, {"ok": True, "tags": cleaned, "queued": True}
+    return update_resource_tags(
+        resource_id,
+        tags,
+        load_metadata=load_resource_library_metadata,
+        save_metadata=save_resource_library_metadata,
+        queue_action=queue_resource_action,
+        trigger_worker=trigger_resource_library_worker,
+    )
 
 
 def rename_resource_file(resource_id: str, source_path: str, new_name: str) -> tuple[bool, dict]:
-    found = find_resource_library_pdf(resource_id, source_path)
-    if not found:
-        return False, {"ok": False, "error": "Resource not found"}
-    src, _category, _rel = found
-    try:
-        safe_name = sanitize_resource_filename(new_name, src.suffix)
-    except ValueError as exc:
-        return False, {"ok": False, "error": str(exc)}
-    dest = src.with_name(safe_name)
-    if dest.resolve() == src.resolve():
-        return False, {"ok": False, "error": f"Rename aborted: the file is already named '{dest.name}'. No files were changed."}
-    if dest.exists():
-        return False, {"ok": False, "error": f"Rename aborted: a file named '{dest.name}' already exists. No files were changed."}
-    display_title = re.sub(r"[_-]+", " ", dest.stem).strip() or dest.stem
-    try:
-        shutil.move(str(src), str(dest))
-    except PermissionError as exc:
-        data = queue_resource_action({"action": "rename", "id": resource_id, "source": str(src), "new_name": safe_name, "portal_error": str(exc)})
-        trigger_resource_library_worker()
-        data.update({"display_title": display_title, "source": str(src), "target_source": str(dest), "refresh_after_ms": 65000})
-        return True, data
-    except Exception as exc:
-        return False, {"ok": False, "error": f"Rename failed: {exc}"}
-    # Preserve metadata across the source-path-derived ID change.
-    data = load_resource_library_metadata()
-    old_entry = data.pop(resource_id, None)
-    new_id = resource_library_id_for(dest)
-    if isinstance(old_entry, dict):
-        data[new_id] = old_entry
-    favs = data.get("_favorites", [])
-    if isinstance(favs, list) and resource_id in favs:
-        data["_favorites"] = sorted({new_id if x == resource_id else str(x) for x in favs})
-    save_resource_library_metadata(data)
-    try:
-        refresh_resource_library()
-    except Exception as exc:
-        return True, {"ok": True, "warning": f"Renamed file on disk, but Resource Library refresh failed: {exc}", "new_id": new_id, "source": str(dest), "display_title": display_title, "renamed_on_disk": True}
-    return True, {"ok": True, "new_id": new_id, "source": str(dest), "display_title": display_title, "renamed_on_disk": True, "refresh_after_ms": 1200}
+    return rename_resource_library_file(
+        resource_id,
+        source_path,
+        new_name,
+        find_pdf=find_resource_library_pdf,
+        load_metadata=load_resource_library_metadata,
+        save_metadata=save_resource_library_metadata,
+        queue_action=queue_resource_action,
+        trigger_worker=trigger_resource_library_worker,
+        refresh_library=refresh_resource_library,
+    )
 
 
 def queue_resource_removal(resource_id: str, source_path: str, error: str) -> dict:
@@ -1418,28 +1319,14 @@ def queue_resource_removal(resource_id: str, source_path: str, error: str) -> di
 
 
 def move_resource_to_removal(resource_id: str, source_path: str = "") -> tuple[bool, dict]:
-    found = find_resource_library_pdf(resource_id, source_path)
-    if not found:
-        return False, {"ok": False, "error": "Resource not found"}
-    src, category, rel = found
-    dest = unique_destination(RESOURCE_LIBRARY_REMOVAL_DIR / category / rel)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        shutil.move(str(src), str(dest))
-    except PermissionError as exc:
-        return True, queue_resource_removal(resource_id, str(src), str(exc))
-    except Exception as exc:
-        return False, {"ok": False, "error": f"Move failed: {exc}"}
-    try:
-        refresh_resource_library()
-    except Exception as exc:
-        return True, {
-            "ok": True,
-            "warning": f"Moved file, but Resource Library refresh failed: {exc}",
-            "moved_to": str(dest),
-            "title": src.name,
-        }
-    return True, {"ok": True, "moved_to": str(dest), "title": src.name}
+    return move_resource_file_to_removal(
+        resource_id,
+        source_path,
+        removal_dir=RESOURCE_LIBRARY_REMOVAL_DIR,
+        find_pdf=find_resource_library_pdf,
+        queue_removal=queue_resource_removal,
+        refresh_library=refresh_resource_library,
+    )
 
 
 def parse_cookie_header(cookie_header: str | None) -> dict[str, str]:

@@ -1841,9 +1841,12 @@ launching, and live service-status checks remain in `report_portal.py`.
 
 `portal_resource_library_write.py` owns payload normalization and dispatch for
 the four classified remove, tag, rename, and favorite mutations, including
-their existing 200/400 result mapping. Filesystem resolution, metadata writes,
-Hermes queueing, worker triggering, and dashboard refresh remain in
-`report_portal.py`. The current compatibility contract applies route
+their existing 200/400 result mapping. `portal_resource_library_store.py` owns
+bounded PDF resolution within configured roots, filename/tag normalization,
+metadata persistence, rename/removal behavior, and side-effect orchestration
+through injected queue, worker, and refresh callbacks. `report_portal.py`
+retains host paths, process launching, and thin compatibility functions. The
+current compatibility contract applies route
 allowlisting but no Administration or same-origin authorization to these four
 writes; this module makes that policy boundary visible without changing it.
 
