@@ -739,6 +739,12 @@ idempotent hash-chain insertion, mutable-run enforcement, and atomic stage
 updates. `HarnessStore` inherits this foundation so repository transactions and
 the legacy class/API remain unchanged.
 
+`n8n/bin/harness_store_run_repository.py` owns atomic run creation and collision
+checks, append-only event/stage transitions, and exact evidence/evidence-contract
+registration. It composes with the store foundation as a mixin; all writes retain
+`BEGIN IMMEDIATE`, mutable-run checks, idempotency keys, commit-before-audit
+ordering, and the original snapshot return contract.
+
 Existing SQLite files, schema versions, hash-chain calculations, terminal
 digests, skill attestations, and controlled-evaluation behavior are contracts.
 

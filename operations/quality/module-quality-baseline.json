@@ -28,7 +28,7 @@
       "max_lines": 1147
     },
     "n8n/bin/onion_sentinel_harness.py": {
-      "max_lines": 2428
+      "max_lines": 2133
     },
     "n8n/bin/pcap_evidence_query.py": {
       "max_lines": 915

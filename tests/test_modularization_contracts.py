@@ -1,8 +1,10 @@
 import ast
+import builtins
 import importlib
 import json
 from pathlib import Path
 import subprocess
+import symtable
 import sys
 import unittest
 
@@ -55,6 +57,38 @@ def top_level_function(path: Path, name: str) -> ast.FunctionDef:
 
 
 class ModularizationCompatibilityContractTests(unittest.TestCase):
+    def test_extracted_harness_modules_have_no_undefined_globals(self) -> None:
+        allowed = set(dir(builtins)) | {
+            "__conditional_annotations__",
+            "__file__",
+            "__name__",
+        }
+        for path in sorted((ROOT / "n8n" / "bin").glob("harness_*.py")):
+            with self.subTest(path=path.name):
+                table = symtable.symtable(
+                    path.read_text(encoding="utf-8"), str(path), "exec"
+                )
+                defined = {
+                    symbol.get_name()
+                    for symbol in table.get_symbols()
+                    if symbol.is_imported()
+                    or symbol.is_assigned()
+                    or symbol.is_namespace()
+                }
+                referenced: set[str] = set()
+
+                def collect(scope: symtable.SymbolTable) -> None:
+                    referenced.update(
+                        symbol.get_name()
+                        for symbol in scope.get_symbols()
+                        if symbol.is_global() and symbol.is_referenced()
+                    )
+                    for child in scope.get_children():
+                        collect(child)
+
+                collect(table)
+                self.assertEqual(sorted(referenced - defined - allowed), [])
+
     def test_harness_supports_isolated_file_loader_import(self) -> None:
         harness = ROOT / "n8n" / "bin" / "onion_sentinel_harness.py"
         script = (
