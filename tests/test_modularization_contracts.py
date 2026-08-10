@@ -57,6 +57,39 @@ def top_level_function(path: Path, name: str) -> ast.FunctionDef:
 
 
 class ModularizationCompatibilityContractTests(unittest.TestCase):
+    def test_relay_supports_isolated_file_loader_import(self) -> None:
+        relay = ROOT / "relay" / "app" / "relay.py"
+        script = (
+            "import importlib.util,sys;"
+            f"p={str(relay)!r};"
+            "s=importlib.util.spec_from_file_location('isolated_relay',p);"
+            "m=importlib.util.module_from_spec(s);"
+            "sys.modules[s.name]=m;"
+            "s.loader.exec_module(m);"
+            "assert m.PcapProgressReporter and m.WebhookPostError;"
+            "assert callable(m.main) and callable(m.process_pcap_requests)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_relay_module_tree_is_fully_installed(self) -> None:
+        installer = (ROOT / "relay" / "bin" / "install-pi-relay.sh").read_text(
+            encoding="utf-8"
+        )
+        for path in sorted((ROOT / "relay" / "app").glob("relay_*.py")):
+            with self.subTest(path=path.name):
+                self.assertIn(
+                    f'$REPO_DIR/relay/app/{path.name}',
+                    installer,
+                )
+
     def test_extracted_harness_modules_have_no_undefined_globals(self) -> None:
         allowed = set(dir(builtins)) | {
             "__conditional_annotations__",

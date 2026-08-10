@@ -38,6 +38,11 @@ install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay/state/batches
 install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay/state/new-alerts
 install -o root -g soalert -m 0750 -d /etc/so-alert-relay
 
+install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/relay_core.py" /opt/so-alert-relay/app/relay_core.py
+install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/relay_pcap_transport.py" /opt/so-alert-relay/app/relay_pcap_transport.py
+install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/relay_pcap_delivery.py" /opt/so-alert-relay/app/relay_pcap_delivery.py
+install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/relay_pcap_service.py" /opt/so-alert-relay/app/relay_pcap_service.py
+install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/relay_application.py" /opt/so-alert-relay/app/relay_application.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay.py" /opt/so-alert-relay/app/relay.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/alert_outbox.py" /opt/so-alert-relay/app/alert_outbox.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/alert_delivery.py" /opt/so-alert-relay/app/alert_delivery.py

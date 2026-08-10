@@ -193,7 +193,14 @@ class ArchitectureHardeningTest(unittest.TestCase):
 
     def test_relay_pcap_broker_uses_single_flight_one_minute_recovery(self):
         timer = (ROOT / "relay/systemd/so-pcap-broker.timer").read_text(encoding="utf-8")
-        worker = (ROOT / "relay/app/relay.py").read_text(encoding="utf-8")
+        relay_app = ROOT / "relay" / "app"
+        worker = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (
+                relay_app / "relay.py",
+                *sorted(relay_app.glob("relay_*.py")),
+            )
+        )
         self.assertIn("OnUnitInactiveSec=1min", timer)
         self.assertNotIn("OnUnitActiveSec=", timer)
         self.assertIn("limit = 1", worker)
