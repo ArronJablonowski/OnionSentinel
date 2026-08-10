@@ -325,6 +325,22 @@ class AlertStoreResilienceTest(unittest.TestCase):
             "SELECT stable_group_id FROM alert_group_alias WHERE legacy_group_id = ?",
             self.durable_job_transition_executor,
         )
+        self.assertIn(
+            "transitionJobStatus: durableJobTransitionExecutor.transition",
+            self.code,
+        )
+        for forwarding_function in (
+            "controlledJobClaimIdentity",
+            "controlledEvaluationLeaseKey",
+            "controlledJobTransitionAdmission",
+            "applyControlledJobTransition",
+            "controlledEvaluationClaimDigest",
+            "controlledEvaluationResultAdmission",
+            "applyControlledEvaluationResultAdmission",
+            "transitionDurableJobStatus",
+            "recoverExpiredDurableJobs",
+        ):
+            self.assertNotIn(f"function {forwarding_function}", self.code)
 
     def test_summary_rebuild_uses_one_windowed_scan(self) -> None:
         rebuild = self.alert_group_service.split("async function rebuildAlertGroupSummariesUnlocked()", 1)[1].split(

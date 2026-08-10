@@ -912,58 +912,6 @@ async function storeAlert(rawAlert) {
   return alertIngestOrchestrator.store(rawAlert);
 }
 
-function controlledJobClaimIdentity(value) {
-  return controlledJobIdentity.parseClaim(value);
-}
-
-function controlledEvaluationLeaseKey(jobType, dedupeKey) {
-  return controlledJobTransitionAuthority.leaseKey(jobType, dedupeKey);
-}
-
-async function controlledJobTransitionAdmission(payload) {
-  return controlledJobTransitionAuthority.admit(payload);
-}
-
-function applyControlledJobTransition(admission, transition) {
-  return controlledJobTransitionAuthority.apply(admission, transition);
-}
-
-function controlledEvaluationClaimDigest(identity) {
-  return controlledResultAdmissionAuthority.claimDigest(identity);
-}
-
-async function controlledEvaluationResultAdmission(payload) {
-  return controlledResultAdmissionAuthority.admit(payload);
-}
-
-function applyControlledEvaluationResultAdmission(admission) {
-  return controlledResultAdmissionAuthority.apply(admission);
-}
-
-async function transitionDurableJobStatus(
-  jobType,
-  dedupeKey,
-  status,
-  error = '',
-  leaseToken = '',
-  retryable = true,
-  requestedClaimIdentity = null,
-) {
-  return durableJobTransitionExecutor.transition(
-    jobType,
-    dedupeKey,
-    status,
-    error,
-    leaseToken,
-    retryable,
-    requestedClaimIdentity,
-  );
-}
-
-async function recoverExpiredDurableJobs() {
-  return durableJobRecovery.recover();
-}
-
 const cohortIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$/;
 const stableGroupIdPattern = /^[a-f0-9]{20}$/;
 const dispatchIdPattern = /^[a-f0-9]{64}$/;
@@ -1224,7 +1172,7 @@ const controlledJobTransitionAuthority = createControlledJobTransition({
   safeString,
   identityConflict: incidentIdentityConflict,
   stableGroupIdPattern,
-  parseClaimIdentity: controlledJobClaimIdentity,
+  parseClaimIdentity: controlledJobIdentity.parseClaim,
   all,
   get,
   incidentReanalysisJobPayload: incidentReanalysisJobOwnership.jobPayload,
@@ -1242,7 +1190,7 @@ const controlledResultAdmissionAuthority = createControlledResultAdmission({
   controlledEvaluationMode,
   safeString,
   identityConflict: incidentIdentityConflict,
-  claimLeaseKey: controlledEvaluationLeaseKey,
+  claimLeaseKey: controlledJobTransitionAuthority.leaseKey,
   get,
   incidentReanalysisJobPayload: incidentReanalysisJobOwnership.jobPayload,
   parseJsonObject,
@@ -1294,12 +1242,12 @@ const durableJobRecovery = createDurableJobRecovery({
   nowUtc,
   warn: (...args) => console.warn(...args),
   signalAiWorkers,
-  drainEnrichmentJobs,
-  drainPostCommitJobs: drainN8nPostCommitJobs,
+  drainEnrichmentJobs: durableBackgroundDrains.drainEnrichment,
+  drainPostCommitJobs: durableBackgroundDrains.drainPostCommit,
 });
 const durableJobTransitionExecutor = createDurableJobTransitionExecutor({
   controlledEvaluationMode,
-  parseClaimIdentity: controlledJobClaimIdentity,
+  parseClaimIdentity: controlledJobIdentity.parseClaim,
   stableGroupIdPattern,
   identityConflict: incidentIdentityConflict,
   get,
@@ -1594,7 +1542,7 @@ const controlledRetirementCommandOwner = createControlledRetirementCommand({
   parseJobPayload: incidentReanalysisJobOwnership.jobPayload,
   projectJob: controlledRetirementJobProjection,
   parseJsonObject,
-  leaseKey: controlledEvaluationLeaseKey,
+  leaseKey: controlledJobTransitionAuthority.leaseKey,
   hasLease: (key) => controlledEvaluationLeases.has(key),
   nowUtc,
   retirePendingExact: (options) => durableJobs.retirePendingExact(options),
@@ -1777,9 +1725,9 @@ const durableJobService = createDurableJobService({
   safeString,
   withWriteGate: withSqliteWriteGate,
   withTransaction: withImmediateTransaction,
-  controlledTransitionAdmission: controlledJobTransitionAdmission,
-  transitionJobStatus: transitionDurableJobStatus,
-  applyControlledTransition: applyControlledJobTransition,
+  controlledTransitionAdmission: controlledJobTransitionAuthority.admit,
+  transitionJobStatus: durableJobTransitionExecutor.transition,
+  applyControlledTransition: controlledJobTransitionAuthority.apply,
   completePendingByDedupeKeys: (...args) => (
     durableJobs.completePendingByDedupeKeys(...args)
   ),
@@ -1811,10 +1759,10 @@ const analysisResultService = createAnalysisResultService({
   identityConflict: incidentIdentityConflict,
   withWriteGate: withSqliteWriteGate,
   withTransaction: withImmediateTransaction,
-  controlledResultAdmission: controlledEvaluationResultAdmission,
+  controlledResultAdmission: controlledResultAdmissionAuthority.admit,
   recordAnalysisResult: recordAiAnalysisResult,
-  transitionJobStatus: transitionDurableJobStatus,
-  applyControlledResultAdmission: applyControlledEvaluationResultAdmission,
+  transitionJobStatus: durableJobTransitionExecutor.transition,
+  applyControlledResultAdmission: controlledResultAdmissionAuthority.apply,
 });
 modularRoutes.registerAll(createAnalysisResultRoutes({
   service: analysisResultService,
@@ -1946,7 +1894,7 @@ const serviceRuntimeLifecycle = createServiceRuntimeLifecycle({
     enrichment: {intervalMs: enrichmentWorkerIntervalMs, drain: drainEnrichmentJobs},
     enrichmentCache: {intervalMs: enrichmentCacheCleanupIntervalMs, prune: () => enrichmentCache.prune()},
     n8nPostCommit: {intervalMs: n8nPostCommitIntervalMs, drain: drainN8nPostCommitJobs},
-    durableRecovery: {intervalMs: durableJobRecoveryIntervalMs, recover: recoverExpiredDurableJobs},
+    durableRecovery: {intervalMs: durableJobRecoveryIntervalMs, recover: durableJobRecovery.recover},
     pipelineDisk: {intervalMs: pipelineDiskSampleIntervalMs, capture: capturePipelineDiskSample},
     postgresShadow: {
       enabled: () => Boolean(postgresShadowProjector),
