@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Union
 
 from bounded_process_io import _FileCapture, _MemoryCapture
 from bounded_process_observation import (
@@ -32,7 +32,7 @@ from bounded_process_termination import (
 )
 
 
-Capture = _MemoryCapture | _FileCapture
+Capture = Union[_MemoryCapture, _FileCapture]
 
 
 @dataclass

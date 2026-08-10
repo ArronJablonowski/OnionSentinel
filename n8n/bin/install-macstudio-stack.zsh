@@ -180,8 +180,66 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/composition/route_composition.js"
 }
 
+validate_production_python_sources() {
+  PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I -B - \
+    "$REPO_DIR/n8n/bin" \
+    "$REPO_DIR/onion-sentinel-dashboard" <<'PY'
+import importlib.util
+from pathlib import Path
+import sys
+
+bin_dir = Path(sys.argv[1])
+dashboard_dir = Path(sys.argv[2])
+sys.path.insert(0, str(bin_dir))
+
+import agent_memory
+import bounded_process
+import harness_maintenance_cli
+import pcap_evidence_query
+
+
+def load_file(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("production Python validation could not create a loader")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+load_file(
+    "_onion_sentinel_software_inventory_collector",
+    bin_dir / "collect-software-inventory.py",
+)
+load_file(
+    "_onion_sentinel_harness_maintenance",
+    bin_dir / "maintain-investigation-harness.py",
+)
+
+sys.path.insert(0, str(dashboard_dir))
+import onion_sentinel_server
+
+result = bounded_process.run_bounded_command(
+    ["/usr/bin/true"],
+    timeout_seconds=5,
+    max_stdout_bytes=100,
+    max_stderr_bytes=100,
+)
+if result.returncode != 0:
+    raise RuntimeError("production Python bounded-process smoke failed")
+PY
+}
+
 trap cleanup_alert_store_stage EXIT
 prepare_alert_store_stage
+validate_production_python_sources
+if [[ "${ONION_SENTINEL_VALIDATE_ONLY:-0}" == "1" ]]; then
+  echo "Mac Studio installer preflight validation passed."
+  exit 0
+elif [[ "${ONION_SENTINEL_VALIDATE_ONLY:-0}" != "0" ]]; then
+  echo "ONION_SENTINEL_VALIDATE_ONLY must be 0 or 1." >&2
+  exit 2
+fi
 
 # Take the same advisory locks used by both AI scheduler lanes before touching
 # launchd or runtime files. A nonblocking failure means an investigation is in
