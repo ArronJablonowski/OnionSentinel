@@ -770,6 +770,77 @@ class InstallerDependencyTests(unittest.TestCase):
                 completed.stderr or completed.stdout,
             )
 
+    def test_production_python_imports_software_inventory_migration_chain(self) -> None:
+        production_python = Path("/usr/bin/python3")
+        if not production_python.is_file():
+            self.skipTest("production system Python is unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            deployed_bin = Path(tmp) / "bin"
+            deployed_bin.mkdir()
+            for source in BIN_DIR.glob("*.py"):
+                shutil.copy2(source, deployed_bin / source.name)
+            collector = deployed_bin / "collect-software-inventory.py"
+            completed = subprocess.run(
+                [
+                    str(production_python),
+                    "-I",
+                    "-c",
+                    (
+                        "import importlib.util, sys; "
+                        "root = sys.argv[1]; "
+                        "sys.path.insert(0, root); "
+                        "path = root + '/collect-software-inventory.py'; "
+                        "spec = importlib.util.spec_from_file_location("
+                        "'_onion_sentinel_software_inventory_collector', path); "
+                        "module = importlib.util.module_from_spec(spec); "
+                        "spec.loader.exec_module(module)"
+                    ),
+                    str(deployed_bin),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                completed.stderr or completed.stdout,
+            )
+
+    def test_installer_validation_only_checks_system_python_before_shutdown(self) -> None:
+        installer = BIN_DIR / "install-macstudio-stack.zsh"
+        source = installer.read_text(encoding="utf-8")
+        validation_call = "prepare_alert_store_stage\nvalidate_production_python_sources"
+        self.assertIn(validation_call, source)
+        self.assertLess(
+            source.index(validation_call),
+            source.index("trap keep_critical_agents_down_on_failure EXIT"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            completed = subprocess.run(
+                ["/bin/zsh", str(installer)],
+                env={
+                    **os.environ,
+                    "STACK_DIR": str(Path(tmp) / "runtime"),
+                    "ONION_SENTINEL_RELEASE_ID": "arr-133-validation-only",
+                    "ONION_SENTINEL_VALIDATE_ONLY": "1",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                completed.stderr or completed.stdout,
+            )
+            self.assertIn(
+                "Mac Studio installer preflight validation passed.",
+                completed.stdout,
+            )
+
     def test_pi_installer_copies_bounded_process_helper(self) -> None:
         installer = (ROOT / "relay" / "bin" / "install-pi-relay.sh").read_text(encoding="utf-8")
         self.assertIn('relay/app/process_io.py" /opt/so-alert-relay/app/process_io.py', installer)
