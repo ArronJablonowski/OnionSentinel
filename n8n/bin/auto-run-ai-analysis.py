@@ -211,9 +211,13 @@ from scheduler_worker import (
 from scheduler_composition import (
     build_application_sources,
     build_claim_sources,
+    build_controlled_recovery_sources,
+    build_controlled_terminal_proof_sources,
     build_drain_sources,
     build_execution_sources,
     build_outcome_sources,
+    build_reporting_sources,
+    build_runner_invocation_sources,
     build_settlement_sources,
     build_startup_sources,
     build_terminal_recovery_sources,
@@ -520,15 +524,7 @@ def settle_controlled_frozen_memory_artifacts(
 
 def controlled_recovery_sources() -> ControlledRecoverySources:
     """Bind exact result validation, replay, proof, and memory settlement."""
-    return ControlledRecoverySources(
-        effective_uid=os.getuid,
-        owner_private_directory=owner_private_directory,
-        load_owner_private_json=load_owner_private_json,
-        validate_payload=validate_controlled_recovery_payload,
-        post_result=post_controlled_recovery_result,
-        terminal_success=controlled_recovery_terminal_success,
-        settle_frozen_memory=settle_controlled_frozen_memory_artifacts,
-    )
+    return build_controlled_recovery_sources(globals())
 
 
 def controlled_recovery_policy() -> ControlledRecoveryPolicy:
@@ -563,21 +559,7 @@ def controlled_recovery_spool_pending(runtime_root: Path) -> bool:
 
 def controlled_terminal_proof_sources() -> ControlledTerminalProofSources:
     """Bind the immutable database proof and canonical digest policies."""
-    def open_readonly_database(database_path: Path) -> sqlite3.Connection:
-        connection = sqlite3.connect(
-            f"file:{database_path}?mode=ro",
-            uri=True,
-            timeout=5,
-        )
-        connection.row_factory = sqlite3.Row
-        return connection
-
-    return ControlledTerminalProofSources(
-        open_readonly_database=open_readonly_database,
-        accepted_fields_match=controlled_accepted_fields_match,
-        storage_canonical_digest=controlled_storage_canonical_digest,
-        valid_digest=lambda value: bool(re.fullmatch(r"[a-f0-9]{64}", value)),
-    )
+    return build_controlled_terminal_proof_sources(globals())
 
 
 def controlled_recovery_terminal_success(
@@ -809,17 +791,7 @@ def rows(conn: sqlite3.Connection, sql: str, params: Iterable[object] = ()) -> l
 
 def scheduler_reporting_sources() -> SchedulerReportingSources:
     """Bind the scheduler's bounded HTTP and controlled-claim policy ports."""
-    return SchedulerReportingSources(
-        request_factory=urllib.request.Request,
-        open_url=urllib.request.urlopen,
-        read_json=read_bounded_json,
-        mutation_headers=alert_store_mutation_headers,
-        sleep=time.sleep,
-        valid_stable_group_key=valid_controlled_stable_group_key,
-        model_route_pattern=CONTROLLED_MODEL_ROUTE_RE,
-        max_response_bytes=DEFAULT_MAX_CONTROL_RESPONSE_BYTES,
-        exact_claim_attempts=CONTROLLED_EXACT_CLAIM_ATTEMPTS,
-    )
+    return build_reporting_sources(globals())
 
 
 def report_ai_job_status(
@@ -1447,14 +1419,7 @@ def runner_invocation_defaults() -> RunnerInvocationDefaults:
 
 
 def runner_invocation_sources() -> RunnerInvocationSources:
-    return RunnerInvocationSources(
-        effective_prompt_limit=effective_prompt_package_limit,
-        role_prompt_file=role_prompt_file,
-        role_second_opinion_prompt_file=role_second_opinion_prompt_file,
-        run_command=run_command,
-        environment_snapshot=lambda: dict(os.environ),
-        fallback_evaluation_token=lambda: _CONTROLLED_EVALUATION_TOKEN,
-    )
+    return build_runner_invocation_sources(globals())
 
 
 def run_analysis(

@@ -10,7 +10,7 @@
       "max_lines": 812
     },
     "n8n/bin/auto-run-ai-analysis.py": {
-      "max_lines": 1699
+      "max_lines": 1664
     },
     "n8n/bin/bounded_process.py": {
       "max_lines": 997

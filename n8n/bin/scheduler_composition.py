@@ -19,6 +19,69 @@ def _emit(runtime: RuntimeNamespace, message: str, *, error: bool = False) -> No
     runtime.get("print", print)(message, file=destination, flush=not error)
 
 
+def build_controlled_recovery_sources(runtime: RuntimeNamespace) -> Any:
+    return runtime["ControlledRecoverySources"](
+        effective_uid=runtime["os"].getuid,
+        owner_private_directory=runtime["owner_private_directory"],
+        load_owner_private_json=runtime["load_owner_private_json"],
+        validate_payload=runtime["validate_controlled_recovery_payload"],
+        post_result=runtime["post_controlled_recovery_result"],
+        terminal_success=runtime["controlled_recovery_terminal_success"],
+        settle_frozen_memory=runtime[
+            "settle_controlled_frozen_memory_artifacts"
+        ],
+    )
+
+
+def build_controlled_terminal_proof_sources(runtime: RuntimeNamespace) -> Any:
+    def open_readonly_database(database_path: Any) -> Any:
+        connection = runtime["sqlite3"].connect(
+            f"file:{database_path}?mode=ro",
+            uri=True,
+            timeout=5,
+        )
+        connection.row_factory = runtime["sqlite3"].Row
+        return connection
+
+    return runtime["ControlledTerminalProofSources"](
+        open_readonly_database=open_readonly_database,
+        accepted_fields_match=runtime["controlled_accepted_fields_match"],
+        storage_canonical_digest=runtime["controlled_storage_canonical_digest"],
+        valid_digest=lambda value: bool(
+            runtime["re"].fullmatch(r"[a-f0-9]{64}", value)
+        ),
+    )
+
+
+def build_reporting_sources(runtime: RuntimeNamespace) -> Any:
+    return runtime["SchedulerReportingSources"](
+        request_factory=runtime["urllib"].request.Request,
+        open_url=runtime["urllib"].request.urlopen,
+        read_json=runtime["read_bounded_json"],
+        mutation_headers=runtime["alert_store_mutation_headers"],
+        sleep=runtime["time"].sleep,
+        valid_stable_group_key=runtime["valid_controlled_stable_group_key"],
+        model_route_pattern=runtime["CONTROLLED_MODEL_ROUTE_RE"],
+        max_response_bytes=runtime["DEFAULT_MAX_CONTROL_RESPONSE_BYTES"],
+        exact_claim_attempts=runtime["CONTROLLED_EXACT_CLAIM_ATTEMPTS"],
+    )
+
+
+def build_runner_invocation_sources(runtime: RuntimeNamespace) -> Any:
+    return runtime["RunnerInvocationSources"](
+        effective_prompt_limit=runtime["effective_prompt_package_limit"],
+        role_prompt_file=runtime["role_prompt_file"],
+        role_second_opinion_prompt_file=runtime[
+            "role_second_opinion_prompt_file"
+        ],
+        run_command=runtime["run_command"],
+        environment_snapshot=lambda: dict(runtime["os"].environ),
+        fallback_evaluation_token=lambda: runtime[
+            "_CONTROLLED_EVALUATION_TOKEN"
+        ],
+    )
+
+
 def build_terminal_recovery_sources(runtime: RuntimeNamespace) -> Any:
     return runtime["TerminalRecoverySources"](
         connect_read_only=runtime["scheduler_read_only_connection"],
