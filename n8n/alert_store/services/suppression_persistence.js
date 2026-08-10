@@ -2,12 +2,16 @@
 
 function createSuppressionPersistence({
   findSuppressRule, stableGroupId, nestedField, pendingHumanReview,
-  suppressionKey, ruleName, get, run, secondsSince,
+  suppressionKey, ruleName, get, run,
 }) {
   const functions = {findSuppressRule, stableGroupId, nestedField, pendingHumanReview,
-    suppressionKey, ruleName, get, run, secondsSince};
+    suppressionKey, ruleName, get, run};
   for (const [name, value] of Object.entries(functions)) {
     if (typeof value !== 'function') throw new TypeError(`${name} must be a function`);
+  }
+
+  function secondsSince(isoTimestamp, nowIso) {
+    return Math.floor((Date.parse(nowIso) - Date.parse(isoTimestamp)) / 1000);
   }
 
   function candidateIdentity(alert) {

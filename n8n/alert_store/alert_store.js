@@ -53,6 +53,7 @@ const {
 } = require('./services/analyst_decision_persistence');
 const {createAlertIngestOrchestrator} = require('./services/alert_ingest_orchestrator');
 const {createAlertPersistence} = require('./services/alert_persistence');
+const {createSuppressionPersistence} = require('./services/suppression_persistence');
 const {createInventoryService} = require('./services/inventory_service');
 const {createInventoryRoutes} = require('./routes/inventory_routes');
 const {createHealthRepository} = require('./repositories/health_repository');
@@ -2613,92 +2614,7 @@ async function storeAlertUnlocked(alert) {
 }
 
 async function applySuppressionPolicy(alert, now) {
-  // Suppression windows are time-boxed. They reduce repeat notifications and
-  // Markdown reports, but every alert row still lands in SQLite for evidence.
-  const rule = findSuppressRule(alert);
-  if (!rule) return {status: 'accepted'};
-  const candidateStableGroupId = stableGroupId({
-    rule_id: alert.rule_id,
-    rule_name: alert.rule_name,
-    event_dataset: alert.event_dataset,
-    source_ip: nestedField(alert, 'source.ip'),
-    destination_ip: nestedField(alert, 'destination.ip'),
-    destination_port: nestedField(alert, 'destination.port'),
-    network_protocol: nestedField(alert, 'network.protocol'),
-    transport_protocol: nestedField(alert, 'network.transport')
-      || nestedField(alert, 'network.iana_number'),
-  });
-  if (await stableGroupHasPendingHumanReview(candidateStableGroupId)) {
-    return {
-      status: 'accepted',
-      reason: 'automatic suppression blocked pending explicit analyst adjudication',
-      review_status: 'pending_human_review',
-    };
-  }
-
-  const key = suppressionKey(rule, alert);
-  const ttlSeconds = Number(rule.ttl_seconds || rule.suppress_seconds || 1800);
-  const escalationThreshold = Number(rule.escalation_threshold || 0);
-  const existing = await get('SELECT * FROM suppression_log WHERE suppression_key = ?', [key]);
-  const expired = existing ? secondsSince(existing.window_start, now) >= ttlSeconds : true;
-
-  if (!existing || expired) {
-    await run(
-      `
-        INSERT INTO suppression_log (
-          suppression_key, rule_name, reason, window_start, last_seen,
-          seen_count, suppressed_count, escalated_count, ttl_seconds,
-          escalation_threshold
-        )
-        VALUES (?, ?, ?, ?, ?, 1, 0, 0, ?, ?)
-        ON CONFLICT(suppression_key) DO UPDATE SET
-          rule_name = excluded.rule_name,
-          reason = excluded.reason,
-          window_start = excluded.window_start,
-          last_seen = excluded.last_seen,
-          seen_count = 1,
-          suppressed_count = 0,
-          escalated_count = 0,
-          ttl_seconds = excluded.ttl_seconds,
-          escalation_threshold = excluded.escalation_threshold
-      `,
-      [key, ruleName(rule), rule.reason || null, now, now, ttlSeconds, escalationThreshold],
-    );
-    return {
-      status: 'accepted',
-      key,
-      rule: ruleName(rule),
-      reason: rule.reason || null,
-      ttl_seconds: ttlSeconds,
-      seen_count: 1,
-    };
-  }
-
-  const nextSeenCount = Number(existing.seen_count || 0) + 1;
-  const shouldEscalate = escalationThreshold > 0 && nextSeenCount % escalationThreshold === 0;
-  // Escalation lets a noisy pattern break through periodically so a real
-  // compromise is not hidden forever by a broad suppression rule.
-  await run(
-    `
-      UPDATE suppression_log
-      SET last_seen = ?,
-          seen_count = seen_count + 1,
-          suppressed_count = suppressed_count + ?,
-          escalated_count = escalated_count + ?
-      WHERE suppression_key = ?
-    `,
-    [now, shouldEscalate ? 0 : 1, shouldEscalate ? 1 : 0, key],
-  );
-
-  return {
-    status: shouldEscalate ? 'escalated' : 'suppressed',
-    key,
-    rule: ruleName(rule),
-    reason: rule.reason || null,
-    ttl_seconds: ttlSeconds,
-    escalation_threshold: escalationThreshold || null,
-    seen_count: nextSeenCount,
-  };
+  return suppressionPersistence.apply(alert, now);
 }
 
 async function rescoreAlertsUnlocked() {
@@ -3062,6 +2978,16 @@ const analystDecisionPersistence = createAnalystDecisionPersistence({
   nowUtc,
   randomUUID: crypto.randomUUID,
   jsonText,
+});
+const suppressionPersistence = createSuppressionPersistence({
+  findSuppressRule,
+  stableGroupId,
+  nestedField,
+  pendingHumanReview: stableGroupHasPendingHumanReview,
+  suppressionKey,
+  ruleName,
+  get,
+  run,
 });
 const alertPersistence = createAlertPersistence({
   currentGroupKey: currentAlertGroupKey,
