@@ -59,6 +59,9 @@ const {
 const {
   createControlledRetirementCommand,
 } = require('./services/controlled_retirement_command');
+const {
+  createIncidentReanalysisFrozenDispatch,
+} = require('./services/incident_reanalysis_frozen_dispatch');
 const {createIncidentAnalysisCompletion} = require('./services/incident_analysis_completion');
 const {createIncidentReanalysisBindingService} = require('./services/incident_reanalysis_binding');
 const {createHealthRoutes} = require('./routes/health_routes');
@@ -4352,38 +4355,13 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
     1000,
   );
   if (caseId && controlledIncidentDispatch) {
-    const priorDispatch = await get(
-      `SELECT controlled_receipt_json
-       FROM incident_reanalysis_runs
-       WHERE controlled_dispatch_id = ?`,
-      [identity.dispatchId],
+    const replay = await incidentReanalysisFrozenDispatchOwner.replay(
+      identity,
+      caseId,
+      requestedBy,
+      reason,
     );
-    if (priorDispatch) {
-      const receipt = parseJsonObject(
-        priorDispatch.controlled_receipt_json,
-      );
-      if (
-        receipt.ok !== true
-        || receipt.case_id !== caseId
-        || receipt.cohort_id !== identity.cohortId
-        || receipt.dispatch_id !== identity.dispatchId
-        || receipt.release_id !== identity.releaseId
-        || receipt.expected_assigned_route !== identity.expectedAssignedRoute
-        || receipt.expected_reviewer_route !== identity.expectedReviewerRoute
-        || receipt.reviewer_required !== identity.reviewerRequired
-        || receipt.representative_alert_id
-          !== identity.representativeAlertId
-        || receipt.stable_group_id !== identity.stableGroupId
-        || receipt.stable_group_key !== identity.stableGroupKey
-        || receipt.requested_by !== requestedBy
-        || receipt.reason !== reason
-      ) {
-        throw incidentIdentityConflict(
-          'controlled incident dispatch identity was already used',
-        );
-      }
-      return receipt;
-    }
+    if (replay) return replay;
   }
   // Release lineage is server-owned deployment metadata. Never allow a
   // dashboard/API caller to spoof the code revision attributed to a run.
@@ -4415,193 +4393,12 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
     throw error;
   }
   if (caseId && controlledIdentitySupplied) {
-    const incident = cases[0];
-    const storedGroupId = typeof incident.group_id === 'string'
-      ? incident.group_id
-      : '';
-    const storedRepresentativeAlertId = typeof incident.representative_alert_id === 'string'
-      ? incident.representative_alert_id
-      : '';
-    const representativeGroupId = typeof incident.representative_group_id === 'string'
-      ? incident.representative_group_id
-      : '';
-    const aliases = await loadAlertGroupAliasSnapshot();
-    const caseIdentity = resolveCanonicalAlertGroupIdentity(storedGroupId, aliases);
-    const requestedStableIdentity = identity.stableGroupIdSupplied
-      ? resolveCanonicalAlertGroupIdentity(identity.stableGroupId, aliases)
-      : caseIdentity;
-    if (
-      requestedStableIdentity.stableGroupId !== caseIdentity.stableGroupId
-      || (
-        identity.stableGroupIdSupplied
-        && identity.stableGroupId !== requestedStableIdentity.stableGroupId
-      )
-    ) {
-      throw incidentIdentityConflict(
-        'requested stable_group_id no longer matches the incident case',
-      );
-    }
-
-    const targetRepresentativeAlertId = identity.representativeAlertIdSupplied
-      ? identity.representativeAlertId
-      : storedRepresentativeAlertId;
-    const targetRepresentative = await get(
-      `SELECT alert_id, stable_group_id, stable_group_key
-       FROM alerts WHERE alert_id = ? LIMIT 1`,
-      [targetRepresentativeAlertId],
-    );
-    if (!targetRepresentative?.alert_id) {
-      throw incidentIdentityConflict(
-        'requested representative_alert_id no longer matches the incident case',
-      );
-    }
-    const targetRepresentativeGroupId = typeof targetRepresentative.stable_group_id === 'string'
-      ? targetRepresentative.stable_group_id.trim().toLowerCase()
-      : '';
-    const targetIdentity = resolveCanonicalAlertGroupIdentity(
-      targetRepresentativeGroupId,
-      aliases,
-    );
-    if (
-      targetIdentity.stableGroupId !== caseIdentity.stableGroupId
-      || (
-        identity.stableGroupIdSupplied
-        && targetIdentity.stableGroupId !== requestedStableIdentity.stableGroupId
-      )
-      // The worker currently proves a claim with the alert row's exact stable
-      // group. A pinned legacy alert would otherwise pass alias validation here
-      // and then deterministically fail after it acquires the durable lease.
-      || targetRepresentativeGroupId !== targetIdentity.stableGroupId
-    ) {
-      throw incidentIdentityConflict(
-        'requested representative_alert_id no longer matches the incident case',
-      );
-    }
-    const targetRepresentativeGroupKey = typeof targetRepresentative.stable_group_key === 'string'
-      ? targetRepresentative.stable_group_key
-      : '';
-    const canonicalAliasGroupKeys = [
-      caseIdentity.stableGroupKey,
-      requestedStableIdentity.stableGroupKey,
-    ].filter(Boolean);
-    if (
-      targetRepresentativeGroupKey
-      && canonicalAliasGroupKeys.some(
-        (groupKey) => groupKey !== targetRepresentativeGroupKey,
-      )
-    ) {
-      throw incidentIdentityConflict(
-        'requested representative_alert_id has an incompatible stable group key',
-      );
-    }
-    if (
-      identity.stableGroupKeySupplied
-      && targetRepresentativeGroupKey !== identity.stableGroupKey
-    ) {
-      throw incidentIdentityConflict(
-        'requested stable_group_key no longer matches the incident case',
-      );
-    }
-    if (
-      representativeGroupId === targetRepresentativeGroupId
-      && Number(incident.representative_exists || 0)
-      && typeof incident.representative_group_key === 'string'
-      && incident.representative_group_key
-      && targetRepresentativeGroupKey
-      && incident.representative_group_key !== targetRepresentativeGroupKey
-    ) {
-      throw incidentIdentityConflict(
-        'requested representative_alert_id has an incompatible stable group key',
-      );
-    }
-
-    const otherCases = await all(
-      `SELECT case_id, group_id FROM incident_response_cases
-       WHERE case_id != ?`,
-      [caseId],
-    );
-    for (const otherCase of otherCases) {
-      const otherIdentity = resolveCanonicalAlertGroupIdentity(
-        String(otherCase.group_id || ''),
-        aliases,
-      );
-      if (otherIdentity.stableGroupId === targetIdentity.stableGroupId) {
-        throw incidentIdentityConflict(
-          'requested stable_group_id belongs to another incident case',
-        );
-      }
-    }
-
-    const targetGroupId = targetIdentity.stableGroupId;
-    if (identity.cohortId) {
-      // This check is deliberately before the case rebind, run creation, event
-      // creation, or queue mutation. A controlled request may not replace the
-      // queued intent behind an already-running legacy or canonical attempt.
-      await rejectProcessingControlledJob(
-        'incident_response_analysis',
-        [storedGroupId, targetGroupId],
-      );
-    }
-    if (
-      storedGroupId !== targetGroupId
-      || storedRepresentativeAlertId !== targetRepresentativeAlertId
-    ) {
-      const updated = await run(
-        `UPDATE incident_response_cases
-         SET group_id = ?, representative_alert_id = ?, updated_at = ?
-         WHERE case_id = ? AND group_id = ? AND representative_alert_id = ?`,
-        [
-          targetGroupId,
-          targetRepresentativeAlertId,
-          requestedAt,
-          caseId,
-          storedGroupId,
-          storedRepresentativeAlertId,
-        ],
-      );
-      if (Number(updated.changes || 0) !== 1) {
-        throw incidentIdentityConflict(
-          'incident case identity changed during frozen dispatch validation',
-        );
-      }
-      await run(
-        `INSERT INTO incident_response_events (
-           case_id, event_type, actor, detail_json, created_at
-         ) VALUES (?, 'reanalysis_basis_rebound', ?, ?, ?)`,
-        [
-          caseId,
-          requestedBy,
-          jsonText({
-            previous_group_id: storedGroupId,
-            previous_representative_alert_id: storedRepresentativeAlertId,
-            group_id: targetGroupId,
-            representative_alert_id: targetRepresentativeAlertId,
-            ...(identity.stableGroupKeySupplied ? {
-              stable_group_key: identity.stableGroupKey,
-            } : {}),
-            ...(identity.cohortId ? {
-              cohort_id: identity.cohortId,
-              dispatch_id: identity.dispatchId,
-              release_id: identity.releaseId,
-              expected_assigned_route: identity.expectedAssignedRoute,
-              expected_reviewer_route: identity.expectedReviewerRoute,
-              reviewer_required: identity.reviewerRequired,
-            } : {}),
-          }),
-          requestedAt,
-        ],
-      );
-    }
-    // The loop below creates the run, run-case, and durable job from this
-    // server-validated frozen basis. Mutating the in-memory snapshot prevents
-    // the legacy identity-drift migration path from undoing the canonical bind.
-    incident.group_id = targetGroupId;
-    incident.representative_alert_id = targetRepresentativeAlertId;
-    incident.representative_exists = 1;
-    incident.representative_group_id = targetGroupId;
-    incident.representative_group_key = targetRepresentativeGroupKey;
-    incident.controlled_legacy_job_group_id = (
-      storedGroupId && storedGroupId !== targetGroupId ? storedGroupId : ''
+    await incidentReanalysisFrozenDispatchOwner.bind(
+      identity,
+      caseId,
+      cases[0],
+      requestedAt,
+      requestedBy,
     );
   }
   await run(
@@ -6225,6 +6022,17 @@ const manualDispatchIdentityOwner = createManualDispatchIdentity({
   controlledRouteModelIdentity,
   representativeAlertIdPattern,
   runtimeReleaseId: controlledRuntimeReleaseId,
+  conflict: incidentIdentityConflict,
+});
+const incidentReanalysisFrozenDispatchOwner = createIncidentReanalysisFrozenDispatch({
+  get,
+  all,
+  run,
+  parseJsonObject,
+  loadAliases: loadAlertGroupAliasSnapshot,
+  resolveCanonicalIdentity: resolveCanonicalAlertGroupIdentity,
+  rejectProcessingJob: rejectProcessingControlledJob,
+  jsonText,
   conflict: incidentIdentityConflict,
 });
 
