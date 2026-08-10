@@ -57,26 +57,26 @@ from scheduler_ai_settings import (
     strict_controlled_ai_settings,
 )
 from scheduler_artifact_repository import (
-    alert_group_id as artifact_alert_group_id,
-    alert_group_key as artifact_alert_group_key,
-    alert_group_key_from_mapping as artifact_group_key_from_mapping,
-    analyzed_alert_groups as artifact_analyzed_alert_groups,
-    analyzed_alert_ids as artifact_analyzed_alert_ids,
-    completed_analysis_group_ids as artifact_completed_group_ids,
-    latest_analysis_mtimes as artifact_analysis_mtimes,
-    latest_pcap_analysis_mtimes as artifact_pcap_analysis_mtimes,
-    latest_pcap_evidence_mtime_for_alert as artifact_pcap_evidence_mtime,
-    latest_pcap_group_mtimes as artifact_pcap_group_mtimes,
-    latest_prompt_for_alert as artifact_latest_prompt,
-    latest_prompt_group_mtimes as artifact_prompt_group_mtimes,
-    latest_prompt_mtimes as artifact_prompt_mtimes,
-    reusable_prompt_for_alert as artifact_reusable_prompt,
+    alert_group_id,
+    alert_group_key,
+    alert_group_key_from_mapping,
+    analyzed_alert_groups,
+    analyzed_alert_ids,
+    completed_analysis_group_ids,
+    latest_analysis_mtimes,
+    latest_pcap_analysis_mtimes,
+    latest_pcap_evidence_mtime_for_alert,
+    latest_pcap_group_mtimes,
+    latest_prompt_for_alert,
+    latest_prompt_group_mtimes,
+    latest_prompt_mtimes,
+    reusable_prompt_for_alert,
 )
 from scheduler_legacy_reconciliation import (
-    orphaned_pending_ai_job_ids as legacy_orphaned_job_ids,
-    pending_ai_job_ids as legacy_pending_job_ids,
-    reconcilable_ai_job_ids as legacy_reconcilable_job_ids,
-    reconcilable_completed_ai_job_ids as legacy_completed_job_ids,
+    orphaned_pending_ai_job_ids,
+    pending_ai_job_ids,
+    reconcilable_ai_job_ids,
+    reconcilable_completed_ai_job_ids,
 )
 from scheduler_controlled_runtime import (
     ControlledRuntimePolicy,
@@ -106,7 +106,7 @@ from scheduler_controlled_claim_contract import (
     ControlledRouteSources,
     controlled_claim_expectations as validate_claim_expectations,
     controlled_job_route_contract as validate_job_route_contract,
-    incident_reanalysis_attempt_id as derive_incident_attempt_id,
+    incident_reanalysis_attempt_id,
     require_controlled_lease_identity,
 )
 from scheduler_claim_snapshot import (
@@ -176,8 +176,8 @@ from scheduler_outcome import (
     handle_scheduler_exception,
 )
 from scheduler_indexed_state import (
-    indexed_reconcilable_ai_job_ids as load_indexed_reconcilable_ai_job_ids,
-    indexed_scheduler_available as indexed_scheduler_state_available,
+    indexed_reconcilable_ai_job_ids,
+    indexed_scheduler_available,
 )
 from scheduler_indexed_selection import (
     IndexedSelectionRequest,
@@ -665,11 +665,6 @@ def report_ai_job_status(
     )
 
 
-def incident_reanalysis_attempt_id(lease_token: str) -> str:
-    """Compatibility delegate for one non-secret IR lease fingerprint."""
-    return derive_incident_attempt_id(lease_token)
-
-
 def job_reanalysis_attempt_id(job_payload: dict, lease_token: str) -> str:
     """Fingerprint only a validated manual reanalysis job, never escalation."""
     if job_payload.get("manual_reanalysis") is not True:
@@ -757,123 +752,6 @@ def test_filter_sql(column: str = "alert_id") -> tuple[str, list[object]]:
     return " AND ".join(clauses), params
 
 
-def latest_analysis_mtimes(analysis_dir: Path) -> dict[str, float]:
-    return artifact_analysis_mtimes(analysis_dir)
-
-
-def latest_pcap_analysis_mtimes(pcap_analysis_dir: Path) -> dict[str, float]:
-    return artifact_pcap_analysis_mtimes(pcap_analysis_dir)
-
-
-def latest_pcap_group_mtimes(pcap_analysis_dir: Path) -> dict[str, float]:
-    """Return newest parsed PCAP evidence time keyed by grouped detection id."""
-    return artifact_pcap_group_mtimes(pcap_analysis_dir)
-
-
-def latest_prompt_mtimes(prompt_dir: Path) -> dict[str, float]:
-    return artifact_prompt_mtimes(prompt_dir)
-
-
-def alert_group_key_from_mapping(alert: dict) -> str:
-    """Return the scheduler duplicate-group key for prompt-package alert data."""
-    return artifact_group_key_from_mapping(alert)
-
-
-def latest_prompt_group_mtimes(conn: sqlite3.Connection, prompt_dir: Path) -> dict[str, float]:
-    return artifact_prompt_group_mtimes(conn, prompt_dir)
-
-
-def analyzed_alert_ids(analysis_dir: Path, pcap_analysis_dir: Path | None = None, prompt_dir: Path | None = None) -> set[str]:
-    """Return analyzed alert ids, excluding AI artifacts stale versus PCAP or manual requeue prompts."""
-    return artifact_analyzed_alert_ids(
-        analysis_dir, pcap_analysis_dir, prompt_dir
-    )
-
-
-def alert_group_key(row: sqlite3.Row) -> str:
-    """Return the same duplicate-group key used by the SOC dashboard."""
-    return artifact_alert_group_key(row)
-
-
-def alert_group_id(group_key: str) -> str:
-    return artifact_alert_group_id(group_key)
-
-
-def analyzed_alert_groups(
-    conn: sqlite3.Connection,
-    analyzed_ids: set[str],
-    analysis_dir: Path | None = None,
-    pcap_analysis_dir: Path | None = None,
-    prompt_dir: Path | None = None,
-) -> set[str]:
-    return artifact_analyzed_alert_groups(
-        conn,
-        analyzed_ids,
-        analysis_dir,
-        pcap_analysis_dir,
-        prompt_dir,
-    )
-
-
-def completed_analysis_group_ids(
-    conn: sqlite3.Connection,
-    analyzed_ids: set[str],
-    analysis_dir: Path,
-    pcap_analysis_dir: Path,
-    prompt_dir: Path,
-) -> set[str]:
-    """Return stable queue keys for groups whose analysis artifacts are current."""
-    return artifact_completed_group_ids(
-        conn,
-        analyzed_ids,
-        analysis_dir,
-        pcap_analysis_dir,
-        prompt_dir,
-    )
-
-
-def orphaned_pending_ai_job_ids(conn: sqlite3.Connection) -> set[str]:
-    """Compatibility delegate for orphaned legacy AI queue intent."""
-    return legacy_orphaned_job_ids(conn)
-
-
-def pending_ai_job_ids(conn: sqlite3.Connection) -> set[str]:
-    """Return coalesced durable AI intents that still require a model run."""
-    return legacy_pending_job_ids(conn)
-
-
-def reconcilable_completed_ai_job_ids(conn: sqlite3.Connection, group_ids: set[str]) -> set[str]:
-    """Compatibility delegate for artifact-complete legacy AI jobs."""
-    return legacy_completed_job_ids(conn, group_ids)
-
-
-def reconcilable_ai_job_ids(
-    conn: sqlite3.Connection,
-    analyzed_ids: set[str],
-    analysis_dir: Path,
-    pcap_analysis_dir: Path,
-    prompt_dir: Path,
-) -> set[str]:
-    """Combine artifact-complete and obsolete durable AI queue intents."""
-    return legacy_reconcilable_job_ids(
-        conn,
-        analyzed_ids,
-        analysis_dir,
-        pcap_analysis_dir,
-        prompt_dir,
-    )
-
-
-def indexed_scheduler_available(conn: sqlite3.Connection) -> bool:
-    """Compatibility delegate for indexed scheduler capability detection."""
-    return indexed_scheduler_state_available(conn)
-
-
-def indexed_reconcilable_ai_job_ids(conn: sqlite3.Connection) -> set[str]:
-    """Compatibility delegate for indexed committed-result reconciliation."""
-    return load_indexed_reconcilable_ai_job_ids(conn)
-
-
 def select_next_alert_indexed(
     conn: sqlite3.Connection,
     args: argparse.Namespace,
@@ -936,20 +814,6 @@ def select_next_alert(
         eligible_filter_statuses=ELIGIBLE_FILTER_STATUSES,
     )
     return select_next_legacy_alert(conn, request, sources)
-
-
-def latest_prompt_for_alert(prompt_dir: Path, alert_id: str) -> Path | None:
-    return artifact_latest_prompt(prompt_dir, alert_id)
-
-
-def latest_pcap_evidence_mtime_for_alert(selected: sqlite3.Row, pcap_analysis_dir: Path) -> float:
-    """Return newest parsed PCAP evidence mtime for the selected alert group."""
-    return artifact_pcap_evidence_mtime(selected, pcap_analysis_dir)
-
-
-def reusable_prompt_for_alert(prompt_dir: Path, selected: sqlite3.Row, pcap_analysis_dir: Path) -> Path | None:
-    """Return a prompt package only if it is current with parsed PCAP evidence."""
-    return artifact_reusable_prompt(prompt_dir, selected, pcap_analysis_dir)
 
 
 def durable_payload(selected: sqlite3.Row) -> dict[str, object]:
