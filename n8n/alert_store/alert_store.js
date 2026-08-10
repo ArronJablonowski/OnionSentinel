@@ -54,6 +54,7 @@ const {
 const {createAlertIngestOrchestrator} = require('./services/alert_ingest_orchestrator');
 const {createAlertPersistence} = require('./services/alert_persistence');
 const {createSuppressionPersistence} = require('./services/suppression_persistence');
+const {createRescorePersistence} = require('./services/rescore_persistence');
 const {createInventoryService} = require('./services/inventory_service');
 const {createInventoryRoutes} = require('./routes/inventory_routes');
 const {createHealthRepository} = require('./repositories/health_repository');
@@ -2618,64 +2619,7 @@ async function applySuppressionPolicy(alert, now) {
 }
 
 async function rescoreAlertsUnlocked() {
-  // POST /rescore after editing scoring_rules.json to update existing rows
-  // without replaying historical alerts from Security Onion.
-  const rows = await all('SELECT alert_id, alert_json FROM alerts');
-  let rescored = 0;
-  let skipped = 0;
-
-  for (const row of rows) {
-    try {
-      const alert = JSON.parse(row.alert_json);
-      alert.triage = scoreAlert(alert);
-      await run(
-        `
-          UPDATE alerts
-          SET source_port = $source_port,
-              destination_port = $destination_port,
-              network_protocol = $network_protocol,
-              transport_protocol = $transport_protocol,
-              traffic_direction = $traffic_direction,
-              triage_score = $triage_score,
-              triage_level = $triage_level,
-              routing = $routing,
-              raw_event_json = $raw_event_json,
-              enrichment_json = $enrichment_json,
-              alert_json = $alert_json
-          WHERE alert_id = $alert_id
-        `,
-        {
-          $source_port: integerField(nestedField(alert, 'source.port')),
-          $destination_port: integerField(nestedField(alert, 'destination.port')),
-          $network_protocol: nestedField(alert, 'network.protocol'),
-          $transport_protocol: nestedField(alert, 'network.transport') || nestedField(alert, 'network.iana_number'),
-          $traffic_direction: alert.triage.traffic_direction,
-          $triage_score: alert.triage.score,
-          $triage_level: alert.triage.level,
-          $routing: alert.triage.routing,
-          $raw_event_json: jsonText(nestedField(alert, 'security_onion.raw_event')),
-          $enrichment_json: jsonText(enrichmentRecord(alert)),
-          $alert_json: jsonText(alert),
-          $alert_id: row.alert_id,
-        },
-      );
-      rescored += 1;
-    } catch (error) {
-      skipped += 1;
-    }
-  }
-
-  const groupSummary = await rebuildAlertGroupSummariesUnlocked();
-
-  return {
-    ok: true,
-    status: 'rescored',
-    total_alerts: rows.length,
-    rescored,
-    skipped,
-    group_summary_groups: groupSummary.groups,
-    scoring_rules: path.basename(scoringRulesPath),
-  };
+  return rescorePersistence.rescore();
 }
 
 async function rescoreAlerts() {
@@ -2988,6 +2932,17 @@ const suppressionPersistence = createSuppressionPersistence({
   ruleName,
   get,
   run,
+});
+const rescorePersistence = createRescorePersistence({
+  all,
+  run,
+  scoreAlert,
+  nestedField,
+  integerField,
+  jsonText,
+  enrichmentRecord,
+  rebuildGroupSummaries: rebuildAlertGroupSummariesUnlocked,
+  scoringRulesName: path.basename(scoringRulesPath),
 });
 const alertPersistence = createAlertPersistence({
   currentGroupKey: currentAlertGroupKey,
