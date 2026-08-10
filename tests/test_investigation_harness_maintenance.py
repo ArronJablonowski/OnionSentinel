@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -201,6 +202,67 @@ class InvestigationHarnessMaintenanceTests(unittest.TestCase):
         result = self.maintenance(apply=True)
         self.assertEqual(result["status"], "absent")
         self.assertFalse(self.db.exists())
+
+    def test_cli_absent_database_writes_private_success_report(self) -> None:
+        report_path = self.root / "logs/maintenance.json"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "n8n/bin/maintain-investigation-harness.py"),
+                "--stack-dir",
+                str(self.root),
+                "--report",
+                str(report_path),
+            ],
+            cwd=self.root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(report["status"], "absent")
+        self.assertFalse(report["database_present"])
+        self.assertEqual(report_path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(report_path.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_cli_invalid_policy_writes_blocked_report_and_returns_two(self) -> None:
+        report_path = self.root / "logs/maintenance.json"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "n8n/bin/maintain-investigation-harness.py"),
+                "--stack-dir",
+                str(self.root),
+                "--report",
+                str(report_path),
+                "--retention-days",
+                "0",
+            ],
+            cwd=self.root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        payload = json.loads(completed.stdout)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertFalse(payload["ok"])
+        self.assertEqual(report["status"], "blocked")
+        self.assertIn("retention days must be between", report["error"])
+
+    def test_harness_runtime_load_is_cached_and_cwd_independent(self) -> None:
+        original_cwd = Path.cwd()
+        try:
+            os.chdir(self.root)
+            first = MAINTENANCE.load_harness_runtime()
+            second = MAINTENANCE.load_harness_runtime()
+        finally:
+            os.chdir(original_cwd)
+        self.assertIs(first, second)
+        self.assertTrue(hasattr(first, "HarnessStore"))
 
     def test_new_database_uses_incremental_auto_vacuum(self) -> None:
         self.add_run("run-current", terminal=False)
