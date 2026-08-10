@@ -1063,6 +1063,71 @@
       ]
     },
     {
+      "path": "n8n/bin/process-pcap-evidence.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/process-pcap-evidence.py",
+      "required_symbols": [
+        "main",
+        "process_one",
+        "run_tshark",
+        "run_zeek",
+        "safe_extract_tar",
+        "signature_context_for_request"
+      ]
+    },
+    {
+      "path": "n8n/bin/pcap_processor_contract.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_processor_contract.py",
+      "required_symbols": [
+        "configured_maxmind_db_paths",
+        "maxmind_geoip_summary",
+        "parse_args",
+        "run_command"
+      ]
+    },
+    {
+      "path": "n8n/bin/pcap_processor_storage.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_processor_storage.py",
+      "required_symbols": [
+        "fetch_remote_artifact",
+        "materialize_pcap_files",
+        "pending_requests",
+        "safe_extract_tar",
+        "signature_context_for_request"
+      ]
+    },
+    {
+      "path": "n8n/bin/pcap_processor_zeek.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_processor_zeek.py",
+      "required_symbols": [
+        "aggregate_zeek_log",
+        "project_zeek_query_record",
+        "run_zeek"
+      ]
+    },
+    {
+      "path": "n8n/bin/pcap_processor_tshark.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_processor_tshark.py",
+      "required_symbols": [
+        "run_tshark"
+      ]
+    },
+    {
+      "path": "n8n/bin/pcap_processor_workflow.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_processor_workflow.py",
+      "required_symbols": [
+        "build_markdown",
+        "main",
+        "process_one",
+        "report_analysis_status"
+      ]
+    },
+    {
       "path": "n8n/bin/prompt_incident_evidence_projection.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_incident_evidence_projection.py",

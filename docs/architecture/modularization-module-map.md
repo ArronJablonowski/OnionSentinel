@@ -2511,6 +2511,22 @@ only after the exact v2 contract is selected. The bundled v1 facade, collector,
 and manifest remain frozen and byte-stable. No module receives credentials or
 transport authority, and Security Onion and Relay access remain read-only.
 
+## PCAP Evidence Processor
+
+`n8n/bin/process-pcap-evidence.py` is a bounded CLI and import-compatibility
+facade. Configuration and shared bounded utilities live in
+`pcap_processor_contract.py`; database and artifact admission in
+`pcap_processor_storage.py`; payload-free Zeek projection and aggregation in
+`pcap_processor_zeek.py`; bounded packet/protocol analysis in
+`pcap_processor_tshark.py`; and report persistence, cleanup, and orchestration
+in `pcap_processor_workflow.py`.
+
+The facade forwards legacy runtime overrides to the owning layer before each
+compatibility call. Existing operator/test injection remains available without
+allowing lower layers to import the facade. The installer stages every module
+beside the entrypoint. Raw captures remain path-confined and read-only; derived
+claims retain tool, timestamp, direction, coverage, and cleanup provenance.
+
 ## Alert Store
 
 Current owner: `n8n/alert_store/alert_store.js` (12,586 lines). The runtime

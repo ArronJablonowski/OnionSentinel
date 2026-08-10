@@ -49,7 +49,22 @@
       "max_lines": 915
     },
     "n8n/bin/process-pcap-evidence.py": {
-      "max_lines": 2018
+      "max_lines": 250
+    },
+    "n8n/bin/pcap_processor_contract.py": {
+      "max_lines": 600
+    },
+    "n8n/bin/pcap_processor_storage.py": {
+      "max_lines": 600
+    },
+    "n8n/bin/pcap_processor_zeek.py": {
+      "max_lines": 600
+    },
+    "n8n/bin/pcap_processor_tshark.py": {
+      "max_lines": 600
+    },
+    "n8n/bin/pcap_processor_workflow.py": {
+      "max_lines": 600
     },
     "onion-sentinel-dashboard/ac_hunter_review.py": {
       "max_lines": 2225
@@ -386,36 +401,36 @@
       "max_complexity": 23,
       "max_lines": 101
     },
-    "n8n/bin/process-pcap-evidence.py::build_markdown": {
+    "n8n/bin/pcap_processor_workflow.py::build_markdown": {
       "max_complexity": 18,
       "max_lines": 124
     },
-    "n8n/bin/process-pcap-evidence.py::fetch_remote_artifact": {
+    "n8n/bin/pcap_processor_storage.py::fetch_remote_artifact": {
       "max_complexity": 20
     },
-    "n8n/bin/process-pcap-evidence.py::materialize_pcap_files": {
+    "n8n/bin/pcap_processor_storage.py::materialize_pcap_files": {
       "max_complexity": 19
     },
-    "n8n/bin/process-pcap-evidence.py::maxmind_geoip_summary": {
+    "n8n/bin/pcap_processor_contract.py::maxmind_geoip_summary": {
       "max_complexity": 31,
       "max_lines": 129
     },
-    "n8n/bin/process-pcap-evidence.py::process_one": {
+    "n8n/bin/pcap_processor_workflow.py::process_one": {
       "max_complexity": 29,
       "max_lines": 123
     },
-    "n8n/bin/process-pcap-evidence.py::run_tshark": {
+    "n8n/bin/pcap_processor_tshark.py::run_tshark": {
       "max_complexity": 49,
       "max_lines": 541
     },
-    "n8n/bin/process-pcap-evidence.py::run_tshark.on_line": {
+    "n8n/bin/pcap_processor_tshark.py::run_tshark.on_line": {
       "max_complexity": 88,
       "max_lines": 239
     },
-    "n8n/bin/process-pcap-evidence.py::run_zeek": {
+    "n8n/bin/pcap_processor_zeek.py::run_zeek": {
       "max_complexity": 23
     },
-    "n8n/bin/process-pcap-evidence.py::signature_context_for_request": {
+    "n8n/bin/pcap_processor_storage.py::signature_context_for_request": {
       "max_lines": 114
     },
     "n8n/bin/promote-dhcp-asset.py::promote": {
