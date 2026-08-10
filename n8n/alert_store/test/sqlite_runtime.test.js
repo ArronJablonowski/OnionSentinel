@@ -149,6 +149,24 @@ test('write gate continues after rejection and restores active count', async () 
   assert.equal(runtime.activeWrites(), 0);
 });
 
+test('waitForWrites observes the current queue through completion and rejection', async () => {
+  const {runtime} = owner();
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const first = runtime.withWriteGate(async () => pending);
+  const second = runtime.withWriteGate(async () => { throw new Error('expected rejection'); });
+  let drained = false;
+  const wait = runtime.waitForWrites().then(() => { drained = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(drained, false);
+  release();
+  await first;
+  await assert.rejects(second, /expected rejection/);
+  await wait;
+  assert.equal(drained, true);
+  assert.equal(runtime.activeWrites(), 0);
+});
+
 test('immediate transaction commits successful work in exact order', async () => {
   const {database, runtime} = owner();
   const result = await runtime.withImmediateTransaction(async () => {

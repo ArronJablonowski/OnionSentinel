@@ -21,7 +21,7 @@ function createServiceRuntimeLifecycle(options) {
     processLike,
     consoleLike,
     database,
-    getSqliteWriteGate,
+    waitForSqliteWrites,
     getActiveSqliteWrites,
     setIntervalFn,
     setTimeoutFn,
@@ -74,7 +74,7 @@ function createServiceRuntimeLifecycle(options) {
       'pipeline disk sample failed',
       'initial pipeline disk sample failed',
     );
-    if (workers.postgresShadow) {
+    if (workers.postgresShadow?.enabled()) {
       scheduleCatching(
         workers.postgresShadow.drain,
         workers.postgresShadow.intervalMs,
@@ -102,7 +102,7 @@ function createServiceRuntimeLifecycle(options) {
           processLike.exit(1);
           return;
         }
-        await getSqliteWriteGate().catch(() => undefined);
+        await waitForSqliteWrites();
         if (getActiveSqliteWrites() !== 0) {
           consoleLike.error('controlled evaluation shutdown retained active writes');
           processLike.exit(1);

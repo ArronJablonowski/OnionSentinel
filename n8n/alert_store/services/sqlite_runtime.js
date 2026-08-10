@@ -108,6 +108,10 @@ function createSqliteRuntime({
     }
   }
 
+  function waitForWrites() {
+    return sqliteWriteGate.catch(() => undefined);
+  }
+
   return {
     database,
     run,
@@ -115,6 +119,7 @@ function createSqliteRuntime({
     all,
     withWriteGate,
     withImmediateTransaction,
+    waitForWrites,
     activeWrites: () => activeSqliteWrites,
   };
 }

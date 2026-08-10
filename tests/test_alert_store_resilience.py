@@ -50,6 +50,13 @@ DURABLE_BACKGROUND_DRAINS = (
     / "services"
     / "durable_background_drains.js"
 )
+SERVICE_RUNTIME_LIFECYCLE = (
+    REPO_ROOT
+    / "n8n"
+    / "alert_store"
+    / "services"
+    / "service_runtime_lifecycle.js"
+)
 
 
 class AlertStoreResilienceTest(unittest.TestCase):
@@ -92,6 +99,9 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.sqlite_runtime = SQLITE_RUNTIME.read_text(encoding="utf-8")
         cls.runtime_configuration = RUNTIME_CONFIGURATION.read_text(encoding="utf-8")
         cls.durable_background_drains = DURABLE_BACKGROUND_DRAINS.read_text(
+            encoding="utf-8"
+        )
+        cls.service_runtime_lifecycle = SERVICE_RUNTIME_LIFECYCLE.read_text(
             encoding="utf-8"
         )
 
@@ -331,13 +341,30 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertNotIn("request.destroy", self.http_runtime)
 
     def test_http_runtime_has_explicit_request_and_connection_ceilings(self) -> None:
-        self.assertIn("configureHttpServer(http.createServer((request, response) =>", self.code)
+        self.assertIn(
+            "configureHttpServer(httpCreateServer((request, response) =>",
+            self.service_runtime_lifecycle,
+        )
+        self.assertIn(
+            "httpCreateServer: (listener) => http.createServer(listener)", self.code
+        )
         self.assertIn("server.requestTimeout", self.http_runtime)
         self.assertIn("server.headersTimeout", self.http_runtime)
         self.assertIn("server.maxRequestsPerSocket", self.http_runtime)
         self.assertIn("server.maxConnections", self.http_runtime)
         self.assertIn("createRequestDispatcher({", self.code)
         self.assertIn("postRequestAdmission.tryAcquire()", self.http_dispatch)
+
+    def test_controlled_shutdown_uses_the_sqlite_runtime_owner(self) -> None:
+        self.assertIn("await waitForSqliteWrites()", self.service_runtime_lifecycle)
+        self.assertIn(
+            "getActiveSqliteWrites() !== 0", self.service_runtime_lifecycle
+        )
+        self.assertIn(
+            "waitForSqliteWrites: () => sqliteRuntime.waitForWrites()", self.code
+        )
+        self.assertIn("waitForWrites", self.sqlite_runtime)
+        self.assertNotIn("sqliteWriteGate.catch", self.code)
 
     def test_new_intake_stops_before_the_eighty_percent_disk_ceiling(self) -> None:
         self.assertIn("function assertDiskWriteAdmission", self.code)

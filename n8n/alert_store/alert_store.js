@@ -58,6 +58,7 @@ const {createRescorePersistence} = require('./services/rescore_persistence');
 const {createAutomaticResponseRouting} = require('./services/automatic_response_routing');
 const {createManualAnalysisDispatch} = require('./services/manual_analysis_dispatch');
 const {createDurableBackgroundDrains} = require('./services/durable_background_drains');
+const {createServiceRuntimeLifecycle} = require('./services/service_runtime_lifecycle');
 const {createDiskWriteAdmission} = require('./services/disk_write_admission');
 const {createWorkerWakeSignaling} = require('./services/worker_wake_signaling');
 const {createBeaconPersistence} = require('./services/beacon_persistence');
@@ -2261,7 +2262,7 @@ function controlledEvaluationRequestAuthorized(request) {
 async function handleRequest(request, response) {
   try {
     const parsedUrl = new URL(request.url, 'http://alert-store.local');
-    if (controlledEvaluationShutdownStarted) {
+    if (serviceRuntimeLifecycle.isShutdownStarted()) {
       request.resume();
       sendJson(response, 503, {
         ok: false,
@@ -2320,119 +2321,64 @@ const dispatchRequest = createRequestDispatcher({
   monotonicNow: process.hrtime.bigint,
 });
 
-let controlledEvaluationShutdownStarted = false;
-
-function installControlledEvaluationShutdown(server) {
-  const shutdown = () => {
-    if (controlledEvaluationShutdownStarted) return;
-    controlledEvaluationShutdownStarted = true;
-    const deadline = setTimeout(() => process.exit(1), 10000);
-    deadline.unref();
-    server.close(async (serverError) => {
-      if (serverError) {
-        console.error(`controlled evaluation server shutdown failed: ${serverError.message}`);
-        process.exit(1);
-        return;
-      }
-      await sqliteWriteGate.catch(() => undefined);
-      if (activeSqliteWrites !== 0) {
-        console.error('controlled evaluation shutdown retained active writes');
-        process.exit(1);
-        return;
-      }
-      db.close((databaseError) => {
-        if (databaseError) {
-          console.error(`controlled evaluation database shutdown failed: ${databaseError.message}`);
-          process.exit(1);
-          return;
-        }
-        process.exit(0);
-      });
-    });
-  };
-  process.once('SIGTERM', shutdown);
-  process.once('SIGINT', shutdown);
-}
-
-initDb().then(async () => {
-  await initializePostgresAssetStore();
-  await initializePostgresSoftwareStore();
-  await initializePostgresAcHunterStore();
-  const postgresStoreState = postgresAuxiliaryStores.state();
-  applicationLogger.log('info', 'database.initialized', {
+const serviceRuntimeLifecycle = createServiceRuntimeLifecycle({
+  initDb,
+  initializePostgresAssetStore,
+  initializePostgresSoftwareStore,
+  initializePostgresAcHunterStore,
+  getPostgresStoreState: () => postgresAuxiliaryStores.state(),
+  applicationLogger,
+  databaseLogFields: {
     database_path: dbPath,
     postgres_shadow_enabled: postgresShadowEnabled,
     asset_postgres_enabled: assetPostgresEnabled,
-    asset_postgres_available: Boolean(postgresStoreState.postgresAssetStore),
     software_postgres_enabled: softwarePostgresEnabled,
-    software_postgres_available: Boolean(postgresStoreState.postgresSoftwareStore),
     ac_hunter_postgres_enabled: acHunterPostgresEnabled,
-    ac_hunter_postgres_available: Boolean(postgresStoreState.postgresAcHunterStore),
-  });
-  const server = configureHttpServer(http.createServer((request, response) => {
-    void dispatchRequest(request, response).catch((error) => {
-      console.error(`unhandled HTTP request failure: ${error.message}`);
-      if (!response.headersSent) sendJson(response, 500, {ok: false, status: 'error'});
-      else response.destroy(error);
-    });
-  }), {
+  },
+  httpCreateServer: (listener) => http.createServer(listener),
+  configureHttpServer,
+  dispatchRequest,
+  sendJson,
+  httpConfiguration: {
     requestTimeoutMs: httpRequestTimeoutMs,
     headersTimeoutMs: httpHeadersTimeoutMs,
     keepAliveTimeoutMs: httpKeepAliveTimeoutMs,
     maxRequestsPerSocket: httpMaxRequestsPerSocket,
     maxConnections: httpMaxConnections,
-  });
-  server.listen(port, host, () => {
-    console.log(`alert-store listening on ${host}:${port}, db=${dbPath}`);
-    applicationLogger.log('info', 'service.ready', {
-      listen_host: host,
-      listen_port: port,
-      database_path: dbPath,
-    });
-  });
-  if (controlledEvaluationMode) {
-    installControlledEvaluationShutdown(server);
-    return;
-  }
-  if (telegramOutboxAutostart) {
-    setInterval(() => void drainTelegramOutbox(), telegramOutboxIntervalMs).unref();
-    void drainTelegramOutbox();
-  }
-  setInterval(() => void drainEnrichmentJobs(), enrichmentWorkerIntervalMs).unref();
-  void drainEnrichmentJobs();
-  setInterval(() => {
-    void enrichmentCache.prune()
-      .catch((error) => console.error(`enrichment cache retention failed: ${error.message}`));
-  }, enrichmentCacheCleanupIntervalMs).unref();
-  void enrichmentCache.prune()
-    .catch((error) => console.error(`initial enrichment cache retention failed: ${error.message}`));
-  setInterval(() => void drainN8nPostCommitJobs(), n8nPostCommitIntervalMs).unref();
-  void drainN8nPostCommitJobs();
-  setInterval(() => {
-    void recoverExpiredDurableJobs().catch((error) => console.error(`durable job lease recovery failed: ${error.message}`));
-  }, durableJobRecoveryIntervalMs).unref();
-  void recoverExpiredDurableJobs().catch((error) => console.error(`initial durable job lease recovery failed: ${error.message}`));
-  setInterval(() => {
-    void capturePipelineDiskSample().catch((error) => console.error(`pipeline disk sample failed: ${error.message}`));
-  }, pipelineDiskSampleIntervalMs).unref();
-  void capturePipelineDiskSample().catch((error) => console.error(`initial pipeline disk sample failed: ${error.message}`));
-  if (postgresShadowProjector) {
-    setInterval(() => {
-      void postgresShadowProjector.drain()
-        .catch((error) => console.error(`PostgreSQL shadow projection failed: ${error.message}`));
-    }, postgresShadowIntervalMs).unref();
-    void postgresShadowProjector.drain()
-      .catch((error) => console.error(`initial PostgreSQL shadow projection failed: ${error.message}`));
-  }
-  setInterval(() => {
-    void withSqliteWriteGate(() => pipelineMetrics.prune())
-      .catch((error) => console.error(`pipeline metric retention failed: ${error.message}`));
-  }, 60 * 60 * 1000).unref();
-}).catch((error) => {
-  applicationLogger.log('critical', 'service.start_failed', {
-    error_type: error.name,
-    error_message: error.message,
-  });
-  console.error(error);
-  process.exit(1);
+  },
+  host,
+  port,
+  dbPath,
+  controlledEvaluationMode,
+  processLike: process,
+  consoleLike: console,
+  database: db,
+  waitForSqliteWrites: () => sqliteRuntime.waitForWrites(),
+  getActiveSqliteWrites: () => sqliteRuntime.activeWrites(),
+  setIntervalFn: setInterval,
+  setTimeoutFn: setTimeout,
+  workers: {
+    telegram: {
+      enabled: telegramOutboxAutostart,
+      intervalMs: telegramOutboxIntervalMs,
+      drain: drainTelegramOutbox,
+    },
+    enrichment: {intervalMs: enrichmentWorkerIntervalMs, drain: drainEnrichmentJobs},
+    enrichmentCache: {intervalMs: enrichmentCacheCleanupIntervalMs, prune: () => enrichmentCache.prune()},
+    n8nPostCommit: {intervalMs: n8nPostCommitIntervalMs, drain: drainN8nPostCommitJobs},
+    durableRecovery: {intervalMs: durableJobRecoveryIntervalMs, recover: recoverExpiredDurableJobs},
+    pipelineDisk: {intervalMs: pipelineDiskSampleIntervalMs, capture: capturePipelineDiskSample},
+    postgresShadow: {
+      enabled: () => Boolean(postgresShadowProjector),
+      intervalMs: postgresShadowIntervalMs,
+      drain: () => postgresShadowProjector.drain(),
+    },
+    pipelineMetrics: {
+      intervalMs: 60 * 60 * 1000,
+      prune: () => pipelineMetrics.prune(),
+      withWriteGate: withSqliteWriteGate,
+    },
+  },
 });
+
+serviceRuntimeLifecycle.run();

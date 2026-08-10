@@ -26,7 +26,7 @@ function fixture(overrides = {}) {
     n8nPostCommit: {intervalMs: 14, drain: task('postcommit')},
     durableRecovery: {intervalMs: 15, recover: task('recovery')},
     pipelineDisk: {intervalMs: 16, capture: task('disk')},
-    postgresShadow: {intervalMs: 17, drain: task('shadow')},
+    postgresShadow: {enabled: () => true, intervalMs: 17, drain: task('shadow')},
     pipelineMetrics: {
       intervalMs: 3600000,
       prune: task('metrics.prune'),
@@ -57,7 +57,7 @@ function fixture(overrides = {}) {
     processLike: {once: (name, callback) => signals.set(name, callback), exit: (code) => exits.push(code)},
     consoleLike: {log: (...args) => logs.push(args), error: (...args) => logs.push(args)},
     database: {close: (callback) => { events.push('db.close'); callback(); }},
-    getSqliteWriteGate: () => Promise.resolve(),
+    waitForSqliteWrites: () => Promise.resolve(),
     getActiveSqliteWrites: () => 0,
     setIntervalFn: (callback, milliseconds) => {
       const timer = {callback, milliseconds, unref: () => events.push(`unref:${milliseconds}`)};
@@ -161,7 +161,7 @@ test('run logs startup failures and exits one without listening', async () => {
 test('optional Telegram and PostgreSQL shadow workers remain disabled', async () => {
   const f = fixture();
   f.workers.telegram.enabled = false;
-  f.workers.postgresShadow = null;
+  f.workers.postgresShadow.enabled = () => false;
   await createServiceRuntimeLifecycle(f.options).start();
   assert.equal(f.events.includes('telegram'), false);
   assert.equal(f.events.includes('shadow'), false);
