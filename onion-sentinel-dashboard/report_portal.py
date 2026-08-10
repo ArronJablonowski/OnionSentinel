@@ -796,14 +796,17 @@ def parse_iso_timestamp(value: object) -> dt.datetime:
     return dt.datetime.fromisoformat(cleaned)
 
 
+_ASSET_RUNTIME = sys.modules[__name__]
+
+
 def _asset_inventory_module():
     """Load the shared strict inventory implementation in source and runtime layouts."""
-    return portal_asset_runtime.asset_inventory_module(sys.modules[__name__])
+    return portal_asset_runtime.asset_inventory_module(_ASSET_RUNTIME)
 
 
 def load_asset_inventory_data() -> tuple[dict, str]:
     """Return the PostgreSQL export used by investigation identity resolution."""
-    return portal_asset_runtime.load_asset_inventory_data(sys.modules[__name__])
+    return portal_asset_runtime.load_asset_inventory_data(_ASSET_RUNTIME)
 
 
 def _asset_record_state(asset: dict, observed_at: dt.datetime) -> str:
@@ -830,7 +833,7 @@ def _mac_address_scope(value: object) -> str:
 
 def _annotate_exact_ip_dhcp_macs(records: list[dict], observed_at: dt.datetime) -> dict:
     return portal_asset_runtime.annotate_exact_ip_dhcp_macs(
-        sys.modules[__name__], records, observed_at
+        _ASSET_RUNTIME, records, observed_at
     )
 
 
@@ -838,7 +841,7 @@ def _dhcp_asset_inventory_overlay(
     inventory: dict, observed_at: dt.datetime
 ) -> tuple[dict[str, dict], list[dict], dict]:
     return portal_asset_runtime.dhcp_asset_inventory_overlay(
-        sys.modules[__name__], inventory, observed_at
+        _ASSET_RUNTIME, inventory, observed_at
     )
 
 
@@ -849,13 +852,13 @@ def asset_inventory_response(
 ) -> tuple[int, dict]:
     """Return current authoritative asset-to-address assignments."""
     return portal_asset_runtime.asset_inventory_response(
-        sys.modules[__name__], observed_at=observed_at, query=query
+        _ASSET_RUNTIME, observed_at=observed_at, query=query
     )
 
 
 def software_asset_label_snapshot() -> AssetLabelSnapshot:
     """Load complete public identities before resolving pseudonymous hosts."""
-    return portal_asset_runtime.software_asset_label_snapshot(sys.modules[__name__])
+    return portal_asset_runtime.software_asset_label_snapshot(_ASSET_RUNTIME)
 
 
 def software_inventory_response(
@@ -865,7 +868,7 @@ def software_inventory_response(
 ) -> tuple[int, dict]:
     """Return only the bounded, collector-produced Software Inventory view."""
     return portal_asset_runtime.software_inventory_response(
-        sys.modules[__name__], observed_at=observed_at, query=query
+        _ASSET_RUNTIME, observed_at=observed_at, query=query
     )
 
 
@@ -873,7 +876,7 @@ def resolve_asset_ip(
     value: object, observed_at: object, inventory: dict | None = None
 ) -> dict:
     return portal_asset_runtime.resolve_asset_ip(
-        sys.modules[__name__], value, observed_at, inventory
+        _ASSET_RUNTIME, value, observed_at, inventory
     )
 
 
@@ -882,7 +885,7 @@ def dhcp_asset_discovery_response(
 ) -> tuple[int, dict]:
     """Return DHCP candidates reconciled against authoritative inventory."""
     return portal_asset_runtime.dhcp_asset_discovery_response(
-        sys.modules[__name__], observed_at=observed_at
+        _ASSET_RUNTIME, observed_at=observed_at
     )
 
 

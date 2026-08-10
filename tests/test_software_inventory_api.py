@@ -1,5 +1,6 @@
 import datetime as dt
 import importlib
+import importlib.util
 import json
 import os
 import sys
@@ -375,6 +376,33 @@ class SoftwareInventoryApiTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["records"], 2)
         self.assertTrue(all(item["platform"] == "macOS" for item in payload["items"]))
         self.assertTrue(all("asset_label" in item for item in payload["items"]))
+
+    def test_portal_asset_runtime_remains_bound_after_same_name_reload(self):
+        """A later characterization import must not redirect this portal instance."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.write_state(tmp)
+            original_state = portal.SOFTWARE_INVENTORY_STATE_FILE
+            spec = importlib.util.spec_from_file_location(
+                "report_portal", DASHBOARD_DIR / "report_portal.py"
+            )
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(spec.loader)
+            replacement = importlib.util.module_from_spec(spec)
+            try:
+                portal.SOFTWARE_INVENTORY_STATE_FILE = path
+                sys.modules["report_portal"] = replacement
+                spec.loader.exec_module(replacement)
+                status, payload = portal.software_inventory_response(
+                    observed_at=NOW,
+                    query={"platform": ["macOS"]},
+                )
+            finally:
+                portal.SOFTWARE_INVENTORY_STATE_FILE = original_state
+                sys.modules["report_portal"] = portal
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["summary"]["records"], 2)
+        self.assertTrue(all(item["platform"] == "macOS" for item in payload["items"]))
 
     def test_portal_uses_postgresql_software_inventory_when_enabled(self):
         database_payload = {
