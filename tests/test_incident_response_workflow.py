@@ -29,6 +29,13 @@ INCIDENT_ANALYSIS_SCHEMA_PATH = (
 INCIDENT_REANALYSIS_REQUEST_PATH = (
     REPO_ROOT / "n8n" / "alert_store" / "services" / "incident_reanalysis_request.js"
 )
+INCIDENT_REANALYSIS_RUN_PERSISTENCE_PATH = (
+    REPO_ROOT
+    / "n8n"
+    / "alert_store"
+    / "services"
+    / "incident_reanalysis_run_persistence.js"
+)
 ANALYSIS_REQUEST_ROUTES_PATH = (
     REPO_ROOT / "n8n" / "alert_store" / "routes" / "analysis_request_routes.js"
 )
@@ -1081,6 +1088,9 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         source = ALERT_STORE_PATH.read_text(encoding="utf-8")
         schema = INCIDENT_ANALYSIS_SCHEMA_PATH.read_text(encoding="utf-8")
         request_source = INCIDENT_REANALYSIS_REQUEST_PATH.read_text(encoding="utf-8")
+        run_persistence_source = INCIDENT_REANALYSIS_RUN_PERSISTENCE_PATH.read_text(
+            encoding="utf-8"
+        )
         routes = ANALYSIS_REQUEST_ROUTES_PATH.read_text(encoding="utf-8")
         binding_source = INCIDENT_REANALYSIS_BINDING_PATH.read_text(encoding="utf-8")
         completion_source = INCIDENT_ANALYSIS_COMPLETION_PATH.read_text(encoding="utf-8")
@@ -1100,10 +1110,13 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn("async function updateIncidentReanalysisProgress", source)
         self.assertIn("async function bindIncidentReanalysisResult", source)
         self.assertIn("incidentReanalysisAttemptId(leaseToken)", source)
-        self.assertIn("WHERE case_id = ? AND status = 'queued' AND run_id != ?", source)
+        self.assertIn(
+            "WHERE case_id = ? AND status = 'queued' AND run_id != ?",
+            run_persistence_source,
+        )
         self.assertNotIn(
             "WHERE case_id = ? AND status IN ('queued', 'running') AND run_id != ?",
-            source,
+            run_persistence_source,
         )
         self.assertIn("releaseId: incidentReanalysisReleaseId", source)
         self.assertIn("releaseId: releaseId()", request_source)

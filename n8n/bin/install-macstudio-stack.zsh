@@ -137,6 +137,7 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/services/incident_reanalysis_job_ownership.js" \
     "$ALERT_STORE_STAGE_DIR/services/incident_reanalysis_attempt_lifecycle.js" \
     "$ALERT_STORE_STAGE_DIR/services/incident_reanalysis_recovery.js" \
+    "$ALERT_STORE_STAGE_DIR/services/incident_reanalysis_run_persistence.js" \
     "$ALERT_STORE_STAGE_DIR/services/incident_analysis_completion.js" \
     "$ALERT_STORE_STAGE_DIR/services/incident_reanalysis_binding.js" \
     "$ALERT_STORE_STAGE_DIR/routes/health_routes.js" \
