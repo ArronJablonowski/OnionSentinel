@@ -2,6 +2,7 @@ import ast
 import importlib
 import json
 from pathlib import Path
+import subprocess
 import sys
 import unittest
 
@@ -28,6 +29,16 @@ def top_level_symbols(path: Path) -> set[str]:
             symbols.update(
                 target.id for target in node.targets if isinstance(target, ast.Name)
             )
+            if any(
+                isinstance(target, ast.Name) and target.id == "__all__"
+                for target in node.targets
+            ):
+                try:
+                    exported = ast.literal_eval(node.value)
+                except (TypeError, ValueError):
+                    exported = ()
+                if isinstance(exported, (list, tuple, set)):
+                    symbols.update(str(name) for name in exported)
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             symbols.add(node.target.id)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -44,6 +55,27 @@ def top_level_function(path: Path, name: str) -> ast.FunctionDef:
 
 
 class ModularizationCompatibilityContractTests(unittest.TestCase):
+    def test_report_portal_supports_isolated_file_loader_import(self) -> None:
+        portal = ROOT / "onion-sentinel-dashboard" / "report_portal.py"
+        script = (
+            "import importlib.util,sys;"
+            f"p={str(portal)!r};"
+            "s=importlib.util.spec_from_file_location('isolated_report_portal',p);"
+            "m=importlib.util.module_from_spec(s);"
+            "sys.modules[s.name]=m;"
+            "s.loader.exec_module(m);"
+            "assert m.PortalHandler and callable(m.main)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_contract_is_versioned_and_bound_to_a_full_release(self) -> None:
         contract = load_contract()
         self.assertEqual(

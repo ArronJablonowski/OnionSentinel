@@ -2,6 +2,13 @@
 """Persistent LAN report portal compatibility facade and entrypoint."""
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+PORTAL_SOURCE_DIR = Path(__file__).resolve().parent
+if str(PORTAL_SOURCE_DIR) not in sys.path:
+    sys.path.insert(0, str(PORTAL_SOURCE_DIR))
+
 import portal_runtime_config as _runtime_config
 
 globals().update({
@@ -11,6 +18,13 @@ globals().update({
 })
 
 import portal_compat_bindings as _compat_bindings
+
+__all__ = (
+    "PortalHandler",
+    "main",
+    "render_incident_response_report_html",
+    "soc_incidents_query_response",
+)
 
 _compat_bindings.bind(sys.modules[__name__])
 
