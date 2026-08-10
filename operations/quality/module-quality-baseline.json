@@ -1,8 +1,5 @@
 {
   "files": {
-    "n8n/bin/agent_memory.py": {
-      "max_lines": 812
-    },
     "n8n/bin/bounded_process.py": {
       "max_lines": 997
     },
@@ -20,16 +17,6 @@
     }
   },
   "functions": {
-    "n8n/bin/agent_memory.py::load_memory_context": {
-      "max_complexity": 19
-    },
-    "n8n/bin/agent_memory.py::normalize_memory_candidate": {
-      "max_complexity": 22
-    },
-    "n8n/bin/agent_memory.py::quarantine_bpfdoor_code_zero_memory": {
-      "max_complexity": 30,
-      "max_lines": 122
-    },
     "n8n/bin/asset_inventory.py::resolve_asset_context": {
       "max_complexity": 41,
       "max_lines": 142
