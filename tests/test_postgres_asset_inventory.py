@@ -69,6 +69,21 @@ class PostgresAssetInventoryTests(unittest.TestCase):
         self.assertIn("authorizeWrite(request)", routes)
         self.assertIn("function requireAssetWrite(request)", request_authorization)
         self.assertIn("function requireAssetStore()", runtime)
+        self.assertIn(
+            "authorizeWrite: requestAuthorization.requireAssetWrite",
+            entrypoint,
+        )
+        for forwarding_function in (
+            "initializePostgresAssetStore",
+            "initializePostgresAcHunterStore",
+            "initializePostgresSoftwareStore",
+            "requirePostgresAssetStore",
+            "requirePostgresSoftwareStore",
+            "requirePostgresAcHunterStore",
+            "assetStoreWriteAuthorized",
+            "requireAssetStoreWriteAuthorization",
+        ):
+            self.assertNotIn(f"function {forwarding_function}", entrypoint)
         self.assertIn("crypto.timingSafeEqual", entrypoint)
         self.assertIn("ASSET_STORE_WRITE_TOKEN", runtime_configuration)
         self.assertIn("createPostgresAuxiliaryStoreRuntime", entrypoint)

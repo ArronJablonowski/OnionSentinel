@@ -699,38 +699,6 @@ function initializePostgresShadowProjector() {
   });
 }
 
-async function initializePostgresAssetStore() {
-  return postgresAuxiliaryStores.initializeAssetStore();
-}
-
-async function initializePostgresAcHunterStore() {
-  return postgresAuxiliaryStores.initializeAcHunterStore();
-}
-
-async function initializePostgresSoftwareStore() {
-  return postgresAuxiliaryStores.initializeSoftwareStore();
-}
-
-function requirePostgresAssetStore() {
-  return postgresAuxiliaryStores.requireAssetStore();
-}
-
-function requirePostgresSoftwareStore() {
-  return postgresAuxiliaryStores.requireSoftwareStore();
-}
-
-function requirePostgresAcHunterStore() {
-  return postgresAuxiliaryStores.requireAcHunterStore();
-}
-
-function assetStoreWriteAuthorized(request) {
-  return requestAuthorization.assetWriteAuthorized(request);
-}
-
-function requireAssetStoreWriteAuthorization(request) {
-  return requestAuthorization.requireAssetWrite(request);
-}
-
 function initializePipelineMetrics() {
   pipelineMetrics = createPipelineMetrics({
     run,
@@ -1627,13 +1595,13 @@ const controlledEvaluationRequests = new Set([
 ]);
 
 const inventoryService = createInventoryService({
-  requireAcHunterStore: requirePostgresAcHunterStore,
-  requireSoftwareStore: requirePostgresSoftwareStore,
-  requireAssetStore: requirePostgresAssetStore,
+  requireAcHunterStore: postgresAuxiliaryStores.requireAcHunterStore,
+  requireSoftwareStore: postgresAuxiliaryStores.requireSoftwareStore,
+  requireAssetStore: postgresAuxiliaryStores.requireAssetStore,
 });
 const modularRoutes = createRouteRegistry(createInventoryRoutes({
   service: inventoryService,
-  authorizeWrite: requireAssetStoreWriteAuthorization,
+  authorizeWrite: requestAuthorization.requireAssetWrite,
   readJsonBody,
   sendJson,
 }));
@@ -1756,7 +1724,7 @@ const enrichmentService = createEnrichmentService({
 });
 modularRoutes.registerAll(createEnrichmentRoutes({
   service: enrichmentService,
-  authorizeInvestigation: requireAssetStoreWriteAuthorization,
+  authorizeInvestigation: requestAuthorization.requireAssetWrite,
   readJsonBody,
   sendJson,
 }));
@@ -1811,9 +1779,9 @@ const dispatchRequest = createRequestDispatcher({
 
 const serviceRuntimeLifecycle = createServiceRuntimeLifecycle({
   initDb,
-  initializePostgresAssetStore,
-  initializePostgresSoftwareStore,
-  initializePostgresAcHunterStore,
+  initializePostgresAssetStore: postgresAuxiliaryStores.initializeAssetStore,
+  initializePostgresSoftwareStore: postgresAuxiliaryStores.initializeSoftwareStore,
+  initializePostgresAcHunterStore: postgresAuxiliaryStores.initializeAcHunterStore,
   getPostgresStoreState: () => postgresAuxiliaryStores.state(),
   applicationLogger,
   databaseLogFields: {
