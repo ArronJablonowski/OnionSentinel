@@ -58,6 +58,7 @@ import portal_delivery_runtime
 import portal_dashboard_runtime
 import portal_foundation_runtime
 import portal_access_runtime
+import portal_catalog_runtime
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
@@ -901,105 +902,18 @@ admin_action_version_info = partial(portal_admin_runtime.admin_action_version_in
 check_admin_action_available = partial(portal_admin_runtime.check_admin_action_available, _ADMIN_RUNTIME)
 
 
-def local_ip() -> str:
-    candidates = []
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        candidates.append(s.getsockname()[0])
-        s.close()
-    except Exception:
-        pass
-    try:
-        hostname = socket.gethostname()
-        candidates.append(socket.gethostbyname(hostname))
-    except Exception:
-        pass
-    for ip in candidates:
-        if ip and not ip.startswith("127."):
-            return ip
-    return "127.0.0.1"
-
-
-def title_from_html(path: Path) -> str:
-    return read_report_title(path)
-
-
-def category_for(path: Path) -> str:
-    return classify_report_category(path, HOME)
-
-
-def should_skip_dir(path: Path) -> bool:
-    return exclude_report_directory(path, EXCLUDE_DIR_NAMES)
-
-
-def report_id(path: Path) -> str:
-    return derive_report_id(path)
-
-
-def scan_reports() -> list[Report]:
-    return discover_reports(
-        home=HOME,
-        scan_roots=SCAN_ROOTS,
-        standalone_html=STANDALONE_HTML,
-        excluded_names=EXCLUDE_DIR_NAMES,
-    )
-
-
-def soc_alerts_report(reports: list[Report]) -> Report | None:
-    """Return the SOC Alerts dashboard report used as the LAN Portal default page."""
-    return select_soc_alerts_report(reports)
-
-
-def soc_alerts_default_path(reports: list[Report]) -> str | None:
-    return project_soc_alerts_default_path(reports)
-
-
-def is_daily_threat_brief_file(report: Report) -> bool:
-    """Return True for individual daily brief HTML files now grouped under the dashboard."""
-    return classify_daily_threat_brief(report)
-
-
-def human_size(n: int) -> str:
-    return format_human_size(n)
-
-
-def artifact_library_disk_usage() -> int:
-    """Return disk usage for mirrored HTML artifacts plus supporting files.
-
-    This intentionally measures the whole configured portal library, not just
-    `.html` files, so PDFs, images, JS/CSS assets, SQLite/db files, and other
-    supporting artifacts count toward the dashboard metric. Use allocated disk
-    blocks when the platform exposes them; fall back to logical file size.
-    """
-    total = 0
-    seen: set[Path] = set()
-    for root in SCAN_ROOTS:
-        if not root.exists():
-            continue
-        try:
-            root = root.resolve()
-        except Exception:
-            continue
-        if root.is_file():
-            files = [root]
-        else:
-            files = []
-            for dirpath, dirnames, filenames in os.walk(root):
-                dirnames[:] = [d for d in dirnames if not should_skip_dir(Path(dirpath) / d)]
-                for filename in filenames:
-                    files.append(Path(dirpath) / filename)
-        for path in files:
-            try:
-                p = path.resolve()
-                if p in seen or not p.is_file():
-                    continue
-                seen.add(p)
-                st = p.stat()
-                total += int(getattr(st, "st_blocks", 0) or 0) * 512 or st.st_size
-            except Exception:
-                continue
-    return total
+_CATALOG_RUNTIME = sys.modules[__name__]
+local_ip = partial(portal_catalog_runtime.local_ip, _CATALOG_RUNTIME)
+title_from_html = partial(portal_catalog_runtime.title_from_html, _CATALOG_RUNTIME)
+category_for = partial(portal_catalog_runtime.category_for, _CATALOG_RUNTIME)
+should_skip_dir = partial(portal_catalog_runtime.should_skip_dir, _CATALOG_RUNTIME)
+report_id = partial(portal_catalog_runtime.report_id, _CATALOG_RUNTIME)
+scan_reports = partial(portal_catalog_runtime.scan_reports, _CATALOG_RUNTIME)
+soc_alerts_report = partial(portal_catalog_runtime.soc_alerts_report, _CATALOG_RUNTIME)
+soc_alerts_default_path = partial(portal_catalog_runtime.soc_alerts_default_path, _CATALOG_RUNTIME)
+is_daily_threat_brief_file = partial(portal_catalog_runtime.is_daily_threat_brief_file, _CATALOG_RUNTIME)
+human_size = partial(portal_catalog_runtime.human_size, _CATALOG_RUNTIME)
+artifact_library_disk_usage = partial(portal_catalog_runtime.artifact_library_disk_usage, _CATALOG_RUNTIME)
 
 
 ADMIN_SERVICE_LABELS = {

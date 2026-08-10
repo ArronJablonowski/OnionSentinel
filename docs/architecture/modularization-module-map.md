@@ -2787,6 +2787,15 @@ the existing store; session IDs remain server-side; filenames and tags remain
 normalized; resource actions remain append-only Hermes work requests with the
 same admin authorization enforced by the HTTP write adapter.
 
+### Portal catalog runtime
+
+`portal_catalog_runtime.py` owns local-address discovery, report title/category
+projection, allowlisted report discovery, SOC default selection, daily-brief
+classification, human sizes, and symlink-deduplicated full artifact-library
+disk usage. It preserves excluded-directory policy, standalone report inputs,
+allocated-block accounting, and loopback fallback without changing catalog
+routes or report IDs.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:
