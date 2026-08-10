@@ -2497,6 +2497,20 @@ immutable donut, hourly-intake, cache, and page view models plus pure KPI/chart
 renderers. The builder retains alert aggregation and bounded metric loading,
 then normalizes those results at the composition boundary.
 
+## Investigation Query Contract
+
+`n8n/bin/investigation_query_contract.py` is a bounded compatibility facade for
+the v2 investigation-query wire contract. The governed implementation is split
+into `investigation_query_schema.py`, `investigation_query_normalization.py`,
+`investigation_query_authorization.py`, `investigation_query_rendering.py`, and
+`investigation_query_response.py`. Dependencies flow in that order and remain
+acyclic; authorization and response validation continue to fail closed.
+
+The versioned runtime installer atomically installs the complete v2 module tree
+only after the exact v2 contract is selected. The bundled v1 facade, collector,
+and manifest remain frozen and byte-stable. No module receives credentials or
+transport authority, and Security Onion and Relay access remain read-only.
+
 ## Alert Store
 
 Current owner: `n8n/alert_store/alert_store.js` (12,586 lines). The runtime

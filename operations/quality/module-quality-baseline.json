@@ -22,7 +22,22 @@
       "max_lines": 1848
     },
     "n8n/bin/investigation_query_contract.py": {
-      "max_lines": 2338
+      "max_lines": 250
+    },
+    "n8n/bin/investigation_query_schema.py": {
+      "max_lines": 600
+    },
+    "n8n/bin/investigation_query_normalization.py": {
+      "max_lines": 600
+    },
+    "n8n/bin/investigation_query_authorization.py": {
+      "max_lines": 800
+    },
+    "n8n/bin/investigation_query_rendering.py": {
+      "max_lines": 600
+    },
+    "n8n/bin/investigation_query_response.py": {
+      "max_lines": 800
     },
     "n8n/bin/maintain-investigation-harness.py": {
       "max_lines": 1147
@@ -238,29 +253,29 @@
       "max_complexity": 54,
       "max_lines": 140
     },
-    "n8n/bin/investigation_query_contract.py::_normalize_event_tuple": {
+    "n8n/bin/investigation_query_normalization.py::_normalize_event_tuple": {
       "max_complexity": 19
     },
-    "n8n/bin/investigation_query_contract.py::_validate_control": {
+    "n8n/bin/investigation_query_response.py::_validate_control": {
       "max_complexity": 64,
       "max_lines": 228
     },
-    "n8n/bin/investigation_query_contract.py::_validate_hit_source": {
+    "n8n/bin/investigation_query_response.py::_validate_hit_source": {
       "max_complexity": 21
     },
-    "n8n/bin/investigation_query_contract.py::_validate_pivot_result": {
+    "n8n/bin/investigation_query_response.py::_validate_pivot_result": {
       "max_complexity": 61,
       "max_lines": 138
     },
-    "n8n/bin/investigation_query_contract.py::authorize_investigation_query_request": {
+    "n8n/bin/investigation_query_authorization.py::authorize_investigation_query_request": {
       "max_complexity": 41,
       "max_lines": 199
     },
-    "n8n/bin/investigation_query_contract.py::validate_authorized_investigation_query_request": {
+    "n8n/bin/investigation_query_authorization.py::validate_authorized_investigation_query_request": {
       "max_complexity": 84,
       "max_lines": 334
     },
-    "n8n/bin/investigation_query_contract.py::validate_investigation_query_response": {
+    "n8n/bin/investigation_query_response.py::validate_investigation_query_response": {
       "max_complexity": 20
     },
     "n8n/bin/investigation_skills.py::load_investigation_skills": {

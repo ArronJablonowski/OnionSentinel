@@ -999,6 +999,70 @@
       ]
     },
     {
+      "path": "n8n/bin/investigation_query_contract.py",
+      "deployment": "versioned-query-runtime",
+      "runtime_path": "$STACK_DIR/bin/investigation_query_contract.py",
+      "required_symbols": [
+        "INVESTIGATION_QUERY_CONTRACT",
+        "authorize_investigation_query_request",
+        "build_query_dsl",
+        "canonical_digest",
+        "validate_authorized_investigation_query_request",
+        "validate_investigation_query_response"
+      ]
+    },
+    {
+      "path": "n8n/bin/investigation_query_schema.py",
+      "deployment": "versioned-query-runtime",
+      "runtime_path": "$STACK_DIR/bin/investigation_query_schema.py",
+      "required_symbols": [
+        "INVESTIGATION_QUERY_CONTRACT",
+        "InvestigationQueryContractError",
+        "PACKS",
+        "canonical_digest"
+      ]
+    },
+    {
+      "path": "n8n/bin/investigation_query_normalization.py",
+      "deployment": "versioned-query-runtime",
+      "runtime_path": "$STACK_DIR/bin/investigation_query_normalization.py",
+      "required_symbols": [
+        "pack_event_tuple_fields",
+        "pack_observable_fields",
+        "tuple_match_semantics",
+        "validate_pack_observables"
+      ]
+    },
+    {
+      "path": "n8n/bin/investigation_query_authorization.py",
+      "deployment": "versioned-query-runtime",
+      "runtime_path": "$STACK_DIR/bin/investigation_query_authorization.py",
+      "required_symbols": [
+        "authorize_investigation_query_request",
+        "validate_authorized_investigation_query_request",
+        "validate_investigation_query_request"
+      ]
+    },
+    {
+      "path": "n8n/bin/investigation_query_rendering.py",
+      "deployment": "versioned-query-runtime",
+      "runtime_path": "$STACK_DIR/bin/investigation_query_rendering.py",
+      "required_symbols": [
+        "build_query_dsl",
+        "kql_equivalent",
+        "oql_equivalent"
+      ]
+    },
+    {
+      "path": "n8n/bin/investigation_query_response.py",
+      "deployment": "versioned-query-runtime",
+      "runtime_path": "$STACK_DIR/bin/investigation_query_response.py",
+      "required_symbols": [
+        "result_coverage",
+        "validate_investigation_query_response"
+      ]
+    },
+    {
       "path": "n8n/bin/prompt_incident_evidence_projection.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_incident_evidence_projection.py",
