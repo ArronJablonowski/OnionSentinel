@@ -2796,6 +2796,25 @@ disk usage. It preserves excluded-directory policy, standalone report inputs,
 allocated-block accounting, and loopback fallback without changing catalog
 routes or report IDs.
 
+### Portal configuration composition root
+
+`portal_runtime_config.py` owns the report portal's imports, immutable defaults,
+filesystem locations, limits, route constants, service/action definitions, and
+small configuration data types. `report_portal.py` re-exports those names
+before binding compatibility delegates, so existing callers and tests can
+still patch facade attributes without domain modules importing the entrypoint.
+Both the configuration root and compatibility facade remain below the
+800-line hard review threshold; the HTTP handler remains below 250 lines.
+
+### Portal compatibility bindings
+
+`portal_compat_bindings.py` declaratively maps legacy public names to their
+domain runtime implementations, initializes per-portal caches/locks and small
+presentation policies, composes incident/SOC callback bundles, and builds the
+HTTP handler against the exact importing module instance. This keeps same-name
+reload isolation and late-bound test overrides while reducing
+`report_portal.py` to configuration re-export, binding, and startup only.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:

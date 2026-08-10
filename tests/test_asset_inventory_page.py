@@ -16,6 +16,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_DIR = ROOT / "onion-sentinel-dashboard"
 PORTAL_PATH = DASHBOARD_DIR / "report_portal.py"
+PORTAL_CONFIG_PATH = DASHBOARD_DIR / "portal_runtime_config.py"
 ASSET_WRITE_POLICY_PATH = DASHBOARD_DIR / "portal_asset_write_request.py"
 JSON_WRITE_SERVICE_PATH = DASHBOARD_DIR / "portal_json_write_service.py"
 HTTP_HANDLER_PATH = DASHBOARD_DIR / "portal_http_handler.py"
@@ -470,13 +471,13 @@ class AssetInventoryPageTests(unittest.TestCase):
         self.assertIn("when:assetCanRefresh", page)
         self.assertIn(".dhcp-review-check[hidden]{display:none!important}", page)
         self.assertIn("asset-inventory.html", page)
-        portal_source = PORTAL_PATH.read_text(encoding="utf-8")
+        portal_config_source = PORTAL_CONFIG_PATH.read_text(encoding="utf-8")
         handler_source = HTTP_HANDLER_PATH.read_text(encoding="utf-8")
         asset_write_policy = ASSET_WRITE_POLICY_PATH.read_text(encoding="utf-8")
         json_write_service = JSON_WRITE_SERVICE_PATH.read_text(encoding="utf-8")
         self.assertIn(
             "ASSET_INVENTORY_ADMIN_WRITE_REQUIRED",
-            portal_source,
+            portal_config_source,
         )
         self.assertIn('"authentication_required"', asset_write_policy)
         self.assertIn(

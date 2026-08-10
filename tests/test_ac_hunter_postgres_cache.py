@@ -54,10 +54,12 @@ class AcHunterPostgresCacheTests(unittest.TestCase):
         self.assertIn("Reload stored snapshot", page)
 
     def test_reactive_revision_uses_only_the_database_digest(self) -> None:
-        portal = (ROOT / "onion-sentinel-dashboard/report_portal.py").read_text()
-        self.assertIn('"ac_hunter": ac_hunter_live_revision()', portal)
-        self.assertIn('alert_store_get_json("/ac-hunter/snapshot"', portal)
-        self.assertIn('cache.get("dataset_digest")', portal)
+        delivery = (
+            ROOT / "onion-sentinel-dashboard/portal_delivery_runtime.py"
+        ).read_text()
+        self.assertIn('"ac_hunter": r.ac_hunter_live_revision()', delivery)
+        self.assertIn('r.alert_store_get_json("/ac-hunter/snapshot"', delivery)
+        self.assertIn('cache.get("dataset_digest")', delivery)
 
 
 if __name__ == "__main__":
