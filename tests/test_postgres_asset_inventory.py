@@ -11,6 +11,9 @@ SCHEMA = ROOT / "n8n" / "postgres" / "asset-inventory-schema.sql"
 STORE = ROOT / "n8n" / "alert_store" / "lib" / "postgres_asset_store.js"
 RUNTIME = ROOT / "n8n" / "alert_store" / "services" / "postgres_auxiliary_store_runtime.js"
 ENTRYPOINT = ROOT / "n8n" / "alert_store" / "alert_store.js"
+RUNTIME_CONFIGURATION = (
+    ROOT / "n8n" / "alert_store" / "lib" / "runtime_configuration.js"
+)
 ROUTES = ROOT / "n8n" / "alert_store" / "routes" / "inventory_routes.js"
 SERVICE = ROOT / "n8n" / "alert_store" / "services" / "inventory_service.js"
 COLLECTOR = ROOT / "n8n" / "bin" / "collect-dhcp-asset-discovery.py"
@@ -56,12 +59,13 @@ class PostgresAssetInventoryTests(unittest.TestCase):
         service = SERVICE.read_text(encoding="utf-8")
         store = STORE.read_text(encoding="utf-8")
         runtime = RUNTIME.read_text(encoding="utf-8")
+        runtime_configuration = RUNTIME_CONFIGURATION.read_text(encoding="utf-8")
         self.assertIn("path: '/assets/inventory'", routes)
         self.assertIn("parsedUrl.searchParams.get('limit')", routes)
         self.assertIn("authorizeWrite(request)", routes)
         self.assertIn("requireAssetStoreWriteAuthorization", entrypoint)
         self.assertIn("crypto.timingSafeEqual", entrypoint)
-        self.assertIn("ASSET_STORE_WRITE_TOKEN", entrypoint)
+        self.assertIn("ASSET_STORE_WRITE_TOKEN", runtime_configuration)
         self.assertIn("createPostgresAuxiliaryStoreRuntime", entrypoint)
         self.assertIn("PostgreSQL asset inventory is unavailable", runtime)
         self.assertIn("asset_store.postgres_idle_error", runtime)

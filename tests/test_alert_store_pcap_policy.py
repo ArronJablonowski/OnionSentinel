@@ -6,6 +6,9 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ALERT_STORE = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
+RUNTIME_CONFIGURATION = (
+    REPO_ROOT / "n8n" / "alert_store" / "lib" / "runtime_configuration.js"
+)
 HEALTH_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "health_service.js"
 PCAP_ROUTES = REPO_ROOT / "n8n" / "alert_store" / "routes" / "pcap_routes.js"
 PCAP_SCHEMA = REPO_ROOT / "n8n" / "alert_store" / "services" / "pcap_schema.js"
@@ -120,11 +123,11 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
         self.assertIn("post('/pcap/requeue', 'requeue')", routes)
 
     def test_pcap_requests_reject_work_outside_configured_capture_retention(self) -> None:
-        code = ALERT_STORE.read_text(encoding="utf-8")
+        runtime_configuration = RUNTIME_CONFIGURATION.read_text(encoding="utf-8")
         pcap_policy = PCAP_POLICY.read_text(encoding="utf-8")
         request_repository = PCAP_REQUEST_REPOSITORY.read_text(encoding="utf-8")
         env_example = ENV_EXAMPLE.read_text(encoding="utf-8")
-        self.assertIn("PCAP_CAPTURE_RETENTION_SECONDS", code)
+        self.assertIn("PCAP_CAPTURE_RETENTION_SECONDS", runtime_configuration)
         self.assertIn("async function rejectExpiredPending", request_repository)
         self.assertIn("PCAP request exceeds configured capture retention", pcap_policy)
         self.assertIn("PCAP_CAPTURE_RETENTION_SECONDS=345600", env_example)
@@ -226,7 +229,7 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
         self.assertIn("transfer_duration_seconds = CASE", transfer_repository)
 
     def test_pcap_transfer_retries_are_durable_bounded_and_stage_aware(self) -> None:
-        code = ALERT_STORE.read_text(encoding="utf-8")
+        runtime_configuration = RUNTIME_CONFIGURATION.read_text(encoding="utf-8")
         schema = PCAP_SCHEMA.read_text(encoding="utf-8")
         transfer_repository = PCAP_TRANSFER_REPOSITORY.read_text(encoding="utf-8")
         request_repository = PCAP_REQUEST_REPOSITORY.read_text(encoding="utf-8")
@@ -240,7 +243,7 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
         ):
             self.assertIn(f"['{column}',", schema)
         self.assertIn("await ensureColumn('pcap_requests', name, definition)", schema)
-        self.assertIn("PCAP_TRANSFER_MAX_ATTEMPTS", code)
+        self.assertIn("PCAP_TRANSFER_MAX_ATTEMPTS", runtime_configuration)
         self.assertIn("async function retryRequest(payload)", transfer_repository)
         self.assertIn("post('/pcap/retry', 'retry')", routes)
         self.assertIn("retry_scheduled: !exhausted", transfer_repository)

@@ -40,6 +40,9 @@ BEACON_PERSISTENCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "beacon_pe
 PROJECT_SERIALIZATION = REPO_ROOT / "n8n" / "alert_store" / "lib" / "project_serialization.js"
 ALERT_VALUE_NORMALIZATION = REPO_ROOT / "n8n" / "alert_store" / "lib" / "alert_value_normalization.js"
 SQLITE_RUNTIME = REPO_ROOT / "n8n" / "alert_store" / "services" / "sqlite_runtime.js"
+RUNTIME_CONFIGURATION = (
+    REPO_ROOT / "n8n" / "alert_store" / "lib" / "runtime_configuration.js"
+)
 
 
 class AlertStoreResilienceTest(unittest.TestCase):
@@ -80,6 +83,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.project_serialization = PROJECT_SERIALIZATION.read_text(encoding="utf-8")
         cls.alert_value_normalization = ALERT_VALUE_NORMALIZATION.read_text(encoding="utf-8")
         cls.sqlite_runtime = SQLITE_RUNTIME.read_text(encoding="utf-8")
+        cls.runtime_configuration = RUNTIME_CONFIGURATION.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
         self.assertIn("require('./lib/provider_scheduler')", self.code)
@@ -96,8 +100,10 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertNotIn("await enrichAlert(", store)
 
     def test_enrichment_provider_circuits_are_bounded(self) -> None:
-        self.assertIn("ENRICHMENT_CIRCUIT_FAILURE_THRESHOLD", self.code)
-        self.assertIn("ENRICHMENT_CIRCUIT_RESET_MS", self.code)
+        self.assertIn(
+            "ENRICHMENT_CIRCUIT_FAILURE_THRESHOLD", self.runtime_configuration
+        )
+        self.assertIn("ENRICHMENT_CIRCUIT_RESET_MS", self.runtime_configuration)
         self.assertIn("provider circuit open until", self.provider_scheduler)
 
     def test_enrichment_cache_and_rate_limits_share_the_sqlite_write_boundary(self) -> None:
@@ -158,7 +164,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertNotIn("postTelegramMessage(", store)
 
     def test_notification_outbox_has_bounded_retry(self) -> None:
-        self.assertIn("TELEGRAM_OUTBOX_MAX_ATTEMPTS", self.code)
+        self.assertIn("TELEGRAM_OUTBOX_MAX_ATTEMPTS", self.runtime_configuration)
         self.assertIn("outboxRetryTimestamp", self.notification_service)
         self.assertIn(
             "terminal ? 'failed' : 'pending'",
@@ -322,7 +328,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
 
     def test_new_intake_stops_before_the_eighty_percent_disk_ceiling(self) -> None:
         self.assertIn("function assertDiskWriteAdmission", self.code)
-        self.assertIn("Math.min(80", self.code)
+        self.assertIn("80, Math.max(2", self.runtime_configuration)
         self.assertIn("createDiskWriteAdmission", self.code)
         self.assertIn("assertDiskWriteAdmission('alert ingestion')", self.alert_ingest_service)
         self.assertIn("assertDiskWriteAdmission('alert enrichment')", self.enrichment_service)
@@ -337,7 +343,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
 
     def test_pipeline_observability_is_bounded_and_outside_network_paths(self) -> None:
         self.assertIn("require('./lib/pipeline_metrics')", self.code)
-        self.assertIn("PIPELINE_EVENT_RETENTION_HOURS", self.code)
+        self.assertIn("PIPELINE_EVENT_RETENTION_HOURS", self.runtime_configuration)
         self.assertIn("state.pipelineMetrics.snapshot()", self.health_service)
         self.assertIn("pipelineMetrics.captureDiskSample", self.code)
 
@@ -380,14 +386,16 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("enqueueJob: (...args) => durableJobs.enqueue(...args)", self.code)
         self.assertNotIn("requestJson({", transaction)
         self.assertIn("void drainPostCommitJobs();", after_commit)
-        self.assertIn("N8N_POST_COMMIT_MAX_ATTEMPTS", self.code)
-        self.assertIn("N8N_POST_COMMIT_BASE_RETRY_SECONDS", self.code)
+        self.assertIn("N8N_POST_COMMIT_MAX_ATTEMPTS", self.runtime_configuration)
+        self.assertIn(
+            "N8N_POST_COMMIT_BASE_RETRY_SECONDS", self.runtime_configuration
+        )
 
     def test_committed_evidence_wakes_local_workers_without_owning_durability(self) -> None:
         self.assertIn("async function signalWorker", self.code)
         self.assertIn("createWorkerWakeSignaling", self.code)
-        self.assertIn("AI_ANALYSIS_WAKE_PATH", self.code)
-        self.assertIn("PCAP_ANALYSIS_WAKE_PATH", self.code)
+        self.assertIn("AI_ANALYSIS_WAKE_PATH", self.runtime_configuration)
+        self.assertIn("PCAP_ANALYSIS_WAKE_PATH", self.runtime_configuration)
         self.assertIn("Wake files are an optimization", self.worker_wake_signaling)
         self.assertIn("interval fallback remain authoritative", self.worker_wake_signaling)
         self.assertIn("void signalAiWorkers('enrichment-completed')", self.code)

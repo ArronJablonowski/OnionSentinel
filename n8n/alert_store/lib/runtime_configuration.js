@@ -1,14 +1,16 @@
 'use strict';
 
-function createRuntimeConfiguration({
-  env,
-  fs,
-  path,
-  os,
-  dirname,
-  getuid,
-  loadAuthorizedActivityPolicy,
-}) {
+const EVALUATION_CREDENTIAL_ENVIRONMENT_KEYS = Object.freeze([
+  'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'N8N_POST_COMMIT_TOKEN',
+  'ASSET_STORE_WRITE_TOKEN', 'ABUSEIPDB_API_KEY', 'GREYNOISE_API_KEY',
+  'OTX_API_KEY', 'URLHAUS_AUTH_KEY', 'VIRUSTOTAL_API_KEY', 'URLSCAN_API_KEY',
+  'GOOGLE_SAFE_BROWSING_API_KEY', 'PHISHTANK_API_KEY',
+  'MALWAREBAZAAR_AUTH_KEY', 'THREATFOX_AUTH_KEY', 'SHODAN_API_KEY',
+  'CENSYS_API_ID', 'CENSYS_API_SECRET', 'CENSYS_API_TOKEN',
+  'CENSYS_ORGANIZATION_ID', 'NVD_API_KEY',
+]);
+
+function createCoreConfiguration({env, path, dirname, loadAuthorizedActivityPolicy}) {
   const dbPath = env.ALERT_STORE_DB || '/data/alerts.sqlite3';
   const scoringRulesPath = env.SCORING_RULES_PATH || '/app/config/scoring_rules.json';
   const authorizedActivityPolicyPath = env.AUTHORIZED_ACTIVITY_POLICY_PATH
@@ -69,62 +71,66 @@ function createRuntimeConfiguration({
   const controlledEvaluationToken = String(
     env.ONION_SENTINEL_EVALUATION_TOKEN || '',
   ).trim();
-  const evaluationCredentialEnvironmentKeys = Object.freeze([
-    'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'N8N_POST_COMMIT_TOKEN',
-    'ASSET_STORE_WRITE_TOKEN', 'ABUSEIPDB_API_KEY', 'GREYNOISE_API_KEY',
-    'OTX_API_KEY', 'URLHAUS_AUTH_KEY', 'VIRUSTOTAL_API_KEY', 'URLSCAN_API_KEY',
-    'GOOGLE_SAFE_BROWSING_API_KEY', 'PHISHTANK_API_KEY',
-    'MALWAREBAZAAR_AUTH_KEY', 'THREATFOX_AUTH_KEY', 'SHODAN_API_KEY',
-    'CENSYS_API_ID', 'CENSYS_API_SECRET', 'CENSYS_API_TOKEN',
-    'CENSYS_ORGANIZATION_ID', 'NVD_API_KEY',
-  ]);
-  if (controlledEvaluationMode) {
-    const configuredCredentialKeys = evaluationCredentialEnvironmentKeys.filter(
-      (key) => String(env[key] || '').trim(),
-    );
-    const explicitRuntimeKeys = [
-      'ALERT_STORE_DB', 'ALERT_STORE_HOST', 'ALERT_STORE_PORT', 'SCORING_RULES_PATH',
-    ];
-    if (
-      explicitRuntimeKeys.some(
-        (key) => !Object.prototype.hasOwnProperty.call(env, key)
-          || !String(env[key] || '').trim(),
-      )
-      || host !== '127.0.0.1'
-      || !Number.isSafeInteger(port)
-      || port < 1024
-      || port > 65535
-      || port === 8787
-      || !path.isAbsolute(dbPath)
-      || !/^[a-f0-9]{40}$/.test(runtimeReleaseIdValue)
-      || !/^[a-f0-9]{64}$/.test(controlledEvaluationToken)
-      || configuredCredentialKeys.length
-    ) {
-      throw new Error(
-        'controlled evaluation requires loopback, an explicit existing '
-        + 'database, an exact release ID, an ephemeral authorization token, '
-        + 'and no configured production credentials',
-      );
-    }
-    const evaluationScoringPath = path.resolve(scoringRulesPath);
-    const evaluationScoringMetadata = fs.lstatSync(evaluationScoringPath);
-    const evaluationOwner = typeof getuid === 'function'
-      ? getuid()
-      : evaluationScoringMetadata.uid;
-    if (
-      evaluationScoringPath !== scoringRulesPath
-      || fs.realpathSync(evaluationScoringPath) !== evaluationScoringPath
-      || !evaluationScoringMetadata.isFile()
-      || evaluationScoringMetadata.isSymbolicLink()
-      || evaluationScoringMetadata.uid !== evaluationOwner
-      || (evaluationScoringMetadata.mode & 0o022) !== 0
-    ) {
-      throw new Error(
-        'controlled evaluation scoring rules must be an owner-controlled regular file',
-      );
-    }
-  }
 
+  return {
+    dbPath, scoringRulesPath, authorizedActivityPolicyPath, authorizedActivityPolicy,
+    beaconPaths, beaconHistoryPaths, host, port, postgresShadowEnabled,
+    postgresShadowIntervalMs, postgresShadowBatchSize, assetPostgresEnabled,
+    assetPostgresSchemaPath, softwarePostgresEnabled, softwarePostgresSchemaPath,
+    acHunterPostgresEnabled, acHunterPostgresSchemaPath, assetStoreWriteToken,
+    controlledEvaluationMode, runtimeReleaseIdValue, controlledEvaluationToken,
+  };
+}
+
+function assertControlledRuntime({env, fs, path, getuid, configuration}) {
+  if (!configuration.controlledEvaluationMode) return;
+  const configuredCredentialKeys = EVALUATION_CREDENTIAL_ENVIRONMENT_KEYS.filter(
+    (key) => String(env[key] || '').trim(),
+  );
+  const explicitRuntimeKeys = [
+    'ALERT_STORE_DB', 'ALERT_STORE_HOST', 'ALERT_STORE_PORT', 'SCORING_RULES_PATH',
+  ];
+  if (
+    explicitRuntimeKeys.some(
+      (key) => !Object.prototype.hasOwnProperty.call(env, key)
+        || !String(env[key] || '').trim(),
+    )
+    || configuration.host !== '127.0.0.1'
+    || !Number.isSafeInteger(configuration.port)
+    || configuration.port < 1024
+    || configuration.port > 65535
+    || configuration.port === 8787
+    || !path.isAbsolute(configuration.dbPath)
+    || !/^[a-f0-9]{40}$/.test(configuration.runtimeReleaseIdValue)
+    || !/^[a-f0-9]{64}$/.test(configuration.controlledEvaluationToken)
+    || configuredCredentialKeys.length
+  ) {
+    throw new Error(
+      'controlled evaluation requires loopback, an explicit existing '
+      + 'database, an exact release ID, an ephemeral authorization token, '
+      + 'and no configured production credentials',
+    );
+  }
+  const evaluationScoringPath = path.resolve(configuration.scoringRulesPath);
+  const evaluationScoringMetadata = fs.lstatSync(evaluationScoringPath);
+  const evaluationOwner = typeof getuid === 'function'
+    ? getuid()
+    : evaluationScoringMetadata.uid;
+  if (
+    evaluationScoringPath !== configuration.scoringRulesPath
+    || fs.realpathSync(evaluationScoringPath) !== evaluationScoringPath
+    || !evaluationScoringMetadata.isFile()
+    || evaluationScoringMetadata.isSymbolicLink()
+    || evaluationScoringMetadata.uid !== evaluationOwner
+    || (evaluationScoringMetadata.mode & 0o022) !== 0
+  ) {
+    throw new Error(
+      'controlled evaluation scoring rules must be an owner-controlled regular file',
+    );
+  }
+}
+
+function createRequestConfiguration({env, path, dbPath}) {
   const applicationLogPath = env.ALERT_STORE_APPLICATION_LOG
     || path.join(path.dirname(path.dirname(dbPath)), 'logs', 'alert-store-application.jsonl');
   const applicationLogMaxBytes = Math.max(
@@ -187,6 +193,20 @@ function createRuntimeConfiguration({
   const telegramOutboxAutostart = !['0', 'false', 'no'].includes(
     String(env.TELEGRAM_OUTBOX_AUTOSTART || '1').toLowerCase(),
   );
+
+  return {
+    applicationLogPath, applicationLogMaxBytes, applicationLogBackups,
+    telegramBotToken, telegramChatId, maxRequestBytes, httpRequestTimeoutMs,
+    httpHeadersTimeoutMs, httpKeepAliveTimeoutMs, httpMaxRequestsPerSocket,
+    httpMaxConnections, httpMaxActivePosts, diskHardMaxUsedPercent,
+    diskStartMaxUsedPercent, diskMinFreeBytes, telegramAlertLevels,
+    telegramCooldownSeconds, telegramOutboxIntervalMs,
+    telegramOutboxBaseRetrySeconds, telegramOutboxMaxRetrySeconds,
+    telegramOutboxMaxAttempts, telegramOutboxAutostart,
+  };
+}
+
+function createEnrichmentConfiguration(env) {
   const enrichmentCacheDefaultTtlSeconds = Number(
     env.ENRICHMENT_CACHE_TTL_SECONDS || 86400,
   );
@@ -267,6 +287,22 @@ function createRuntimeConfiguration({
   const urlscanSubmitEnabled = ['1', 'true', 'yes'].includes(
     String(env.URLSCAN_SUBMIT_ENABLED || '').toLowerCase(),
   );
+
+  return {
+    enrichmentCacheDefaultTtlSeconds, vulnerabilityCacheDefaultTtlSeconds,
+    enrichmentNegativeCacheTtlSeconds, enrichmentStaleIfErrorSeconds,
+    enrichmentVulnerabilityStaleIfErrorSeconds, enrichmentCacheL1MaxEntries,
+    enrichmentCacheL1TtlSeconds, enrichmentCacheL1MaxBytes,
+    enrichmentCacheMaxEntries, enrichmentCacheMaxBytes,
+    enrichmentCacheRawResponseMaxBytes, enrichmentCacheCleanupIntervalMs,
+    enrichmentSourceTtlDefaults, enrichmentTimeoutMs, httpJsonMaxResponseBytes,
+    enrichmentCircuitFailureThreshold, enrichmentCircuitResetMs,
+    enrichmentCircuitMaxResetMs, enrichmentWorkerIntervalMs,
+    enrichmentWorkerMaxAttempts, virustotalMinimumLevel, urlscanSubmitEnabled,
+  };
+}
+
+function createWorkflowConfiguration({env, path, os}) {
   const pcapRequestMaxWindowSeconds = Math.max(
     30, Number(env.PCAP_REQUEST_MAX_WINDOW_SECONDS || 300),
   );
@@ -335,7 +371,21 @@ function createRuntimeConfiguration({
   ).trim();
   const analystStatusReasonMaxLength = 140;
   const analystAdjudicationTextMaxLength = 4000;
-  const enrichmentSecrets = {
+
+  return {
+    pcapRequestMaxWindowSeconds, pcapRequestDefaultWindowSeconds,
+    pcapClaimLeaseSeconds, pcapCaptureRetentionSeconds, pcapPriorityMaxWaitSeconds,
+    pcapTransferMaxAttempts, pcapTransferMaxRetrySeconds, pipelineEventRetentionHours,
+    pipelineDiskSampleIntervalMs, n8nPostCommitUrl, n8nPostCommitToken,
+    n8nPostCommitIntervalMs, n8nPostCommitTimeoutMs, n8nPostCommitMaxAttempts,
+    n8nPostCommitBaseRetrySeconds, durableJobRecoveryIntervalMs,
+    aiAnalysisLeaseSeconds, runtimeDir, aiAnalysisWakePaths, pcapAnalysisWakePath,
+    analystStatusReasonMaxLength, analystAdjudicationTextMaxLength,
+  };
+}
+
+function createEnrichmentSecrets(env) {
+  return {
     abuseipdb: (env.ABUSEIPDB_API_KEY || '').trim(),
     greynoise: (env.GREYNOISE_API_KEY || '').trim(),
     otx: (env.OTX_API_KEY || '').trim(),
@@ -353,41 +403,20 @@ function createRuntimeConfiguration({
     censysOrganizationId: (env.CENSYS_ORGANIZATION_ID || '').trim(),
     nvd: (env.NVD_API_KEY || '').trim(),
   };
+}
 
+function createRuntimeConfiguration(dependencies) {
+  const {env, fs, path, os, dirname, getuid, loadAuthorizedActivityPolicy} = dependencies;
+  const core = createCoreConfiguration({
+    env, path, dirname, loadAuthorizedActivityPolicy,
+  });
+  assertControlledRuntime({env, fs, path, getuid, configuration: core});
   return {
-    dbPath, scoringRulesPath, authorizedActivityPolicyPath, authorizedActivityPolicy,
-    beaconPaths, beaconHistoryPaths, host, port, postgresShadowEnabled,
-    postgresShadowIntervalMs, postgresShadowBatchSize, assetPostgresEnabled,
-    assetPostgresSchemaPath, softwarePostgresEnabled, softwarePostgresSchemaPath,
-    acHunterPostgresEnabled, acHunterPostgresSchemaPath, assetStoreWriteToken,
-    controlledEvaluationMode, runtimeReleaseIdValue, controlledEvaluationToken,
-    applicationLogPath, applicationLogMaxBytes, applicationLogBackups,
-    telegramBotToken, telegramChatId, maxRequestBytes, httpRequestTimeoutMs,
-    httpHeadersTimeoutMs, httpKeepAliveTimeoutMs, httpMaxRequestsPerSocket,
-    httpMaxConnections, httpMaxActivePosts, diskHardMaxUsedPercent,
-    diskStartMaxUsedPercent, diskMinFreeBytes, telegramAlertLevels,
-    telegramCooldownSeconds, telegramOutboxIntervalMs,
-    telegramOutboxBaseRetrySeconds, telegramOutboxMaxRetrySeconds,
-    telegramOutboxMaxAttempts, telegramOutboxAutostart,
-    enrichmentCacheDefaultTtlSeconds, vulnerabilityCacheDefaultTtlSeconds,
-    enrichmentNegativeCacheTtlSeconds, enrichmentStaleIfErrorSeconds,
-    enrichmentVulnerabilityStaleIfErrorSeconds, enrichmentCacheL1MaxEntries,
-    enrichmentCacheL1TtlSeconds, enrichmentCacheL1MaxBytes,
-    enrichmentCacheMaxEntries, enrichmentCacheMaxBytes,
-    enrichmentCacheRawResponseMaxBytes, enrichmentCacheCleanupIntervalMs,
-    enrichmentSourceTtlDefaults, enrichmentTimeoutMs, httpJsonMaxResponseBytes,
-    enrichmentCircuitFailureThreshold, enrichmentCircuitResetMs,
-    enrichmentCircuitMaxResetMs, enrichmentWorkerIntervalMs,
-    enrichmentWorkerMaxAttempts, virustotalMinimumLevel, urlscanSubmitEnabled,
-    pcapRequestMaxWindowSeconds, pcapRequestDefaultWindowSeconds,
-    pcapClaimLeaseSeconds, pcapCaptureRetentionSeconds, pcapPriorityMaxWaitSeconds,
-    pcapTransferMaxAttempts, pcapTransferMaxRetrySeconds, pipelineEventRetentionHours,
-    pipelineDiskSampleIntervalMs, n8nPostCommitUrl, n8nPostCommitToken,
-    n8nPostCommitIntervalMs, n8nPostCommitTimeoutMs, n8nPostCommitMaxAttempts,
-    n8nPostCommitBaseRetrySeconds, durableJobRecoveryIntervalMs,
-    aiAnalysisLeaseSeconds, runtimeDir, aiAnalysisWakePaths, pcapAnalysisWakePath,
-    analystStatusReasonMaxLength, analystAdjudicationTextMaxLength,
-    enrichmentSecrets,
+    ...core,
+    ...createRequestConfiguration({env, path, dbPath: core.dbPath}),
+    ...createEnrichmentConfiguration(env),
+    ...createWorkflowConfiguration({env, path, os}),
+    enrichmentSecrets: createEnrichmentSecrets(env),
   };
 }
 
