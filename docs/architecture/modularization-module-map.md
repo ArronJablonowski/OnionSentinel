@@ -2513,6 +2513,22 @@ transport authority, and Security Onion and Relay access remain read-only.
 
 ## PCAP Evidence Processor
 
+### Derived PCAP evidence query
+
+`pcap_evidence_query.py` retains the stable import surface and declarative
+operation/filter/output allowlists. `pcap_evidence_query_validation.py` owns
+typed scalar, IP, integer, epoch, boolean, and window validation.
+`pcap_evidence_query_matching.py` owns recursive alias lookup and exact typed
+candidate matching, while `pcap_evidence_query_selection.py` owns bounded
+selection from fixed derived-JSON paths.
+
+`pcap_evidence_query_projection.py` owns payload/parser/path scrubbing and
+allowlisted nested record projection. `pcap_evidence_query_response.py` owns
+deduplication, deterministic query/result digests, evidence references, audit
+accounting, provenance, and the 32 KiB output boundary. Dependencies flow from
+the policy facade into these pure modules and do not cycle. No module opens a
+capture, invokes a parser or shell, accepts a caller path, or reaches a network.
+
 `n8n/bin/process-pcap-evidence.py` is a bounded CLI and import-compatibility
 facade. Configuration and shared bounded utilities live in
 `pcap_processor_contract.py`; database and artifact admission in

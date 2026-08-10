@@ -251,6 +251,25 @@ class ArchitectureHardeningTest(unittest.TestCase):
         self.assertIn("<string>--max-terminal-runs</string>", plist)
         self.assertIn("<string>--max-live-bytes</string>", plist)
 
+    def test_pcap_query_module_tree_is_installed_before_compatibility_module(self):
+        installer = (
+            ROOT / "n8n/bin/install-macstudio-stack.zsh"
+        ).read_text(encoding="utf-8")
+        facade_copy = 'cp "$REPO_DIR/n8n/bin/pcap_evidence_query.py"'
+        for module in (
+            "pcap_evidence_query_validation.py",
+            "pcap_evidence_query_matching.py",
+            "pcap_evidence_query_selection.py",
+            "pcap_evidence_query_projection.py",
+            "pcap_evidence_query_response.py",
+        ):
+            module_copy = f'cp "$REPO_DIR/n8n/bin/{module}"'
+            self.assertIn(module_copy, installer)
+            self.assertLess(
+                installer.index(module_copy),
+                installer.index(facade_copy),
+            )
+
     def test_repair_install_preserves_live_scoring_policy(self):
         installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text(encoding="utf-8")
         destination = '$STACK_DIR/alert_store/config/scoring_rules.json'
