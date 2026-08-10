@@ -763,6 +763,13 @@ preserves terminal immutability, ledger-manifest version compatibility,
 hypothesis-manifest and payload digests, event-chain continuity, constant-time
 digest comparisons, and verification-before-export behavior.
 
+`n8n/bin/harness_run_foundation.py` owns durable run identity and counters,
+elapsed-time enforcement, prompt-evidence cataloguing, model preflight,
+role/capability tool authorization, and atomic query-batch budget reservation.
+It receives the store as a port and retains shadow-vs-enforce semantics,
+approval gates, exact route binding, collision-safe reservations, and bounded
+prompt evidence accounting.
+
 Existing SQLite files, schema versions, hash-chain calculations, terminal
 digests, skill attestations, and controlled-evaluation behavior are contracts.
 

@@ -45,6 +45,7 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `bin/harness_contracts.py` | Immutable job identity, secret-safe metadata, skill attestation, evidence counting, and terminal ledger-manifest contracts. |
 | `bin/harness_policy.py` | Package-free harness activation, identity, capability, budget, authorization, and policy-file contracts. |
 | `bin/harness_query_contract.py` | Bounded query-result counting, truncation detection, and provenance-bound per-query status resolution. |
+| `bin/harness_run_foundation.py` | Durable run identity, counters, elapsed-time budgets, model/tool/query authorization, and preflight reservations. |
 | `bin/harness_store_foundation.py` | Owner-only SQLite connection/schema lifecycle, audit logging, event insertion, mutability, and stage-update foundation. |
 | `bin/harness_store_decision_repository.py` | Evidence-bound hypothesis revision and decision ledger repository. |
 | `bin/harness_store_execution_repository.py` | Atomic budget reservation and immutable model/tool-call ledgers. |
