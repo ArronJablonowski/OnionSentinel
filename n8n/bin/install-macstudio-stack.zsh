@@ -114,6 +114,7 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/services/analyst_review_projection.js" \
     "$ALERT_STORE_STAGE_DIR/services/analyst_decision_persistence.js" \
     "$ALERT_STORE_STAGE_DIR/services/alert_ingest_orchestrator.js" \
+    "$ALERT_STORE_STAGE_DIR/services/post_commit_payload.js" \
     "$ALERT_STORE_STAGE_DIR/services/alert_persistence.js" \
     "$ALERT_STORE_STAGE_DIR/services/suppression_persistence.js" \
     "$ALERT_STORE_STAGE_DIR/services/rescore_persistence.js" \
