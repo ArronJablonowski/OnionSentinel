@@ -35,6 +35,11 @@ class PcapAnalysisWorkflowTest(unittest.TestCase):
         self.worker = load_module("process_pcap_evidence", PCAP_WORKER_PATH)
         self.prompt_builder = load_module("build_ai_investigation_prompt", PROMPT_BUILDER_PATH)
         self.ai_runner = load_module("run_local_ai_analysis", AI_RUNNER_PATH)
+        # Hermetic tests must never fall through to $HOME/n8n-local defaults.
+        # Some process_one fixtures intentionally use a minimal Args object, so
+        # bind the worker's runtime fallbacks to this test's private directory.
+        self.worker.DEFAULT_DB = self.root / "alerts.sqlite3"
+        self.worker.DEFAULT_DETECTION_PLAYBOOKS = self.root / "detection_playbooks.json"
         # Archive safety tests should be deterministic even when the host that
         # runs pytest is above the production new-work disk threshold.
         self.capacity_patch = mock.patch.object(
