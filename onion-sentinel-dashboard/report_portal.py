@@ -41,6 +41,7 @@ import soc_alert_api
 import software_inventory
 import cti_program
 import portal_asset_runtime
+import portal_admin_runtime
 import portal_settings_runtime
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
@@ -1206,208 +1207,27 @@ save_soc_ai_settings = partial(portal_settings_runtime.save_soc_ai_settings, _SE
 save_soc_agent_model = partial(portal_settings_runtime.save_soc_agent_model, _SETTINGS_RUNTIME)
 
 
-def admin_status_path(action_id: str) -> Path:
-    return action_status_path(action_id, _admin_action_state_sources())
-
-
-def admin_log_path(action_id: str) -> Path:
-    return action_log_path(action_id, _admin_action_state_sources())
-
-
-def process_is_running(pid: int | None) -> bool:
-    if not pid:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-
-def _admin_action_state_sources() -> AdminActionStateSources:
-    return AdminActionStateSources(
-        state_dir=ADMIN_STATE_DIR,
-        lock_file=ADMIN_LOCK_FILE,
-        actions=ADMIN_ACTIONS,
-        process_running=process_is_running,
-        now_iso=now_iso_local,
-        parse_timestamp=parse_iso_timestamp,
-        format_timestamp=format_iso_timestamp,
-    )
-
-
-def read_admin_action_status(action_id: str) -> dict:
-    return read_action_status(action_id, _admin_action_state_sources())
-
-
-def write_admin_action_status(action_id: str, status: dict) -> None:
-    write_action_status(action_id, status, _admin_action_state_sources())
-
-
-def latest_admin_action_outcome() -> dict | None:
-    """Return the newest non-running admin action outcome for status banner rendering."""
-    return latest_action_outcome(_admin_action_state_sources())
-
-
-def read_admin_lock() -> dict | None:
-    return read_action_lock(_admin_action_state_sources())
-
-
-def running_admin_action() -> dict | None:
-    """Return the currently running admin action, clearing stale locks when safe."""
-    return running_action(_admin_action_state_sources())
-
-
-def claim_admin_action_lock(action_id: str, label: str, started_at: str) -> tuple[bool, str]:
-    """Atomically claim the singleton admin-action lock."""
-    return claim_action_lock(
-        action_id, label, started_at, _admin_action_state_sources()
-    )
-
-
-def update_admin_action_lock_pid(action_id: str, pid: int) -> None:
-    update_action_lock_pid(action_id, pid, _admin_action_state_sources())
-
-
-def release_admin_action_lock(action_id: str) -> None:
-    release_action_lock(action_id, _admin_action_state_sources())
-
-
-def start_admin_action(action_id: str, confirmation: str = "") -> tuple[bool, str]:
-    def spawn(wrapped_command: str, log) -> int:
-        proc = subprocess.Popen(
-            ["/bin/bash", "-lc", wrapped_command],
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            cwd=str(HOME),
-            env=ADMIN_COMMAND_ENV,
-            start_new_session=True,
-        )
-        return proc.pid
-
-    return run_admin_action(
-        action_id,
-        confirmation,
-        AdminActionRunnerSources(
-            actions=ADMIN_ACTIONS,
-            state_dir=ADMIN_STATE_DIR,
-            lock_file=ADMIN_LOCK_FILE,
-            macos_update_checker=HOME
-            / ".hermes"
-            / "scripts"
-            / "check_macos_updates.py",
-            now_iso=now_iso_local,
-            running_action=running_admin_action,
-            read_status=read_admin_action_status,
-            process_running=process_is_running,
-            check_available=check_admin_action_available,
-            claim_lock=claim_admin_action_lock,
-            release_lock=release_admin_action_lock,
-            update_lock_pid=update_admin_action_lock_pid,
-            write_status=write_admin_action_status,
-            status_path=admin_status_path,
-            log_path=admin_log_path,
-            quote=shlex.quote,
-            spawn=spawn,
-        ),
-    )
-
-
-def tail_file(path: Path, max_chars: int = 7000) -> str:
-    try:
-        data = path.read_bytes()
-    except Exception:
-        return "No log output yet."
-    if len(data) > max_chars:
-        data = data[-max_chars:]
-    return data.decode("utf-8", errors="replace")
-
-
-def _cron_failure_sources() -> CronFailureSources:
-    return CronFailureSources(
-        jobs_file=CRON_JOBS_FILE,
-        output_dir=CRON_OUTPUT_DIR,
-        parse_timestamp=parse_iso_timestamp,
-        format_timestamp=format_iso_timestamp,
-        redact=redact_sensitive_text,
-    )
-
-
-def cron_failure_records(limit: int = 12) -> list[dict]:
-    """Collect recent failed Hermes cron runs from jobs.json and output files."""
-    return compose_cron_failure_records(_cron_failure_sources(), limit=limit)
-
-
-def render_cron_failure_log_section() -> str:
-    sources = _cron_failure_sources()
-    return render_cron_failure_log(
-        compose_cron_failure_records(sources), sources
-    )
-
-
-
-def _run_admin_version_command(command: list[str], timeout: int = 12) -> tuple[int | None, str]:
-    """Run a bounded version/discovery command for Admin card metadata."""
-    try:
-        proc = subprocess.run(
-            command,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=timeout,
-            env=ADMIN_COMMAND_ENV,
-        )
-        return proc.returncode, proc.stdout.strip()
-    except Exception as exc:
-        return None, f"Unable to run {' '.join(command)}: {exc}"
-
-
-def admin_action_version_info(action_id: str) -> dict[str, str]:
-    """Return current/latest version metadata for an Administration update card."""
-    return compose_admin_action_version_info(
-        action_id,
-        AdminVersionSources(
-            run_command=lambda command, timeout: _run_admin_version_command(
-                command, timeout=timeout
-            ),
-            read_macos_update_status=read_macos_update_status,
-            hermes_bin=HERMES_BIN,
-            hermes_project=HOME / ".hermes" / "hermes-agent",
-        ),
-    )
-
-def check_admin_action_available(action_id: str, skip_expensive: bool = False) -> tuple[bool, str]:
-    """Return whether an admin action can be started because relevant updates exist."""
-    def run_command(
-        command: list[str], timeout: int, combine_stderr: bool
-    ) -> AdminCommandOutcome:
-        try:
-            proc = subprocess.run(
-                command,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT if combine_stderr else subprocess.PIPE,
-                timeout=timeout,
-                env=ADMIN_COMMAND_ENV,
-            )
-            return AdminCommandOutcome(
-                returncode=proc.returncode,
-                stdout=proc.stdout or "",
-                stderr="" if combine_stderr else (proc.stderr or ""),
-            )
-        except Exception as exc:
-            return AdminCommandOutcome(returncode=None, error=str(exc))
-
-    return compose_admin_action_availability(
-        action_id,
-        skip_expensive,
-        AdminAvailabilitySources(
-            read_macos_update_status=read_macos_update_status,
-            run_command=run_command,
-            hermes_bin=HERMES_BIN,
-        ),
-    )
+_ADMIN_RUNTIME = sys.modules[__name__]
+admin_status_path = partial(portal_admin_runtime.admin_status_path, _ADMIN_RUNTIME)
+admin_log_path = partial(portal_admin_runtime.admin_log_path, _ADMIN_RUNTIME)
+process_is_running = partial(portal_admin_runtime.process_is_running, _ADMIN_RUNTIME)
+_admin_action_state_sources = partial(portal_admin_runtime.admin_action_state_sources, _ADMIN_RUNTIME)
+read_admin_action_status = partial(portal_admin_runtime.read_admin_action_status, _ADMIN_RUNTIME)
+write_admin_action_status = partial(portal_admin_runtime.write_admin_action_status, _ADMIN_RUNTIME)
+latest_admin_action_outcome = partial(portal_admin_runtime.latest_admin_action_outcome, _ADMIN_RUNTIME)
+read_admin_lock = partial(portal_admin_runtime.read_admin_lock, _ADMIN_RUNTIME)
+running_admin_action = partial(portal_admin_runtime.running_admin_action, _ADMIN_RUNTIME)
+claim_admin_action_lock = partial(portal_admin_runtime.claim_admin_action_lock, _ADMIN_RUNTIME)
+update_admin_action_lock_pid = partial(portal_admin_runtime.update_admin_action_lock_pid, _ADMIN_RUNTIME)
+release_admin_action_lock = partial(portal_admin_runtime.release_admin_action_lock, _ADMIN_RUNTIME)
+start_admin_action = partial(portal_admin_runtime.start_admin_action, _ADMIN_RUNTIME)
+tail_file = partial(portal_admin_runtime.tail_file, _ADMIN_RUNTIME)
+_cron_failure_sources = partial(portal_admin_runtime.cron_failure_sources, _ADMIN_RUNTIME)
+cron_failure_records = partial(portal_admin_runtime.cron_failure_records, _ADMIN_RUNTIME)
+render_cron_failure_log_section = partial(portal_admin_runtime.render_cron_failure_log_section, _ADMIN_RUNTIME)
+_run_admin_version_command = partial(portal_admin_runtime.run_admin_version_command, _ADMIN_RUNTIME)
+admin_action_version_info = partial(portal_admin_runtime.admin_action_version_info, _ADMIN_RUNTIME)
+check_admin_action_available = partial(portal_admin_runtime.check_admin_action_available, _ADMIN_RUNTIME)
 
 
 def local_ip() -> str:
@@ -1511,85 +1331,6 @@ def artifact_library_disk_usage() -> int:
     return total
 
 
-def _admin_process_lines() -> list[str]:
-    proc = subprocess.run(
-        ["/bin/ps", "axww", "-o", "pid=,args="],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=3,
-        check=True,
-    )
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-
-
-def _admin_service_probe_sources() -> AdminServiceProbeSources:
-    def docker_info() -> ServiceCommandOutcome:
-        docker_bin = shutil.which("docker") or "/usr/local/bin/docker"
-        proc = subprocess.run(
-            [docker_bin, "info", "--format", "{{.ServerVersion}}"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=4,
-            check=False,
-            env={
-                **os.environ,
-                "PATH": ADMIN_COMMAND_ENV.get(
-                    "PATH", os.environ.get("PATH", "")
-                ),
-            },
-        )
-        return ServiceCommandOutcome(
-            returncode=proc.returncode,
-            stdout=proc.stdout or "",
-            stderr=proc.stderr or "",
-        )
-
-    return AdminServiceProbeSources(
-        process_lines=_admin_process_lines,
-        docker_info=docker_info,
-    )
-
-
-def process_matches(matchers: list[str], exclude: list[str] | None = None) -> list[str]:
-    """Return ps output lines whose command text matches supplied substrings."""
-    return matching_process_lines(_admin_process_lines(), matchers, exclude)
-
-
-def macs_fan_control_status() -> tuple[bool, str]:
-    """Return whether Macs Fan Control is currently running plus detail text."""
-    return probe_macs_fan_control_status(_admin_service_probe_sources())
-
-
-def codex_app_status() -> tuple[bool, str]:
-    """Return whether the Codex desktop app is currently running plus detail text."""
-    return probe_codex_app_status(_admin_service_probe_sources())
-
-
-def codex_cli_status() -> tuple[bool, str]:
-    """Return whether the Codex command-line interface is currently running."""
-    return probe_codex_cli_status(_admin_service_probe_sources())
-
-
-def docker_status() -> tuple[bool, str]:
-    """Return whether Docker is currently running plus detail text."""
-    return probe_docker_status(_admin_service_probe_sources())
-
-
-def n8n_container_status() -> dict[str, object]:
-    """Return compact n8n container/app health without exposing container config."""
-    docker_bin = shutil.which("docker") or "/usr/local/bin/docker"
-    env = {**os.environ, "PATH": ADMIN_COMMAND_ENV.get("PATH", os.environ.get("PATH", ""))}
-    return compose_n8n_container_status(N8nContainerStatusSources(
-        docker_bin=docker_bin, container_name=N8N_CONTAINER_NAME,
-        health_url=N8N_HEALTH_URL, environment=env,
-        pipe=subprocess.PIPE, run=subprocess.run,
-        now=lambda: dt.datetime.now().astimezone(),
-        format_timestamp=format_iso_timestamp,
-    ))
-
-
 ADMIN_SERVICE_LABELS = {
     "macs-fan-control": "Macs Fan Control",
     "codex": "Codex app",
@@ -1597,50 +1338,17 @@ ADMIN_SERVICE_LABELS = {
     "docker": "Docker",
     "n8n": "n8n container",
 }
-
-
-def admin_service_statuses() -> dict[str, dict[str, object]]:
-    """Return current process/service status records for Administration status cards."""
-    checks = {
-        "macs-fan-control": macs_fan_control_status,
-        "codex": codex_app_status,
-        "codex-cli": codex_cli_status,
-        "docker": docker_status,
-    }
-    return compose_admin_service_statuses(
-        ADMIN_SERVICE_LABELS, checks, n8n_container_status
-    )
-
-
-def start_admin_service(service_id: str) -> tuple[bool, str, dict[str, object] | None]:
-    """Start one allowed Administration service/app without repeating the request on refresh."""
-    start_commands = {
-        "macs-fan-control": ["/usr/bin/open", "-a", "Macs Fan Control"],
-        "codex": ["/usr/bin/open", "-a", "Codex"],
-        "codex-cli": ["/usr/bin/osascript", "-e", f'tell application "Terminal" to do script "{CODEX_CLI_BIN}"', "-e", 'tell application "Terminal" to activate'],
-        "docker": ["/usr/bin/open", "-a", "Docker"],
-    }
-    def spawn(command: list[str]) -> None:
-        subprocess.Popen(
-            command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-
-    return start_allowed_admin_service(
-        service_id,
-        AdminServiceStartSources(
-            labels=ADMIN_SERVICE_LABELS,
-            start_commands=start_commands,
-            statuses=admin_service_statuses,
-            spawn=spawn,
-        ),
-    )
-
-
-def defang_admin_service_json(statuses: dict[str, dict[str, object]]) -> dict[str, object]:
-    return {"ok": True, "services": statuses, "time": now_iso_local()}
+_admin_process_lines = partial(portal_admin_runtime.admin_process_lines, _ADMIN_RUNTIME)
+_admin_service_probe_sources = partial(portal_admin_runtime.admin_service_probe_sources, _ADMIN_RUNTIME)
+process_matches = partial(portal_admin_runtime.process_matches, _ADMIN_RUNTIME)
+macs_fan_control_status = partial(portal_admin_runtime.macs_fan_control_status, _ADMIN_RUNTIME)
+codex_app_status = partial(portal_admin_runtime.codex_app_status, _ADMIN_RUNTIME)
+codex_cli_status = partial(portal_admin_runtime.codex_cli_status, _ADMIN_RUNTIME)
+docker_status = partial(portal_admin_runtime.docker_status, _ADMIN_RUNTIME)
+n8n_container_status = partial(portal_admin_runtime.n8n_container_status, _ADMIN_RUNTIME)
+admin_service_statuses = partial(portal_admin_runtime.admin_service_statuses, _ADMIN_RUNTIME)
+start_admin_service = partial(portal_admin_runtime.start_admin_service, _ADMIN_RUNTIME)
+defang_admin_service_json = partial(portal_admin_runtime.defang_admin_service_json, _ADMIN_RUNTIME)
 
 
 def system_uptime_metric() -> tuple[str, str, bool]:

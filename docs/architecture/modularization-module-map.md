@@ -1849,6 +1849,12 @@ service identifier normalization, existing start-service dispatch, and
 200/400/403 response projection. Concrete session lookup, token storage, app
 launching, and live service-status checks remain in `report_portal.py`.
 
+`portal_admin_runtime.py` owns late-bound Administration action state,
+singleton action launch, bounded version/update discovery, cron failure
+projection, process/service probes, and allowlisted service startup. Host paths,
+commands, environment, clocks, and patchable process ports are supplied by the
+compatibility runtime; the module does not import the HTTP handler.
+
 `portal_admin_session_store.py` owns Administration CSRF-token validation and
 private persistence, PBKDF2 password-record validation, hashed session
 persistence and expiry, and strict cookie projection. `report_portal.py`
