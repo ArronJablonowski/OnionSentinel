@@ -85,7 +85,11 @@ ONION_SENTINEL_RELEASE_ID="$release_id" n8n/bin/install-macstudio-stack.zsh
 The host-native alert-store requires Node.js 20.17 or newer. The installer
 copies the committed lockfile and runs `npm ci --omit=dev`; do not replace this
 with an unlocked production install. The locked `sqlite3` runtime has no known
-production dependency advisories at the time of this release.
+production dependency advisories at the time of this release. Its optional
+`node-gyp` dependency is native installation/build tooling; `undici` is used by
+that toolchain for header downloads and is not imported by the running
+alert-store. The lockfile nevertheless pins the transitive toolchain to a
+non-advisory `undici` release so clean installs do not retain a known issue.
 
 The installer validates and persists the exact release ID before deployment.
 For a commit-less disaster recovery only,
