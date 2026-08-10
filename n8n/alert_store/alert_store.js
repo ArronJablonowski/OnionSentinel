@@ -103,6 +103,9 @@ const {
   createAlertGroupAliasResolution,
 } = require('./services/alert_group_alias_resolution');
 const {
+  createIncidentDurableJobPersistence,
+} = require('./services/incident_durable_job_persistence');
+const {
   createIncidentReanalysisRequest,
 } = require('./services/incident_reanalysis_request');
 const {
@@ -1105,49 +1108,6 @@ async function validateControlledRetirementPostState(identity, receipt) {
 async function retireControlledEvaluation(payload) {
   return controlledRetirementCommandOwner.retire(payload);
 }
-async function rejectProcessingControlledJob(jobType, groupIds) {
-  const keys = [...new Set(
-    (groupIds || [])
-      .map((value) => (typeof value === 'string' ? value.trim().toLowerCase() : ''))
-      .filter(Boolean),
-  )];
-  if (!keys.length) return;
-  const placeholders = keys.map(() => '?').join(', ');
-  const processing = await get(
-    `SELECT id, dedupe_key FROM durable_jobs
-     WHERE job_type = ? AND status = 'processing'
-       AND dedupe_key IN (${placeholders})
-     ORDER BY id ASC LIMIT 1`,
-    [jobType, ...keys],
-  );
-  if (processing) {
-    throw incidentIdentityConflict(
-      `controlled dispatch conflicts with processing ${jobType} job for ${processing.dedupe_key}`,
-    );
-  }
-}
-
-async function retirePendingIncidentJobs(groupIds, retiredAt) {
-  const keys = [...new Set(
-    (groupIds || [])
-      .map((value) => (typeof value === 'string' ? value.trim().toLowerCase() : ''))
-      .filter(Boolean),
-  )];
-  if (!keys.length) return 0;
-  const placeholders = keys.map(() => '?').join(', ');
-  const result = await run(
-    `UPDATE durable_jobs
-     SET status = 'completed', lease_expires_at = NULL, lease_token = NULL,
-         last_error = NULL, completed_at = COALESCE(completed_at, ?),
-         last_completed_at = COALESCE(last_completed_at, ?),
-         processing_started_at = NULL, rerun_requested = 0, updated_at = ?
-     WHERE job_type = 'incident_response_analysis'
-       AND status = 'pending' AND dedupe_key IN (${placeholders})`,
-    [retiredAt, retiredAt, retiredAt, ...keys],
-  );
-  return Number(result.changes || 0);
-}
-
 function manualDispatchIdentity(payload) {
   return manualDispatchIdentityOwner.normalize(payload);
 }
@@ -1808,13 +1768,18 @@ const manualDispatchIdentityOwner = createManualDispatchIdentity({
   runtimeReleaseId: controlledRuntimeReleaseId,
   conflict: incidentIdentityConflict,
 });
+const incidentDurableJobPersistence = createIncidentDurableJobPersistence({
+  get,
+  run,
+  conflict: incidentIdentityConflict,
+});
 const manualAnalysisDispatch = createManualAnalysisDispatch({
   get,
   run,
   safeString,
   normalizeIdentity: manualDispatchIdentity,
   conflict: incidentIdentityConflict,
-  rejectProcessingJob: rejectProcessingControlledJob,
+  rejectProcessingJob: incidentDurableJobPersistence.rejectProcessing,
   enqueueJob: (...args) => durableJobs.enqueue(...args),
   recordMetric: (...args) => pipelineMetrics.record(...args),
   nowUtc,
@@ -1832,7 +1797,7 @@ const incidentReanalysisFrozenDispatchOwner = createIncidentReanalysisFrozenDisp
   parseJsonObject,
   loadAliases: alertGroupAliasResolution.loadSnapshot,
   resolveCanonicalIdentity: alertGroupAliasResolution.resolve,
-  rejectProcessingJob: rejectProcessingControlledJob,
+  rejectProcessingJob: incidentDurableJobPersistence.rejectProcessing,
   jsonText,
   conflict: incidentIdentityConflict,
 });
@@ -1850,7 +1815,7 @@ const incidentReanalysisRequestOwner = createIncidentReanalysisRequest({
   get,
   run,
   supersedeCase: supersedeIncidentReanalysisCase,
-  retirePendingJobs: retirePendingIncidentJobs,
+  retirePendingJobs: incidentDurableJobPersistence.retirePendingIncident,
   enqueueJob: (...args) => durableJobs.enqueue(...args),
   jsonText,
   recordMetric: (...args) => pipelineMetrics.record(...args),
