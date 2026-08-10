@@ -34,6 +34,9 @@ class PcapRetentionTest(unittest.TestCase):
         self.safe_root = self.root / "n8n-local"
         self.artifact_dir = self.safe_root / "pcap-evidence" / "artifacts"
         self.analysis_dir = self.safe_root / "soc-alerts" / "pcap-analysis"
+        # DEFAULT_DB is computed when the script is imported, before HOME is
+        # rebound below. Keep every minimal Args fixture inside this test root.
+        self.module.DEFAULT_DB = self.safe_root / "alert_store_data" / "alerts.sqlite3"
         self.artifact_dir.mkdir(parents=True)
         self.analysis_dir.mkdir(parents=True)
         self.original_home = self.module.HOME
