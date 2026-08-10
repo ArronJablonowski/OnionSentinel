@@ -49,6 +49,7 @@ import portal_soc_pcap_runtime
 import portal_llm_runtime
 import portal_soc_query_runtime
 import portal_incident_action_runtime
+import portal_incident_read_runtime
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
@@ -2577,206 +2578,20 @@ INCIDENT_ROW_CALLBACKS = IncidentRowCallbacks(
 )
 
 
-def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
-    """Return one bounded page of durable Incident Response cases.
-
-    Case lists intentionally omit raw model JSON and packet evidence. The UI
-    loads the existing group-detail endpoint only after an analyst expands a
-    row, keeping routine polling inexpensive even with a large case history.
-    """
-    return incident_list_response(
-        incident_read_service_sources(),
-        query,
-        max_per_page=SOC_ALERT_API_MAX_LIMIT,
-    )
-
-
-def soc_incident_review_state(
-    conn: sqlite3.Connection,
-    case: dict[str, object],
-    analysis: dict[str, object],
-    response: dict[str, object],
-) -> dict[str, object]:
-    """Derive durable current-review state for one Incident Response detail."""
-    records = load_incident_review_records(conn, case, analysis)
-    return compose_incident_review_state(
-        case,
-        analysis,
-        response,
-        records.evidence_updated_at,
-        records.reviewer,
-        records.adjudication,
-        _soc_review_defaults(),
-        INCIDENT_ROW_CALLBACKS,
-    )
-
-
-def _incident_html_text(value: object, fallback: str = "n/a") -> str:
-    text = str(value or "").strip() or fallback
-    return html.escape(text)
-
-
-def _incident_nonnegative_int(value: object) -> int:
-    """Render malformed evidence counters as zero instead of failing the case API."""
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError, OverflowError):
-        return 0
-
-
-def _incident_query_linked_finding(report: dict[str, object], query_digest: object) -> str:
-    """Return the first responder statement explicitly linked to a trusted query."""
-    digest = str(query_digest or "").strip()
-    if not digest:
-        return ""
-    timeline = report.get("factual_timeline")
-    if isinstance(timeline, list):
-        for event in timeline:
-            if not isinstance(event, dict) or str(event.get("query_digest") or "").strip() != digest:
-                continue
-            finding = str(event.get("event") or "").strip()
-            if finding:
-                return finding if len(finding) <= 360 else f"{finding[:357].rstrip()}…"
-    for key in (
-        "security_onion_findings",
-        "osquery_findings",
-        "pcap_findings",
-        "host_findings",
-        "correlation_findings",
-        "evidence_gaps",
-    ):
-        values = report.get(key)
-        items = values if isinstance(values, list) else [values]
-        for item in items:
-            finding = str(item or "").strip()
-            if digest in finding:
-                return finding if len(finding) <= 360 else f"{finding[:357].rstrip()}…"
-    return ""
-
-
-def _incident_html_list(values: object, fallback: str = "No findings were recorded.") -> str:
-    items = values if isinstance(values, list) else ([values] if values not in (None, "") else [])
-    rendered = []
-    for item in items[:100]:
-        if isinstance(item, (dict, list)):
-            text = json.dumps(item, sort_keys=True, default=str)
-        else:
-            text = str(item)
-        if text.strip():
-            rendered.append(f"<li>{html.escape(text.strip())}</li>")
-    return f'<ul class="ir-report-list">{"".join(rendered)}</ul>' if rendered else f"<p>{html.escape(fallback)}</p>"
-
-
-def _incident_report_section(title: str, body: str) -> str:
-    return (
-        '<section class="ir-report-subsection">'
-        f"<h4>{html.escape(title)}</h4>"
-        f'<div class="ir-report-subsection-body">{body}</div>'
-        "</section>"
-    )
-
-
-def render_analyst_review_panel(
-    review: dict[str, object] | None,
-    *,
-    group_id: str,
-    case_id: str = "",
-) -> str:
-    """Render bounded review state and one explicit human-adjudication entry."""
-    callbacks = ReviewPanelRenderCallbacks(
-        html_text=_incident_html_text,
-        outcome_label=soc_alert_detection_outcome_label,
-        review_defaults=_soc_review_defaults,
-    )
-    return render_review_panel(
-        review,
-        group_id=group_id,
-        case_id=case_id,
-        callbacks=callbacks,
-    )
-
-
-def render_investigation_query_audit_html(
-    response: dict[str, object],
-    report: dict[str, object],
-) -> tuple[str, int]:
-    """Render broker-owned iterative pivot records, never model-authored queries."""
-    callbacks = InvestigationAuditRenderCallbacks(
-        html_text=_incident_html_text,
-        nonnegative_int=_incident_nonnegative_int,
-        linked_finding=_incident_query_linked_finding,
-    )
-    return render_investigation_query_audit(response, report, callbacks)
-
-
-def render_incident_response_report_html(
-    case: dict[str, object],
-    response: dict[str, object],
-    analysis: dict[str, object],
-    review: dict[str, object] | None = None,
-) -> tuple[str, int]:
-    """Render a fact-grounded responder report and immutable query audit."""
-    callbacks = IncidentReportRenderCallbacks(
-        html_text=_incident_html_text,
-        nonnegative_int=_incident_nonnegative_int,
-        linked_finding=_incident_query_linked_finding,
-        html_list=_incident_html_list,
-        report_section=_incident_report_section,
-        investigation_audit=render_investigation_query_audit_html,
-        review_panel=render_analyst_review_panel,
-    )
-    return render_incident_response_report(
-        case,
-        response,
-        analysis,
-        review,
-        callbacks,
-    )
-
-
-def render_prior_soc_analysis_html(response: dict[str, object], analysis: dict[str, object]) -> str:
-    sections = [
-        _incident_report_section("BLUF", f"<p>{_incident_html_text(response.get('bluf') or analysis.get('bluf'))}</p>"),
-        _incident_report_section("Assessment", f"<p>{_incident_html_text(response.get('summary') or analysis.get('summary'))}</p>"),
-        _incident_report_section("Likely Meaning", f"<p>{_incident_html_text(response.get('likely_meaning'))}</p>"),
-        _incident_report_section("Severity Reasoning", f"<p>{_incident_html_text(response.get('severity_reasoning'))}</p>"),
-        _incident_report_section("Alert Frequency Assessment", f"<p>{_incident_html_text(response.get('alert_frequency_assessment'))}</p>"),
-        _incident_report_section("Public Enrichment Findings", _incident_html_list(response.get("public_enrichment_findings"))),
-        _incident_report_section("PCAP Analysis Findings", _incident_html_list(response.get("pcap_analysis_findings"))),
-        _incident_report_section("False Positive Possibilities", _incident_html_list(response.get("false_positive_possibilities"))),
-        _incident_report_section("Recommended Next Steps", _incident_html_list(response.get("recommended_next_steps"))),
-        _incident_report_section("Evidence Used", _incident_html_list(response.get("evidence_used"))),
-        _incident_report_section("Evidence Gaps", _incident_html_list(response.get("evidence_gaps"))),
-        _incident_report_section("Recommended Tuning Actions", _incident_html_list(response.get("recommended_tuning_actions"))),
-    ]
-    return '<div class="ir-prior-analysis">' + "".join(sections) + "</div>"
-
-
-def incident_read_service_sources() -> IncidentReadServiceSources:
-    """Bind portal runtime resources to Incident Response read orchestration."""
-    return IncidentReadServiceSources(
-        connect=soc_alert_db_connect,
-        api_error=soc_alert_api_error,
-        parse_list_request=parse_incident_list_request,
-        schema_ready=incident_schema_ready,
-        empty_page=empty_incident_page,
-        load_list_records=load_incident_list_records,
-        load_inventory=load_asset_inventory_data,
-        compose_list_rows=compose_incident_list_rows,
-        load_detail_records=load_incident_detail_records,
-        parse_analysis_response=parse_analysis_response,
-        compose_review_state=compose_incident_review_state,
-        review_defaults=_soc_review_defaults,
-        row_callbacks=INCIDENT_ROW_CALLBACKS,
-        render_incident_report=render_incident_response_report_html,
-        render_prior_analysis=render_prior_soc_analysis_html,
-        compose_detail_payload=compose_incident_detail_payload,
-    )
-
-
-def soc_incident_detail_response(case_id: str) -> tuple[int, dict]:
-    """Return one bounded IR report, its exact query audit, and prior SOC analysis."""
-    return incident_detail_response(incident_read_service_sources(), case_id)
+_INCIDENT_READ_RUNTIME = sys.modules[__name__]
+soc_incidents_query_response = partial(portal_incident_read_runtime.soc_incidents_query_response, _INCIDENT_READ_RUNTIME)
+soc_incident_review_state = partial(portal_incident_read_runtime.soc_incident_review_state, _INCIDENT_READ_RUNTIME)
+_incident_html_text = partial(portal_incident_read_runtime.incident_html_text, _INCIDENT_READ_RUNTIME)
+_incident_nonnegative_int = partial(portal_incident_read_runtime.incident_nonnegative_int, _INCIDENT_READ_RUNTIME)
+_incident_query_linked_finding = partial(portal_incident_read_runtime.incident_query_linked_finding, _INCIDENT_READ_RUNTIME)
+_incident_html_list = partial(portal_incident_read_runtime.incident_html_list, _INCIDENT_READ_RUNTIME)
+_incident_report_section = partial(portal_incident_read_runtime.incident_report_section, _INCIDENT_READ_RUNTIME)
+render_analyst_review_panel = partial(portal_incident_read_runtime.render_analyst_review_panel, _INCIDENT_READ_RUNTIME)
+render_investigation_query_audit_html = partial(portal_incident_read_runtime.render_investigation_query_audit_html, _INCIDENT_READ_RUNTIME)
+render_incident_response_report_html = partial(portal_incident_read_runtime.render_incident_response_report_html, _INCIDENT_READ_RUNTIME)
+render_prior_soc_analysis_html = partial(portal_incident_read_runtime.render_prior_soc_analysis_html, _INCIDENT_READ_RUNTIME)
+incident_read_service_sources = partial(portal_incident_read_runtime.incident_read_service_sources, _INCIDENT_READ_RUNTIME)
+soc_incident_detail_response = partial(portal_incident_read_runtime.soc_incident_detail_response, _INCIDENT_READ_RUNTIME)
 
 
 _SOC_QUERY_RUNTIME = sys.modules[__name__]

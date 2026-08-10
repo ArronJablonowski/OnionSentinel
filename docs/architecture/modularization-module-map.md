@@ -2707,6 +2707,15 @@ resolution, and adjudication-history composition. Alert-store remains the
 production mutation owner. Database, transport, clock, policy, and history
 ports remain injected, preserving status/error contracts and test isolation.
 
+### Incident read runtime
+
+`portal_incident_read_runtime.py` owns bounded incident list/detail composition,
+durable review-state projection, escaped review and responder report rendering,
+broker-owned query-audit rendering, prior SOC analysis rendering, and the
+incident read-service dependency bundle. It preserves lazy evidence loading,
+query-digest provenance, output caps, escaping, and the separation between
+durable repository records and presentation.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:
