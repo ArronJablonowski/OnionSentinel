@@ -717,6 +717,14 @@ the exact symbols; SQLite and run execution depend inward on this policy module.
 The unchanged legacy `HarnessPolicy.from_dict` validator retains its exact
 ratcheting allowance under the new owner and may not grow.
 
+`n8n/bin/harness_contracts.py` owns immutable job envelopes, bounded and
+secret-safe audit metadata, content-free investigation-skill attestations,
+hypothesis and terminal ledger manifests, and conservative evidence-row
+accounting. It depends only on `harness_policy.py` plus SQLite's read interface;
+it has no database lifecycle, network, model, or query execution authority.
+Unchanged legacy complexity allowances for skill attestation and job-envelope
+parsing move exactly to this owner and remain ratcheting.
+
 Existing SQLite files, schema versions, hash-chain calculations, terminal
 digests, skill attestations, and controlled-evaluation behavior are contracts.
 

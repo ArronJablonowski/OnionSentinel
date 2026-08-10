@@ -28,7 +28,7 @@
       "max_lines": 1147
     },
     "n8n/bin/onion_sentinel_harness.py": {
-      "max_lines": 3655
+      "max_lines": 3210
     },
     "n8n/bin/pcap_evidence_query.py": {
       "max_lines": 915
@@ -323,10 +323,10 @@
       "max_complexity": 36,
       "max_lines": 171
     },
-    "n8n/bin/onion_sentinel_harness.py::JobEnvelope.from_prompt": {
+    "n8n/bin/harness_contracts.py::JobEnvelope.from_prompt": {
       "max_complexity": 18
     },
-    "n8n/bin/onion_sentinel_harness.py::investigation_skill_selection_attestation": {
+    "n8n/bin/harness_contracts.py::investigation_skill_selection_attestation": {
       "max_complexity": 30,
       "max_lines": 128
     },

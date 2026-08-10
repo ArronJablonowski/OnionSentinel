@@ -78,8 +78,10 @@ class ModularizationCompatibilityContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_harness_job_envelope_has_one_dataclass_boundary(self) -> None:
-        harness = ROOT / "n8n" / "bin" / "onion_sentinel_harness.py"
-        tree = ast.parse(harness.read_text(encoding="utf-8"), filename=str(harness))
+        contracts = ROOT / "n8n" / "bin" / "harness_contracts.py"
+        tree = ast.parse(
+            contracts.read_text(encoding="utf-8"), filename=str(contracts)
+        )
         envelope = next(
             node
             for node in tree.body
