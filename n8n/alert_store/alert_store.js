@@ -37,6 +37,9 @@ const {
 } = require('./services/alert_store_schema_foundation');
 const {createIncidentAnalysisSchema} = require('./services/incident_analysis_schema');
 const {createAiReviewSchema} = require('./services/ai_review_schema');
+const {
+  createNotificationEnrichmentSchema,
+} = require('./services/notification_enrichment_schema');
 const {createInventoryService} = require('./services/inventory_service');
 const {createInventoryRoutes} = require('./routes/inventory_routes');
 const {createHealthRepository} = require('./repositories/health_repository');
@@ -1508,65 +1511,7 @@ async function initDb() {
   await alertStoreSchemaFoundation.installFoundation();
   await incidentAnalysisSchema.install();
   await aiReviewSchema.install();
-  await run(`
-    CREATE TABLE IF NOT EXISTS notification_log (
-      notification_key TEXT PRIMARY KEY,
-      last_sent TEXT NOT NULL,
-      sent_count INTEGER NOT NULL DEFAULT 1,
-      channel TEXT NOT NULL,
-      alert_id TEXT,
-      triage_level TEXT,
-      rule_name TEXT,
-      source_ip TEXT,
-      destination_ip TEXT
-    )
-  `);
-  await run(`
-    CREATE TABLE IF NOT EXISTS notification_outbox (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      notification_key TEXT NOT NULL,
-      channel TEXT NOT NULL DEFAULT 'telegram',
-      alert_id TEXT,
-      triage_level TEXT,
-      rule_name TEXT,
-      source_ip TEXT,
-      destination_ip TEXT,
-      payload_json TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending',
-      attempt_count INTEGER NOT NULL DEFAULT 0,
-      next_attempt_at TEXT NOT NULL,
-      last_error TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      sent_at TEXT
-    )
-  `);
-  await run('CREATE INDEX IF NOT EXISTS idx_notification_outbox_due ON notification_outbox(status, next_attempt_at, id)');
-  await run('CREATE INDEX IF NOT EXISTS idx_notification_outbox_key ON notification_outbox(notification_key, status)');
-  // A process exit can interrupt delivery after claim. Retrying is safe because
-  // notification_log cooldown still prevents a second queued alert message.
-  await run("UPDATE notification_outbox SET status = 'pending', updated_at = ? WHERE status = 'delivering'", [nowUtc()]);
-  await run(`
-    CREATE TABLE IF NOT EXISTS suppression_log (
-      suppression_key TEXT PRIMARY KEY,
-      rule_name TEXT NOT NULL,
-      reason TEXT,
-      window_start TEXT NOT NULL,
-      last_seen TEXT NOT NULL,
-      seen_count INTEGER NOT NULL DEFAULT 1,
-      suppressed_count INTEGER NOT NULL DEFAULT 0,
-      escalated_count INTEGER NOT NULL DEFAULT 0,
-      ttl_seconds INTEGER NOT NULL,
-      escalation_threshold INTEGER NOT NULL
-    )
-  `);
-  await enrichmentCache.install();
-  await run(`
-    CREATE TABLE IF NOT EXISTS enrichment_rate_limit (
-      source TEXT PRIMARY KEY,
-      last_request_at TEXT NOT NULL
-    )
-  `);
+  await notificationEnrichmentSchema.install();
   await run(`
     CREATE TABLE IF NOT EXISTS pcap_requests (
       request_id TEXT PRIMARY KEY,
@@ -4407,6 +4352,11 @@ const alertStoreSchemaFoundation = createAlertStoreSchemaFoundation({
 });
 const incidentAnalysisSchema = createIncidentAnalysisSchema({run, ensureColumn});
 const aiReviewSchema = createAiReviewSchema({run, ensureColumn});
+const notificationEnrichmentSchema = createNotificationEnrichmentSchema({
+  run,
+  nowUtc,
+  installEnrichmentCache: () => enrichmentCache.install(),
+});
 const controlledRetirementProjections = createControlledRetirementProjections({
   rawSha256: controlledRetirementRawSha256,
   sha256: controlledRetirementSha256,
