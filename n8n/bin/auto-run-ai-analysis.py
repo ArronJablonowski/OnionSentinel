@@ -208,6 +208,17 @@ from scheduler_worker import (
     SchedulerWorkerSources,
     process_scheduler_selection,
 )
+from scheduler_composition import (
+    build_application_sources,
+    build_claim_sources,
+    build_drain_sources,
+    build_execution_sources,
+    build_outcome_sources,
+    build_settlement_sources,
+    build_startup_sources,
+    build_terminal_recovery_sources,
+    build_worker_sources,
+)
 
 
 HOME = Path.home()
@@ -1615,12 +1626,7 @@ def scheduler_read_only_connection(path: Path) -> sqlite3.Connection:
 
 def terminal_recovery_sources() -> TerminalRecoverySources:
     """Bind recovery services at call time for compatibility and testing."""
-    return TerminalRecoverySources(
-        connect_read_only=scheduler_read_only_connection,
-        path_exists=lambda path: path.exists(),
-        load_candidates=load_terminal_success_recovery_candidates,
-        report_status=report_ai_job_status,
-    )
+    return build_terminal_recovery_sources(globals())
 
 
 def reconcile_terminal_success_durable_jobs(args: argparse.Namespace) -> int:
@@ -1650,141 +1656,42 @@ def detect_indexed_scheduler_mode(path: Path) -> bool:
 
 def scheduler_startup_sources() -> SchedulerStartupSources:
     """Bind startup services at call time for compatibility and testing."""
-    return SchedulerStartupSources(
-        stop_for_drain=stop_for_maintenance_drain,
-        controlled_runtime=controlled_evaluation_runtime,
-        consume_controlled_token=consume_controlled_evaluation_token,
-        require_capacity=require_runtime_capacity,
-        path_exists=lambda path: path.exists(),
-        consume_wake_marker=consume_wake_marker,
-        detect_indexed_mode=detect_indexed_scheduler_mode,
-        recover_controlled_spool=recover_controlled_evaluation_spool,
-        flush_deferred_results=flush_deferred_analysis_results,
-        recover_terminal_success=reconcile_terminal_success_durable_jobs,
-        reconcile_worker_state=reconcile_worker_state,
-        emit=lambda message: print(message, flush=True),
-        emit_error=lambda message: print(message, file=sys.stderr),
-        now=project_now,
-    )
+    return build_startup_sources(globals())
 
 
 def scheduler_settlement_sources() -> SchedulerSettlementSources:
     """Bind post-drain settlement effects at call time."""
-    return SchedulerSettlementSources(
-        signal_dashboard_refresh=signal_dashboard_refresh,
-        reconcile_worker_state=reconcile_worker_state,
-        emit=lambda message: print(message, flush=True),
-        emit_error=lambda message: print(message, file=sys.stderr),
-        now=project_now,
-        controlled_failure_exit_code=CONTROLLED_SELECTED_JOB_FAILURE_EXIT_CODE,
-    )
+    return build_settlement_sources(globals())
 
 
 def scheduler_claim_sources() -> SchedulerClaimSources:
     """Bind exact claim and server-authoritative identity services."""
-    return SchedulerClaimSources(
-        exact_expectations=controlled_claim_expectations,
-        report_status=report_ai_job_status,
-        load_claimed_job=claimed_durable_ai_job,
-        require_controlled_identity=require_controlled_claim_identity,
-        job_reanalysis_attempt_id=job_reanalysis_attempt_id,
-        emit=lambda message: print(message, flush=True),
-        now=project_now,
-    )
+    return build_claim_sources(globals())
 
 
 def scheduler_execution_sources() -> SchedulerExecutionSources:
     """Bind evidence, prompt, lease-renewal, and runner services."""
-    return SchedulerExecutionSources(
-        report_status=report_ai_job_status,
-        validate_controlled_route=controlled_job_route_contract,
-        collect_incident_evidence=collect_incident_evidence,
-        build_prompt=build_prompt,
-        reusable_prompt=reusable_prompt_for_alert,
-        run_analysis=run_analysis,
-    )
+    return build_execution_sources(globals())
 
 
 def scheduler_outcome_sources() -> SchedulerOutcomeSources:
     """Bind status reporting, spool recovery, and output effects."""
-    return SchedulerOutcomeSources(
-        report_status=report_ai_job_status,
-        failure_is_retryable=ai_failure_is_retryable,
-        recover_controlled_spool=recover_controlled_evaluation_spool,
-        controlled_spool_pending=controlled_recovery_spool_pending,
-        now=project_now,
-        emit=lambda message: print(message, flush=True),
-        emit_error=lambda message: print(message, file=sys.stderr),
-        write_stdout=lambda message: print(message, end=""),
-        write_stderr=lambda message: print(message, file=sys.stderr, end=""),
-        result_submission_indeterminate_marker=(
-            CONTROLLED_RESULT_SUBMISSION_INDETERMINATE
-        ),
-    )
+    return build_outcome_sources(globals())
 
 
 def scheduler_drain_sources() -> SchedulerDrainSources:
     """Bind queue selection and drain-loop projection services."""
-    def open_readonly_database(database_path: Path) -> sqlite3.Connection:
-        connection = sqlite3.connect(
-            f"file:{database_path}?mode=ro",
-            uri=True,
-        )
-        connection.row_factory = sqlite3.Row
-        return connection
-
-    return SchedulerDrainSources(
-        stop_for_drain=stop_for_maintenance_drain,
-        configured_levels=configured_analysis_levels,
-        open_readonly_database=open_readonly_database,
-        select_indexed=select_next_alert_indexed,
-        select_legacy=select_next_alert,
-        analyzed_alert_ids=analyzed_alert_ids,
-        alert_group_key=alert_group_key,
-        alert_group_id=alert_group_id,
-        durable_payload=durable_payload,
-        now=project_now,
-        emit=lambda message: print(message, flush=True),
-    )
+    return build_drain_sources(globals())
 
 
 def scheduler_worker_sources() -> SchedulerWorkerSources:
     """Bind the per-selection scheduler application workflow."""
-    return SchedulerWorkerSources(
-        acquire_claim=acquire_scheduler_claim,
-        claim_sources=scheduler_claim_sources,
-        execute_analysis=execute_scheduler_analysis,
-        execution_sources=scheduler_execution_sources,
-        handle_process_outcome=handle_process_outcome,
-        handle_claim_rejection=handle_controlled_claim_rejection,
-        handle_exception=handle_scheduler_exception,
-        outcome_sources=scheduler_outcome_sources,
-        controlled_claim_error=ControlledClaimRejected,
-        execution_errors=(BoundedProcessError, RuntimeError, OSError),
-    )
+    return build_worker_sources(globals())
 
 
 def main() -> int:
     return run_scheduler_application(
-        SchedulerApplicationSources(
-            parse_args=parse_args,
-            startup_sources=scheduler_startup_sources,
-            prepare_run=prepare_scheduler_run,
-            initialize_run=initialize_scheduler_run,
-            drain_sources=scheduler_drain_sources,
-            select_work=select_scheduler_work,
-            worker_sources=scheduler_worker_sources,
-            process_selection=process_scheduler_selection,
-            settlement_sources=scheduler_settlement_sources,
-            settle_run=settle_scheduler_run,
-            acquire_nonblocking_lock=lambda handle: fcntl.flock(
-                handle,
-                fcntl.LOCK_EX | fcntl.LOCK_NB,
-            ),
-            emit=lambda message: print(message, flush=True),
-            now=project_now,
-            default_drain_file=DEFAULT_DRAIN,
-        )
+        build_application_sources(globals())
     )
 
 

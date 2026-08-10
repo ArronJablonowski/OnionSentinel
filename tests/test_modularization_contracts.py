@@ -111,6 +111,29 @@ class ModularizationCompatibilityContractTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_scheduler_supports_isolated_late_bound_composition(self) -> None:
+        scheduler = ROOT / "n8n" / "bin" / "auto-run-ai-analysis.py"
+        script = (
+            "import importlib.util,sys;"
+            f"p={str(scheduler)!r};"
+            "s=importlib.util.spec_from_file_location('isolated_scheduler',p);"
+            "m=importlib.util.module_from_spec(s);"
+            "s.loader.exec_module(m);"
+            "replacement=lambda *a,**k:None;"
+            "m.run_analysis=replacement;"
+            "assert m.scheduler_execution_sources().run_analysis is replacement;"
+            "assert callable(m.main) and callable(m.parse_args)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_harness_job_envelope_has_one_dataclass_boundary(self) -> None:
         contracts = ROOT / "n8n" / "bin" / "harness_contracts.py"
         tree = ast.parse(

@@ -474,6 +474,12 @@ selection and processing, controlled-run state projection, and final
 settlement. The legacy `main()` now only binds current facade collaborators,
 so tests and operational overrides retain their existing interception points.
 
+`scheduler_composition.py` owns the late-bound port assembly for startup,
+terminal recovery, claim, execution, outcome, drain, worker, settlement, and
+application services. Its pure builders receive the compatibility facade's
+live namespace, preserving call-time test and operator overrides without
+acquiring database, network, process, or credential authority.
+
 `scheduler_cli.py` now owns the launchd-facing argument schema, runtime path
 options, lane and queue controls, numeric bounds, and fail-closed controlled-
 evaluation identity validation. `auto-run-ai-analysis.py` retains a thin
