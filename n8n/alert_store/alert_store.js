@@ -51,6 +51,7 @@ const analystReviewDefinitions = require('./services/analyst_review_projection')
 const {
   createAnalystDecisionPersistence,
 } = require('./services/analyst_decision_persistence');
+const {createAlertIngestOrchestrator} = require('./services/alert_ingest_orchestrator');
 const {createInventoryService} = require('./services/inventory_service');
 const {createInventoryRoutes} = require('./routes/inventory_routes');
 const {createHealthRepository} = require('./repositories/health_repository');
@@ -1673,93 +1674,7 @@ function buildPostCommitPayload(rawAlert, stored) {
 }
 
 async function storeAlert(rawAlert) {
-  const alert = {
-    ...rawAlert,
-    triage: scoreAlert(rawAlert),
-  };
-  let wakeAiAfterCommit = false;
-  const result = await withSqliteWriteGate(() => withImmediateTransaction(async () => {
-    const stored = await storeAlertUnlocked(alert);
-    if (stored.ok) {
-      let enrichmentQueued = false;
-      stored.notification = await queueTelegramNotification(
-        alert,
-        stored.alert,
-        stored.stored,
-        nowUtc(),
-        stored.filter,
-      );
-      if (stored.status === 'accepted' && stored.stored && stored.alert?.alert_id) {
-        const postCommitPayload = buildPostCommitPayload(rawAlert, stored);
-        await durableJobs.enqueue(
-          'n8n_post_commit',
-          stored.alert.alert_id,
-          postCommitPayload,
-          {priority: severityRank[String(stored.alert.triage_level || 'informational').toLowerCase()] ?? 0,
-            maxAttempts: n8nPostCommitMaxAttempts},
-        );
-        await pipelineMetrics.record('n8n_post_commit', 'enqueued', stored.alert.alert_id, {
-          eventKey: `n8n_post_commit:enqueued:${stored.alert.alert_id}`,
-          sizeBytes: Buffer.byteLength(JSON.stringify(postCommitPayload)),
-        });
-      }
-      const campaignEnrichmentAdmitted = !stored.campaign
-        || stored.campaign.member_ordinal <= stored.campaign.enrichment_sample_limit;
-      if (
-        stored.alert?.alert_id
-        && stored.status !== 'dropped'
-        && !hasUsableExternalIntel(alert)
-        && campaignEnrichmentAdmitted
-      ) {
-        const level = String(stored.alert.triage_level || nestedField(alert, 'triage.level') || 'informational').toLowerCase();
-        await durableJobs.enqueue('public_enrichment', stored.alert.alert_id, {alert_id: stored.alert.alert_id}, {
-          priority: severityRank[level] ?? 0,
-          maxAttempts: enrichmentWorkerMaxAttempts,
-        });
-        await pipelineMetrics.record('public_enrichment', 'enqueued', stored.alert.alert_id, {
-          eventKey: `public_enrichment:enqueued:${stored.alert.alert_id}:${stored.alert.seen_count || 1}`,
-        });
-        enrichmentQueued = true;
-      }
-      if (stored.alert?.alert_id && !['dropped', 'suppressed'].includes(stored.status)) {
-        const groupKey = stored.alert.stable_group_key || alertGroupKeyFromRow(stored.alert);
-        const groupId = stored.alert.stable_group_id || alertGroupId(groupKey);
-        const level = String(stored.alert.triage_level || 'informational').toLowerCase();
-        const campaignOwnsIncidentInvestigation = stored.campaign?.investigation_mode
-          === 'incident_response_only';
-        if (socAnalysisPolicy.matchesAnalysis(level) && !campaignOwnsIncidentInvestigation) {
-          await durableJobs.enqueue('ai_analysis', groupId, {
-            group_id: groupId,
-            group_key: groupKey,
-            representative_alert_id: stored.alert.alert_id,
-          }, {priority: severityRank[level] ?? 0, maxAttempts: 8});
-          await pipelineMetrics.record('ai_analysis', 'enqueued', groupId, {
-            eventKey: `ai_analysis:enqueued:${groupId}:${stored.alert.seen_count || 1}`,
-          });
-          // Enrichment normally finishes in seconds. Let that committed
-          // evidence wake AI first; launchd remains the bounded fallback.
-          wakeAiAfterCommit = !enrichmentQueued;
-        }
-        // Automatic incident response owns a separate threshold and still
-        // needs the worker even when base SOC analysis is below its floor.
-        wakeAiAfterCommit = wakeAiAfterCommit || stored.incident?.status === 'queued';
-      }
-      await pipelineMetrics.record('alert_ingest', 'completed', stored.alert?.alert_id || 'unknown', {
-        eventKey: `alert_ingest:completed:${stored.alert?.alert_id || 'unknown'}:${stored.alert?.seen_count || 1}`,
-        sizeBytes: Buffer.byteLength(JSON.stringify(rawAlert || {})),
-      });
-    }
-    return stored;
-  }));
-  if (!result.ok) return result;
-  if (wakeAiAfterCommit) void signalAiWorkers('alert-committed');
-  // Delivery is deliberately outside the ingest transaction. A Telegram
-  // timeout cannot delay the webhook response or cause n8n to replay a safely
-  // committed alert.
-  void drainTelegramOutbox();
-  void drainEnrichmentJobs();
-  void drainN8nPostCommitJobs();
-  return result;
+  return alertIngestOrchestrator.store(rawAlert);
 }
 
 function controlledJobClaimIdentity(value) {
@@ -3363,6 +3278,29 @@ const analystDecisionPersistence = createAnalystDecisionPersistence({
   nowUtc,
   randomUUID: crypto.randomUUID,
   jsonText,
+});
+const alertIngestOrchestrator = createAlertIngestOrchestrator({
+  scoreAlert,
+  withWriteGate: withSqliteWriteGate,
+  withTransaction: withImmediateTransaction,
+  storeUnlocked: storeAlertUnlocked,
+  queueNotification: queueTelegramNotification,
+  nowUtc,
+  buildPostCommitPayload,
+  enqueueJob: (...args) => durableJobs.enqueue(...args),
+  recordMetric: (...args) => pipelineMetrics.record(...args),
+  severityRank,
+  postCommitMaxAttempts: n8nPostCommitMaxAttempts,
+  hasUsableExternalIntel,
+  nestedField,
+  enrichmentMaxAttempts: enrichmentWorkerMaxAttempts,
+  groupKeyFromRow: alertGroupKeyFromRow,
+  groupIdFromKey: alertGroupId,
+  matchesAnalysis: (level) => socAnalysisPolicy.matchesAnalysis(level),
+  signalAiWorkers,
+  drainNotificationOutbox: drainTelegramOutbox,
+  drainEnrichmentJobs,
+  drainPostCommitJobs: drainN8nPostCommitJobs,
 });
 const startupPersistenceOrchestrator = createStartupPersistenceOrchestrator({
   initializeDurableJobs,
