@@ -486,6 +486,12 @@ provider-lane resolution, and Codex prompt ceilings. Compatibility delegates
 pass the facade's live constants and environment at call time, so saved settings
 and test overrides retain the exact historical behavior.
 
+`scheduler_selection_compat.py` owns facade-level construction of indexed and
+legacy selection requests and source ports, bounded test-fixture exclusion, and
+defensive durable-payload decoding. Indexed fairness and legacy artifact
+freshness remain enforced by their extracted selection services; live facade
+bindings preserve compatibility overrides.
+
 `scheduler_controlled_compat.py` owns the facade-level controlled-evaluation
 policy assembly: frozen-runtime admission, ephemeral mutation-token containment,
 bounded recovery transport and payload binding, owner-private artifact access,

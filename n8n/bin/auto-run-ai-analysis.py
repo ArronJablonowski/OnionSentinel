@@ -254,6 +254,12 @@ from scheduler_controlled_compat import (
     valid_controlled_stable_group_key as validate_stable_group_key,
     validate_controlled_recovery_payload as validate_recovery_payload,
 )
+from scheduler_selection_compat import (
+    durable_payload as decode_durable_payload,
+    select_next_alert_indexed as select_indexed_candidate,
+    select_next_alert_legacy as select_legacy_candidate,
+    test_filter_sql as build_test_filter_sql,
+)
 
 
 HOME = Path.home()
@@ -744,12 +750,7 @@ def reconcile_completed_ai_jobs(base_url: str, group_ids: set[str]) -> int:
 
 
 def test_filter_sql(column: str = "alert_id") -> tuple[str, list[object]]:
-    clauses = []
-    params: list[object] = []
-    for pattern in TEST_PREFIXES:
-        clauses.append(f"{column} NOT LIKE ?")
-        params.append(pattern)
-    return " AND ".join(clauses), params
+    return build_test_filter_sql(TEST_PREFIXES, column)
 
 
 def select_next_alert_indexed(
@@ -757,29 +758,12 @@ def select_next_alert_indexed(
     args: argparse.Namespace,
     already_selected_groups: set[str] | None = None,
 ) -> sqlite3.Row | None:
-    lane_sql, lane_params = provider_lane_sql(args)
-    # Indexed groups are guarded by durable job state. Do not apply the legacy
-    # per-process exclusion set: a request coalesced while inference is active
-    # becomes a fresh pending job and should be eligible immediately.
-    del already_selected_groups
-    request = IndexedSelectionRequest(
-        levels=args.levels,
-        hours=args.hours,
-        include_tests=args.include_tests,
-        only_group_id=str(getattr(args, "only_group_id", "") or ""),
-        lane_sql=lane_sql,
-        lane_params=tuple(lane_params),
+    return select_indexed_candidate(
+        globals(),
+        conn,
+        args,
+        already_selected_groups,
     )
-    sources = IndexedSelectionSources(
-        now=lambda: dt.datetime.now().astimezone(),
-        precise_now=project_now_precise,
-        alert_time_sql=alert_time_sql,
-        severity_priority_sql=severity_priority_sql,
-        test_filter_sql=test_filter_sql,
-        eligible_filter_statuses=ELIGIBLE_FILTER_STATUSES,
-        fairness_age_seconds=AI_JOB_FAIRNESS_AGE_SECONDS,
-    )
-    return select_next_indexed_alert(conn, request, sources)
 
 
 def select_next_alert(
@@ -788,43 +772,18 @@ def select_next_alert(
     already_analyzed: set[str],
     already_selected_groups: set[str] | None = None,
 ) -> sqlite3.Row | None:
-    request = LegacySelectionRequest(
-        levels=args.levels,
-        hours=args.hours,
-        include_tests=args.include_tests,
-        only_group_id=str(getattr(args, "only_group_id", "") or ""),
-        analysis_dir=getattr(args, "analysis_dir", None),
-        pcap_analysis_dir=getattr(args, "pcap_analysis_dir", None),
-        prompt_dir=getattr(args, "prompt_dir", None),
-        already_analyzed=frozenset(already_analyzed),
-        already_selected_groups=frozenset(already_selected_groups or set()),
+    return select_legacy_candidate(
+        globals(),
+        conn,
+        args,
+        already_analyzed,
+        already_selected_groups,
     )
-    sources = LegacySelectionSources(
-        now=lambda: dt.datetime.now().astimezone(),
-        alert_time_sql=lambda: alert_time_sql(),
-        alert_group_key_sql=alert_group_key_sql,
-        severity_priority_sql=lambda: severity_priority_sql(),
-        test_filter_sql=lambda: test_filter_sql(),
-        latest_prompt_mtimes=latest_prompt_mtimes,
-        latest_analysis_mtimes=latest_analysis_mtimes,
-        analyzed_alert_groups=analyzed_alert_groups,
-        pending_ai_job_ids=pending_ai_job_ids,
-        alert_group_key=alert_group_key,
-        alert_group_id=alert_group_id,
-        eligible_filter_statuses=ELIGIBLE_FILTER_STATUSES,
-    )
-    return select_next_legacy_alert(conn, request, sources)
 
 
 def durable_payload(selected: sqlite3.Row) -> dict[str, object]:
     """Decode trusted queue metadata without letting corruption alter limits."""
-    if "durable_payload_json" not in selected.keys():
-        return {}
-    try:
-        payload = json.loads(str(selected["durable_payload_json"] or "{}"))
-    except json.JSONDecodeError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    return decode_durable_payload(globals(), selected)
 
 
 def claimed_durable_ai_job(
