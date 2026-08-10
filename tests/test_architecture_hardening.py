@@ -101,6 +101,14 @@ class ArchitectureHardeningTest(unittest.TestCase):
             '/opt/homebrew/bin/npm ci --omit=dev',
             installer,
         )
+        self.assertIn(
+            '/opt/homebrew/bin/npm run check:install-scripts',
+            installer,
+        )
+        self.assertIn(
+            'verify_install_script_policy.js',
+            installer,
+        )
         self.assertNotIn(
             '/opt/homebrew/bin/npm --prefix "$STACK_DIR/alert_store"',
             installer,

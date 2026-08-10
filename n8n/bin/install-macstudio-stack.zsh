@@ -454,6 +454,7 @@ cp "$REPO_DIR/n8n/alert_store/alert_store.js" "$STACK_DIR/alert_store/alert_stor
 cp "$REPO_DIR/n8n/alert_store/alert_store_proxy.js" "$STACK_DIR/alert_store/alert_store_proxy.js"
 cp "$REPO_DIR/n8n/alert_store/package.json" "$STACK_DIR/alert_store/package.json"
 cp "$REPO_DIR/n8n/alert_store/package-lock.json" "$STACK_DIR/alert_store/package-lock.json"
+cp "$REPO_DIR/n8n/alert_store/verify_install_script_policy.js" "$STACK_DIR/alert_store/verify_install_script_policy.js"
 cp "$REPO_DIR/n8n/alert_store/review_alerts.js" "$STACK_DIR/alert_store/review_alerts.js"
 cp "$REPO_DIR/n8n/alert_store/investigation_notes.js" "$STACK_DIR/alert_store/investigation_notes.js"
 cp "$REPO_DIR/n8n/alert_store/lib/provider_scheduler.js" "$STACK_DIR/alert_store/lib/provider_scheduler.js"
@@ -1314,9 +1315,18 @@ if (major < 20 || (major === 20 && minor < 17)) {
   process.exit(1);
 }
 '
+/opt/homebrew/bin/node -e '
+const version = process.argv[1];
+const major = Number(String(version).split(".")[0]);
+if (!Number.isInteger(major) || major < 11) {
+  console.error(`Onion Sentinel locked install policy requires npm >=11; found ${version}`);
+  process.exit(1);
+}
+' "$(/opt/homebrew/bin/npm --version)"
 (
   cd "$STACK_DIR/alert_store"
   PATH="/opt/homebrew/bin:$PATH" /opt/homebrew/bin/npm ci --omit=dev
+  PATH="/opt/homebrew/bin:$PATH" /opt/homebrew/bin/npm run check:install-scripts
 )
 
 /usr/local/bin/docker compose -f "$STACK_DIR/docker-compose.yml" --project-directory "$STACK_DIR" up -d

@@ -7,10 +7,14 @@
   "scripts": {
     "start": "node alert_store.js",
     "check": "node --check alert_store.js",
+    "check:install-scripts": "npm install-scripts ls --json | node verify_install_script_policy.js",
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "pg": "8.22.0",
     "sqlite3": "6.0.1"
+  },
+  "allowScripts": {
+    "sqlite3@6.0.1": true
   }
 }

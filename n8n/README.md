@@ -82,7 +82,7 @@ release_id="$(git rev-parse --verify HEAD)"
 ONION_SENTINEL_RELEASE_ID="$release_id" n8n/bin/install-macstudio-stack.zsh
 ```
 
-The host-native alert-store requires Node.js 20.17 or newer. The installer
+The host-native alert-store requires Node.js 20.17 and npm 11 or newer. The installer
 copies the committed lockfile and runs `npm ci --omit=dev`; do not replace this
 with an unlocked production install. The locked `sqlite3` runtime has no known
 production dependency advisories at the time of this release. Its optional
@@ -90,6 +90,17 @@ production dependency advisories at the time of this release. Its optional
 that toolchain for header downloads and is not imported by the running
 alert-store. The lockfile nevertheless pins the transitive toolchain to a
 non-advisory `undici` release so clean installs do not retain a known issue.
+
+The exact `sqlite3@6.0.1` native install script is the only approved dependency lifecycle
+script. The installer fails if npm reports any new or unreviewed script-bearing
+dependency.
+
+`sqlite3@6.0.1` is the latest published compatible release and still invokes
+the deprecated `prebuild-install@7.1.3` helper before its `node-gyp` fallback.
+No maintained drop-in with the same callback/API and Node 20 support is
+currently available, so the approval is version-pinned and must be reviewed on
+every sqlite3 upgrade. Runtime code loads the compiled binding, not either
+installer. Do not broaden `allowScripts` to an unpinned package name.
 
 The installer validates and persists the exact release ID before deployment.
 For a commit-less disaster recovery only,
