@@ -725,6 +725,13 @@ it has no database lifecycle, network, model, or query execution authority.
 Unchanged legacy complexity allowances for skill attestation and job-envelope
 parsing move exactly to this owner and remain ratcheting.
 
+`n8n/bin/harness_query_contract.py` owns bounded returned-count observation,
+recursive truncation detection, and exact per-query status resolution from a
+Security Onion batch. Individual status is admitted only when outer response,
+read-only controls, query ordering, audit ordering, query/result digests,
+semantic validity, timeout state, and successful shard accounting agree. The
+full outer result remains the durable provenance object.
+
 Existing SQLite files, schema versions, hash-chain calculations, terminal
 digests, skill attestations, and controlled-evaluation behavior are contracts.
 

@@ -756,6 +756,7 @@ cp "$REPO_DIR/n8n/bin/ac_hunter_contract.py" "$STACK_DIR/bin/ac_hunter_contract.
 cp "$REPO_DIR/n8n/bin/onion_sentinel_harness.py" "$STACK_DIR/bin/onion_sentinel_harness.py"
 cp "$REPO_DIR/n8n/bin/harness_contracts.py" "$STACK_DIR/bin/harness_contracts.py"
 cp "$REPO_DIR/n8n/bin/harness_policy.py" "$STACK_DIR/bin/harness_policy.py"
+cp "$REPO_DIR/n8n/bin/harness_query_contract.py" "$STACK_DIR/bin/harness_query_contract.py"
 cp "$REPO_DIR/n8n/bin/security_jsonl_log.py" "$STACK_DIR/bin/security_jsonl_log.py"
 cp "$REPO_DIR/operations/evaluate-harness-traces.py" "$STACK_DIR/bin/evaluate-harness-traces.py"
 cp "$REPO_DIR/operations/trace_evaluation_skills.py" "$STACK_DIR/bin/trace_evaluation_skills.py"
