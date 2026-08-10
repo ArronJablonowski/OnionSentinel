@@ -255,6 +255,29 @@ class ModularizationCompatibilityContractTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_software_inventory_collector_supports_isolated_file_loader_import(self) -> None:
+        collector = ROOT / "n8n" / "bin" / "collect-software-inventory.py"
+        script = (
+            "import importlib.util,sys;"
+            f"p={str(collector)!r};"
+            "s=importlib.util.spec_from_file_location('isolated_software_collector',p);"
+            "m=importlib.util.module_from_spec(s);"
+            "sys.modules[s.name]=m;"
+            "s.loader.exec_module(m);"
+            "assert callable(m.collect_snapshot);"
+            "assert callable(m.validate_state);"
+            "assert callable(m.main)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_contract_is_versioned_and_bound_to_a_full_release(self) -> None:
         contract = load_contract()
         self.assertEqual(
