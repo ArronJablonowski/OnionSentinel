@@ -12,9 +12,6 @@
     "n8n/bin/pcap_evidence_query.py": {
       "max_lines": 915
     },
-    "onion-sentinel-dashboard/onion_sentinel_server.py": {
-      "max_lines": 979
-    },
     "operations/benchmark-ollama-cybersecurity.py": {
       "max_lines": 1164
     }
@@ -390,20 +387,6 @@
     },
     "onion-sentinel-dashboard/cti_program.py::normalize_program": {
       "max_complexity": 20
-    },
-    "onion-sentinel-dashboard/onion_sentinel_server.py::OnionSentinelHandler.do_GET": {
-      "max_complexity": 28,
-      "max_lines": 145
-    },
-    "onion-sentinel-dashboard/onion_sentinel_server.py::OnionSentinelHandler.do_POST": {
-      "max_complexity": 23,
-      "max_lines": 120
-    },
-    "onion-sentinel-dashboard/onion_sentinel_server.py::current_runtime_release_id": {
-      "max_complexity": 22
-    },
-    "onion-sentinel-dashboard/onion_sentinel_server.py::main": {
-      "max_complexity": 27
     },
     "onion-sentinel-dashboard/scripts/dashboard_pcap_components.py::render_pcap_evidence_markdown": {
       "max_complexity": 22
