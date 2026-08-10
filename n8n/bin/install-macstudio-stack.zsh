@@ -104,6 +104,7 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/services/incident_analysis_schema.js" \
     "$ALERT_STORE_STAGE_DIR/services/ai_review_schema.js" \
     "$ALERT_STORE_STAGE_DIR/services/notification_enrichment_schema.js" \
+    "$ALERT_STORE_STAGE_DIR/services/pcap_schema.js" \
     "$ALERT_STORE_STAGE_DIR/services/durable_job_recovery.js" \
     "$ALERT_STORE_STAGE_DIR/services/durable_job_transition_executor.js" \
     "$ALERT_STORE_STAGE_DIR/services/controlled_retirement_completed_member.js" \

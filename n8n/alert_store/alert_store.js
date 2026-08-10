@@ -40,6 +40,7 @@ const {createAiReviewSchema} = require('./services/ai_review_schema');
 const {
   createNotificationEnrichmentSchema,
 } = require('./services/notification_enrichment_schema');
+const {createPcapSchema} = require('./services/pcap_schema');
 const {createInventoryService} = require('./services/inventory_service');
 const {createInventoryRoutes} = require('./routes/inventory_routes');
 const {createHealthRepository} = require('./repositories/health_repository');
@@ -1512,76 +1513,7 @@ async function initDb() {
   await incidentAnalysisSchema.install();
   await aiReviewSchema.install();
   await notificationEnrichmentSchema.install();
-  await run(`
-    CREATE TABLE IF NOT EXISTS pcap_requests (
-      request_id TEXT PRIMARY KEY,
-      status TEXT NOT NULL,
-      alert_id TEXT,
-      group_id TEXT,
-      group_key TEXT,
-      first_seen TEXT,
-      last_seen TEXT,
-      source_ip TEXT,
-      source_port INTEGER,
-      destination_ip TEXT,
-      destination_port INTEGER,
-      network_protocol TEXT,
-      transport_protocol TEXT,
-      community_id TEXT,
-      requested_by TEXT,
-      reason TEXT NOT NULL,
-      max_window_seconds INTEGER NOT NULL,
-      relay_host TEXT,
-      artifact_path TEXT,
-      artifact_sha256 TEXT,
-      artifact_size_bytes INTEGER,
-      error TEXT,
-      diagnostics_json TEXT,
-      request_json TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      claimed_at TEXT,
-      completed_at TEXT,
-      updated_at TEXT NOT NULL
-    )
-  `);
-  await ensureColumn('pcap_requests', 'claimed_at', 'TEXT');
-  await ensureColumn('pcap_requests', 'completed_at', 'TEXT');
-  await ensureColumn('pcap_requests', 'diagnostics_json', 'TEXT');
-  await ensureColumn('pcap_requests', 'analysis_status', "TEXT NOT NULL DEFAULT 'not_ready'");
-  await ensureColumn('pcap_requests', 'analysis_attempt_count', 'INTEGER NOT NULL DEFAULT 0');
-  await ensureColumn('pcap_requests', 'analysis_error', 'TEXT');
-  await ensureColumn('pcap_requests', 'analysis_started_at', 'TEXT');
-  await ensureColumn('pcap_requests', 'analysis_completed_at', 'TEXT');
-  await ensureColumn('pcap_requests', 'outcome', 'TEXT');
-  await ensureColumn('pcap_requests', 'transfer_stage', 'TEXT');
-  await ensureColumn('pcap_requests', 'transfer_bytes', 'INTEGER NOT NULL DEFAULT 0');
-  await ensureColumn('pcap_requests', 'transfer_total_bytes', 'INTEGER NOT NULL DEFAULT 0');
-  await ensureColumn('pcap_requests', 'transfer_progress_at', 'TEXT');
-  await ensureColumn('pcap_requests', 'transfer_duration_seconds', 'INTEGER');
-  await ensureColumn('pcap_requests', 'transfer_attempt_count', 'INTEGER NOT NULL DEFAULT 0');
-  await ensureColumn('pcap_requests', 'transfer_retry_count', 'INTEGER NOT NULL DEFAULT 0');
-  await ensureColumn('pcap_requests', 'transfer_last_error', 'TEXT');
-  await ensureColumn('pcap_requests', 'transfer_last_failed_stage', 'TEXT');
-  await ensureColumn('pcap_requests', 'next_attempt_at', 'TEXT');
-  await run(`
-    UPDATE pcap_requests
-    SET transfer_duration_seconds = MAX(
-      0,
-      CAST(ROUND(
-        (julianday(replace(completed_at, '  ', 'T')) -
-         julianday(replace(claimed_at, '  ', 'T'))) * 86400
-      ) AS INTEGER)
-    )
-    WHERE transfer_duration_seconds IS NULL
-      AND claimed_at IS NOT NULL
-      AND completed_at IS NOT NULL
-  `);
-  await pcapRequestRepository.backfillOutcomes();
-  await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_status_created ON pcap_requests(status, created_at)');
-  await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_status_next_attempt ON pcap_requests(status, next_attempt_at)');
-  await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_completed_at ON pcap_requests(completed_at)');
-  await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_alert_id ON pcap_requests(alert_id)');
-  await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_group_id ON pcap_requests(group_id)');
+  await pcapSchema.install();
   initializeDurableJobs();
   await durableJobs.install();
   initializePostgresShadowOutbox();
@@ -4356,6 +4288,11 @@ const notificationEnrichmentSchema = createNotificationEnrichmentSchema({
   run,
   nowUtc,
   installEnrichmentCache: () => enrichmentCache.install(),
+});
+const pcapSchema = createPcapSchema({
+  run,
+  ensureColumn,
+  backfillOutcomes: () => pcapRequestRepository.backfillOutcomes(),
 });
 const controlledRetirementProjections = createControlledRetirementProjections({
   rawSha256: controlledRetirementRawSha256,
