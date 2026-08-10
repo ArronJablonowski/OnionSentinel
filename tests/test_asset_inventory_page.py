@@ -18,6 +18,7 @@ DASHBOARD_DIR = ROOT / "onion-sentinel-dashboard"
 PORTAL_PATH = DASHBOARD_DIR / "report_portal.py"
 ASSET_WRITE_POLICY_PATH = DASHBOARD_DIR / "portal_asset_write_request.py"
 JSON_WRITE_SERVICE_PATH = DASHBOARD_DIR / "portal_json_write_service.py"
+HTTP_HANDLER_PATH = DASHBOARD_DIR / "portal_http_handler.py"
 BUILDER_PATH = DASHBOARD_DIR / "scripts" / "build_soc_alerts_dashboard.py"
 ASSET_PAGE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_asset_inventory_page.py"
 INSTALLER_PATH = ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
@@ -470,6 +471,7 @@ class AssetInventoryPageTests(unittest.TestCase):
         self.assertIn(".dhcp-review-check[hidden]{display:none!important}", page)
         self.assertIn("asset-inventory.html", page)
         portal_source = PORTAL_PATH.read_text(encoding="utf-8")
+        handler_source = HTTP_HANDLER_PATH.read_text(encoding="utf-8")
         asset_write_policy = ASSET_WRITE_POLICY_PATH.read_text(encoding="utf-8")
         json_write_service = JSON_WRITE_SERVICE_PATH.read_text(encoding="utf-8")
         self.assertIn(
@@ -479,7 +481,7 @@ class AssetInventoryPageTests(unittest.TestCase):
         self.assertIn('"authentication_required"', asset_write_policy)
         self.assertIn(
             "dispatch_json_write(",
-            portal_source,
+            handler_source,
         )
         self.assertIn("prepare_asset_write_request(", json_write_service)
         self.assertIn(

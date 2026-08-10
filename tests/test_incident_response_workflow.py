@@ -19,6 +19,7 @@ BUILDER_PATH = DASHBOARD_DIR / "scripts" / "build_soc_alerts_dashboard.py"
 INCIDENT_PAGE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_incident_response_page.py"
 SHELL_PAGE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_shell_page.py"
 PORTAL_PATH = DASHBOARD_DIR / "report_portal.py"
+PORTAL_HTTP_HANDLER_PATH = DASHBOARD_DIR / "portal_http_handler.py"
 ALERT_STORE_PATH = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
 CONTROLLED_INCIDENT_COMPOSITION_PATH = (
     REPO_ROOT
@@ -716,12 +717,14 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
     def test_portal_review_routes_require_same_origin_json_marker(self) -> None:
         source = PORTAL_PATH.read_text(encoding="utf-8") + (
             PORTAL_PATH.parent / "portal_request_routes.py"
-        ).read_text(encoding="utf-8")
+        ).read_text(encoding="utf-8") + PORTAL_HTTP_HANDLER_PATH.read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("def _soc_review_write_authorized", source)
         self.assertIn('X-Onion-Sentinel-Request', source)
         self.assertIn('fetch_site != "same-origin"', source)
-        self.assertIn('parsed_origin.netloc.lower() != request_host', source)
+        self.assertIn('parsed_origin.netloc.lower() == request_host', source)
         alert_review = self.portal.classify_post_route(
             "/api/soc-alerts/group/adjudicate",
             cti_program_path=self.portal.CTI_PROGRAM_API_PATH,

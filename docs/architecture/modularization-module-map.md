@@ -1871,6 +1871,13 @@ exact response headers, stable revision projection, keepalive frames, and clean
 socket-disconnect handling. `report_portal.py` injects the cached snapshot,
 digest, clock, and sleep callbacks from its compatibility runtime.
 
+`portal_http_handler.py` owns HTTP response framing, HEAD/GET/POST dispatch,
+same-origin review-write policy, Administration session checks, and bounded
+error/redirect translation. A late-bound runtime provider preserves the
+existing patchable compatibility surface and the production
+`OnionSentinelHandler` subclass without importing the facade or creating a
+dependency cycle.
+
 `portal_admin_form_service.py` owns Administration form parsing, action-token
 ordering, login/password decision flow, session creation/destruction ports,
 action authorization and dispatch, cookie-header projection, and encoded
