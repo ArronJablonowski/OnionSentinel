@@ -34,6 +34,7 @@ SUPPRESSION_PERSISTENCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "supp
 AI_REVIEW_REPOSITORY = REPO_ROOT / "n8n" / "alert_store" / "repositories" / "ai_review_repository.js"
 AI_ANALYSIS_ACCEPTANCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "ai_analysis_acceptance.js"
 DURABLE_JOB_TRANSITION_EXECUTOR = REPO_ROOT / "n8n" / "alert_store" / "services" / "durable_job_transition_executor.js"
+DISK_WRITE_ADMISSION = REPO_ROOT / "n8n" / "alert_store" / "services" / "disk_write_admission.js"
 
 
 class AlertStoreResilienceTest(unittest.TestCase):
@@ -68,6 +69,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.ai_review_repository = AI_REVIEW_REPOSITORY.read_text(encoding="utf-8")
         cls.ai_analysis_acceptance = AI_ANALYSIS_ACCEPTANCE.read_text(encoding="utf-8")
         cls.durable_job_transition_executor = DURABLE_JOB_TRANSITION_EXECUTOR.read_text(encoding="utf-8")
+        cls.disk_write_admission = DISK_WRITE_ADMISSION.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
         self.assertIn("require('./lib/provider_scheduler')", self.code)
@@ -311,9 +313,10 @@ class AlertStoreResilienceTest(unittest.TestCase):
     def test_new_intake_stops_before_the_eighty_percent_disk_ceiling(self) -> None:
         self.assertIn("function assertDiskWriteAdmission", self.code)
         self.assertIn("Math.min(80", self.code)
+        self.assertIn("createDiskWriteAdmission", self.code)
         self.assertIn("assertDiskWriteAdmission('alert ingestion')", self.alert_ingest_service)
         self.assertIn("assertDiskWriteAdmission('alert enrichment')", self.enrichment_service)
-        self.assertIn("error.statusCode = 507", self.code)
+        self.assertIn("error.statusCode = 507", self.disk_write_admission)
         self.assertIn("disk_capacity: state.diskCapacitySnapshot()", self.health_service)
 
     def test_heartbeats_are_accepted_before_disk_admission_is_checked(self) -> None:
