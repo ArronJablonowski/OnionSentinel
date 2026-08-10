@@ -17,6 +17,11 @@ AI_RUNNER = REPO_ROOT / "n8n" / "bin" / "run-local-ai-analysis.py"
 ALERT_STORE = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
 CORRELATION_MODULE = REPO_ROOT / "n8n" / "alert_store" / "lib" / "correlation_context.js"
 ANALYSIS_RESULT_ROUTES = REPO_ROOT / "n8n" / "alert_store" / "routes" / "analysis_result_routes.js"
+ANALYSIS_RESULT_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "analysis_result_service.js"
+SCHEMA_FOUNDATION = REPO_ROOT / "n8n" / "alert_store" / "services" / "alert_store_schema_foundation.js"
+INCIDENT_ANALYSIS_SCHEMA = REPO_ROOT / "n8n" / "alert_store" / "services" / "incident_analysis_schema.js"
+AI_REVIEW_SCHEMA = REPO_ROOT / "n8n" / "alert_store" / "services" / "ai_review_schema.js"
+AUTHORIZED_CAMPAIGN_PERSISTENCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "authorized_campaign_persistence.js"
 CORRELATION_BACKFILL = REPO_ROOT / "n8n" / "bin" / "backfill-ai-correlation-context.py"
 
 
@@ -376,16 +381,27 @@ class AiCorrelationContextTests(unittest.TestCase):
         )
 
     def test_alert_store_owns_correlation_writes(self) -> None:
-        source = ALERT_STORE.read_text(encoding="utf-8")
+        composition = ALERT_STORE.read_text(encoding="utf-8")
+        foundation = SCHEMA_FOUNDATION.read_text(encoding="utf-8")
+        incident_schema = INCIDENT_ANALYSIS_SCHEMA.read_text(encoding="utf-8")
+        review_schema = AI_REVIEW_SCHEMA.read_text(encoding="utf-8")
+        result_service = ANALYSIS_RESULT_SERVICE.read_text(encoding="utf-8")
+        campaign_persistence = AUTHORIZED_CAMPAIGN_PERSISTENCE.read_text(encoding="utf-8")
         result_routes = ANALYSIS_RESULT_ROUTES.read_text(encoding="utf-8")
         runner = AI_RUNNER.read_text(encoding="utf-8")
 
-        self.assertIn("CREATE TABLE IF NOT EXISTS alert_observables", source)
-        self.assertIn("CREATE TABLE IF NOT EXISTS ai_analysis_runs", source)
-        self.assertIn("CREATE TABLE IF NOT EXISTS alert_correlations", source)
+        self.assertIn("createAlertStoreSchemaFoundation", composition)
+        self.assertIn("createIncidentAnalysisSchema", composition)
+        self.assertIn("createAiReviewSchema", composition)
+        self.assertIn("CREATE TABLE IF NOT EXISTS alert_observables", foundation)
+        self.assertIn("CREATE TABLE IF NOT EXISTS ai_analysis_runs", incident_schema)
+        self.assertIn("CREATE TABLE IF NOT EXISTS alert_correlations", review_schema)
         self.assertIn("path: '/analysis/result'", result_routes)
-        self.assertIn("withSqliteWriteGate(() => withImmediateTransaction", source)
-        self.assertIn("observable.observable_type = 'community_id'", source)
+        self.assertIn("withWriteGate: withSqliteWriteGate", composition)
+        self.assertIn("withTransaction: withImmediateTransaction", composition)
+        self.assertIn("await withWriteGate(async () =>", result_service)
+        self.assertIn("await withTransaction(async () =>", result_service)
+        self.assertIn("observable.observable_type = 'community_id'", campaign_persistence)
         self.assertNotIn("sqlite3.connect", runner)
 
     def test_observable_module_normalizes_alert_facts(self) -> None:

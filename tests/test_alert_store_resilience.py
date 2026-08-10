@@ -19,11 +19,21 @@ DURABLE_JOB_ROUTES = REPO_ROOT / "n8n" / "alert_store" / "routes" / "durable_job
 PCAP_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "pcap_service.js"
 ENRICHMENT_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "enrichment_service.js"
 ALERT_INGEST_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "alert_ingest_service.js"
+ALERT_INGEST_ORCHESTRATOR = REPO_ROOT / "n8n" / "alert_store" / "services" / "alert_ingest_orchestrator.js"
 NOTIFICATION_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "notification_service.js"
 ALERT_GROUP_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "alert_group_service.js"
 ENRICHMENT_PROVIDER_CLIENT = REPO_ROOT / "n8n" / "alert_store" / "services" / "enrichment_provider_client.js"
 ENRICHMENT_ORCHESTRATOR = REPO_ROOT / "n8n" / "alert_store" / "services" / "enrichment_orchestrator.js"
 ANALYST_REVIEW_POLICY = REPO_ROOT / "n8n" / "alert_store" / "lib" / "analyst_review_policy.js"
+SCHEMA_FOUNDATION = REPO_ROOT / "n8n" / "alert_store" / "services" / "alert_store_schema_foundation.js"
+AI_REVIEW_SCHEMA = REPO_ROOT / "n8n" / "alert_store" / "services" / "ai_review_schema.js"
+NOTIFICATION_ENRICHMENT_SCHEMA = REPO_ROOT / "n8n" / "alert_store" / "services" / "notification_enrichment_schema.js"
+ANALYST_REVIEW_PROJECTION = REPO_ROOT / "n8n" / "alert_store" / "services" / "analyst_review_projection.js"
+ANALYST_DECISION_PERSISTENCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "analyst_decision_persistence.js"
+SUPPRESSION_PERSISTENCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "suppression_persistence.js"
+AI_REVIEW_REPOSITORY = REPO_ROOT / "n8n" / "alert_store" / "repositories" / "ai_review_repository.js"
+AI_ANALYSIS_ACCEPTANCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "ai_analysis_acceptance.js"
+DURABLE_JOB_TRANSITION_EXECUTOR = REPO_ROOT / "n8n" / "alert_store" / "services" / "durable_job_transition_executor.js"
 
 
 class AlertStoreResilienceTest(unittest.TestCase):
@@ -43,11 +53,21 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.pcap_service = PCAP_SERVICE.read_text(encoding="utf-8")
         cls.enrichment_service = ENRICHMENT_SERVICE.read_text(encoding="utf-8")
         cls.alert_ingest_service = ALERT_INGEST_SERVICE.read_text(encoding="utf-8")
+        cls.alert_ingest_orchestrator = ALERT_INGEST_ORCHESTRATOR.read_text(encoding="utf-8")
         cls.notification_service = NOTIFICATION_SERVICE.read_text(encoding="utf-8")
         cls.alert_group_service = ALERT_GROUP_SERVICE.read_text(encoding="utf-8")
         cls.enrichment_provider_client = ENRICHMENT_PROVIDER_CLIENT.read_text(encoding="utf-8")
         cls.enrichment_orchestrator = ENRICHMENT_ORCHESTRATOR.read_text(encoding="utf-8")
         cls.analyst_review_policy = ANALYST_REVIEW_POLICY.read_text(encoding="utf-8")
+        cls.schema_foundation = SCHEMA_FOUNDATION.read_text(encoding="utf-8")
+        cls.ai_review_schema = AI_REVIEW_SCHEMA.read_text(encoding="utf-8")
+        cls.notification_enrichment_schema = NOTIFICATION_ENRICHMENT_SCHEMA.read_text(encoding="utf-8")
+        cls.analyst_review_projection = ANALYST_REVIEW_PROJECTION.read_text(encoding="utf-8")
+        cls.analyst_decision_persistence = ANALYST_DECISION_PERSISTENCE.read_text(encoding="utf-8")
+        cls.suppression_persistence = SUPPRESSION_PERSISTENCE.read_text(encoding="utf-8")
+        cls.ai_review_repository = AI_REVIEW_REPOSITORY.read_text(encoding="utf-8")
+        cls.ai_analysis_acceptance = AI_ANALYSIS_ACCEPTANCE.read_text(encoding="utf-8")
+        cls.durable_job_transition_executor = DURABLE_JOB_TRANSITION_EXECUTOR.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
         self.assertIn("require('./lib/provider_scheduler')", self.code)
@@ -57,11 +77,10 @@ class AlertStoreResilienceTest(unittest.TestCase):
 
     def test_enrichment_is_durable_and_outside_ingest_latency(self) -> None:
         self.assertIn("require('./lib/durable_job_queue')", self.code)
-        self.assertIn("durableJobs.enqueue('public_enrichment'", self.code)
+        self.assertIn("enqueueJob: (...args) => durableJobs.enqueue(...args)", self.code)
+        self.assertIn("await enqueueJob('public_enrichment'", self.alert_ingest_orchestrator)
         self.assertIn("async function drainEnrichmentJobs()", self.code)
-        store = self.code.split("async function storeAlert(rawAlert)", 1)[1].split(
-            "async function drainEnrichmentJobs", 1
-        )[0]
+        store = self.alert_ingest_orchestrator.split("async function store(rawAlert)", 1)[1]
         self.assertNotIn("await enrichAlert(", store)
 
     def test_enrichment_provider_circuits_are_bounded(self) -> None:
@@ -114,12 +133,16 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertNotIn("maybeNotifyTelegram(", store_unlocked)
 
     def test_notification_failure_does_not_reject_persisted_alert(self) -> None:
-        self.assertIn("CREATE TABLE IF NOT EXISTS notification_outbox", self.code)
-        self.assertIn("withImmediateTransaction(async () =>", self.code)
-        self.assertIn("void drainTelegramOutbox();", self.code)
-        store = self.code.split("async function storeAlert(rawAlert)", 1)[1].split(
-            "async function storeAlertUnlocked(alert)", 1
-        )[0]
+        self.assertIn(
+            "CREATE TABLE IF NOT EXISTS notification_outbox",
+            self.notification_enrichment_schema,
+        )
+        self.assertIn(
+            "const result = await withWriteGate(() => withTransaction(async () =>",
+            self.alert_ingest_orchestrator,
+        )
+        self.assertIn("void drainNotificationOutbox();", self.alert_ingest_orchestrator)
+        store = self.alert_ingest_orchestrator.split("async function store(rawAlert)", 1)[1]
         self.assertNotIn("postTelegramMessage(", store)
 
     def test_notification_outbox_has_bounded_retry(self) -> None:
@@ -131,14 +154,18 @@ class AlertStoreResilienceTest(unittest.TestCase):
         )
 
     def test_analyst_state_is_owned_by_alert_store(self) -> None:
-        self.assertIn("CREATE TABLE IF NOT EXISTS analyst_alert_group_state", self.code)
+        self.assertIn("createAlertStoreSchemaFoundation", self.code)
+        self.assertIn(
+            "CREATE TABLE IF NOT EXISTS analyst_alert_group_state",
+            self.schema_foundation,
+        )
         self.assertIn("path: '/analyst-status'", self.analyst_state_routes)
-        self.assertIn("withSqliteWriteGate(async () =>", self.code)
+        self.assertIn("return withWriteGate(async () =>", self.analyst_decision_persistence)
 
     def test_analyst_adjudication_is_append_only_and_guards_terminal_actions(self) -> None:
-        self.assertIn("CREATE TABLE IF NOT EXISTS analyst_adjudications", self.code)
-        self.assertIn("INSERT INTO analyst_adjudications", self.code)
-        self.assertNotIn("UPDATE analyst_adjudications", self.code)
+        self.assertIn("CREATE TABLE IF NOT EXISTS analyst_adjudications", self.ai_review_schema)
+        self.assertIn("INSERT INTO analyst_adjudications", self.analyst_decision_persistence)
+        self.assertNotIn("UPDATE analyst_adjudications", self.analyst_decision_persistence)
         for column in (
             "event_status",
             "detection_validity",
@@ -146,11 +173,12 @@ class AlertStoreResilienceTest(unittest.TestCase):
             "handling",
             "duplicate_of",
         ):
-            self.assertIn(
-                f"ensureColumn('analyst_adjudications', '{column}', 'TEXT')",
-                self.code,
-            )
-        self.assertIn("resolve_case must be a JSON boolean", self.code)
+            self.assertIn(f"'{column}'", self.ai_review_schema)
+        self.assertIn(
+            "ensureColumn('analyst_adjudications', name, 'TEXT')",
+            self.ai_review_schema,
+        )
+        self.assertIn("resolve_case must be a JSON boolean", self.analyst_decision_persistence)
         self.assertIn(
             "function deriveAnalystLegacyOutcome(factors)",
             self.analyst_review_policy,
@@ -160,17 +188,17 @@ class AlertStoreResilienceTest(unittest.TestCase):
             self.analyst_review_policy,
         )
         self.assertIn(
-            "const verdictContradictions = analystVerdictContradictions(",
-            self.code,
+            "const contradictions = verdictContradictions(",
+            self.analyst_decision_persistence,
         )
         self.assertIn(
             "outcome_override conflicts with explicit verdict factors",
-            self.code,
+            self.analyst_decision_persistence,
         )
         self.assertIn("path: '/adjudications'", self.analyst_state_routes)
         self.assertIn("path: '/incidents/status'", self.analyst_state_routes)
-        self.assertIn("disputed_pending_human", self.code)
-        self.assertIn("review_completed_not_authorized", self.code)
+        self.assertIn("disputed_pending_human", self.analyst_review_projection)
+        self.assertIn("review_completed_not_authorized", self.analyst_review_projection)
         self.assertIn(
             "function reviewerAutomationAuthorization(",
             self.analyst_review_policy,
@@ -180,7 +208,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
             self.analyst_review_policy,
         )
         self.assertGreaterEqual(
-            self.code.count(
+            self.analyst_review_projection.count(
                 "const reviewer = conservativeReviewerTelemetry("
             ),
             2,
@@ -198,21 +226,21 @@ class AlertStoreResilienceTest(unittest.TestCase):
             self.analyst_review_policy,
         )
         self.assertIn(
-            "reviewAuthorization.authorized === false",
-            self.code,
+            "authorization.authorized === false",
+            self.analyst_review_projection,
         )
         self.assertIn(
             "required independent review needs explicit analyst adjudication before suppression",
-            self.code,
+            self.analyst_decision_persistence,
         )
         self.assertIn(
             "required independent review needs explicit analyst adjudication before resolution",
-            self.code,
+            self.analyst_decision_persistence,
         )
         self.assertIn("async function stableGroupHasPendingHumanReview", self.code)
         self.assertIn(
             "automatic suppression blocked pending explicit analyst adjudication",
-            self.code,
+            self.suppression_persistence,
         )
         self.assertIn(
             "recordAdjudication: (payload) => transactionalWrite(\n"
@@ -231,8 +259,8 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("completePendingByDedupeKeys(jobType, dedupeKeys)", self.durable_job_service)
 
     def test_second_opinion_telemetry_has_an_independent_durable_schema(self) -> None:
-        self.assertIn("CREATE TABLE IF NOT EXISTS ai_second_opinion_runs", self.code)
-        self.assertIn("INSERT INTO ai_second_opinion_runs", self.code)
+        self.assertIn("CREATE TABLE IF NOT EXISTS ai_second_opinion_runs", self.ai_review_schema)
+        self.assertIn("INSERT INTO ai_second_opinion_runs", self.ai_review_repository)
         for field in (
             "primary_model",
             "reviewer_model",
@@ -244,14 +272,17 @@ class AlertStoreResilienceTest(unittest.TestCase):
             "memory_candidates_promoted",
             "reviewer_error",
         ):
-            self.assertIn(field, self.code)
-        self.assertIn("second_opinion_recorded: secondOpinionRecorded", self.code)
+            self.assertIn(field, self.ai_review_schema + self.ai_review_repository)
+        self.assertIn(
+            "second_opinion_recorded: Boolean(state.secondOpinionRecorded)",
+            self.ai_analysis_acceptance,
+        )
 
     def test_ai_status_callback_resolves_legacy_group_alias(self) -> None:
         self.assertIn("async function transitionDurableJobStatus", self.code)
         self.assertIn(
             "SELECT stable_group_id FROM alert_group_alias WHERE legacy_group_id = ?",
-            self.code,
+            self.durable_job_transition_executor,
         )
         self.assertIn("transitionDurableJobStatus(", self.code)
 
@@ -298,13 +329,16 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("pipelineMetrics.captureDiskSample", self.code)
 
     def test_n8n_report_work_is_enqueued_inside_commit_and_delivered_afterward(self) -> None:
-        store = self.code.split("async function storeAlert(rawAlert)", 1)[1].split(
-            "async function transitionDurableJobStatus", 1
-        )[0]
+        store = self.alert_ingest_orchestrator.split("async function store(rawAlert)", 1)[1]
         transaction, after_commit = store.split("if (!result.ok) return result;", 1)
-        self.assertIn("durableJobs.enqueue(\n          'n8n_post_commit'", transaction)
+        self.assertIn("await enqueuePostCommit(rawAlert, stored)", transaction)
+        self.assertIn(
+            "await enqueueJob('n8n_post_commit'",
+            self.alert_ingest_orchestrator,
+        )
+        self.assertIn("enqueueJob: (...args) => durableJobs.enqueue(...args)", self.code)
         self.assertNotIn("requestJson({", transaction)
-        self.assertIn("void drainN8nPostCommitJobs();", after_commit)
+        self.assertIn("void drainPostCommitJobs();", after_commit)
         self.assertIn("N8N_POST_COMMIT_MAX_ATTEMPTS", self.code)
         self.assertIn("N8N_POST_COMMIT_BASE_RETRY_SECONDS", self.code)
 

@@ -10,14 +10,16 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / "n8n/alert_store/lib/authorized_activity_policy.js"
 POLICY = ROOT / "n8n/config/authorized_activity_campaigns.json"
-ALERT_STORE = ROOT / "n8n/alert_store/alert_store.js"
+CAMPAIGN_PERSISTENCE = (
+    ROOT / "n8n/alert_store/services/authorized_campaign_persistence.js"
+)
 
 
 class AuthorizedActivityCampaignPolicyTests(unittest.TestCase):
     def test_startup_backfill_is_bounded_and_keyset_paginated(self) -> None:
-        code = ALERT_STORE.read_text()
-        start = code.index("async function backfillAuthorizedActivityCampaigns()")
-        end = code.index("\nasync function authorizedCampaignForAlertId", start)
+        code = CAMPAIGN_PERSISTENCE.read_text()
+        start = code.index("async function backfillCampaigns()")
+        end = code.index("\n  async function campaignForAlertId", start)
         backfill = code[start:end]
 
         self.assertNotIn("SELECT * FROM alerts", backfill)
@@ -26,21 +28,21 @@ class AuthorizedActivityCampaignPolicyTests(unittest.TestCase):
         self.assertIn("ORDER BY rowid ASC", backfill)
         self.assertIn("LIMIT ?", backfill)
         self.assertIn("NOT EXISTS", backfill)
-        self.assertIn("earliestAuthorization", backfill)
-        self.assertIn("latestAuthorization", backfill)
+        self.assertIn("Date.parse(item.authorization_start)", backfill)
+        self.assertIn("Date.parse(item.authorization_end)", backfill)
+        self.assertIn("const earliest = new Date(Math.min(...starts)).toISOString()", backfill)
+        self.assertIn("const latest = new Date(Math.max(...ends)).toISOString()", backfill)
 
     def test_campaign_representative_is_recomputed_from_earliest_member(self) -> None:
-        code = ALERT_STORE.read_text()
+        code = CAMPAIGN_PERSISTENCE.read_text()
         self.assertIn(
             "SELECT alert_id FROM authorized_activity_campaign_members\n"
-            "           WHERE campaign_id = ?\n"
-            "           ORDER BY observed_at ASC, alert_id ASC LIMIT 1",
+            "             WHERE campaign_id = ? ORDER BY observed_at ASC, alert_id ASC LIMIT 1",
             code,
         )
         self.assertIn(
             "SELECT stable_group_id FROM authorized_activity_campaign_members\n"
-            "           WHERE campaign_id = ?\n"
-            "           ORDER BY observed_at ASC, alert_id ASC LIMIT 1",
+            "             WHERE campaign_id = ? ORDER BY observed_at ASC, alert_id ASC LIMIT 1",
             code,
         )
 

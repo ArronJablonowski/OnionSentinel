@@ -8,6 +8,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ALERT_STORE = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
 HEALTH_SERVICE = REPO_ROOT / "n8n" / "alert_store" / "services" / "health_service.js"
 PCAP_ROUTES = REPO_ROOT / "n8n" / "alert_store" / "routes" / "pcap_routes.js"
+PCAP_SCHEMA = REPO_ROOT / "n8n" / "alert_store" / "services" / "pcap_schema.js"
+ALERT_PERSISTENCE = (
+    REPO_ROOT / "n8n" / "alert_store" / "services" / "alert_persistence.js"
+)
+DURABLE_JOB_RECOVERY = (
+    REPO_ROOT / "n8n" / "alert_store" / "services" / "durable_job_recovery.js"
+)
 PCAP_POLICY = REPO_ROOT / "n8n" / "alert_store" / "lib" / "pcap_policy.js"
 PCAP_TRANSFER_REPOSITORY = (
     REPO_ROOT
@@ -34,6 +41,7 @@ PCAP_WORKFLOW_SYNC = REPO_ROOT / "n8n" / "bin" / "sync-pcap-broker-workflow.py"
 class AlertStorePcapPolicyTest(unittest.TestCase):
     def test_alert_store_auto_queues_pcap_for_configured_levels(self) -> None:
         code = ALERT_STORE.read_text()
+        persistence = ALERT_PERSISTENCE.read_text(encoding="utf-8")
         policy = SOC_ANALYSIS_POLICY.read_text()
 
         self.assertIn("createSocAnalysisPolicy", code)
@@ -46,9 +54,13 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
             policy,
         )
         self.assertIn("async function maybeQueueAutomaticPcapRequest", code)
-        self.assertIn("const pcap = await maybeQueueAutomaticPcapRequest(alert, row, inserted, suppression, campaign);", code)
+        self.assertIn("queueAutomaticPcap: maybeQueueAutomaticPcapRequest", code)
+        self.assertIn(
+            "const pcap = await queueAutomaticPcap(alert, row, inserted, suppression, campaign);",
+            persistence,
+        )
         self.assertIn("status: 'coalesced_campaign'", code)
-        self.assertIn("pcap,", code)
+        self.assertIn("campaign, pcap, incident", persistence)
         self.assertIn("Automatic PCAP request for ${level} alert", code)
 
     def test_automatic_incident_routing_failure_rolls_back_for_upstream_retry(self) -> None:
@@ -128,10 +140,11 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
         )
 
     def test_pcap_parser_state_is_durable_and_reported_by_worker(self) -> None:
-        code = ALERT_STORE.read_text(encoding="utf-8")
+        schema = PCAP_SCHEMA.read_text(encoding="utf-8")
         routes = PCAP_ROUTES.read_text(encoding="utf-8")
         worker = (REPO_ROOT / "n8n" / "bin" / "process-pcap-evidence.py").read_text(encoding="utf-8")
-        self.assertIn("analysis_status", code)
+        self.assertIn("['analysis_status', \"TEXT NOT NULL DEFAULT 'not_ready'\"]", schema)
+        self.assertIn("await ensureColumn('pcap_requests', name, definition)", schema)
         self.assertIn("post('/pcap/analysis-status', 'analysisStatus')", routes)
         self.assertIn("report_analysis_status", worker)
         self.assertIn('"processing"', worker)
@@ -145,27 +158,29 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
         self.assertIn("status: 'coalesced'", code)
 
     def test_recovered_analysis_leases_reapply_campaign_admission(self) -> None:
-        code = ALERT_STORE.read_text(encoding="utf-8")
-        start = code.index("async function recoverExpiredDurableJobs")
-        end = code.index("const cohortIdPattern", start)
-        recovery = code[start:end]
-        self.assertIn("await durableJobs.recoverExpired()", recovery)
+        composition = ALERT_STORE.read_text(encoding="utf-8")
+        recovery = DURABLE_JOB_RECOVERY.read_text(encoding="utf-8")
+        self.assertIn("const recovered = await queue.recoverExpired()", recovery)
         self.assertIn(
             "recovered.authorized_activity = await "
-            "reconcileAuthorizedActivityBacklog()",
+            "reconcileAuthorizedActivity()",
             recovery,
         )
         self.assertLess(
-            recovery.index("reconcileAuthorizedActivityBacklog()"),
+            recovery.index("reconcileAuthorizedActivity()"),
             recovery.index("signalAiWorkers('ai-lease-recovered')"),
+        )
+        self.assertIn(
+            "reconcileAuthorizedActivity: reconcileAuthorizedActivityBacklog",
+            composition,
         )
 
     def test_pcap_terminal_outcomes_and_storage_metrics_are_durable(self) -> None:
-        code = ALERT_STORE.read_text(encoding="utf-8")
+        schema = PCAP_SCHEMA.read_text(encoding="utf-8")
         pcap_policy = PCAP_POLICY.read_text(encoding="utf-8")
         request_repository = PCAP_REQUEST_REPOSITORY.read_text(encoding="utf-8")
         health_service = HEALTH_SERVICE.read_text(encoding="utf-8")
-        self.assertIn("ensureColumn('pcap_requests', 'outcome', 'TEXT')", code)
+        self.assertIn("['analysis_completed_at', 'TEXT'], ['outcome', 'TEXT']", schema)
         self.assertIn("function classifyPcapOutcome", pcap_policy)
         self.assertIn("backfillOutcomes", request_repository)
         self.assertIn("pcap_outcomes", health_service)
@@ -176,7 +191,6 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
         )
 
     def test_singular_no_matching_packet_errors_are_normalized(self) -> None:
-        code = ALERT_STORE.read_text(encoding="utf-8")
         pcap_policy = PCAP_POLICY.read_text(encoding="utf-8")
         transfer_repository = PCAP_TRANSFER_REPOSITORY.read_text(encoding="utf-8")
         request_repository = PCAP_REQUEST_REPOSITORY.read_text(encoding="utf-8")
@@ -185,10 +199,10 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
         self.assertIn("requestedOutcome !== 'failed'", transfer_repository)
 
     def test_large_transfer_progress_renews_claim_lease(self) -> None:
-        code = ALERT_STORE.read_text(encoding="utf-8")
+        schema = PCAP_SCHEMA.read_text(encoding="utf-8")
         transfer_repository = PCAP_TRANSFER_REPOSITORY.read_text(encoding="utf-8")
         routes = PCAP_ROUTES.read_text(encoding="utf-8")
-        self.assertIn("ensureColumn('pcap_requests', 'transfer_progress_at', 'TEXT')", code)
+        self.assertIn("['transfer_progress_at', 'TEXT']", schema)
         self.assertIn(
             "COALESCE(transfer_progress_at, claimed_at, updated_at, created_at)",
             transfer_repository,
@@ -199,14 +213,15 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
         self.assertEqual(progress_webhook["parameters"]["path"], "pcap/progress")
 
     def test_pcap_transfer_duration_is_persisted_and_backfilled(self) -> None:
-        code = ALERT_STORE.read_text(encoding="utf-8")
+        schema = PCAP_SCHEMA.read_text(encoding="utf-8")
         transfer_repository = PCAP_TRANSFER_REPOSITORY.read_text(encoding="utf-8")
-        self.assertIn("ensureColumn('pcap_requests', 'transfer_duration_seconds', 'INTEGER')", code)
-        self.assertIn("julianday(replace(completed_at, '  ', 'T'))", code)
+        self.assertIn("['transfer_duration_seconds', 'INTEGER']", schema)
+        self.assertIn("julianday(replace(completed_at, '  ', 'T'))", schema)
         self.assertIn("transfer_duration_seconds = CASE", transfer_repository)
 
     def test_pcap_transfer_retries_are_durable_bounded_and_stage_aware(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
+        schema = PCAP_SCHEMA.read_text(encoding="utf-8")
         transfer_repository = PCAP_TRANSFER_REPOSITORY.read_text(encoding="utf-8")
         request_repository = PCAP_REQUEST_REPOSITORY.read_text(encoding="utf-8")
         routes = PCAP_ROUTES.read_text(encoding="utf-8")
@@ -217,7 +232,8 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
             "transfer_last_failed_stage",
             "next_attempt_at",
         ):
-            self.assertIn(f"ensureColumn('pcap_requests', '{column}'", code)
+            self.assertIn(f"['{column}',", schema)
+        self.assertIn("await ensureColumn('pcap_requests', name, definition)", schema)
         self.assertIn("PCAP_TRANSFER_MAX_ATTEMPTS", code)
         self.assertIn("async function retryRequest(payload)", transfer_repository)
         self.assertIn("post('/pcap/retry', 'retry')", routes)
