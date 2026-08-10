@@ -260,4 +260,3 @@ def resolve_query_binding(
         ):
             return outer_status, observation
     return nested_status, observation
-
