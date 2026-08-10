@@ -53,6 +53,7 @@ import portal_incident_read_runtime
 import portal_soc_record_runtime
 import portal_write_runtime
 import portal_soc_core_runtime
+import portal_soc_detail_runtime
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
@@ -1542,96 +1543,21 @@ def render_home(reports: list[Report], host: str, port: int) -> bytes:
     )
     return render_home_dashboard(compose_home_dashboard(reports, sources))
 
-def normalize_soc_alert_status_meta(value: object, *, now: str | None = None) -> dict | None:
-    """Normalize analyst-controlled alert workflow state before persistence."""
-    return normalize_status_meta(value, now_iso=now_iso_utc, now=now)
-
-
-def ensure_soc_alert_status_table(conn: sqlite3.Connection) -> None:
-    """Create and migrate analyst status/adjudication persistence tables."""
-    ensure_soc_alert_status_schema(conn)
-
-
-def soc_alert_group_key_from_values(
-    triage_level: object,
-    rule_name: object,
-    source_ip: object,
-    destination_ip: object,
-    filter_status: object,
-    suppression_key: object = None,
-) -> str:
-    """Return the stable grouped-detection key used by the dashboard/API."""
-    if suppression_key:
-        return str(suppression_key)
-    return "|".join([
-        str(triage_level or "unknown-level"),
-        str(rule_name or "unknown-rule"),
-        str(source_ip or "unknown-source"),
-        str(destination_ip or "unknown-destination"),
-        str(filter_status or "accepted"),
-    ])
-
-
-def soc_alert_group_id(group_key: object) -> str:
-    return hashlib.sha1(str(group_key or "").encode("utf-8")).hexdigest()[:12]
-
-
-def soc_alert_group_key_sql() -> str:
-    return """
-      COALESCE(
-        NULLIF(suppression_key, ''),
-        COALESCE(triage_level, 'unknown-level') || '|' ||
-        COALESCE(rule_name, 'unknown-rule') || '|' ||
-        COALESCE(source_ip, 'unknown-source') || '|' ||
-        COALESCE(destination_ip, 'unknown-destination') || '|' ||
-        COALESCE(filter_status, 'accepted')
-      )
-    """
-
-
-def soc_alert_public_enrichment_status(enrichment_json: object) -> dict:
-    return compose_enrichment_status(enrichment_json)
-
-
-def soc_alert_group_enrichment_json(conn: sqlite3.Connection, group_key: object) -> str:
-    key = str(group_key or "").strip()
-    return soc_alert_group_enrichment_json_map(conn, [key]).get(key, "") if key else ""
-
-
-def soc_alert_group_enrichment_json_map(
-    conn: sqlite3.Connection,
-    group_keys: list[object],
-) -> dict[str, str]:
-    """Load the best enrichment record for each visible group in one query.
-
-    Group keys are derived expressions rather than indexed columns in the raw
-    alert table. Looking them up one row at a time therefore scans the alert
-    corpus once per displayed group. The window query below scans it once for
-    the bounded page and preserves the same quality/newness ordering used by
-    ``soc_alert_group_enrichment_json``.
-    """
-    plan = group_enrichment_query_plan(group_keys, soc_alert_group_key_sql())
-    if not plan.args:
-        return {}
-    try:
-        rows = conn.execute(plan.sql, plan.args).fetchall()
-    except sqlite3.Error:
-        return {}
-    return project_group_enrichment_rows(rows)
-
-
-def directory_size_bytes(path: Path) -> int:
-    """Return total bytes for a runtime evidence directory without following symlinks."""
-    if not path.exists():
-        return 0
-    total = 0
-    for item in path.rglob("*"):
-        try:
-            if item.is_file() and not item.is_symlink():
-                total += item.stat().st_size
-        except OSError:
-            continue
-    return total
+_SOC_DETAIL_RUNTIME = sys.modules[__name__]
+normalize_soc_alert_status_meta = partial(portal_soc_detail_runtime.normalize_soc_alert_status_meta, _SOC_DETAIL_RUNTIME)
+ensure_soc_alert_status_table = partial(portal_soc_detail_runtime.ensure_soc_alert_status_table, _SOC_DETAIL_RUNTIME)
+soc_alert_group_key_from_values = partial(portal_soc_detail_runtime.soc_alert_group_key_from_values, _SOC_DETAIL_RUNTIME)
+soc_alert_group_id = partial(portal_soc_detail_runtime.soc_alert_group_id, _SOC_DETAIL_RUNTIME)
+soc_alert_group_key_sql = partial(portal_soc_detail_runtime.soc_alert_group_key_sql, _SOC_DETAIL_RUNTIME)
+soc_alert_public_enrichment_status = partial(portal_soc_detail_runtime.soc_alert_public_enrichment_status, _SOC_DETAIL_RUNTIME)
+soc_alert_group_enrichment_json = partial(portal_soc_detail_runtime.soc_alert_group_enrichment_json, _SOC_DETAIL_RUNTIME)
+soc_alert_group_enrichment_json_map = partial(portal_soc_detail_runtime.soc_alert_group_enrichment_json_map, _SOC_DETAIL_RUNTIME)
+directory_size_bytes = partial(portal_soc_detail_runtime.directory_size_bytes, _SOC_DETAIL_RUNTIME)
+soc_alert_validate_detail_layout_html = partial(portal_soc_detail_runtime.soc_alert_validate_detail_layout_html, _SOC_DETAIL_RUNTIME)
+soc_alert_layout_error_html = partial(portal_soc_detail_runtime.soc_alert_layout_error_html, _SOC_DETAIL_RUNTIME)
+soc_alert_append_live_pcap_detail = partial(portal_soc_detail_runtime.soc_alert_append_live_pcap_detail, _SOC_DETAIL_RUNTIME)
+soc_alert_normalize_heading_text = partial(portal_soc_detail_runtime.soc_alert_normalize_heading_text, _SOC_DETAIL_RUNTIME)
+soc_alert_collapse_detail_sections = partial(portal_soc_detail_runtime.soc_alert_collapse_detail_sections, _SOC_DETAIL_RUNTIME)
 
 
 _SOC_PCAP_RUNTIME = sys.modules[__name__]
@@ -1679,50 +1605,6 @@ SOC_ALERT_DETAIL_LAYOUT_MARKERS = (
 )
 
 
-def soc_alert_validate_detail_layout_html(detail_html: str) -> list[str]:
-    """Validate the immutable analyst-facing layout before the API serves it."""
-    issues: list[str] = []
-    version_match = re.search(r'data-layout-version="([^"]+)"', detail_html or "")
-    version = version_match.group(1) if version_match else "missing"
-    if version != SOC_ALERT_DETAIL_LAYOUT_VERSION:
-        issues.append(
-            f"Report layout version is {version}; expected {SOC_ALERT_DETAIL_LAYOUT_VERSION}. "
-            "The dashboard must be rebuilt from the current report template."
-        )
-    positions: list[int] = []
-    for label, marker in SOC_ALERT_DETAIL_LAYOUT_MARKERS:
-        count = (detail_html or "").count(marker)
-        if count != 1:
-            issues.append(f'Required section "{label}" appeared {count} time(s); exactly one is required.')
-        positions.append((detail_html or "").find(marker))
-    present_positions = [position for position in positions if position >= 0]
-    if present_positions != sorted(present_positions):
-        issues.append("Required report sections are not in the canonical order.")
-    return list(dict.fromkeys(issues))
-
-
-def soc_alert_layout_error_html(issues: list[str]) -> str:
-    """Return an escaped error payload that the dashboard promotes to a modal."""
-    items = "".join(f"<li>{html.escape(issue)}</li>" for issue in issues)
-    return (
-        f'<section class="detail-layout-error" role="alert" data-layout-version="{SOC_ALERT_DETAIL_LAYOUT_VERSION}">'
-        "<strong>Detailed Alert Report layout error</strong>"
-        "<p>Historical or malformed report data could not be mapped to the required layout. "
-        "The report is shown for recovery context, but it does not satisfy the current standard.</p>"
-        f"<ul>{items}</ul></section>"
-    )
-
-
-def soc_alert_append_live_pcap_detail(group_id: str, detail_html: str) -> str:
-    """Preserve the canonical fragment; late evidence must never append a new section.
-
-    PCAP status is queried live for the alert row, while the scheduled dashboard
-    rebuild refreshes the canonical Parsed PCAP Evidence body. Appending here
-    used to place PCAP evidence after Raw Logs and silently broke the contract.
-    """
-    _ = group_id
-    return detail_html
-
 
 SOC_ALERT_COLLAPSIBLE_DETAIL_SECTIONS = {
     "ai model used": "AI Model Used",
@@ -1735,54 +1617,6 @@ SOC_ALERT_COLLAPSIBLE_DETAIL_SECTIONS = {
     "threat context": "Threat Context",
     "analyst notes": "Analyst Notes",
 }
-
-
-def soc_alert_normalize_heading_text(value: str) -> str:
-    text = re.sub(r"<[^>]+>", "", value or "")
-    text = html.unescape(text)
-    text = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
-    return text
-
-
-def soc_alert_collapse_detail_sections(detail_html: str) -> str:
-    """Collapse expensive reference sections in lazy-loaded alert detail HTML."""
-    if not detail_html or "detail-collapsible-section" in detail_html:
-        return detail_html
-    heading_re = re.compile(r"<h([2-6])([^>]*)>(.*?)</h\1>", re.IGNORECASE | re.DOTALL)
-    matches = list(heading_re.finditer(detail_html))
-    if not matches:
-        return detail_html
-    chunks: list[str] = []
-    cursor = 0
-    index = 0
-    while index < len(matches):
-        match = matches[index]
-        level = int(match.group(1))
-        normalized = soc_alert_normalize_heading_text(match.group(3))
-        summary = SOC_ALERT_COLLAPSIBLE_DETAIL_SECTIONS.get(normalized)
-        if not summary:
-            index += 1
-            continue
-        end = len(detail_html)
-        next_index = index + 1
-        while next_index < len(matches):
-            next_level = int(matches[next_index].group(1))
-            if next_level <= level:
-                end = matches[next_index].start()
-                break
-            next_index += 1
-        slug = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-") or "detail"
-        chunks.append(detail_html[cursor:match.start()])
-        chunks.append(
-            f'<details class="detail-report-section detail-collapsible-section detail-section-{slug}">'
-            f"<summary>{html.escape(summary)}</summary>"
-            f'<div class="detail-collapsible-body">{detail_html[match.end():end]}</div>'
-            "</details>"
-        )
-        cursor = end
-        index = next_index
-    chunks.append(detail_html[cursor:])
-    return "".join(chunks)
 
 
 
