@@ -3049,6 +3049,35 @@ coverage truthfulness, warnings, and revision projection. The 61-line
 `software_inventory.py` facade re-exports the legacy public and private symbols
 used by the portal and tests while performing no storage or response work.
 
+## Relay Runtime
+
+`relay.py` is the package-free, executable compatibility facade for the
+Raspberry Pi Relay. It keeps the original flat import surface and temporarily
+forwards facade-level overrides used by recovery tooling and characterization
+tests. The facade performs no transport or persistence work and remains below
+250 lines.
+
+`relay_core.py` owns configuration/path resolution, the restricted
+Security Onion alert pull, bounded webhook transport, evidence persistence,
+deduplication, filtering, and Relay-root capacity policy.
+
+`relay_pcap_transport.py` owns broker HTTP calls, claim-progress reporting,
+capture-loss admission, spool retention/capacity, bounded Security Onion
+streaming, hashes, and transfer timeout/bandwidth policy. It remains below the
+800-line hard review threshold.
+
+`relay_pcap_delivery.py` owns the bounded SSH/rsync handoff to the Mac Studio,
+remote verification/cleanup, broker completion callbacks, and retry scheduling.
+`relay_pcap_service.py` owns the single-flight, one-request-per-run PCAP state
+machine and outcome accounting. Dependencies flow in that order and do not
+cycle.
+
+`relay_application.py` owns durable alert outbox delivery, quiet-cycle
+heartbeats, CLI parsing, and one-shot lifecycle composition. The Pi installer
+copies all five implementation modules before the executable facade. External
+investigation systems remain read-only; allowlists, limits, timeouts,
+redaction, fail-closed behavior, HTTP schemas, and exit behavior are unchanged.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:

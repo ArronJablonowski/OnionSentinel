@@ -151,7 +151,22 @@
       "max_lines": 1164
     },
     "relay/app/relay.py": {
-      "max_lines": 2098
+      "max_lines": 250
+    },
+    "relay/app/relay_application.py": {
+      "max_lines": 600
+    },
+    "relay/app/relay_core.py": {
+      "max_lines": 600
+    },
+    "relay/app/relay_pcap_delivery.py": {
+      "max_lines": 600
+    },
+    "relay/app/relay_pcap_service.py": {
+      "max_lines": 600
+    },
+    "relay/app/relay_pcap_transport.py": {
+      "max_lines": 800
     },
     "relay/app/relay_health_wrapper.py": {
       "max_lines": 1349
@@ -642,27 +657,27 @@
     "relay/app/process_io.py::run_bounded_command": {
       "max_complexity": 18
     },
-    "relay/app/relay.py::_process_pcap_requests_unlocked": {
+    "relay/app/relay_pcap_service.py::_process_pcap_requests_unlocked": {
       "max_complexity": 44,
       "max_lines": 273
     },
-    "relay/app/relay.py::capture_protection_decision": {
+    "relay/app/relay_pcap_transport.py::capture_protection_decision": {
       "max_complexity": 18
     },
-    "relay/app/relay.py::drain_alert_outbox": {
+    "relay/app/relay_application.py::drain_alert_outbox": {
       "max_complexity": 25
     },
-    "relay/app/relay.py::main": {
+    "relay/app/relay_application.py::main": {
       "max_lines": 112
     },
-    "relay/app/relay.py::pcap_outcome_from_error": {
+    "relay/app/relay_pcap_delivery.py::pcap_outcome_from_error": {
       "max_complexity": 17
     },
-    "relay/app/relay.py::streamed_spool_artifact": {
+    "relay/app/relay_pcap_transport.py::streamed_spool_artifact": {
       "max_complexity": 30,
       "max_lines": 138
     },
-    "relay/app/relay.py::upload_pcap_artifact_via_rsync": {
+    "relay/app/relay_pcap_delivery.py::upload_pcap_artifact_via_rsync": {
       "max_complexity": 26
     },
     "relay/app/relay_health_wrapper.py::classify_child_diagnostic": {

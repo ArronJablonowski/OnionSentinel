@@ -3533,6 +3533,67 @@
       "required_symbols": [
         "settings_client_actions_fragment"
       ]
+    },
+    {
+      "path": "relay/app/relay.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/relay.py",
+      "required_symbols": [
+        "PcapProgressReporter",
+        "WebhookPostError",
+        "main",
+        "process_pcap_requests"
+      ]
+    },
+    {
+      "path": "relay/app/relay_core.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/relay_core.py",
+      "required_symbols": [
+        "filter_dropped_alerts",
+        "post_json_to_webhook",
+        "run_ssh_pull"
+      ]
+    },
+    {
+      "path": "relay/app/relay_pcap_transport.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/relay_pcap_transport.py",
+      "required_symbols": [
+        "PcapProgressReporter",
+        "broker_request",
+        "capture_protection_decision",
+        "streamed_spool_artifact"
+      ]
+    },
+    {
+      "path": "relay/app/relay_pcap_delivery.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/relay_pcap_delivery.py",
+      "required_symbols": [
+        "complete_pcap_request",
+        "pcap_outcome_from_error",
+        "upload_pcap_artifact_via_rsync"
+      ]
+    },
+    {
+      "path": "relay/app/relay_pcap_service.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/relay_pcap_service.py",
+      "required_symbols": [
+        "_process_pcap_requests_unlocked",
+        "process_pcap_requests"
+      ]
+    },
+    {
+      "path": "relay/app/relay_application.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/relay_application.py",
+      "required_symbols": [
+        "build_relay_heartbeat",
+        "drain_alert_outbox",
+        "main"
+      ]
     }
   ],
   "python_package_trees": [
