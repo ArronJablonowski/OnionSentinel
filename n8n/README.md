@@ -764,6 +764,9 @@ The maintenance job:
   stale;
 - creates a verified SQLite `.backup` copy under
   `$HOME/n8n-local/alert_store_backups`;
+- keeps that directory owner-only (`0700`) and removes ACLs before normalizing
+  every direct regular backup or recovery artifact to `0600`; a symlinked
+  backup root fails the maintenance transition without following it;
 - waits through normal writer contention with a 60-second SQLite busy timeout
   and bounded backup retries instead of treating a transient lock as database
   corruption;

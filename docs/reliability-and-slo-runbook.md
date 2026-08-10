@@ -351,7 +351,10 @@ Hourly alert-store maintenance continues to make online SQLite backups and run
 ordinary alert-store write transaction cannot create a false backup outage.
 Temporary backup targets from interrupted runs are removed only after they are
 30 minutes old, while completed backups are promoted atomically after their own
-independent `quick_check` succeeds.
+independent `quick_check` succeeds. The hourly backup directory is owner-only
+(`0700`), direct regular backup and recovery artifacts are stripped of ACLs and
+normalized to `0600`, and a symlinked backup root fails the durable maintenance
+transition without being followed.
 A separate daily LaunchAgent creates an atomic recovery
 bundle under `$HOME/n8n-local/recovery_backups` containing:
 
