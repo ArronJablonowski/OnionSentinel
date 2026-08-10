@@ -485,7 +485,7 @@
     "onion-sentinel-dashboard/software_inventory_assets.py::apply_asset_labels": {
       "max_complexity": 36
     },
-    "onion-sentinel-dashboard/software_inventory.py::build_response": {
+    "onion-sentinel-dashboard/software_inventory_response.py::build_response": {
       "max_complexity": 48,
       "max_lines": 213
     },

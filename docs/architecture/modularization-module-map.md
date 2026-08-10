@@ -2836,6 +2836,12 @@ an OS projection only through one current, high-confidence, non-DHCP static
 asset association; conflicts, partial inventories, stale validity, and dynamic
 address claims remain unlabeled or uncorrelated.
 
+`software_inventory_response.py` owns bounded state-to-API composition:
+time-window selection, fixed filtering and sorting, pagination, summaries,
+coverage truthfulness, warnings, and revision projection. The 61-line
+`software_inventory.py` facade re-exports the legacy public and private symbols
+used by the portal and tests while performing no storage or response work.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:

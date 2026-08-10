@@ -1057,6 +1057,7 @@ cp "$REPO_DIR/n8n/bin/asset_inventory.py" "$DASHBOARD_RUNTIME_DIR/asset_inventor
 cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory.py" "$DASHBOARD_RUNTIME_DIR/software_inventory.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory_assets.py" "$DASHBOARD_RUNTIME_DIR/software_inventory_assets.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory_query.py" "$DASHBOARD_RUNTIME_DIR/software_inventory_query.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory_response.py" "$DASHBOARD_RUNTIME_DIR/software_inventory_response.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory_state.py" "$DASHBOARD_RUNTIME_DIR/software_inventory_state.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/soc_alert_api.py" "$DASHBOARD_RUNTIME_DIR/soc_alert_api.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/artifact_cache.py" "$DASHBOARD_RUNTIME_DIR/artifact_cache.py"

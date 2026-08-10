@@ -11,9 +11,10 @@ dependency.
 | --- | --- |
 | `onion_sentinel_server.py` | Dedicated port `8766` service that exposes only Onion Sentinel static files, admin login, and SOC APIs. |
 | `report_portal.py` | Transitional SOC API implementation imported from the dedicated server; non-SOC routes are not exposed by `onion_sentinel_server.py`. |
-| `software_inventory.py` | Compatibility facade plus bounded query/asset projection for the collector-produced Software Inventory snapshot. |
+| `software_inventory.py` | Thin compatibility facade for the collector-produced Software Inventory snapshot. |
 | `software_inventory_assets.py` | Complete-inventory asset labeling and fail-closed endpoint OS correlation policy. |
 | `software_inventory_query.py` | Fixed filter contract, freshness classification, public evidence projection, and bounded error payloads. |
+| `software_inventory_response.py` | Bounded filtering, sorting, pagination, summary, coverage, and warning composition. |
 | `software_inventory_state.py` | Owner-controlled snapshot reads, schema validation, provenance enforcement, and normalized state projection. |
 | `ac_hunter_review.py` | Read-only AC Hunter client, in-memory auth refresh, normalization, deterministic triage, and owner-only last-good cache. |
 | `artifact_cache.py` | Thread-safe, single-flight cache for parsed Markdown/JSON artifacts. |
