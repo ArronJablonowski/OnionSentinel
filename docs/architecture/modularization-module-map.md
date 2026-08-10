@@ -2368,6 +2368,12 @@ durable drains, and deferred AI-result acceptance. Incident-bound acceptance
 is constructed only after controlled incident ownership exists, preserving
 immutable attempt provenance without a circular module dependency.
 
+`composition/startup_persistence_compatibility.js` owns additive SQLite column
+compatibility, atomic stable-identity backfill, and the ordered schema/startup
+sequence. It receives schema owners after application composition, preserving
+the controlled-evaluation short circuit without entrypoint-owned migration
+logic.
+
 ## Deployment Map
 
 The current production installer copies individual files. These additions are

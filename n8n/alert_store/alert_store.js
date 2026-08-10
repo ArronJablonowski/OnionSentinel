@@ -31,6 +31,9 @@ const {
 const {
   createEvidenceProcessingComposition,
 } = require('./composition/evidence_processing_composition');
+const {
+  createStartupPersistenceCompatibility,
+} = require('./composition/startup_persistence_compatibility');
 const {createPcapPolicy} = require('./lib/pcap_policy');
 const {createProjectSerialization} = require('./lib/project_serialization');
 const {createRuntimeConfiguration} = require('./lib/runtime_configuration');
@@ -266,69 +269,21 @@ function writeN8nBeacon(stage, alert = {}, result = null, error = null) {
   return beaconPersistence.writeBeacon(stage, alert, result, error);
 }
 
-async function assertControlledEvaluationSchema() {
-  return controlledEvaluationSchema.assertSchema();
-}
-async function initDb() {
-  // Schema upgrades are additive. ensureColumn keeps existing SQLite DBs usable
-  // after new triage fields are introduced.
-  if (await alertStoreSchemaFoundation.configureRuntime()) return;
-  await alertStoreSchemaFoundation.installFoundation();
-  await incidentAnalysisSchema.install();
-  await aiReviewSchema.install();
-  await notificationEnrichmentSchema.install();
-  await pcapSchema.install();
-  await startupPersistenceOrchestrator.initialize();
-}
-
-async function tableColumns(tableName) {
-  return new Promise((resolve, reject) => {
-    db.all(`PRAGMA table_info(${tableName})`, [], (error, rows) => {
-      if (error) reject(error);
-      else resolve(rows.map((row) => row.name));
-    });
-  });
-}
-
-async function ensureColumn(tableName, columnName, columnType) {
-  // Older SQLite builds do not support ADD COLUMN IF NOT EXISTS.
-  const columns = await tableColumns(tableName);
-  if (!columns.includes(columnName)) {
-    await run(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnType}`);
-  }
-}
-
-async function persistStableIdentity(alertId, row, alert = {}) {
-  const identityRow = {...row, rule_id: alert.rule_id || row.rule_id};
-  const key = stableGroupKey(identityRow);
-  const id = stableGroupId(identityRow);
-  await run('UPDATE alerts SET rule_id = COALESCE(?, rule_id), stable_group_key = ?, stable_group_id = ? WHERE alert_id = ?',
-    [alert.rule_id || null, key, id, alertId]);
-  return {stable_group_key: key, stable_group_id: id};
-}
-
-async function backfillStableGroupIdentity() {
-  const pending = await all("SELECT * FROM alerts WHERE stable_group_id IS NULL OR stable_group_id = ''");
-  if (!pending.length) return 0;
-  // A restart must never expose a partially migrated identity index. Keeping
-  // the startup backfill in one transaction also avoids one fsync per row when
-  // DELETE/FULL durability is intentionally enabled.
-  await withImmediateTransaction(async () => {
-    for (const item of pending) {
-      const alert = parseJsonObject(item.alert_json);
-      await persistStableIdentity(item.alert_id, item, alert);
-    }
-  });
-  return pending.length;
-}
-
-async function recordAuthorizedActivityCampaign(alert, row, inserted = true) {
-  return authorizedCampaignPersistence.recordCampaign(alert, row, inserted);
-}
-
-async function backfillAuthorizedActivityCampaigns() {
-  return authorizedCampaignPersistence.backfillCampaigns();
-}
+const startupPersistenceCompatibility = createStartupPersistenceCompatibility({
+  database: {
+    db,
+    run,
+    all,
+    withTransaction: withImmediateTransaction,
+  },
+  identity: {stableGroupKey, stableGroupId},
+  serialization: {parseJsonObject},
+});
+const {
+  ensureColumn,
+  persistStableIdentity,
+  backfillStableGroupIdentity,
+} = startupPersistenceCompatibility;
 
 async function authorizedCampaignForAlertId(alertId) {
   return authorizedCampaignPersistence.campaignForAlertId(alertId);
@@ -340,10 +295,6 @@ async function reconcileAuthorizedActivityBacklog() {
 
 async function indexAlertObservables(alert, row) {
   return authorizedCampaignPersistence.indexObservables(alert, row);
-}
-
-async function backfillAlertObservables() {
-  return authorizedCampaignPersistence.backfillObservables();
 }
 
 async function recordAiAnalysisResult(payload) {
@@ -360,10 +311,6 @@ function validIncidentCaseId(value) {
 
 async function stableGroupHasPendingHumanReview(stableId) {
   return analystReviewProjection.pendingHumanReview(stableId);
-}
-
-async function analystReviewState(options = {}) {
-  return analystReviewProjection.reviewState(options);
 }
 
 async function analystAdjudicationSnapshot(searchParams) {
@@ -774,6 +721,14 @@ const {
     refreshGroupAliases,
   },
   serialization: {nowUtc, parseJsonObject, jsonText, normalizeTimestampValue},
+});
+const initDb = startupPersistenceCompatibility.createSchemaInitializer({
+  alertStoreSchemaFoundation,
+  incidentAnalysisSchema,
+  aiReviewSchema,
+  notificationEnrichmentSchema,
+  pcapSchema,
+  startupPersistenceOrchestrator,
 });
 async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppression, campaign = null) {
   return automaticResponseRouting.queuePcap(
