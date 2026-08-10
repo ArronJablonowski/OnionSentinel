@@ -16,6 +16,20 @@ READ_PROJECTION = (
     / "lib"
     / "postgres_asset_read_projection.js"
 )
+INVENTORY_REPOSITORY = (
+    ROOT
+    / "n8n"
+    / "alert_store"
+    / "lib"
+    / "postgres_asset_inventory_repository.js"
+)
+DHCP_REPOSITORY = (
+    ROOT
+    / "n8n"
+    / "alert_store"
+    / "lib"
+    / "postgres_asset_dhcp_repository.js"
+)
 RUNTIME = ROOT / "n8n" / "alert_store" / "services" / "postgres_auxiliary_store_runtime.js"
 REQUEST_AUTHORIZATION = (
     ROOT / "n8n" / "alert_store" / "lib" / "request_authorization.js"
@@ -79,6 +93,10 @@ class PostgresAssetInventoryTests(unittest.TestCase):
         service = SERVICE.read_text(encoding="utf-8")
         store = STORE.read_text(encoding="utf-8")
         read_projection = READ_PROJECTION.read_text(encoding="utf-8")
+        write_sources = (
+            INVENTORY_REPOSITORY.read_text(encoding="utf-8")
+            + DHCP_REPOSITORY.read_text(encoding="utf-8")
+        )
         runtime = RUNTIME.read_text(encoding="utf-8")
         request_authorization = REQUEST_AUTHORIZATION.read_text(encoding="utf-8")
         route_composition = ROUTE_COMPOSITION.read_text(encoding="utf-8")
@@ -124,22 +142,22 @@ class PostgresAssetInventoryTests(unittest.TestCase):
             "conditions.push('$1::timestamptz IS NOT NULL')",
             read_projection,
         )
-        self.assertIn("asset.ip_address_changed_from_dhcp", store)
-        self.assertIn("ip_change_approved", store)
-        self.assertIn("explicit DHCP IP-change confirmation is required", store)
-        self.assertIn("lower(asset_id) = lower($1)", store)
-        self.assertIn("asset name already belongs to authoritative asset", store)
-        self.assertIn("asset.edited", store)
-        self.assertIn("asset.demoted_to_dhcp", store)
+        self.assertIn("asset.ip_address_changed_from_dhcp", write_sources)
+        self.assertIn("ip_change_approved", write_sources)
+        self.assertIn("explicit DHCP IP-change confirmation is required", write_sources)
+        self.assertIn("lower(asset_id) = lower($1)", write_sources)
+        self.assertIn("asset name already belongs to authoritative asset", write_sources)
+        self.assertIn("asset.edited", write_sources)
+        self.assertIn("asset.demoted_to_dhcp", write_sources)
         self.assertIn(
             "asset has no preserved DHCP observation to return to review",
-            store,
+            write_sources,
         )
-        self.assertEqual(store.count("$7::jsonb, $8::jsonb"), 2)
-        self.assertIn("JSON.stringify(current.expected_services)", store)
-        self.assertIn("JSON.stringify(current.expected_behaviors)", store)
-        self.assertIn("JSON.stringify(desired.expected_services)", store)
-        self.assertIn("JSON.stringify(desired.expected_behaviors)", store)
+        self.assertEqual(write_sources.count("$7::jsonb, $8::jsonb"), 2)
+        self.assertIn("JSON.stringify(current.expected_services)", write_sources)
+        self.assertIn("JSON.stringify(current.expected_behaviors)", write_sources)
+        self.assertIn("JSON.stringify(desired.expected_services)", write_sources)
+        self.assertIn("JSON.stringify(desired.expected_behaviors)", write_sources)
 
     def test_schema_allows_distinct_ip_change_review_decision(self) -> None:
         sql = SCHEMA.read_text(encoding="utf-8")

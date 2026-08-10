@@ -226,3 +226,67 @@ test('snapshot uses bounded all-state pages and preserves inventory schema', asy
   assert.equal(snapshot.assets[0].asset_id, 'asset-1');
   assert.deepEqual(snapshot.assets[0].identifiers.ip_addresses, ['192.0.2.10']);
 });
+
+test('inventory import failure rolls back and releases its transaction owner', async () => {
+  const statements = [];
+  let released = false;
+  const client = {
+    query: async (sql) => {
+      const text = String(sql).trim();
+      statements.push(text);
+      if (text.startsWith('INSERT INTO onion_sentinel_assets.identifiers')) {
+        throw new Error('synthetic identifier failure');
+      }
+      return {rows: []};
+    },
+    release: () => { released = true; },
+  };
+  const store = createPostgresAssetStore({
+    pool: {
+      query: async () => ({rows: []}),
+      connect: async () => client,
+    },
+    schemaPath: '/unused',
+  });
+  await assert.rejects(
+    () => store.importInventory({
+      schema: 'onion-sentinel-asset-inventory-v1',
+      generated_at: '2026-08-01T18:00:00Z',
+      assets: [validInventoryRecord()],
+    }),
+    /synthetic identifier failure/,
+  );
+  assert.equal(statements[0], 'BEGIN');
+  assert.equal(statements.at(-1), 'ROLLBACK');
+  assert.equal(statements.includes('COMMIT'), false);
+  assert.equal(released, true);
+});
+
+test('health projection retains exact schema and bounded numeric counts', async () => {
+  const store = createPostgresAssetStore({
+    pool: {
+      query: async (sql) => {
+        const text = String(sql);
+        if (text.includes('inventory_counts')) {
+          return {rows: [{records_total: '4', current_records: '3'}]};
+        }
+        if (text.includes('dhcp_observations')) {
+          return {rows: [{count: '2', latest: '2026-08-01T18:00:00Z'}]};
+        }
+        if (text.includes('audit_events')) {
+          return {rows: [{count: '7', latest: '2026-08-01T18:01:00Z'}]};
+        }
+        throw new Error(`unexpected query: ${sql}`);
+      },
+    },
+    schemaPath: '/unused',
+  });
+  assert.deepEqual(await store.stats(), {
+    enabled: true,
+    backend: 'postgresql',
+    schema_version: 1,
+    inventory: {records_total: '4', current_records: '3'},
+    dhcp_observations: {count: 2, latest: '2026-08-01T18:00:00Z'},
+    audit_events: {count: 7, latest: '2026-08-01T18:01:00Z'},
+  });
+});

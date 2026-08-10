@@ -2403,6 +2403,14 @@ exact supported schema-version gate. `lib/postgres_asset_read_projection.js`
 owns parameterized search/filter pagination, allowlisted ordering, bounded
 snapshot traversal, health counts, and public PostgreSQL asset projections.
 
+`lib/postgres_asset_inventory_repository.js` owns atomic inventory import,
+versioned operator edits, identifier conflict checks, and demotion back to
+preserved DHCP evidence. `lib/postgres_asset_dhcp_repository.js` owns DHCP
+reconciliation, promotion, and approved IP-change transactions.
+`lib/postgres_asset_health_projection.js` owns the bounded schema, inventory,
+DHCP, and append-only audit health projection. `postgres_asset_store.js` is a
+thin compatibility facade over these owners.
+
 ## Deployment Map
 
 The current production installer copies individual files. These additions are
