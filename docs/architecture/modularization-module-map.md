@@ -2688,6 +2688,16 @@ caching, and history API composition. SQLite remains authoritative for
 committed executions; JSONL remains bounded runtime telemetry, and observed
 model/runtime identity continues to come from each independent execution row.
 
+### Grouped SOC query runtime
+
+`portal_soc_query_runtime.py` owns late-bound composition of grouped summary
+and fallback queries, analyst-status filtering, page enrichment, AI/PCAP
+evidence joins, cached JSON responses, bounded detail-fragment delivery,
+metrics, and suppression history. Repository, settings, evidence, cache, and
+presentation ports remain injected so the facade's compatibility seams and
+failure-path tests remain effective. Paths, pagination, sorting, response
+schemas, and exclusion of manually escalated incident groups are preserved.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:
