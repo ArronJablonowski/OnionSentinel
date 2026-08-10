@@ -34,6 +34,9 @@ const {
 const {
   createStartupPersistenceCompatibility,
 } = require('./composition/startup_persistence_compatibility');
+const {
+  createApplicationRuntimePorts,
+} = require('./composition/application_runtime_ports');
 const {createPcapPolicy} = require('./lib/pcap_policy');
 const {createProjectSerialization} = require('./lib/project_serialization');
 const {createRuntimeConfiguration} = require('./lib/runtime_configuration');
@@ -605,6 +608,30 @@ const aiAnalysisAcceptance = evidenceProcessing.createAiAcceptance({
   bindingAuthority: incidentReanalysisBindingService.bindingAuthority,
   analysisCompletion: incidentAnalysisCompletion,
 });
+const applicationRuntimePorts = createApplicationRuntimePorts({
+  mutable: mutableRuntimeOwners,
+  domain: {
+    enrichmentCache,
+    pcapRequestRepository,
+    resolveDashboardAlertGroup,
+    randomUUID: crypto.randomUUID,
+    rebuildGroupSummariesUnlocked: rebuildAlertGroupSummariesUnlocked,
+    queueIncidentResponseForGroup,
+    persistStableIdentity,
+    refreshGroupSummary: refreshAlertGroupSummary,
+    queueNotification: queueTelegramNotification,
+    signalAiWorkers,
+    drainNotificationOutbox: drainTelegramOutbox,
+    drainEnrichmentJobs,
+    drainPostCommitJobs: drainN8nPostCommitJobs,
+  },
+  lifecycle: {
+    reconcileRecoveredIncidentAttempts: incidentReanalysisRecovery.reconcile,
+    backfillStableGroupIdentity,
+    rebuildAlertGroupSummaries,
+    refreshGroupAliases,
+  },
+});
 const {
   aiReviewSchema,
   alertIngestOrchestrator,
@@ -686,40 +713,8 @@ const {
     hasUsableExternalIntel,
     enrichmentMaxAttempts: enrichmentWorkerMaxAttempts,
   },
-  services: {
-    installEnrichmentCache: () => enrichmentCache.install(),
-    backfillPcapOutcomes: () => pcapRequestRepository.backfillOutcomes(),
-    completePendingJobs: (...args) => (
-      mutableRuntimeOwners.durableJobs().completePendingByDedupeKeys(...args)
-    ),
-    resolveDashboardAlertGroup,
-    randomUUID: crypto.randomUUID,
-    rebuildGroupSummaries: rebuildAlertGroupSummariesUnlocked,
-    createPcapRequest: (...args) => pcapRequestRepository.createRequest(...args),
-    queueIncidentResponseForGroup,
-    persistStableIdentity,
-    refreshGroupSummary: refreshAlertGroupSummary,
-    queueNotification: queueTelegramNotification,
-    enqueueJob: (...args) => mutableRuntimeOwners.durableJobs().enqueue(...args),
-    recordMetric: (...args) => mutableRuntimeOwners.pipelineMetrics().record(...args),
-    signalAiWorkers,
-    drainNotificationOutbox: drainTelegramOutbox,
-    drainEnrichmentJobs,
-    drainPostCommitJobs: drainN8nPostCommitJobs,
-  },
-  lifecycle: {
-    initializeDurableJobs: mutableRuntimeOwners.initializeDurableJobs,
-    installDurableJobs: () => mutableRuntimeOwners.durableJobs().install(),
-    initializePostgresShadowOutbox: mutableRuntimeOwners.initializePostgresShadowOutbox,
-    installPostgresShadowOutbox: () => mutableRuntimeOwners.postgresShadowOutbox().install(),
-    initializePostgresShadowProjector: mutableRuntimeOwners.initializePostgresShadowProjector,
-    reconcileRecoveredIncidentAttempts: incidentReanalysisRecovery.reconcile,
-    initializePipelineMetrics: mutableRuntimeOwners.initializePipelineMetrics,
-    installPipelineMetrics: () => mutableRuntimeOwners.pipelineMetrics().install(),
-    backfillStableGroupIdentity,
-    rebuildAlertGroupSummaries,
-    refreshGroupAliases,
-  },
+  services: applicationRuntimePorts.services,
+  lifecycle: applicationRuntimePorts.lifecycle,
   serialization: {nowUtc, parseJsonObject, jsonText, normalizeTimestampValue},
 });
 const initDb = startupPersistenceCompatibility.createSchemaInitializer({

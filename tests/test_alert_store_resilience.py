@@ -52,6 +52,13 @@ MUTABLE_RUNTIME_OWNERS = (
     / "composition"
     / "mutable_runtime_owners.js"
 )
+APPLICATION_RUNTIME_PORTS = (
+    REPO_ROOT
+    / "n8n"
+    / "alert_store"
+    / "composition"
+    / "application_runtime_ports.js"
+)
 DISK_WRITE_ADMISSION = REPO_ROOT / "n8n" / "alert_store" / "services" / "disk_write_admission.js"
 WORKER_WAKE_SIGNALING = REPO_ROOT / "n8n" / "alert_store" / "services" / "worker_wake_signaling.js"
 BEACON_PERSISTENCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "beacon_persistence.js"
@@ -115,6 +122,9 @@ class AlertStoreResilienceTest(unittest.TestCase):
             encoding="utf-8"
         )
         cls.mutable_runtime_owners = MUTABLE_RUNTIME_OWNERS.read_text(encoding="utf-8")
+        cls.application_runtime_ports = APPLICATION_RUNTIME_PORTS.read_text(
+            encoding="utf-8"
+        )
         cls.disk_write_admission = DISK_WRITE_ADMISSION.read_text(encoding="utf-8")
         cls.worker_wake_signaling = WORKER_WAKE_SIGNALING.read_text(encoding="utf-8")
         cls.beacon_persistence = BEACON_PERSISTENCE.read_text(encoding="utf-8")
@@ -138,8 +148,8 @@ class AlertStoreResilienceTest(unittest.TestCase):
     def test_enrichment_is_durable_and_outside_ingest_latency(self) -> None:
         self.assertIn("require('../lib/durable_job_queue')", self.mutable_runtime_owners)
         self.assertIn(
-            "enqueueJob: (...args) => mutableRuntimeOwners.durableJobs().enqueue(...args)",
-            self.code,
+            "enqueueJob: (...args) => mutable.durableJobs().enqueue(...args)",
+            self.application_runtime_ports,
         )
         self.assertIn("await enqueueJob('public_enrichment'", self.alert_ingest_orchestrator)
         self.assertIn("async function drainEnrichmentJobs()", self.code)
@@ -494,8 +504,8 @@ class AlertStoreResilienceTest(unittest.TestCase):
             self.alert_ingest_orchestrator,
         )
         self.assertIn(
-            "enqueueJob: (...args) => mutableRuntimeOwners.durableJobs().enqueue(...args)",
-            self.code,
+            "enqueueJob: (...args) => mutable.durableJobs().enqueue(...args)",
+            self.application_runtime_ports,
         )
         self.assertNotIn("requestJson({", transaction)
         self.assertIn("void drainPostCommitJobs();", after_commit)

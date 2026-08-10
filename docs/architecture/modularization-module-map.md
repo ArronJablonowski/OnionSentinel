@@ -2374,6 +2374,11 @@ sequence. It receives schema owners after application composition, preserving
 the controlled-evaluation short circuit without entrypoint-owned migration
 logic.
 
+`composition/application_runtime_ports.js` assembles the service and lifecycle
+ports consumed by application composition. Lazy durable, metrics, and shadow
+owners are resolved only when their existing startup or request action runs;
+the entrypoint no longer duplicates that adapter graph.
+
 ## Deployment Map
 
 The current production installer copies individual files. These additions are
