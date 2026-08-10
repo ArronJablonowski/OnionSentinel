@@ -37,6 +37,7 @@ DURABLE_JOB_TRANSITION_EXECUTOR = REPO_ROOT / "n8n" / "alert_store" / "services"
 DISK_WRITE_ADMISSION = REPO_ROOT / "n8n" / "alert_store" / "services" / "disk_write_admission.js"
 WORKER_WAKE_SIGNALING = REPO_ROOT / "n8n" / "alert_store" / "services" / "worker_wake_signaling.js"
 BEACON_PERSISTENCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "beacon_persistence.js"
+PROJECT_SERIALIZATION = REPO_ROOT / "n8n" / "alert_store" / "lib" / "project_serialization.js"
 
 
 class AlertStoreResilienceTest(unittest.TestCase):
@@ -74,6 +75,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.disk_write_admission = DISK_WRITE_ADMISSION.read_text(encoding="utf-8")
         cls.worker_wake_signaling = WORKER_WAKE_SIGNALING.read_text(encoding="utf-8")
         cls.beacon_persistence = BEACON_PERSISTENCE.read_text(encoding="utf-8")
+        cls.project_serialization = PROJECT_SERIALIZATION.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
         self.assertIn("require('./lib/provider_scheduler')", self.code)
@@ -341,6 +343,12 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("function writeJsonAtomic", self.beacon_persistence)
         self.assertNotIn("function writeJsonAtomic", self.code)
         self.assertIn("atomic local-only state with no credentials or packet evidence", self.beacon_persistence)
+
+    def test_timestamp_and_json_serialization_have_one_shared_owner(self) -> None:
+        self.assertIn("createProjectSerialization", self.code)
+        self.assertIn("function normalizeTimestampValue", self.code)
+        self.assertIn("isoTimestampPattern", self.project_serialization)
+        self.assertIn("function canonicalJsonText", self.project_serialization)
 
     def test_n8n_report_work_is_enqueued_inside_commit_and_delivered_afterward(self) -> None:
         store = self.alert_ingest_orchestrator.split("async function store(rawAlert)", 1)[1]
