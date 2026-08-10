@@ -65,6 +65,9 @@ const {
 const {
   createIncidentReanalysisRequest,
 } = require('./services/incident_reanalysis_request');
+const {
+  createIncidentReanalysisJobOwnership,
+} = require('./services/incident_reanalysis_job_ownership');
 const {createIncidentAnalysisCompletion} = require('./services/incident_analysis_completion');
 const {createIncidentReanalysisBindingService} = require('./services/incident_reanalysis_binding');
 const {createHealthRoutes} = require('./routes/health_routes');
@@ -4328,134 +4331,35 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
   return incidentReanalysisRequestOwner.request(payload, requestedCaseId);
 }
 function incidentReanalysisJobPayload(job) {
-  if (!job?.payload_json) return {};
-  try {
-    const payload = JSON.parse(job.payload_json);
-    return payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
-  } catch (_) {
-    return {};
-  }
+  return incidentReanalysisJobOwnership.jobPayload(job);
 }
 
 async function retireCompletedIncidentReanalysisJob(job) {
-  const payload = incidentReanalysisJobPayload(job);
-  if (payload?.manual_reanalysis !== true) return false;
-  const runId = safeString(payload?.reanalysis_run_id, 80);
-  const caseId = validIncidentCaseId(payload?.case_id);
-  if (!runId || !caseId) return false;
-  const completed = await get(
-    `SELECT analysis_id
-     FROM incident_reanalysis_run_cases
-     WHERE run_id = ? AND case_id = ?
-       AND status = 'completed' AND analysis_id IS NOT NULL`,
-    [runId, caseId],
-  );
-  if (!completed?.analysis_id) return false;
-  const updatedAt = nowUtc();
-  const result = await run(
-    `UPDATE durable_jobs
-     SET status = 'completed', lease_expires_at = NULL, lease_token = NULL,
-         last_error = NULL, completed_at = COALESCE(completed_at, ?),
-         last_completed_at = COALESCE(last_completed_at, ?),
-         processing_started_at = NULL, rerun_requested = 0, updated_at = ?
-     WHERE id = ? AND job_type = 'incident_response_analysis'
-       AND status IN ('pending', 'processing') AND payload_json = ?`,
-    [
-      updatedAt,
-      updatedAt,
-      updatedAt,
-      Number(job.id || 0),
-      String(job.payload_json || ''),
-    ],
-  );
-  return Number(result.changes || 0) === 1;
+  return incidentReanalysisJobOwnership.retireCompleted(job);
 }
 
 async function retireSupersededIncidentReanalysisJob(job) {
-  if (job?.status !== 'pending') return false;
-  const payload = incidentReanalysisJobPayload(job);
-  if (payload?.manual_reanalysis !== true) return false;
-  const runId = safeString(payload?.reanalysis_run_id, 80);
-  const caseId = validIncidentCaseId(payload?.case_id);
-  if (!runId || !caseId) return false;
-  const superseded = await get(
-    `SELECT 1 AS present
-     FROM incident_reanalysis_run_cases
-     WHERE run_id = ? AND case_id = ? AND status = 'skipped'`,
-    [runId, caseId],
-  );
-  if (!superseded) return false;
-  const updatedAt = nowUtc();
-  const result = await run(
-    `UPDATE durable_jobs
-     SET status = 'completed', lease_expires_at = NULL, lease_token = NULL,
-         last_error = NULL, completed_at = COALESCE(completed_at, ?),
-         last_completed_at = COALESCE(last_completed_at, ?),
-         processing_started_at = NULL, rerun_requested = 0, updated_at = ?
-     WHERE id = ? AND job_type = 'incident_response_analysis'
-       AND status = 'pending' AND payload_json = ?`,
-    [
-      updatedAt,
-      updatedAt,
-      updatedAt,
-      Number(job.id || 0),
-      String(job.payload_json || ''),
-    ],
-  );
-  return Number(result.changes || 0) === 1;
+  return incidentReanalysisJobOwnership.retireSuperseded(job);
 }
 
 function incidentReanalysisAttemptId(leaseToken) {
-  const token = safeString(leaseToken, 128);
-  if (!token) return '';
-  // Persist only a one-way lease fingerprint. The worker's bearer-like lease
-  // token remains transient while still providing immutable attempt identity.
-  return `ira-${crypto.createHash('sha256').update(token).digest('hex').slice(0, 40)}`;
+  return incidentReanalysisJobOwnership.attemptId(leaseToken);
 }
 
 function incidentAnalysisProvider(modelPath, observedProvider = '') {
-  const observed = safeString(observedProvider, 100).toLowerCase();
-  if (observed) return observed;
-  const route = safeString(modelPath, 100).toLowerCase();
-  if (route === 'frontier-codex-cli') return 'codex-cli';
-  if (route === 'hermes-agent') return 'openai-codex';
-  if (route === 'openclaw') return 'openclaw';
-  if (route === 'ollama') return 'ollama';
-  return route;
+  return incidentReanalysisJobOwnership.analysisProvider(modelPath, observedProvider);
 }
 
-async function closeStaleIncidentReanalysisAttempts(groupId, currentRunId, currentCaseId, updatedAt) {
-  const stale = await all(
-    `SELECT attempt_id, run_id, case_id
-     FROM incident_reanalysis_attempts
-     WHERE group_id = ? AND status = 'running'`,
-    [groupId],
+async function closeStaleIncidentReanalysisAttempts(
+  groupId,
+  currentRunId,
+  currentCaseId,
+  updatedAt,
+) {
+  return incidentReanalysisJobOwnership.closeStale(
+    groupId, currentRunId, currentCaseId, updatedAt,
   );
-  if (!stale.length) return;
-  const staleError = 'Prior durable processing lease ended before completion';
-  const affectedRuns = new Set();
-  for (const attempt of stale) {
-    await run(
-      `UPDATE incident_reanalysis_attempts
-       SET status = 'failed', latest_error = ?, completed_at = ?, updated_at = ?
-       WHERE attempt_id = ? AND status = 'running'`,
-      [staleError, updatedAt, updatedAt, attempt.attempt_id],
-    );
-    if (attempt.run_id === currentRunId && attempt.case_id === currentCaseId) continue;
-    await run(
-      `UPDATE incident_reanalysis_run_cases
-       SET status = 'failed', latest_error = ?, completed_at = ?, updated_at = ?
-       WHERE run_id = ? AND case_id = ?
-         AND status NOT IN ('completed', 'skipped')`,
-      [staleError, updatedAt, updatedAt, attempt.run_id, attempt.case_id],
-    );
-    affectedRuns.add(String(attempt.run_id || ''));
-  }
-  for (const runId of affectedRuns) {
-    await refreshIncidentReanalysisRun(runId);
-  }
 }
-
 async function beginIncidentReanalysisAttempt(job, leaseToken, groupId) {
   const payload = incidentReanalysisJobPayload(job);
   const runId = safeString(payload?.reanalysis_run_id, 80);
@@ -5723,6 +5627,16 @@ const incidentReanalysisRequestOwner = createIncidentReanalysisRequest({
   recordMetric: (...args) => pipelineMetrics.record(...args),
   refreshRun: refreshIncidentReanalysisRun,
   conflict: incidentIdentityConflict,
+});
+const incidentReanalysisJobOwnership = createIncidentReanalysisJobOwnership({
+  safeString,
+  validCaseId: validIncidentCaseId,
+  get,
+  all,
+  run,
+  nowUtc,
+  sha256Text: (value) => crypto.createHash('sha256').update(value).digest('hex'),
+  refreshRun: refreshIncidentReanalysisRun,
 });
 
 async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppression, campaign = null) {
