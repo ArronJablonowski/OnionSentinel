@@ -1076,6 +1076,62 @@
       ]
     },
     {
+      "path": "n8n/bin/detection_validation.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation.py",
+      "required_symbols": [
+        "build_detection_validation",
+        "extract_group_packet_features",
+        "extract_rule_context",
+        "load_detection_playbooks",
+        "marker_specs",
+        "parse_suricata_rule",
+        "resolve_detection_playbook"
+      ]
+    },
+    {
+      "path": "n8n/bin/detection_validation_rule.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation_rule.py",
+      "required_symbols": [
+        "extract_rule_context",
+        "parse_suricata_rule"
+      ]
+    },
+    {
+      "path": "n8n/bin/detection_validation_packet.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation_packet.py",
+      "required_symbols": [
+        "marker_specs"
+      ]
+    },
+    {
+      "path": "n8n/bin/detection_validation_features.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation_features.py",
+      "required_symbols": [
+        "extract_group_packet_features"
+      ]
+    },
+    {
+      "path": "n8n/bin/detection_validation_policy.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation_policy.py",
+      "required_symbols": [
+        "load_detection_playbooks",
+        "resolve_detection_playbook"
+      ]
+    },
+    {
+      "path": "n8n/bin/detection_validation_result.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation_result.py",
+      "required_symbols": [
+        "build_detection_validation"
+      ]
+    },
+    {
       "path": "n8n/bin/pcap_processor_contract.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/pcap_processor_contract.py",

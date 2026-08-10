@@ -19,7 +19,22 @@
       "max_lines": 1799
     },
     "n8n/bin/detection_validation.py": {
-      "max_lines": 1848
+      "max_lines": 250
+    },
+    "n8n/bin/detection_validation_rule.py": {
+      "max_lines": 600
+    },
+    "n8n/bin/detection_validation_packet.py": {
+      "max_lines": 600
+    },
+    "n8n/bin/detection_validation_features.py": {
+      "max_lines": 600
+    },
+    "n8n/bin/detection_validation_policy.py": {
+      "max_lines": 600
+    },
+    "n8n/bin/detection_validation_result.py": {
+      "max_lines": 600
     },
     "n8n/bin/investigation_query_contract.py": {
       "max_lines": 250
@@ -185,55 +200,55 @@
     "n8n/bin/configure-post-commit-env.py::render_env": {
       "max_complexity": 16
     },
-    "n8n/bin/detection_validation.py::_bounded_application_buffers": {
+    "n8n/bin/detection_validation_packet.py::_bounded_application_buffers": {
       "max_complexity": 41,
       "max_lines": 102
     },
-    "n8n/bin/detection_validation.py::_content_match_positions": {
+    "n8n/bin/detection_validation_packet.py::_content_match_positions": {
       "max_complexity": 37
     },
-    "n8n/bin/detection_validation.py::_evaluate_numeric_predicate": {
+    "n8n/bin/detection_validation_policy.py::_evaluate_numeric_predicate": {
       "max_complexity": 18
     },
-    "n8n/bin/detection_validation.py::_icmp_from_packet": {
+    "n8n/bin/detection_validation_rule.py::_icmp_from_packet": {
       "max_complexity": 19
     },
-    "n8n/bin/detection_validation.py::_infer_stun_response_xbits_state": {
+    "n8n/bin/detection_validation_policy.py::_infer_stun_response_xbits_state": {
       "max_complexity": 34
     },
-    "n8n/bin/detection_validation.py::_network_packet_envelope": {
+    "n8n/bin/detection_validation_packet.py::_network_packet_envelope": {
       "max_complexity": 18
     },
-    "n8n/bin/detection_validation.py::_ordered_deployed_content_constraints": {
+    "n8n/bin/detection_validation_packet.py::_ordered_deployed_content_constraints": {
       "max_complexity": 21
     },
-    "n8n/bin/detection_validation.py::_validated_stun_rule_semantics": {
+    "n8n/bin/detection_validation_policy.py::_validated_stun_rule_semantics": {
       "max_complexity": 18
     },
-    "n8n/bin/detection_validation.py::build_detection_validation": {
+    "n8n/bin/detection_validation_result.py::build_detection_validation": {
       "max_complexity": 136,
       "max_lines": 351
     },
-    "n8n/bin/detection_validation.py::extract_group_packet_features": {
+    "n8n/bin/detection_validation_features.py::extract_group_packet_features": {
       "max_complexity": 43,
       "max_lines": 266
     },
-    "n8n/bin/detection_validation.py::extract_rule_context": {
+    "n8n/bin/detection_validation_rule.py::extract_rule_context": {
       "max_complexity": 31,
       "max_lines": 109
     },
-    "n8n/bin/detection_validation.py::load_detection_playbooks": {
+    "n8n/bin/detection_validation_policy.py::load_detection_playbooks": {
       "max_complexity": 64,
       "max_lines": 116
     },
-    "n8n/bin/detection_validation.py::marker_specs": {
+    "n8n/bin/detection_validation_packet.py::marker_specs": {
       "max_complexity": 28
     },
-    "n8n/bin/detection_validation.py::parse_suricata_rule": {
+    "n8n/bin/detection_validation_rule.py::parse_suricata_rule": {
       "max_complexity": 32,
       "max_lines": 146
     },
-    "n8n/bin/detection_validation.py::resolve_detection_playbook": {
+    "n8n/bin/detection_validation_policy.py::resolve_detection_playbook": {
       "max_complexity": 28
     },
     "n8n/bin/evaluate-investigation-skills-v2.py::evaluate": {

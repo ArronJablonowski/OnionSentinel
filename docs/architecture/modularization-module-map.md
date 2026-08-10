@@ -2527,6 +2527,22 @@ allowing lower layers to import the facade. The installer stages every module
 beside the entrypoint. Raw captures remain path-confined and read-only; derived
 claims retain tool, timestamp, direction, coverage, and cleanup provenance.
 
+## Detection Validation
+
+`n8n/bin/detection_validation.py` is a bounded import-compatibility facade.
+`detection_validation_rule.py` owns deployed-rule and alert metadata parsing;
+`detection_validation_packet.py` owns bounded packet primitives and deployed
+content constraints; `detection_validation_features.py` owns group evidence
+aggregation; `detection_validation_policy.py` owns versioned playbooks and
+deterministic predicate policy; and `detection_validation_result.py` owns the
+conclusion-safe public result projection.
+
+The dependency chain is acyclic and never points back to the facade. A rule
+match remains an evidence fact rather than an independent malicious verdict.
+Unsupported fields, missing coverage, negative evidence, rule identity drift,
+and confidence limiters remain explicit and fail closed. The installer stages
+the complete module set beside every runtime consumer.
+
 ## Alert Store
 
 Current owner: `n8n/alert_store/alert_store.js` (12,586 lines). The runtime
