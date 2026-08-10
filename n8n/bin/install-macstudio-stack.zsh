@@ -834,6 +834,7 @@ cp "$REPO_DIR/n8n/bin/scheduler_execution.py" "$STACK_DIR/bin/scheduler_executio
 cp "$REPO_DIR/n8n/bin/scheduler_indexed_selection.py" "$STACK_DIR/bin/scheduler_indexed_selection.py"
 cp "$REPO_DIR/n8n/bin/scheduler_indexed_state.py" "$STACK_DIR/bin/scheduler_indexed_state.py"
 cp "$REPO_DIR/n8n/bin/scheduler_job_reporting.py" "$STACK_DIR/bin/scheduler_job_reporting.py"
+cp "$REPO_DIR/n8n/bin/scheduler_job_compat.py" "$STACK_DIR/bin/scheduler_job_compat.py"
 cp "$REPO_DIR/n8n/bin/scheduler_legacy_selection.py" "$STACK_DIR/bin/scheduler_legacy_selection.py"
 cp "$REPO_DIR/n8n/bin/scheduler_outcome.py" "$STACK_DIR/bin/scheduler_outcome.py"
 cp "$REPO_DIR/n8n/bin/scheduler_settlement.py" "$STACK_DIR/bin/scheduler_settlement.py"

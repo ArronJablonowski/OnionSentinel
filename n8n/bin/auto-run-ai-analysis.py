@@ -260,6 +260,24 @@ from scheduler_selection_compat import (
     select_next_alert_legacy as select_legacy_candidate,
     test_filter_sql as build_test_filter_sql,
 )
+from scheduler_job_compat import (
+    ai_failure_is_retryable as classify_ai_failure_retry,
+    analysis_command as build_compat_analysis_command,
+    build_prompt as build_compat_prompt,
+    claimed_durable_ai_job as validate_claimed_durable_job,
+    collect_incident_evidence as collect_compat_incident_evidence,
+    controlled_claim_expectations as validate_controlled_claim_candidate,
+    controlled_job_route_contract as resolve_controlled_job_route,
+    job_reanalysis_attempt_id as derive_job_reanalysis_attempt_id,
+    reconcile_completed_ai_jobs as reconcile_completed_jobs,
+    report_ai_job_status as transition_compat_ai_job_status,
+    require_controlled_claim_identity as validate_controlled_claim_identity,
+    run_analysis as invoke_compat_analysis,
+    run_command as run_compat_command,
+    runner_invocation_defaults as build_runner_invocation_defaults,
+    strict_ai_settings_module as load_strict_ai_settings_module,
+    strict_controlled_ai_settings as load_strict_controlled_ai_settings,
+)
 
 
 HOME = Path.home()
@@ -652,8 +670,8 @@ def report_ai_job_status(
     worker never performs expensive inference without a durable processing
     lease in the current indexed architecture.
     """
-    return transition_ai_job_status(
-        scheduler_reporting_sources(),
+    return transition_compat_ai_job_status(
+        globals(),
         base_url,
         group_id,
         status,
@@ -673,15 +691,11 @@ def report_ai_job_status(
 
 def job_reanalysis_attempt_id(job_payload: dict, lease_token: str) -> str:
     """Fingerprint only a validated manual reanalysis job, never escalation."""
-    if job_payload.get("manual_reanalysis") is not True:
-        return ""
-    run_id = str(job_payload.get("reanalysis_run_id") or "").strip().lower()
-    case_id = str(job_payload.get("case_id") or "").strip().lower()
-    if not re.fullmatch(r"irr-[a-f0-9-]{36}", run_id):
-        return ""
-    if not re.fullmatch(r"ir-[a-z0-9_-]{1,64}", case_id):
-        return ""
-    return incident_reanalysis_attempt_id(lease_token)
+    return derive_job_reanalysis_attempt_id(
+        globals(),
+        job_payload,
+        lease_token,
+    )
 
 
 NON_RETRYABLE_AI_FAILURE_MARKERS = (
@@ -715,38 +729,12 @@ NON_RETRYABLE_AI_FAILURE_MARKERS = (
 
 def ai_failure_is_retryable(error: object) -> bool:
     """Return false for deterministic failures that rebuilding cannot repair."""
-    detail = str(error or "").strip().lower()
-    return not any(marker in detail for marker in NON_RETRYABLE_AI_FAILURE_MARKERS)
+    return classify_ai_failure_retry(NON_RETRYABLE_AI_FAILURE_MARKERS, error)
 
 
 def reconcile_completed_ai_jobs(base_url: str, group_ids: set[str]) -> int:
     """Mark pending queue intent complete when current artifacts already satisfy it."""
-    if not group_ids:
-        return 0
-    payload = json.dumps({
-        "job_type": "ai_analysis",
-        "dedupe_keys": sorted(group_ids),
-    }).encode("utf-8")
-    request = urllib.request.Request(
-        f"{base_url.rstrip('/')}/jobs/reconcile-completed",
-        data=payload,
-        headers=alert_store_mutation_headers(),
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            if response.status not in range(200, 300):
-                raise RuntimeError(f"AI job reconciliation returned HTTP {response.status}")
-            result = read_bounded_json(response, max_bytes=DEFAULT_MAX_CONTROL_RESPONSE_BYTES)
-            return int(result.get("reconciled") or 0)
-    except urllib.error.HTTPError as exc:
-        # Older alert-store versions may not have the batch endpoint during a
-        # rolling deployment. Analysis must continue and the next run retries.
-        if exc.code == 404:
-            return 0
-        raise RuntimeError(f"AI job reconciliation returned HTTP {exc.code}") from exc
-    except (urllib.error.URLError, BoundedHttpError) as exc:
-        raise RuntimeError(f"AI job reconciliation failed: {exc}") from exc
+    return reconcile_completed_jobs(globals(), base_url, group_ids)
 
 
 def test_filter_sql(column: str = "alert_id") -> tuple[str, list[object]]:
@@ -795,11 +783,8 @@ def claimed_durable_ai_job(
     expected_job_id: int = 0,
 ) -> tuple[dict[str, object], str, str, str]:
     """Validate and return the exact durable AI snapshot bound to a lease."""
-    return load_claimed_durable_job(
-        ClaimSnapshotPolicy(
-            severity_priority=SEVERITY_PRIORITY,
-            stable_group_key_valid=valid_controlled_stable_group_key,
-        ),
+    return validate_claimed_durable_job(
+        globals(),
         processing_transition,
         database_path,
         expected_job_type=expected_job_type,
@@ -818,15 +803,8 @@ def require_controlled_claim_identity(
     expected_job_id: int,
 ) -> None:
     """Fail closed when a controlled run leases a different frozen member."""
-    require_controlled_lease_identity(
-        ControlledLeaseIdentitySources(
-            stable_group_key_valid=valid_controlled_stable_group_key,
-            require_release=require_controlled_release_attestation,
-            route_contract=lambda payload: controlled_job_route_contract(
-                args, payload
-            ),
-            reject=ControlledClaimRejected,
-        ),
+    validate_controlled_claim_identity(
+        globals(),
         args,
         claimed_payload,
         claimed_alert_id=claimed_alert_id,
@@ -838,33 +816,7 @@ def require_controlled_claim_identity(
 
 def _strict_ai_settings_module() -> Any:
     """Load the analysis runner so both processes use one settings parser."""
-
-    global _STRICT_AI_SETTINGS_MODULE
-    if _STRICT_AI_SETTINGS_MODULE is not None:
-        return _STRICT_AI_SETTINGS_MODULE
-    runner_path = (BIN_DIR / "run-local-ai-analysis.py").resolve(strict=True)
-    module_name = (
-        "_onion_sentinel_strict_ai_settings_"
-        + hashlib.sha256(str(runner_path).encode("utf-8")).hexdigest()[:16]
-    )
-    module = sys.modules.get(module_name)
-    if module is None:
-        spec = importlib.util.spec_from_file_location(module_name, runner_path)
-        if spec is None or spec.loader is None:
-            raise RuntimeError("analysis runner settings loader is unavailable")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        try:
-            spec.loader.exec_module(module)
-        except Exception:
-            sys.modules.pop(module_name, None)
-            raise
-    if not callable(getattr(module, "load_ai_settings", None)) or not callable(
-        getattr(module, "enabled_agent_model_routes", None)
-    ):
-        raise RuntimeError("analysis runner settings loader is incomplete")
-    _STRICT_AI_SETTINGS_MODULE = module
-    return module
+    return load_strict_ai_settings_module(globals())
 
 
 def _strict_controlled_ai_settings(
@@ -872,17 +824,7 @@ def _strict_controlled_ai_settings(
 ) -> tuple[dict[str, Any], dict[str, Any], set[str]]:
     """Return runner-normalized settings plus exact persisted assignments."""
 
-    runner = _strict_ai_settings_module()
-    return strict_controlled_ai_settings(
-        settings_path,
-        MAX_AI_SETTINGS_BYTES,
-        StrictSettingsSources(
-            load_ai_settings=runner.load_ai_settings,
-            read_bytes_bounded=runner.read_bytes_bounded,
-            enabled_agent_model_routes=runner.enabled_agent_model_routes,
-            max_settings_bytes=runner.DEFAULT_MAX_SETTINGS_BYTES,
-        ),
-    )
+    return load_strict_controlled_ai_settings(globals(), settings_path)
 
 
 def controlled_job_route_contract(
@@ -890,24 +832,9 @@ def controlled_job_route_contract(
     job_payload: dict[str, object],
 ) -> dict[str, object]:
     """Compatibility delegate for canonical enabled route binding."""
-    settings_path = Path(
-        getattr(args, "ai_settings_file", DEFAULT_AI_SETTINGS)
-    )
-    return validate_job_route_contract(
-        ControlledRoutePolicy(model_route_pattern=CONTROLLED_MODEL_ROUTE_RE),
-        ControlledRouteSources(
-            load_settings=lambda: _strict_controlled_ai_settings(
-                settings_path
-            ),
-            reject=ControlledClaimRejected,
-            settings_errors=(
-                OSError,
-                UnicodeError,
-                ValueError,
-                TypeError,
-                RuntimeError,
-            ),
-        ),
+    return resolve_controlled_job_route(
+        globals(),
+        args,
         job_payload,
     )
 
@@ -918,15 +845,8 @@ def controlled_claim_expectations(
     job_payload: dict[str, object],
 ) -> dict[str, object]:
     """Compatibility delegate for exact frozen candidate validation."""
-    return validate_claim_expectations(
-        ControlledClaimSources(
-            stable_group_key_valid=valid_controlled_stable_group_key,
-            require_release=require_controlled_release_attestation,
-            route_contract=lambda payload: controlled_job_route_contract(
-                args, payload
-            ),
-            reject=ControlledClaimRejected,
-        ),
+    return validate_controlled_claim_candidate(
+        globals(),
         args,
         selected,
         job_payload,
@@ -944,8 +864,8 @@ def run_command(
     progress_interval_seconds: float = 30,
 ):
     """Run one trusted helper with bounded time, memory, and descendants."""
-    print("running:", " ".join(cmd), flush=True)
-    return run_bounded_command(
+    return run_compat_command(
+        globals(),
         cmd,
         timeout_seconds=timeout_seconds,
         max_stdout_bytes=max_stdout_bytes,
@@ -957,39 +877,12 @@ def run_command(
 
 
 def collect_incident_evidence(alert_id: str, args: argparse.Namespace, *, progress_callback=None) -> Path:
-    collector = Path(__file__).with_name("collect-incident-evidence.py")
-    proc = run_command(
-        [
-            sys.executable,
-            str(collector),
-            "--alert-id",
-            alert_id,
-            "--db",
-            str(args.db),
-            "--config",
-            str(args.incident_evidence_config),
-            "--out-dir",
-            str(args.incident_evidence_dir),
-        ],
-        timeout_seconds=360,
-        max_stdout_bytes=1024 * 1024,
-        max_stderr_bytes=DEFAULT_MAX_CHILD_STDERR_BYTES,
+    return collect_compat_incident_evidence(
+        globals(),
+        alert_id,
+        args,
         progress_callback=progress_callback,
-        progress_interval_seconds=30,
     )
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"incident evidence collector failed rc={proc.returncode}")
-    output_lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-    if not output_lines:
-        raise RuntimeError("incident evidence collector returned no artifact path")
-    artifact = Path(output_lines[-1])
-    try:
-        artifact.resolve().relative_to(args.incident_evidence_dir.resolve())
-    except ValueError as exc:
-        raise RuntimeError("incident evidence collector returned a path outside its configured directory") from exc
-    if not artifact.is_file():
-        raise RuntimeError("incident evidence collector did not publish its artifact")
-    return artifact
 
 
 def build_prompt(
@@ -998,37 +891,8 @@ def build_prompt(
     job_payload: dict[str, object] | None = None,
     incident_evidence_path: Path | None = None,
 ) -> Path:
-    return build_prompt_package(
-        PromptBuilderDefaults(
-            builder_path=Path(__file__).with_name(
-                "build-ai-investigation-prompt.py"
-            ),
-            python_executable=sys.executable,
-            database=DEFAULT_DB,
-            rollup_dir=DEFAULT_ROLLUP_DIR,
-            agent_memory_dir=DEFAULT_AGENT_MEMORY_DIR,
-            shared_memory_file=DEFAULT_SHARED_MEMORY_FILE,
-            pcap_analysis_dir=DEFAULT_PCAP_ANALYSIS_DIR,
-            prior_analysis_dir=DEFAULT_ANALYSIS_DIR,
-            asset_inventory_file=DEFAULT_ASSET_INVENTORY_FILE,
-            detection_playbooks=DEFAULT_DETECTION_PLAYBOOKS,
-            investigation_skills=DEFAULT_INVESTIGATION_SKILLS,
-            timeout_seconds=180,
-            max_stdout_bytes=1024 * 1024,
-            max_stderr_bytes=DEFAULT_MAX_CHILD_STDERR_BYTES,
-        ),
-        PromptBuilderSources(
-            initial_prompt_limit=effective_initial_prompt_package_limit,
-            role_prompt_file=role_prompt_file,
-            role_second_opinion_prompt_file=(
-                role_second_opinion_prompt_file
-            ),
-            role_memory_file=role_memory_file,
-            run_command=run_command,
-            emit_stderr=lambda message: print(
-                message, file=sys.stderr, end=""
-            ),
-        ),
+    return build_compat_prompt(
+        globals(),
         alert_id,
         args,
         job_payload,
@@ -1043,9 +907,8 @@ def analysis_command(
     reanalysis_attempt_id: str = "",
     agent_role: str = "",
 ) -> list[str]:
-    return build_analysis_command(
-        runner_invocation_defaults(),
-        runner_invocation_sources(),
+    return build_compat_analysis_command(
+        globals(),
         prompt_path,
         args,
         reanalysis_attempt_id=reanalysis_attempt_id,
@@ -1054,20 +917,7 @@ def analysis_command(
 
 
 def runner_invocation_defaults() -> RunnerInvocationDefaults:
-    return RunnerInvocationDefaults(
-        python_executable=sys.executable,
-        runner_path=Path(__file__).with_name("run-local-ai-analysis.py"),
-        prompt_dir=DEFAULT_PROMPT_DIR,
-        harness_policy=DEFAULT_INVESTIGATION_HARNESS_POLICY,
-        disagreement_prompt=DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT,
-        live_osquery_config=DEFAULT_LIVE_OSQUERY_CONFIG,
-        incident_evidence_config=DEFAULT_INCIDENT_EVIDENCE_CONFIG,
-        investigation_pivot_dir=DEFAULT_INVESTIGATION_PIVOT_DIR,
-        max_stdout_bytes=DEFAULT_MAX_CHILD_STDOUT_BYTES,
-        max_stderr_bytes=DEFAULT_MAX_CHILD_STDERR_BYTES,
-        token_environment_key=CONTROLLED_EVALUATION_TOKEN_ENV,
-        token_pattern=CONTROLLED_EVALUATION_TOKEN_RE,
-    )
+    return build_runner_invocation_defaults(globals())
 
 
 def runner_invocation_sources() -> RunnerInvocationSources:
@@ -1083,9 +933,8 @@ def run_analysis(
     agent_role: str = "",
     controlled_result_identity: dict[str, object] | None = None,
 ):
-    return invoke_analysis_runner(
-        runner_invocation_defaults(),
-        runner_invocation_sources(),
+    return invoke_compat_analysis(
+        globals(),
         prompt_path,
         args,
         progress_callback=progress_callback,

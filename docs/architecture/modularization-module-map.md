@@ -492,6 +492,13 @@ defensive durable-payload decoding. Indexed fairness and legacy artifact
 freshness remain enforced by their extracted selection services; live facade
 bindings preserve compatibility overrides.
 
+`scheduler_job_compat.py` owns facade-level durable-job reporting and
+reconciliation, manual reanalysis identity, immutable claim snapshot and route
+binding, strict shared AI-settings loading, bounded helper execution, incident
+evidence collection, prompt construction, and runner invocation. It composes
+the extracted enforcement services from live facade ports; it does not weaken
+claim, route, process, or artifact boundaries.
+
 `scheduler_controlled_compat.py` owns the facade-level controlled-evaluation
 policy assembly: frozen-runtime admission, ephemeral mutation-token containment,
 bounded recovery transport and payload binding, owner-private artifact access,
