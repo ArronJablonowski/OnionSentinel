@@ -38,6 +38,7 @@ DISK_WRITE_ADMISSION = REPO_ROOT / "n8n" / "alert_store" / "services" / "disk_wr
 WORKER_WAKE_SIGNALING = REPO_ROOT / "n8n" / "alert_store" / "services" / "worker_wake_signaling.js"
 BEACON_PERSISTENCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "beacon_persistence.js"
 PROJECT_SERIALIZATION = REPO_ROOT / "n8n" / "alert_store" / "lib" / "project_serialization.js"
+ALERT_VALUE_NORMALIZATION = REPO_ROOT / "n8n" / "alert_store" / "lib" / "alert_value_normalization.js"
 
 
 class AlertStoreResilienceTest(unittest.TestCase):
@@ -76,6 +77,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.worker_wake_signaling = WORKER_WAKE_SIGNALING.read_text(encoding="utf-8")
         cls.beacon_persistence = BEACON_PERSISTENCE.read_text(encoding="utf-8")
         cls.project_serialization = PROJECT_SERIALIZATION.read_text(encoding="utf-8")
+        cls.alert_value_normalization = ALERT_VALUE_NORMALIZATION.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
         self.assertIn("require('./lib/provider_scheduler')", self.code)
@@ -349,6 +351,13 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("function normalizeTimestampValue", self.code)
         self.assertIn("isoTimestampPattern", self.project_serialization)
         self.assertIn("function canonicalJsonText", self.project_serialization)
+
+    def test_alert_value_normalization_has_one_shared_owner(self) -> None:
+        self.assertIn("require('./lib/alert_value_normalization')", self.code)
+        self.assertIn("function enrichmentRecord", self.code)
+        self.assertIn("alert_json remains the complete source of truth", self.alert_value_normalization)
+        self.assertIn("function normalizeTriageLevel", self.alert_value_normalization)
+        self.assertIn("function safeFileToken", self.alert_value_normalization)
 
     def test_n8n_report_work_is_enqueued_inside_commit_and_delivered_afterward(self) -> None:
         store = self.alert_ingest_orchestrator.split("async function store(rawAlert)", 1)[1]
