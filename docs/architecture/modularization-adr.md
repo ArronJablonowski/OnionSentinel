@@ -62,7 +62,7 @@ compatibility files are excluded only by a narrow reviewed allowlist.
 
 ### ARR-85 remaining file exceptions
 
-The final release ratchet removed every obsolete monolith allowance. Six
+The final release ratchet removed every obsolete monolith allowance. Five
 repository-only or production files remain above the 800-line module limit.
 Their current measured size is the non-growing ceiling; each has one named
 owner, one cohesive reason to change, an explicit risk, and a Linear issue that
@@ -71,7 +71,6 @@ expires the exception.
 | File | Owner and cohesive boundary | Risk while retained | Expiration |
 | --- | --- | --- | --- |
 | `n8n/bin/agent_memory.py` (812) | AI memory validation, journal I/O, quarantine, and promotion | persistence and policy remain coupled near the hard limit | ARR-121 |
-| `n8n/bin/bounded_process.py` (997) | bounded process launch, descendant observation, and verified termination | resource policy and platform process mechanics share one failure boundary | ARR-122 |
 | `n8n/bin/maintain-investigation-harness.py` (1,147) | harness integrity, recovery, retention, checkpointing, and disk maintenance | a maintenance failure can span several independently recoverable stages | ARR-123 |
 | `n8n/bin/pcap_evidence_query.py` (915) | bounded PCAP selection, provenance binding, and response projection | evidence admission and presentation remain tightly coupled | ARR-124 |
 | `onion-sentinel-dashboard/onion_sentinel_server.py` (979) | HTTP application composition, health, static/portal dispatch, and lifecycle | routing and service supervision still share one entry module | ARR-125 |
