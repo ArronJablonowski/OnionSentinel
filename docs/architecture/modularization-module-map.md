@@ -770,6 +770,12 @@ It receives the store as a port and retains shadow-vs-enforce semantics,
 approval gates, exact route binding, collision-safe reservations, and bounded
 prompt evidence accounting.
 
+`n8n/bin/harness_run_execution.py` owns phase-to-stage projection and durable
+model-call/query-round observation. It preserves preflight-before-execution,
+exact assigned/observed route and provider identity, full outer-result digest
+provenance, per-query status binding, returned-row/truncation accounting,
+evidence registration, and tool/model ledger ordering.
+
 Existing SQLite files, schema versions, hash-chain calculations, terminal
 digests, skill attestations, and controlled-evaluation behavior are contracts.
 

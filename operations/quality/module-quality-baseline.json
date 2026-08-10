@@ -28,7 +28,7 @@
       "max_lines": 1147
     },
     "n8n/bin/onion_sentinel_harness.py": {
-      "max_lines": 834
+      "max_lines": 433
     },
     "n8n/bin/pcap_evidence_query.py": {
       "max_lines": 915
@@ -297,7 +297,7 @@
       "max_complexity": 35,
       "max_lines": 130
     },
-    "n8n/bin/onion_sentinel_harness.py::HarnessRun.model_call": {
+    "n8n/bin/harness_run_execution.py::HarnessRunExecution.model_call": {
       "max_complexity": 18,
       "max_lines": 123
     },
@@ -305,7 +305,7 @@
       "max_complexity": 16,
       "max_lines": 103
     },
-    "n8n/bin/onion_sentinel_harness.py::HarnessRun.query_round": {
+    "n8n/bin/harness_run_execution.py::HarnessRunExecution.query_round": {
       "max_complexity": 62,
       "max_lines": 249
     },
