@@ -46,6 +46,7 @@ import portal_operational_runtime
 import portal_settings_runtime
 import portal_soc_status_runtime
 import portal_soc_pcap_runtime
+import portal_llm_runtime
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
@@ -1975,98 +1976,34 @@ write_soc_alert_status = partial(portal_soc_status_runtime.write_soc_alert_statu
 soc_alert_status_response = partial(portal_soc_status_runtime.soc_alert_status_response, _SOC_STATUS_RUNTIME)
 
 
-def llm_analysis_log_limit(raw: object) -> int:
-    return bounded_llm_analysis_log_limit(raw)
-
-
-def llm_analysis_log_page(raw: object) -> int:
-    return bounded_llm_analysis_log_page(raw)
-
-
-def read_llm_analysis_logs(max_rows: int = 1000) -> list[dict]:
-    """Read a bounded newest-first tail without retaining full history."""
-    return SOC_ALERT_LLM_ANALYSIS_LOG_INDEX.tail(max_rows)
-
-
-def current_llm_queue_size() -> int:
-    static_status = read_soc_alert_json_file(SOC_ALERT_STATIC_STATUS_FILE)
-    return llm_queue_size(static_status)
-
-
-def read_bounded_llm_analysis_record(path: Path) -> dict:
-    return read_bounded_llm_record(path, SOC_ALERT_LLM_ANALYSIS_RECORD_MAX_BYTES)
-
-
-def active_llm_analysis_record_paths() -> list[Path]:
-    return active_llm_record_paths(
-        SOC_ALERT_LLM_ANALYSIS_ACTIVE_DIR,
-        SOC_ALERT_LLM_ANALYSIS_ACTIVE_LIMIT,
-    )
-
-
-def active_llm_sources() -> ActiveLlmSources:
-    return ActiveLlmSources(
-        active_directory=SOC_ALERT_LLM_ANALYSIS_ACTIVE_DIR,
-        record_max_bytes=SOC_ALERT_LLM_ANALYSIS_RECORD_MAX_BYTES,
-        active_limit=SOC_ALERT_LLM_ANALYSIS_ACTIVE_LIMIT,
-        process_commands=llm_analysis_process_commands,
-    )
-
-
-def read_active_llm_analyses() -> list[dict]:
-    return load_active_llm_analyses(active_llm_sources())
-
-
-def llm_agent_execution_state(record: object) -> dict:
-    return project_llm_agent_execution_state(record)
-
-
-def decorate_llm_analysis_record(record: object, *, live: bool) -> dict:
-    return project_llm_analysis_record(record, live=live)
-
-
-def read_llm_current_analysis() -> dict:
-    queue_size = current_llm_queue_size()
-    active_runs = read_active_llm_analyses()
-    data = (
-        {}
-        if active_runs
-        else read_bounded_llm_analysis_record(SOC_ALERT_LLM_ANALYSIS_CURRENT_FILE)
-    )
-    return compose_current_llm_analysis(
-        queue_size,
-        active_runs,
-        data,
-        llm_analysis_process_active,
-    )
-
-
-def merge_live_llm_activity(static_ai: object, current: object) -> dict:
-    return project_live_llm_activity(static_ai, current)
-
-
-def llm_analysis_process_commands() -> list[str]:
-    try:
-        proc = subprocess.run(
-            ["ps", "axo", "pid=,command="],
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=3,
-        )
-    except Exception:
-        return []
-    return proc.stdout.splitlines()
-
-
-def llm_analysis_process_active(
-    prompt_package: str,
-    commands: list[str] | None = None,
-    runner_pid: object = None,
-) -> bool:
-    commands = commands if commands is not None else llm_analysis_process_commands()
-    return active_llm_process_present(prompt_package, commands, runner_pid)
+_LLM_RUNTIME = sys.modules[__name__]
+llm_analysis_log_limit = partial(portal_llm_runtime.llm_analysis_log_limit, _LLM_RUNTIME)
+llm_analysis_log_page = partial(portal_llm_runtime.llm_analysis_log_page, _LLM_RUNTIME)
+read_llm_analysis_logs = partial(portal_llm_runtime.read_llm_analysis_logs, _LLM_RUNTIME)
+current_llm_queue_size = partial(portal_llm_runtime.current_llm_queue_size, _LLM_RUNTIME)
+read_bounded_llm_analysis_record = partial(portal_llm_runtime.read_bounded_llm_analysis_record, _LLM_RUNTIME)
+active_llm_analysis_record_paths = partial(portal_llm_runtime.active_llm_analysis_record_paths, _LLM_RUNTIME)
+active_llm_sources = partial(portal_llm_runtime.active_llm_sources, _LLM_RUNTIME)
+read_active_llm_analyses = partial(portal_llm_runtime.read_active_llm_analyses, _LLM_RUNTIME)
+llm_agent_execution_state = partial(portal_llm_runtime.llm_agent_execution_state, _LLM_RUNTIME)
+decorate_llm_analysis_record = partial(portal_llm_runtime.decorate_llm_analysis_record, _LLM_RUNTIME)
+read_llm_current_analysis = partial(portal_llm_runtime.read_llm_current_analysis, _LLM_RUNTIME)
+merge_live_llm_activity = partial(portal_llm_runtime.merge_live_llm_activity, _LLM_RUNTIME)
+llm_analysis_process_commands = partial(portal_llm_runtime.llm_analysis_process_commands, _LLM_RUNTIME)
+llm_analysis_process_active = partial(portal_llm_runtime.llm_analysis_process_active, _LLM_RUNTIME)
+llm_history_store_sources = partial(portal_llm_runtime.llm_history_store_sources, _LLM_RUNTIME)
+_llm_analysis_run_timestamp = partial(portal_llm_runtime.llm_analysis_run_timestamp, _LLM_RUNTIME)
+_llm_primary_run_identity = partial(portal_llm_runtime.llm_primary_run_identity, _LLM_RUNTIME)
+read_llm_database_primary_logs = partial(portal_llm_runtime.read_llm_database_primary_logs, _LLM_RUNTIME)
+reconcile_llm_primary_logs = partial(portal_llm_runtime.reconcile_llm_primary_logs, _LLM_RUNTIME)
+_llm_reviewer_started_at = partial(portal_llm_runtime.llm_reviewer_started_at, _LLM_RUNTIME)
+hydrate_llm_reviewer_from_parent = partial(portal_llm_runtime.hydrate_llm_reviewer_from_parent, _LLM_RUNTIME)
+read_llm_second_opinion_logs = partial(portal_llm_runtime.read_llm_second_opinion_logs, _LLM_RUNTIME)
+read_llm_disagreement_adjudication_logs = partial(portal_llm_runtime.read_llm_disagreement_adjudication_logs, _LLM_RUNTIME)
+_llm_log_sort_timestamp = partial(portal_llm_runtime.llm_log_sort_timestamp, _LLM_RUNTIME)
+llm_history_api_sources = partial(portal_llm_runtime.llm_history_api_sources, _LLM_RUNTIME)
+read_llm_agent_activity_snapshot = partial(portal_llm_runtime.read_llm_agent_activity_snapshot, _LLM_RUNTIME)
+llm_analysis_logs_response = partial(portal_llm_runtime.llm_analysis_logs_response, _LLM_RUNTIME)
 
 
 LLM_ANALYSIS_COMBINED_HISTORY_LIMIT = 5000
@@ -2076,117 +2013,6 @@ LLM_AGENT_ACTIVITY_CACHE = ResponseCache(
     lock_stripes=1,
 )
 
-
-def llm_history_store_sources() -> LlmHistoryStoreSources:
-    return LlmHistoryStoreSources(
-        connect=soc_alert_db_connect,
-        history_limit=LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
-    )
-
-
-def _llm_analysis_run_timestamp(value: object) -> float:
-    return projected_llm_run_timestamp(value)
-
-
-def _llm_primary_run_identity(record: object) -> tuple[str, str, float]:
-    return projected_llm_primary_identity(record)
-
-
-def read_llm_database_primary_logs(
-    *,
-    limit: int = LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
-) -> list[dict]:
-    """Read committed primary executions for every configured agent role.
-
-    JSONL contains the richer runtime and mactop telemetry, but SQLite is the
-    authoritative record that an analysis was committed. Returning a bounded
-    database projection lets Reports surface SIEM Engineer, Threat Hunter,
-    Cyber Threat Intel, Incident Responder, and SOC Analyst runs even if their
-    local telemetry was rotated or missed during a rolling deployment.
-    """
-    rows = read_primary_history_rows(llm_history_store_sources(), limit=limit)
-    return project_database_primary_rows(rows)
-
-
-def reconcile_llm_primary_logs(
-    telemetry_logs: list[dict],
-    database_logs: list[dict],
-) -> tuple[list[dict], int]:
-    return reconcile_projected_llm_primary_logs(telemetry_logs, database_logs)
-
-
-def _llm_reviewer_started_at(generated_at: object, runtime: object) -> str:
-    return projected_llm_reviewer_started_at(generated_at, runtime)
-
-
-def hydrate_llm_reviewer_from_parent(
-    reviewer: dict,
-    parent: dict | None,
-) -> None:
-    hydrate_projected_llm_reviewer(reviewer, parent)
-
-
-def read_llm_second_opinion_logs(
-    primary_logs: list[dict],
-    *,
-    limit: int = LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
-) -> list[dict]:
-    """Return bounded reviewer executions shaped like the primary audit log.
-
-    Second opinions are durable SQLite telemetry, while primary resource
-    telemetry is append-only JSONL. Bind them by the shared analysis/log ID and
-    copy only alert context and observed host metrics from the parent run.
-    Reviewer model, runtime, status, outcome, and error always come from the
-    independent reviewer row.
-    """
-    rows = read_second_opinion_history_rows(
-        llm_history_store_sources(), limit=limit
-    )
-    return project_second_opinion_rows(rows, primary_logs)
-
-
-def read_llm_disagreement_adjudication_logs(
-    primary_logs: list[dict],
-    *,
-    limit: int = LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
-) -> list[dict]:
-    """Return durable shadow adjudicator executions as distinct audit runs."""
-    rows = read_adjudication_history_rows(
-        llm_history_store_sources(), limit=limit
-    )
-    return project_adjudication_rows(rows, primary_logs)
-
-
-def _llm_log_sort_timestamp(record: dict) -> float:
-    return projected_llm_log_sort_timestamp(record)
-
-
-def llm_history_api_sources() -> LlmHistoryApiSources:
-    return LlmHistoryApiSources(
-        telemetry_page=lambda page, limit: (
-            SOC_ALERT_LLM_ANALYSIS_LOG_INDEX.page(page=page, limit=limit)
-        ),
-        read_database_primary=read_llm_database_primary_logs,
-        reconcile_primary=reconcile_llm_primary_logs,
-        read_reviewer=read_llm_second_opinion_logs,
-        read_adjudication=read_llm_disagreement_adjudication_logs,
-        compose_snapshot=compose_llm_activity_snapshot,
-        read_active=read_active_llm_analyses,
-        decorate=lambda record, live: decorate_llm_analysis_record(
-            record, live=live
-        ),
-        cache=LLM_AGENT_ACTIVITY_CACHE,
-        history_limit=LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
-    )
-
-
-def read_llm_agent_activity_snapshot() -> dict:
-    """Return one cached, bounded, role-complete history snapshot."""
-    return load_llm_agent_activity_snapshot(llm_history_api_sources())
-
-
-def llm_analysis_logs_response(query: dict[str, list[str]]) -> dict:
-    return compose_llm_analysis_logs_response(llm_history_api_sources(), query)
 
 
 def soc_alert_suppression_review_state(alert_id: str) -> dict:

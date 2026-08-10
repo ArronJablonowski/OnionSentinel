@@ -2679,6 +2679,15 @@ filesystem, cache, and loopback service test seams. Capture evidence remains
 read-only in the portal, and production request ownership remains with
 alert-store.
 
+### LLM activity runtime
+
+`portal_llm_runtime.py` owns late-bound active-run discovery, bounded current
+record reads, process liveness checks, durable SQLite history projection,
+JSONL/SQLite reconciliation, reviewer and adjudicator hydration, response
+caching, and history API composition. SQLite remains authoritative for
+committed executions; JSONL remains bounded runtime telemetry, and observed
+model/runtime identity continues to come from each independent execution row.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:
