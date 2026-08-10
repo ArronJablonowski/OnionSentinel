@@ -32,7 +32,11 @@ def _secure_sqlite_files(path: Path) -> None:
         Path(f"{path}-shm"),
     ):
         if candidate.exists() and not candidate.is_symlink():
-            os.chmod(candidate, stat.S_IRUSR | stat.S_IWUSR)
+            try:
+                os.chmod(candidate, stat.S_IRUSR | stat.S_IWUSR)
+            except FileNotFoundError:
+                if candidate == path or candidate.exists():
+                    raise
 
 
 def _probe_existing_schema_version(path: Path) -> int | None:

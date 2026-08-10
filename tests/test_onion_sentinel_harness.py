@@ -14,6 +14,7 @@ import threading
 import unittest
 import warnings
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -865,6 +866,42 @@ class OnionSentinelHarnessTests(unittest.TestCase):
                     stat.S_IRUSR | stat.S_IWUSR,
                     path.name,
                 )
+
+    def test_sqlite_security_tolerates_sidecar_disappearing_before_chmod(self) -> None:
+        self.db_path.parent.mkdir(parents=True)
+        self.db_path.touch()
+        wal_path = Path(f"{self.db_path}-wal")
+        wal_path.touch()
+        real_chmod = os.chmod
+
+        def racing_chmod(path, mode):
+            if Path(path) == wal_path:
+                wal_path.unlink()
+                raise FileNotFoundError(2, "sidecar closed concurrently", str(path))
+            return real_chmod(path, mode)
+
+        with mock.patch.object(HARNESS.os, "chmod", side_effect=racing_chmod):
+            HARNESS._secure_sqlite_files(self.db_path)
+
+        self.assertEqual(stat.S_IMODE(self.db_path.stat().st_mode), 0o600)
+        self.assertFalse(wal_path.exists())
+
+    def test_sqlite_security_does_not_hide_database_disappearance(self) -> None:
+        self.db_path.parent.mkdir(parents=True)
+        self.db_path.touch()
+        with (
+            mock.patch.object(
+                HARNESS.os,
+                "chmod",
+                side_effect=FileNotFoundError(
+                    2,
+                    "database disappeared",
+                    str(self.db_path),
+                ),
+            ),
+            self.assertRaises(FileNotFoundError),
+        ):
+            HARNESS._secure_sqlite_files(self.db_path)
 
     def test_full_lifecycle_exports_a_complete_secret_safe_trace(self) -> None:
         self.write_policy(enabled=True)
