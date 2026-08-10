@@ -28,7 +28,7 @@
       "max_lines": 1147
     },
     "n8n/bin/onion_sentinel_harness.py": {
-      "max_lines": 2964
+      "max_lines": 2428
     },
     "n8n/bin/pcap_evidence_query.py": {
       "max_lines": 915
@@ -309,7 +309,7 @@
       "max_complexity": 62,
       "max_lines": 249
     },
-    "n8n/bin/onion_sentinel_harness.py::HarnessStore.initialize": {
+    "n8n/bin/harness_store_foundation.py::HarnessStoreFoundation.initialize": {
       "max_lines": 237
     },
     "n8n/bin/onion_sentinel_harness.py::HarnessStore.record_decision": {

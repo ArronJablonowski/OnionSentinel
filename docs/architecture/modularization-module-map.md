@@ -732,6 +732,13 @@ read-only controls, query ordering, audit ordering, query/result digests,
 semantic validity, timeout state, and successful shard accounting agree. The
 full outer result remains the durable provenance object.
 
+`n8n/bin/harness_store_foundation.py` owns hardened SQLite connection setup,
+read-only preflight of existing schema versions, versioned schema creation and
+migration, owner-only file permissions, committed-event audit mirroring,
+idempotent hash-chain insertion, mutable-run enforcement, and atomic stage
+updates. `HarnessStore` inherits this foundation so repository transactions and
+the legacy class/API remain unchanged.
+
 Existing SQLite files, schema versions, hash-chain calculations, terminal
 digests, skill attestations, and controlled-evaluation behavior are contracts.
 
