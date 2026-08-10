@@ -68,6 +68,9 @@ const {
 const {
   createIncidentReanalysisJobOwnership,
 } = require('./services/incident_reanalysis_job_ownership');
+const {
+  createIncidentReanalysisAttemptLifecycle,
+} = require('./services/incident_reanalysis_attempt_lifecycle');
 const {createIncidentAnalysisCompletion} = require('./services/incident_analysis_completion');
 const {createIncidentReanalysisBindingService} = require('./services/incident_reanalysis_binding');
 const {createHealthRoutes} = require('./routes/health_routes');
@@ -4361,167 +4364,20 @@ async function closeStaleIncidentReanalysisAttempts(
   );
 }
 async function beginIncidentReanalysisAttempt(job, leaseToken, groupId) {
-  const payload = incidentReanalysisJobPayload(job);
-  const runId = safeString(payload?.reanalysis_run_id, 80);
-  const caseId = validIncidentCaseId(payload?.case_id);
-  const attemptId = incidentReanalysisAttemptId(leaseToken);
-  if (!attemptId) return null;
-  if (!runId || !caseId) {
-    // A normal escalation may follow a recovered reanalysis lease for the
-    // same deduped group. Close that stale ownership before its later result
-    // could be mistaken for the normal escalation's output.
-    await closeStaleIncidentReanalysisAttempts(
-      safeString(groupId, 64).toLowerCase(),
-      '',
-      '',
-      nowUtc(),
-    );
-    return null;
-  }
-  const runCase = await get(
-    `SELECT group_id, status
-     FROM incident_reanalysis_run_cases
-     WHERE run_id = ? AND case_id = ?`,
-    [runId, caseId],
-  );
-  if (!runCase || !['queued', 'running', 'failed'].includes(String(runCase.status || ''))) {
-    return null;
-  }
-  const boundGroupId = safeString(runCase.group_id || groupId, 64).toLowerCase();
-  if (!boundGroupId || (groupId && boundGroupId !== groupId)) return null;
-  const updatedAt = nowUtc();
-  await closeStaleIncidentReanalysisAttempts(boundGroupId, runId, caseId, updatedAt);
-  await run(
-    `INSERT INTO incident_reanalysis_attempts (
-       attempt_id, run_id, case_id, group_id, durable_attempt_count,
-       status, started_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, 'running', ?, ?)
-     ON CONFLICT(attempt_id) DO NOTHING`,
-    [
-      attemptId,
-      runId,
-      caseId,
-      boundGroupId,
-      Math.max(0, Number(job?.attempt_count || 0)),
-      updatedAt,
-      updatedAt,
-    ],
-  );
-  await run(
-    `UPDATE incident_reanalysis_run_cases
-     SET status = 'running', skip_reason = NULL, latest_error = NULL,
-         started_at = COALESCE(started_at, ?), completed_at = NULL,
-         latest_attempt_id = ?, updated_at = ?
-     WHERE run_id = ? AND case_id = ?
-       AND status IN ('queued', 'running', 'failed')`,
-    [updatedAt, attemptId, updatedAt, runId, caseId],
-  );
-  await refreshIncidentReanalysisRun(runId);
-  return {attempt_id: attemptId, run_id: runId, case_id: caseId};
+  return incidentReanalysisAttemptLifecycle.begin(job, leaseToken, groupId);
 }
 
 async function heartbeatIncidentReanalysisAttempt(leaseToken) {
-  const attemptId = incidentReanalysisAttemptId(leaseToken);
-  if (!attemptId) return null;
-  const updatedAt = nowUtc();
-  await run(
-    `UPDATE incident_reanalysis_attempts
-     SET updated_at = ?
-     WHERE attempt_id = ? AND status = 'running'`,
-    [updatedAt, attemptId],
-  );
-  return get(
-    `SELECT attempt_id, run_id, case_id
-     FROM incident_reanalysis_attempts WHERE attempt_id = ?`,
-    [attemptId],
-  );
+  return incidentReanalysisAttemptLifecycle.heartbeat(leaseToken);
 }
 
 async function finishIncidentReanalysisAttempt(job, requestedStatus, error, leaseToken) {
-  const attemptId = incidentReanalysisAttemptId(leaseToken);
-  if (!attemptId) return null;
-  const attempt = await get(
-    `SELECT attempt_id, run_id, case_id, status
-     FROM incident_reanalysis_attempts WHERE attempt_id = ?`,
-    [attemptId],
-  );
-  if (!attempt) return null;
-  const updatedAt = nowUtc();
-  if (requestedStatus === 'completed') {
-    await run(
-      `UPDATE incident_reanalysis_attempts
-       SET status = 'completed', latest_error = NULL,
-           completed_at = COALESCE(completed_at, ?), updated_at = ?
-       WHERE attempt_id = ?`,
-      [updatedAt, updatedAt, attemptId],
-    );
-    await run(
-      `UPDATE incident_reanalysis_run_cases
-       SET status = 'completed', latest_error = NULL,
-           completed_at = COALESCE(completed_at, ?),
-           latest_attempt_id = ?, updated_at = ?
-       WHERE run_id = ? AND case_id = ? AND status != 'skipped'`,
-      [updatedAt, attemptId, updatedAt, attempt.run_id, attempt.case_id],
-    );
-  } else if (requestedStatus === 'failed') {
-    const latestError = safeString(error || job?.last_error || 'analysis attempt failed', 1000);
-    await run(
-      `UPDATE incident_reanalysis_attempts
-       SET status = CASE WHEN status = 'completed' THEN status ELSE 'failed' END,
-           latest_error = CASE WHEN status = 'completed' THEN latest_error ELSE ? END,
-           completed_at = CASE WHEN status = 'completed' THEN completed_at ELSE ? END,
-           updated_at = ?
-       WHERE attempt_id = ?`,
-      [latestError, updatedAt, updatedAt, attemptId],
-    );
-    if (attempt.status !== 'completed') {
-      const currentPayload = incidentReanalysisJobPayload(job);
-      const retryOwnsSameRun = (
-        job?.status === 'pending'
-        && safeString(currentPayload?.reanalysis_run_id, 80) === attempt.run_id
-        && validIncidentCaseId(currentPayload?.case_id) === attempt.case_id
-      );
-      const caseStatus = retryOwnsSameRun ? 'queued' : 'failed';
-      await run(
-        `UPDATE incident_reanalysis_run_cases
-         SET status = ?, latest_error = ?,
-             completed_at = CASE WHEN ? = 'queued' THEN NULL ELSE ? END,
-             latest_attempt_id = ?, updated_at = ?
-         WHERE run_id = ? AND case_id = ?
-           AND status NOT IN ('completed', 'skipped')`,
-        [
-          caseStatus,
-          latestError,
-          caseStatus,
-          updatedAt,
-          attemptId,
-          updatedAt,
-          attempt.run_id,
-          attempt.case_id,
-        ],
-      );
-    }
-  }
-  await refreshIncidentReanalysisRun(attempt.run_id);
-  return attempt;
+  return incidentReanalysisAttemptLifecycle.finish(job, requestedStatus, error, leaseToken);
 }
 
 async function queueCurrentIncidentReanalysisRun(job) {
-  const payload = incidentReanalysisJobPayload(job);
-  const runId = safeString(payload?.reanalysis_run_id, 80);
-  const caseId = validIncidentCaseId(payload?.case_id);
-  if (!runId || !caseId) return null;
-  const updatedAt = nowUtc();
-  await run(
-    `UPDATE incident_reanalysis_run_cases
-     SET status = 'queued', latest_error = NULL, completed_at = NULL, updated_at = ?
-     WHERE run_id = ? AND case_id = ? AND status = 'failed'`,
-    [updatedAt, runId, caseId],
-  );
-  await refreshIncidentReanalysisRun(runId);
-  return {run_id: runId, case_id: caseId};
+  return incidentReanalysisAttemptLifecycle.queue(job);
 }
-
 async function reconcileRecoveredIncidentReanalysisAttempts() {
   if (!durableJobs) return 0;
   let reconciled = 0;
@@ -4746,25 +4602,9 @@ async function reconcileRecoveredIncidentReanalysisAttempts() {
   return reconciled;
 }
 
-async function updateIncidentReanalysisProgress({
-  job,
-  requestedStatus,
-  error = '',
-  leaseToken = '',
-  groupId = '',
-  newLease = false,
-}) {
-  if (requestedStatus === 'processing') {
-    if (newLease) return beginIncidentReanalysisAttempt(job, leaseToken, groupId);
-    return heartbeatIncidentReanalysisAttempt(leaseToken);
-  }
-  if (['completed', 'failed'].includes(requestedStatus)) {
-    return finishIncidentReanalysisAttempt(job, requestedStatus, error, leaseToken);
-  }
-  if (requestedStatus === 'pending') return queueCurrentIncidentReanalysisRun(job);
-  return null;
+async function updateIncidentReanalysisProgress(options) {
+  return incidentReanalysisAttemptLifecycle.update(options);
 }
-
 async function incidentReanalysisBindingAuthority(attempt) {
   return incidentReanalysisBindingService.bindingAuthority(attempt);
 }
@@ -5636,6 +5476,17 @@ const incidentReanalysisJobOwnership = createIncidentReanalysisJobOwnership({
   run,
   nowUtc,
   sha256Text: (value) => crypto.createHash('sha256').update(value).digest('hex'),
+  refreshRun: refreshIncidentReanalysisRun,
+});
+const incidentReanalysisAttemptLifecycle = createIncidentReanalysisAttemptLifecycle({
+  jobPayload: incidentReanalysisJobPayload,
+  safeString,
+  validCaseId: validIncidentCaseId,
+  attemptId: incidentReanalysisAttemptId,
+  closeStale: closeStaleIncidentReanalysisAttempts,
+  get,
+  run,
+  nowUtc,
   refreshRun: refreshIncidentReanalysisRun,
 });
 
