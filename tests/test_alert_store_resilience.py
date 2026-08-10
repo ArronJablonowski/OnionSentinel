@@ -418,8 +418,8 @@ class AlertStoreResilienceTest(unittest.TestCase):
 
     def test_alert_value_normalization_has_one_shared_owner(self) -> None:
         self.assertIn("require('./lib/alert_value_normalization')", self.code)
-        self.assertIn("function enrichmentRecord", self.code)
         self.assertIn("alert_json remains the complete source of truth", self.alert_value_normalization)
+        self.assertIn("function enrichmentRecord", self.alert_value_normalization)
         self.assertIn("function normalizeTriageLevel", self.alert_value_normalization)
         self.assertIn("function safeFileToken", self.alert_value_normalization)
 
