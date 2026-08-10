@@ -183,7 +183,16 @@ try {
   // older container-based DR deployments bootable.
   sqlite3 = require('/usr/local/lib/node_modules/n8n/node_modules/.pnpm/sqlite3@5.1.7/node_modules/sqlite3');
 }
-const projectSerialization = createProjectSerialization();
+const {
+  projectOffset,
+  formatProjectTimestamp,
+  parseProjectTimestamp,
+  nowUtc,
+  normalizeTimestampValue,
+  normalizeJsonTimestamps,
+  jsonText,
+  canonicalJsonText,
+} = createProjectSerialization();
 
 // Runtime values come from docker-compose.yml and .env. Keep real tokens in
 // .env only; this DR repo stores placeholders and source code.
@@ -452,38 +461,6 @@ const {
   outboxAutostart: telegramOutboxAutostart,
   controlledEvaluationMode,
 });
-function projectOffset(date) {
-  return projectSerialization.projectOffset(date);
-}
-
-function formatProjectTimestamp(date) {
-  return projectSerialization.formatProjectTimestamp(date);
-}
-
-function parseProjectTimestamp(value) {
-  return projectSerialization.parseProjectTimestamp(value);
-}
-
-function nowUtc() {
-  return projectSerialization.nowUtc();
-}
-
-function normalizeTimestampValue(value) {
-  return projectSerialization.normalizeTimestampValue(value);
-}
-
-function normalizeJsonTimestamps(value) {
-  return projectSerialization.normalizeJsonTimestamps(value);
-}
-
-function jsonText(value) {
-  return projectSerialization.jsonText(value);
-}
-
-function canonicalJsonText(value) {
-  return projectSerialization.canonicalJsonText(value);
-}
-
 const beaconPersistence = createBeaconPersistence({
   fs,
   path,
