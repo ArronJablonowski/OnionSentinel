@@ -267,7 +267,14 @@ class ArchitectureHardeningTest(unittest.TestCase):
         ai = (
             ROOT / "n8n/bin/scheduler_runtime_compat.py"
         ).read_text(encoding="utf-8")
-        pcap = (ROOT / "n8n/bin/process-pcap-evidence.py").read_text(encoding="utf-8")
+        pcap_root = ROOT / "n8n/bin"
+        pcap = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (
+                pcap_root / "process-pcap-evidence.py",
+                *sorted(pcap_root.glob("pcap_processor_*.py")),
+            )
+        )
         dashboard = (ROOT / "n8n/bin/refresh-soc-dashboard.py").read_text(encoding="utf-8")
         self.assertIn("path.unlink(missing_ok=True)", ai)
         self.assertIn("path.unlink(missing_ok=True)", pcap)

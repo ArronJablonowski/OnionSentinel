@@ -210,6 +210,28 @@ class ModularizationCompatibilityContractTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_pcap_processor_supports_isolated_file_loader_import(self) -> None:
+        processor = ROOT / "n8n" / "bin" / "process-pcap-evidence.py"
+        script = (
+            "import importlib.util,sys;"
+            f"p={str(processor)!r};"
+            "s=importlib.util.spec_from_file_location('isolated_pcap_processor',p);"
+            "m=importlib.util.module_from_spec(s);"
+            "sys.modules[s.name]=m;"
+            "s.loader.exec_module(m);"
+            "assert callable(m.process_one) and callable(m.run_zeek);"
+            "assert callable(m.run_tshark) and callable(m.main)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_contract_is_versioned_and_bound_to_a_full_release(self) -> None:
         contract = load_contract()
         self.assertEqual(

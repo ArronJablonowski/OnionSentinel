@@ -177,7 +177,14 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
     def test_pcap_parser_state_is_durable_and_reported_by_worker(self) -> None:
         schema = PCAP_SCHEMA.read_text(encoding="utf-8")
         routes = PCAP_ROUTES.read_text(encoding="utf-8")
-        worker = (REPO_ROOT / "n8n" / "bin" / "process-pcap-evidence.py").read_text(encoding="utf-8")
+        worker_root = REPO_ROOT / "n8n" / "bin"
+        worker = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (
+                worker_root / "process-pcap-evidence.py",
+                *sorted(worker_root.glob("pcap_processor_*.py")),
+            )
+        )
         self.assertIn("['analysis_status', \"TEXT NOT NULL DEFAULT 'not_ready'\"]", schema)
         self.assertIn("await ensureColumn('pcap_requests', name, definition)", schema)
         self.assertIn("post('/pcap/analysis-status', 'analysisStatus')", routes)
