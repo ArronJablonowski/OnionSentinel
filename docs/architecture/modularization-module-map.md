@@ -751,6 +751,12 @@ rejection, same-revision collision detection, citation requirements for
 supported/contradicted hypotheses, bounded decision projection, canonical
 response/rationale digests, and commit-before-audit ordering.
 
+`n8n/bin/harness_store_execution_repository.py` owns atomic pre-execution
+budget reservations plus immutable model-call and tool-call ledgers. Reservation
+collisions, enforce-vs-shadow limits, provider/model/path/harness attribution,
+read-only/query coverage, input/output digests, and commit-before-audit stage
+updates retain their existing transaction and idempotency behavior.
+
 Existing SQLite files, schema versions, hash-chain calculations, terminal
 digests, skill attestations, and controlled-evaluation behavior are contracts.
 
