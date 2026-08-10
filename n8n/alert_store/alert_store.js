@@ -41,6 +41,9 @@ const {
   createNotificationEnrichmentSchema,
 } = require('./services/notification_enrichment_schema');
 const {createPcapSchema} = require('./services/pcap_schema');
+const {
+  createStartupPersistenceOrchestrator,
+} = require('./services/startup_persistence_orchestrator');
 const {createInventoryService} = require('./services/inventory_service');
 const {createInventoryRoutes} = require('./routes/inventory_routes');
 const {createHealthRepository} = require('./repositories/health_repository');
@@ -1514,23 +1517,7 @@ async function initDb() {
   await aiReviewSchema.install();
   await notificationEnrichmentSchema.install();
   await pcapSchema.install();
-  initializeDurableJobs();
-  await durableJobs.install();
-  initializePostgresShadowOutbox();
-  await postgresShadowOutbox.install();
-  initializePostgresShadowProjector();
-  // durableJobs.install() performs startup lease recovery before the periodic
-  // alert-store watchdog runs. Reconcile the immutable IR attempt ledger in
-  // the same startup pass so recovered jobs cannot leave runs stuck running.
-  await reconcileRecoveredIncidentReanalysisAttempts();
-  initializePipelineMetrics();
-  await pipelineMetrics.install();
-  await backfillStableGroupIdentity();
-  await backfillAuthorizedActivityCampaigns();
-  await reconcileAuthorizedActivityBacklog();
-  await backfillAlertObservables();
-  await rebuildAlertGroupSummaries();
-  await refreshGroupAliases();
+  await startupPersistenceOrchestrator.initialize();
 }
 
 async function tableColumns(tableName) {
@@ -4293,6 +4280,22 @@ const pcapSchema = createPcapSchema({
   run,
   ensureColumn,
   backfillOutcomes: () => pcapRequestRepository.backfillOutcomes(),
+});
+const startupPersistenceOrchestrator = createStartupPersistenceOrchestrator({
+  initializeDurableJobs,
+  installDurableJobs: () => durableJobs.install(),
+  initializePostgresShadowOutbox,
+  installPostgresShadowOutbox: () => postgresShadowOutbox.install(),
+  initializePostgresShadowProjector,
+  reconcileRecoveredIncidentAttempts: reconcileRecoveredIncidentReanalysisAttempts,
+  initializePipelineMetrics,
+  installPipelineMetrics: () => pipelineMetrics.install(),
+  backfillStableGroupIdentity,
+  backfillAuthorizedActivityCampaigns,
+  reconcileAuthorizedActivityBacklog,
+  backfillAlertObservables,
+  rebuildAlertGroupSummaries,
+  refreshGroupAliases,
 });
 const controlledRetirementProjections = createControlledRetirementProjections({
   rawSha256: controlledRetirementRawSha256,
