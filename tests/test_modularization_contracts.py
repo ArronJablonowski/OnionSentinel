@@ -232,6 +232,29 @@ class ModularizationCompatibilityContractTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_detection_validation_supports_isolated_file_loader_import(self) -> None:
+        validator = ROOT / "n8n" / "bin" / "detection_validation.py"
+        script = (
+            "import importlib.util,sys;"
+            f"p={str(validator)!r};"
+            "s=importlib.util.spec_from_file_location('isolated_detection_validation',p);"
+            "m=importlib.util.module_from_spec(s);"
+            "sys.modules[s.name]=m;"
+            "s.loader.exec_module(m);"
+            "assert callable(m.parse_suricata_rule);"
+            "assert callable(m.extract_group_packet_features);"
+            "assert callable(m.build_detection_validation)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_contract_is_versioned_and_bound_to_a_full_release(self) -> None:
         contract = load_contract()
         self.assertEqual(
