@@ -43,6 +43,7 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `bin/verify-agent-memory.py` | Read-only deployment verifier for every agent prompt, role memory, shared memory, permissions, and retrieval contract. |
 | `bin/onion_sentinel_harness.py` | Disabled-by-default investigation control plane with role policy, budgets, durable state, evidence/model/tool/decision ledgers, memory gates, and a hash-chained audit trace. |
 | `bin/harness_contracts.py` | Immutable job identity, secret-safe metadata, skill attestation, evidence counting, and terminal ledger-manifest contracts. |
+| `bin/harness_memory.py` | Evidence-, confidence-, review-, and approval-gated durable-memory promotion decision policy. |
 | `bin/harness_policy.py` | Package-free harness activation, identity, capability, budget, authorization, and policy-file contracts. |
 | `bin/harness_query_contract.py` | Bounded query-result counting, truncation detection, and provenance-bound per-query status resolution. |
 | `bin/harness_run_foundation.py` | Durable run identity, counters, elapsed-time budgets, model/tool/query authorization, and preflight reservations. |

@@ -732,6 +732,11 @@ read-only controls, query ordering, audit ordering, query/result digests,
 semantic validity, timeout state, and successful shard accounting agree. The
 full outer result remains the durable provenance object.
 
+`n8n/bin/harness_memory.py` owns the pure post-analysis memory-promotion
+decision. It preserves the existing unresolved-reference, corroborating-source,
+confidence, independent-review, shared-memory approval, and role-capability
+gates without gaining persistence or runtime credential access.
+
 `n8n/bin/harness_store_foundation.py` owns hardened SQLite connection setup,
 read-only preflight of existing schema versions, versioned schema creation and
 migration, owner-only file permissions, committed-event audit mirroring,
