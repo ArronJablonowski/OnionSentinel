@@ -108,6 +108,7 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/services/startup_persistence_orchestrator.js" \
     "$ALERT_STORE_STAGE_DIR/services/authorized_campaign_persistence.js" \
     "$ALERT_STORE_STAGE_DIR/services/analyst_review_projection.js" \
+    "$ALERT_STORE_STAGE_DIR/services/analyst_decision_persistence.js" \
     "$ALERT_STORE_STAGE_DIR/services/durable_job_recovery.js" \
     "$ALERT_STORE_STAGE_DIR/services/durable_job_transition_executor.js" \
     "$ALERT_STORE_STAGE_DIR/services/controlled_retirement_completed_member.js" \
