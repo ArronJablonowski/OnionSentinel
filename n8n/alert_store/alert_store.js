@@ -24,7 +24,6 @@ const {createPostgresAcHunterStore} = require('./lib/postgres_ac_hunter_store');
 const {createSecurityLogger} = require('./lib/security_logger');
 const {createPipelineMetrics} = require('./lib/pipeline_metrics');
 const {createSocAnalysisPolicy} = require('./lib/soc_analysis_policy');
-const {createRouteRegistry} = require('./lib/route_registry');
 const {createRequestDispatcher} = require('./lib/http_dispatch');
 const {createRequestAuthorization} = require('./lib/request_authorization');
 const {createControlledJobIdentity} = require('./lib/controlled_job_identity');
@@ -68,14 +67,10 @@ const {
   createPostgresAuxiliaryStoreRuntime,
 } = require('./services/postgres_auxiliary_store_runtime');
 const {createSqliteRuntime} = require('./services/sqlite_runtime');
-const {createInventoryService} = require('./services/inventory_service');
-const {createInventoryRoutes} = require('./routes/inventory_routes');
-const {createHealthRepository} = require('./repositories/health_repository');
 const {createAiCorrelationRepository} = require('./repositories/ai_correlation_repository');
 const {createAiReviewRepository} = require('./repositories/ai_review_repository');
 const {createPcapRequestRepository} = require('./repositories/pcap_request_repository');
 const {createPcapTransferRepository} = require('./repositories/pcap_transfer_repository');
-const {createHealthService} = require('./services/health_service');
 const {createAiAnalysisAcceptance} = require('./services/ai_analysis_acceptance');
 const {createControlledJobTransition} = require('./services/controlled_job_transition');
 const {createControlledResultAdmission} = require('./services/controlled_result_admission');
@@ -122,23 +117,8 @@ const {
 } = require('./services/incident_reanalysis_run_persistence');
 const {createIncidentAnalysisCompletion} = require('./services/incident_analysis_completion');
 const {createIncidentReanalysisBindingService} = require('./services/incident_reanalysis_binding');
-const {createHealthRoutes} = require('./routes/health_routes');
-const {createAnalystStateService} = require('./services/analyst_state_service');
-const {createAnalystStateRoutes} = require('./routes/analyst_state_routes');
-const {createDurableJobService} = require('./services/durable_job_service');
-const {createDurableJobRoutes} = require('./routes/durable_job_routes');
-const {createAnalysisRequestService} = require('./services/analysis_request_service');
-const {createAnalysisRequestRoutes} = require('./routes/analysis_request_routes');
-const {createAnalysisResultService} = require('./services/analysis_result_service');
-const {createAnalysisResultRoutes} = require('./routes/analysis_result_routes');
-const {createPcapService} = require('./services/pcap_service');
 const {createPcapAnalysisCompletion} = require('./services/pcap_analysis_completion');
-const {createPcapRoutes} = require('./routes/pcap_routes');
-const {createEnrichmentService} = require('./services/enrichment_service');
-const {createEnrichmentRoutes} = require('./routes/enrichment_routes');
-const {createMaintenanceRoutes} = require('./routes/maintenance_routes');
-const {createAlertIngestService} = require('./services/alert_ingest_service');
-const {createAlertIngestRoutes} = require('./routes/alert_ingest_routes');
+const {createRouteComposition} = require('./composition/route_composition');
 const {createNotificationService} = require('./services/notification_service');
 const {createAlertGroupService} = require('./services/alert_group_service');
 const {createScoringPolicy} = require('./lib/scoring_policy');
@@ -1594,160 +1574,109 @@ const controlledEvaluationRequests = new Set([
   'POST /jobs/status',
 ]);
 
-const inventoryService = createInventoryService({
-  requireAcHunterStore: postgresAuxiliaryStores.requireAcHunterStore,
-  requireSoftwareStore: postgresAuxiliaryStores.requireSoftwareStore,
-  requireAssetStore: postgresAuxiliaryStores.requireAssetStore,
-});
-const modularRoutes = createRouteRegistry(createInventoryRoutes({
-  service: inventoryService,
-  authorizeWrite: requestAuthorization.requireAssetWrite,
-  readJsonBody,
-  sendJson,
-}));
-const healthRepository = createHealthRepository({get, all});
-const healthService = createHealthService({
-  repository: healthRepository,
-  runtime: () => ({
-    controlledEvaluationMode,
-    controlledEvaluationLeases,
-    controlledRoutes: controlledEvaluationRequests,
-    runtimeReleaseId: runtimeReleaseIdValue,
-    host,
-    port,
-    activeSqliteWrites: sqliteRuntime.activeWrites(),
-    telegramOutboxSnapshot,
-    enrichmentScheduler,
-    enrichmentCache,
-    authorizedActivityPolicyPath,
-    authorizedActivityPolicyCount: authorizedActivityPolicy.policies.length,
-    authorizedCampaignReconciliation: authorizedCampaignPersistence.reconciliationState(),
-    diskCapacitySnapshot,
-    postgresShadowOutbox,
-    postgresShadowProjector,
-    postgresShadowEnabled,
-    ...postgresAuxiliaryStores.state(),
-    durableJobs,
-    serviceMetrics,
-    postRequestAdmission,
-    pipelineMetrics,
-    nowUtc,
-  }),
-});
-modularRoutes.registerAll(createHealthRoutes({service: healthService, sendJson}));
-const analystStateService = createAnalystStateService({
-  analystStatusSnapshot,
-  updateAnalystStatus,
-  analystAdjudicationSnapshot,
-  recordAnalystAdjudication,
-  updateIncidentCaseStatus,
-  withWriteGate: withSqliteWriteGate,
-  withTransaction: withImmediateTransaction,
-});
-modularRoutes.registerAll(createAnalystStateRoutes({
-  service: analystStateService,
-  readJsonBody,
-  sendJson,
-}));
-const durableJobService = createDurableJobService({
-  safeString,
-  withWriteGate: withSqliteWriteGate,
-  withTransaction: withImmediateTransaction,
-  controlledTransitionAdmission: controlledJobTransitionAuthority.admit,
-  transitionJobStatus: durableJobTransitionExecutor.transition,
-  applyControlledTransition: controlledJobTransitionAuthority.apply,
-  completePendingByDedupeKeys: (...args) => (
-    durableJobs.completePendingByDedupeKeys(...args)
-  ),
-});
-modularRoutes.registerAll(createDurableJobRoutes({
-  service: durableJobService,
-  readJsonBody,
-  sendJson,
-}));
-const analysisRequestService = createAnalysisRequestService({
-  controlledEvaluationMode: () => controlledEvaluationMode,
-  identityConflict: incidentIdentityConflict,
-  withWriteGate: withSqliteWriteGate,
-  withTransaction: withImmediateTransaction,
-  requestAiReanalysis,
-  requestIncidentEscalation,
-  requestIncidentReanalysis: incidentReanalysisRequestOwner.request,
-  retireControlledEvaluation: controlledRetirementCommandOwner.retire,
-  signalAiWorkers,
-});
-modularRoutes.registerAll(createAnalysisRequestRoutes({
-  service: analysisRequestService,
-  readJsonBody,
-  sendJson,
-}));
-const analysisResultService = createAnalysisResultService({
-  controlledEvaluationMode: () => controlledEvaluationMode,
-  requestHasOwnField,
-  identityConflict: incidentIdentityConflict,
-  withWriteGate: withSqliteWriteGate,
-  withTransaction: withImmediateTransaction,
-  controlledResultAdmission: controlledResultAdmissionAuthority.admit,
-  recordAnalysisResult: recordAiAnalysisResult,
-  transitionJobStatus: durableJobTransitionExecutor.transition,
-  applyControlledResultAdmission: controlledResultAdmissionAuthority.apply,
-});
-modularRoutes.registerAll(createAnalysisResultRoutes({
-  service: analysisResultService,
-  readJsonBody,
-  sendJson,
-}));
-const pcapService = createPcapService({
-  withWriteGate: withSqliteWriteGate,
-  withTransaction: withImmediateTransaction,
-  createRequest: (...args) => pcapRequestRepository.createRequest(...args),
-  listRequests: (...args) => pcapRequestRepository.listRequests(...args),
-  claimRequest: (...args) => pcapTransferRepository.claimRequest(...args),
-  completeRequest: (...args) => pcapTransferRepository.completeRequest(...args),
-  updateTransferProgress: (...args) => pcapTransferRepository.updateTransferProgress(...args),
-  retryRequest: (...args) => pcapTransferRepository.retryRequest(...args),
-  completeAnalysis: (...args) => pcapAnalysisCompletion.complete(...args),
-  requeueRequests: (...args) => pcapRequestRepository.requeueRequests(...args),
-  signalPcapWorker: (reason) => signalWorker(pcapAnalysisWakePath, reason),
-  signalAiWorkers,
-});
-modularRoutes.registerAll(createPcapRoutes({
-  service: pcapService,
-  readJsonBody,
-  sendJson,
-}));
-const enrichmentService = createEnrichmentService({
-  assertDiskWriteAdmission,
-  enrichAlert,
-  cachedInvestigationEnrichment,
-  queryInvestigationEnrichment,
-});
-modularRoutes.registerAll(createEnrichmentRoutes({
-  service: enrichmentService,
-  authorizeInvestigation: requestAuthorization.requireAssetWrite,
-  readJsonBody,
-  sendJson,
-}));
-modularRoutes.registerAll(createMaintenanceRoutes({
-  service: {
-    rescore: rescoreAlerts,
-    refreshGroups: rebuildAlertGroupSummaries,
+const modularRoutes = createRouteComposition({
+  http: {readJsonBody, sendJson},
+  transaction: {
+    withWriteGate: withSqliteWriteGate,
+    withTransaction: withImmediateTransaction,
   },
-  sendJson,
-}));
-const alertIngestService = createAlertIngestService({
-  metrics: serviceMetrics,
-  now: Date.now,
-  readJsonBody,
-  writeBeacon: writeN8nBeacon,
-  isRelayHeartbeat,
-  assertDiskWriteAdmission,
-  storeAlert,
+  inventory: {
+    requireAcHunterStore: postgresAuxiliaryStores.requireAcHunterStore,
+    requireSoftwareStore: postgresAuxiliaryStores.requireSoftwareStore,
+    requireAssetStore: postgresAuxiliaryStores.requireAssetStore,
+    authorizeWrite: requestAuthorization.requireAssetWrite,
+  },
+  health: {
+    get,
+    all,
+    runtime: () => ({
+      controlledEvaluationMode,
+      controlledEvaluationLeases,
+      controlledRoutes: controlledEvaluationRequests,
+      runtimeReleaseId: runtimeReleaseIdValue,
+      host,
+      port,
+      activeSqliteWrites: sqliteRuntime.activeWrites(),
+      telegramOutboxSnapshot,
+      enrichmentScheduler,
+      enrichmentCache,
+      authorizedActivityPolicyPath,
+      authorizedActivityPolicyCount: authorizedActivityPolicy.policies.length,
+      authorizedCampaignReconciliation: authorizedCampaignPersistence.reconciliationState(),
+      diskCapacitySnapshot,
+      postgresShadowOutbox,
+      postgresShadowProjector,
+      postgresShadowEnabled,
+      ...postgresAuxiliaryStores.state(),
+      durableJobs,
+      serviceMetrics,
+      postRequestAdmission,
+      pipelineMetrics,
+      nowUtc,
+    }),
+  },
+  analystState: {
+    analystStatusSnapshot,
+    updateAnalystStatus,
+    analystAdjudicationSnapshot,
+    recordAnalystAdjudication,
+    updateIncidentCaseStatus,
+  },
+  durableJob: {
+    safeString,
+    controlledTransitionAdmission: controlledJobTransitionAuthority.admit,
+    transitionJobStatus: durableJobTransitionExecutor.transition,
+    applyControlledTransition: controlledJobTransitionAuthority.apply,
+    completePendingByDedupeKeys: (...args) => durableJobs.completePendingByDedupeKeys(...args),
+  },
+  analysisRequest: {
+    controlledEvaluationMode: () => controlledEvaluationMode,
+    identityConflict: incidentIdentityConflict,
+    requestAiReanalysis,
+    requestIncidentEscalation,
+    requestIncidentReanalysis: incidentReanalysisRequestOwner.request,
+    retireControlledEvaluation: controlledRetirementCommandOwner.retire,
+    signalAiWorkers,
+  },
+  analysisResult: {
+    controlledEvaluationMode: () => controlledEvaluationMode,
+    requestHasOwnField,
+    identityConflict: incidentIdentityConflict,
+    controlledResultAdmission: controlledResultAdmissionAuthority.admit,
+    recordAnalysisResult: recordAiAnalysisResult,
+    transitionJobStatus: durableJobTransitionExecutor.transition,
+    applyControlledResultAdmission: controlledResultAdmissionAuthority.apply,
+  },
+  pcap: {
+    createRequest: (...args) => pcapRequestRepository.createRequest(...args),
+    listRequests: (...args) => pcapRequestRepository.listRequests(...args),
+    claimRequest: (...args) => pcapTransferRepository.claimRequest(...args),
+    completeRequest: (...args) => pcapTransferRepository.completeRequest(...args),
+    updateTransferProgress: (...args) => pcapTransferRepository.updateTransferProgress(...args),
+    retryRequest: (...args) => pcapTransferRepository.retryRequest(...args),
+    completeAnalysis: (...args) => pcapAnalysisCompletion.complete(...args),
+    requeueRequests: (...args) => pcapRequestRepository.requeueRequests(...args),
+    signalPcapWorker: (reason) => signalWorker(pcapAnalysisWakePath, reason),
+    signalAiWorkers,
+  },
+  enrichment: {
+    assertDiskWriteAdmission,
+    enrichAlert,
+    cachedInvestigationEnrichment,
+    queryInvestigationEnrichment,
+    authorizeInvestigation: requestAuthorization.requireAssetWrite,
+  },
+  maintenance: {rescore: rescoreAlerts, refreshGroups: rebuildAlertGroupSummaries},
+  alertIngest: {
+    metrics: serviceMetrics,
+    now: Date.now,
+    readJsonBody,
+    writeBeacon: writeN8nBeacon,
+    isRelayHeartbeat,
+    assertDiskWriteAdmission,
+    storeAlert,
+  },
 });
-modularRoutes.registerAll(createAlertIngestRoutes({
-  service: alertIngestService,
-  sendJson,
-}));
 
 function controlledEvaluationRequestAuthorized(request) {
   return requestAuthorization.controlledEvaluationAuthorized(request);

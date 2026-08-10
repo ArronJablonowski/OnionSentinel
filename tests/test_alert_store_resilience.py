@@ -34,6 +34,7 @@ SUPPRESSION_PERSISTENCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "supp
 AI_REVIEW_REPOSITORY = REPO_ROOT / "n8n" / "alert_store" / "repositories" / "ai_review_repository.js"
 AI_ANALYSIS_ACCEPTANCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "ai_analysis_acceptance.js"
 DURABLE_JOB_TRANSITION_EXECUTOR = REPO_ROOT / "n8n" / "alert_store" / "services" / "durable_job_transition_executor.js"
+ROUTE_COMPOSITION = REPO_ROOT / "n8n" / "alert_store" / "composition" / "route_composition.js"
 DISK_WRITE_ADMISSION = REPO_ROOT / "n8n" / "alert_store" / "services" / "disk_write_admission.js"
 WORKER_WAKE_SIGNALING = REPO_ROOT / "n8n" / "alert_store" / "services" / "worker_wake_signaling.js"
 BEACON_PERSISTENCE = REPO_ROOT / "n8n" / "alert_store" / "services" / "beacon_persistence.js"
@@ -91,6 +92,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.ai_review_repository = AI_REVIEW_REPOSITORY.read_text(encoding="utf-8")
         cls.ai_analysis_acceptance = AI_ANALYSIS_ACCEPTANCE.read_text(encoding="utf-8")
         cls.durable_job_transition_executor = DURABLE_JOB_TRANSITION_EXECUTOR.read_text(encoding="utf-8")
+        cls.route_composition = ROUTE_COMPOSITION.read_text(encoding="utf-8")
         cls.disk_write_admission = DISK_WRITE_ADMISSION.read_text(encoding="utf-8")
         cls.worker_wake_signaling = WORKER_WAKE_SIGNALING.read_text(encoding="utf-8")
         cls.beacon_persistence = BEACON_PERSISTENCE.read_text(encoding="utf-8")
@@ -326,9 +328,11 @@ class AlertStoreResilienceTest(unittest.TestCase):
             self.durable_job_transition_executor,
         )
         self.assertIn(
-            "transitionJobStatus: durableJobTransitionExecutor.transition",
-            self.code,
+            "transitionJobStatus: durableJob.transitionJobStatus",
+            self.route_composition,
         )
+        self.assertIn("createDurableJobService", self.route_composition)
+        self.assertNotIn("createDurableJobService", self.code)
         for forwarding_function in (
             "controlledJobClaimIdentity",
             "controlledEvaluationLeaseKey",

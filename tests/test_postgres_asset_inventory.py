@@ -13,6 +13,9 @@ RUNTIME = ROOT / "n8n" / "alert_store" / "services" / "postgres_auxiliary_store_
 REQUEST_AUTHORIZATION = (
     ROOT / "n8n" / "alert_store" / "lib" / "request_authorization.js"
 )
+ROUTE_COMPOSITION = (
+    ROOT / "n8n" / "alert_store" / "composition" / "route_composition.js"
+)
 ENTRYPOINT = ROOT / "n8n" / "alert_store" / "alert_store.js"
 RUNTIME_CONFIGURATION = (
     ROOT / "n8n" / "alert_store" / "lib" / "runtime_configuration.js"
@@ -63,6 +66,7 @@ class PostgresAssetInventoryTests(unittest.TestCase):
         store = STORE.read_text(encoding="utf-8")
         runtime = RUNTIME.read_text(encoding="utf-8")
         request_authorization = REQUEST_AUTHORIZATION.read_text(encoding="utf-8")
+        route_composition = ROUTE_COMPOSITION.read_text(encoding="utf-8")
         runtime_configuration = RUNTIME_CONFIGURATION.read_text(encoding="utf-8")
         self.assertIn("path: '/assets/inventory'", routes)
         self.assertIn("parsedUrl.searchParams.get('limit')", routes)
@@ -70,9 +74,11 @@ class PostgresAssetInventoryTests(unittest.TestCase):
         self.assertIn("function requireAssetWrite(request)", request_authorization)
         self.assertIn("function requireAssetStore()", runtime)
         self.assertIn(
-            "authorizeWrite: requestAuthorization.requireAssetWrite",
-            entrypoint,
+            "authorizeWrite: inventory.authorizeWrite",
+            route_composition,
         )
+        self.assertIn("createInventoryService", route_composition)
+        self.assertNotIn("createInventoryService", entrypoint)
         for forwarding_function in (
             "initializePostgresAssetStore",
             "initializePostgresAcHunterStore",
