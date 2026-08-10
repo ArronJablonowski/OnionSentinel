@@ -6,9 +6,6 @@
     "n8n/bin/bounded_process.py": {
       "max_lines": 997
     },
-    "n8n/bin/maintain-investigation-harness.py": {
-      "max_lines": 1147
-    },
     "n8n/bin/pcap_evidence_query.py": {
       "max_lines": 915
     },
@@ -260,20 +257,6 @@
     "n8n/bin/live_osquery_contract.py::validate_result_artifact": {
       "max_complexity": 42,
       "max_lines": 190
-    },
-    "n8n/bin/maintain-investigation-harness.py::main": {
-      "max_lines": 214
-    },
-    "n8n/bin/maintain-investigation-harness.py::maintain_database": {
-      "max_complexity": 29,
-      "max_lines": 146
-    },
-    "n8n/bin/maintain-investigation-harness.py::verify_event_chains": {
-      "max_complexity": 19
-    },
-    "n8n/bin/maintain-investigation-harness.py::verify_recent_harness_backup": {
-      "max_complexity": 32,
-      "max_lines": 121
     },
     "n8n/bin/maintain-pcap-evidence.py::cleanup_analyzed_artifacts": {
       "max_complexity": 17
