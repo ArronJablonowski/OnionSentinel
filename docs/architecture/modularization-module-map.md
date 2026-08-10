@@ -2392,6 +2392,12 @@ initialization. The entrypoint now retains only platform loading, runtime
 configuration, foundation construction, application graph construction, and
 HTTP lifecycle startup.
 
+`lib/postgres_asset_normalization.js` owns PostgreSQL asset and DHCP input
+normalization, bounded identity/provenance validation, observation freshness
+and fingerprints, inventory snapshot shaping, and public asset projection.
+The legacy `postgres_asset_store.js` path continues to export
+`normalizeInventoryRecord` for compatibility.
+
 ## Deployment Map
 
 The current production installer copies individual files. These additions are
