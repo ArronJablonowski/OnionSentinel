@@ -14,9 +14,6 @@
     },
     "onion-sentinel-dashboard/onion_sentinel_server.py": {
       "max_lines": 979
-    },
-    "operations/benchmark-ollama-cybersecurity.py": {
-      "max_lines": 1164
     }
   },
   "functions": {
@@ -438,24 +435,6 @@
     },
     "onion-sentinel-dashboard/software_inventory_state.py::_sanitize_source_statuses": {
       "max_complexity": 17
-    },
-    "operations/benchmark-ollama-cybersecurity.py::_query_validation": {
-      "max_complexity": 21
-    },
-    "operations/benchmark-ollama-cybersecurity.py::benchmark_cases": {
-      "max_lines": 398
-    },
-    "operations/benchmark-ollama-cybersecurity.py::benchmark_model": {
-      "max_complexity": 24
-    },
-    "operations/benchmark-ollama-cybersecurity.py::main": {
-      "max_complexity": 16
-    },
-    "operations/benchmark-ollama-cybersecurity.py::score_batch": {
-      "max_complexity": 27
-    },
-    "operations/benchmark-ollama-cybersecurity.py::score_query_batch": {
-      "max_complexity": 20
     },
     "operations/evaluate-analysis-replays.py::_classification_metrics": {
       "max_complexity": 32

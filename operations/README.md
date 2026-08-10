@@ -69,6 +69,13 @@ TEST-NET fixtures on a loopback server.
 fixed matrix of synthetic SOC triage, evidence-provenance, PCAP interpretation,
 correlation, incident response, threat hunting, and SIEM safety decisions.
 The tool never reads the live alert database, report corpus, or credentials.
+The executable retains the synthetic decision fixture catalog and stable CLI.
+Exact installed-model discovery and bounded POST transport live in
+`benchmark_ollama_discovery.py`; deterministic prompt/retry execution lives in
+`benchmark_ollama_execution.py`; generated-query fixtures live in
+`benchmark_ollama_query_cases.py`; safety scoring and report aggregation live in
+`benchmark_ollama_scoring.py` and `benchmark_ollama_reporting.py`. Dependencies
+flow from the executable into those leaf modules without cycles.
 
 Run it on the Ollama host and write generated results outside the repository:
 
@@ -79,10 +86,11 @@ python3 operations/benchmark-ollama-cybersecurity.py \
   --output /tmp/onion-sentinel-model-benchmark.json
 ```
 
-Each model receives six bounded requests containing 36 total cases. The JSON
-artifact contains case-level evidence-discipline results and timing data; a
-Markdown summary is written beside it. `--yield-seconds` leaves an interval
-between models for the production AI worker on a shared Ollama host.
+Each model receives seven bounded requests containing 42 total cases: six
+decision-category batches with 36 cases plus one six-case generated-query
+batch. The JSON artifact contains case-level evidence-discipline results and
+timing data; a Markdown summary is written beside it. `--yield-seconds` leaves
+an interval between models for the production AI worker on a shared Ollama host.
 
 ## Incident Responder harness cohort
 
