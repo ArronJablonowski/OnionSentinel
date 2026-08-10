@@ -6,6 +6,9 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ALERT_STORE = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
+APPLICATION_COMPOSITION = (
+    REPO_ROOT / "n8n" / "alert_store" / "composition" / "application_composition.js"
+)
 RUNTIME_CONFIGURATION = (
     REPO_ROOT / "n8n" / "alert_store" / "lib" / "runtime_configuration.js"
 )
@@ -47,6 +50,7 @@ PCAP_WORKFLOW_SYNC = REPO_ROOT / "n8n" / "bin" / "sync-pcap-broker-workflow.py"
 class AlertStorePcapPolicyTest(unittest.TestCase):
     def test_alert_store_auto_queues_pcap_for_configured_levels(self) -> None:
         code = ALERT_STORE.read_text()
+        composition = APPLICATION_COMPOSITION.read_text(encoding="utf-8")
         persistence = ALERT_PERSISTENCE.read_text(encoding="utf-8")
         routing = AUTOMATIC_RESPONSE_ROUTING.read_text(encoding="utf-8")
         policy = SOC_ANALYSIS_POLICY.read_text()
@@ -61,8 +65,9 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
             policy,
         )
         self.assertIn("async function maybeQueueAutomaticPcapRequest", code)
-        self.assertIn("createAutomaticResponseRouting", code)
-        self.assertIn("queueAutomaticPcap: maybeQueueAutomaticPcapRequest", code)
+        self.assertIn("createApplicationComposition", code)
+        self.assertIn("createAutomaticResponseRouting", composition)
+        self.assertIn("queueAutomaticPcap: automaticResponseRouting.queuePcap", composition)
         self.assertIn(
             "const pcap = await queueAutomaticPcap(alert, row, inserted, suppression, campaign);",
             persistence,

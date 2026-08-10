@@ -382,6 +382,13 @@ class AiCorrelationContextTests(unittest.TestCase):
 
     def test_alert_store_owns_correlation_writes(self) -> None:
         composition = ALERT_STORE.read_text(encoding="utf-8")
+        application_composition = (
+            REPO_ROOT
+            / "n8n"
+            / "alert_store"
+            / "composition"
+            / "application_composition.js"
+        ).read_text(encoding="utf-8")
         foundation = SCHEMA_FOUNDATION.read_text(encoding="utf-8")
         incident_schema = INCIDENT_ANALYSIS_SCHEMA.read_text(encoding="utf-8")
         review_schema = AI_REVIEW_SCHEMA.read_text(encoding="utf-8")
@@ -390,9 +397,10 @@ class AiCorrelationContextTests(unittest.TestCase):
         result_routes = ANALYSIS_RESULT_ROUTES.read_text(encoding="utf-8")
         runner = AI_RUNNER.read_text(encoding="utf-8")
 
-        self.assertIn("createAlertStoreSchemaFoundation", composition)
-        self.assertIn("createIncidentAnalysisSchema", composition)
-        self.assertIn("createAiReviewSchema", composition)
+        self.assertIn("createApplicationComposition", composition)
+        self.assertIn("createAlertStoreSchemaFoundation", application_composition)
+        self.assertIn("createIncidentAnalysisSchema", application_composition)
+        self.assertIn("createAiReviewSchema", application_composition)
         self.assertIn("CREATE TABLE IF NOT EXISTS alert_observables", foundation)
         self.assertIn("CREATE TABLE IF NOT EXISTS ai_analysis_runs", incident_schema)
         self.assertIn("CREATE TABLE IF NOT EXISTS alert_correlations", review_schema)

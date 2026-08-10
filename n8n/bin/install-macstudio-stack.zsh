@@ -168,6 +168,7 @@ prepare_alert_store_stage() {
     "$ALERT_STORE_STAGE_DIR/services/alert_group_service.js" \
     "$ALERT_STORE_STAGE_DIR/services/enrichment_provider_client.js" \
     "$ALERT_STORE_STAGE_DIR/services/enrichment_orchestrator.js" \
+    "$ALERT_STORE_STAGE_DIR/composition/application_composition.js" \
     "$ALERT_STORE_STAGE_DIR/composition/controlled_incident_composition.js" \
     "$ALERT_STORE_STAGE_DIR/composition/route_composition.js"
 }

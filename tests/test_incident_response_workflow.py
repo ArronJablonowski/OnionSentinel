@@ -27,6 +27,9 @@ CONTROLLED_INCIDENT_COMPOSITION_PATH = (
     / "composition"
     / "controlled_incident_composition.js"
 )
+APPLICATION_COMPOSITION_PATH = (
+    REPO_ROOT / "n8n" / "alert_store" / "composition" / "application_composition.js"
+)
 MANUAL_ANALYSIS_DISPATCH_PATH = (
     REPO_ROOT / "n8n" / "alert_store" / "services" / "manual_analysis_dispatch.js"
 )
@@ -1092,11 +1095,13 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
     def test_alert_store_uses_a_distinct_agent_job_and_analysis_role(self) -> None:
         source = ALERT_STORE_PATH.read_text(encoding="utf-8")
         composition = CONTROLLED_INCIDENT_COMPOSITION_PATH.read_text(encoding="utf-8")
+        application = APPLICATION_COMPOSITION_PATH.read_text(encoding="utf-8")
         dispatch = MANUAL_ANALYSIS_DISPATCH_PATH.read_text(encoding="utf-8")
         schema = INCIDENT_ANALYSIS_SCHEMA_PATH.read_text(encoding="utf-8")
         routes = ANALYSIS_REQUEST_ROUTES_PATH.read_text(encoding="utf-8")
 
-        self.assertIn("createIncidentAnalysisSchema", source)
+        self.assertIn("createApplicationComposition", source)
+        self.assertIn("createIncidentAnalysisSchema", application)
         self.assertIn("CREATE TABLE IF NOT EXISTS incident_response_cases", schema)
         self.assertIn("CREATE TABLE IF NOT EXISTS incident_response_events", schema)
         self.assertIn("async function requestIncidentEscalation", source)
@@ -1110,6 +1115,7 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
     def test_case_bound_reanalysis_has_durable_run_progress_contract(self) -> None:
         source = ALERT_STORE_PATH.read_text(encoding="utf-8")
         composition = CONTROLLED_INCIDENT_COMPOSITION_PATH.read_text(encoding="utf-8")
+        application = APPLICATION_COMPOSITION_PATH.read_text(encoding="utf-8")
         schema = INCIDENT_ANALYSIS_SCHEMA_PATH.read_text(encoding="utf-8")
         request_source = INCIDENT_REANALYSIS_REQUEST_PATH.read_text(encoding="utf-8")
         run_persistence_source = INCIDENT_REANALYSIS_RUN_PERSISTENCE_PATH.read_text(
@@ -1126,7 +1132,8 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         completion_source = INCIDENT_ANALYSIS_COMPLETION_PATH.read_text(encoding="utf-8")
         index_source = ANALYSIS_INDEX_PATH.read_text(encoding="utf-8")
 
-        self.assertIn("createIncidentAnalysisSchema", source)
+        self.assertIn("createApplicationComposition", source)
+        self.assertIn("createIncidentAnalysisSchema", application)
         self.assertIn("CREATE TABLE IF NOT EXISTS incident_reanalysis_runs", schema)
         self.assertIn("CREATE TABLE IF NOT EXISTS incident_reanalysis_run_cases", schema)
         self.assertIn("CREATE TABLE IF NOT EXISTS incident_reanalysis_attempts", schema)

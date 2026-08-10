@@ -2343,6 +2343,11 @@ incident dispatch. It receives persistence, transaction, queue, serialization,
 identity, and runtime ports explicitly; the legacy entry point retains only
 the environment-specific adapters and public compatibility functions.
 
+`composition/application_composition.js` assembles schema installation,
+domain persistence, automatic response routing, alert ingestion, and startup
+recovery from explicit database, policy, service, lifecycle, and serialization
+ports. SQL and transaction semantics remain in their existing service owners.
+
 ## Deployment Map
 
 The current production installer copies individual files. These additions are

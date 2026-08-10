@@ -26,32 +26,7 @@ const {createPipelineMetrics} = require('./lib/pipeline_metrics');
 const {createSocAnalysisPolicy} = require('./lib/soc_analysis_policy');
 const {createRequestDispatcher} = require('./lib/http_dispatch');
 const {createRequestAuthorization} = require('./lib/request_authorization');
-const {createControlledEvaluationSchema} = require('./lib/controlled_evaluation_schema');
-const {
-  createAlertStoreSchemaFoundation,
-} = require('./services/alert_store_schema_foundation');
-const {createIncidentAnalysisSchema} = require('./services/incident_analysis_schema');
-const {createAiReviewSchema} = require('./services/ai_review_schema');
-const {
-  createNotificationEnrichmentSchema,
-} = require('./services/notification_enrichment_schema');
-const {createPcapSchema} = require('./services/pcap_schema');
-const {
-  createStartupPersistenceOrchestrator,
-} = require('./services/startup_persistence_orchestrator');
-const {
-  createAuthorizedCampaignPersistence,
-} = require('./services/authorized_campaign_persistence');
 const analystReviewDefinitions = require('./services/analyst_review_projection');
-const {
-  createAnalystDecisionPersistence,
-} = require('./services/analyst_decision_persistence');
-const {createAlertIngestOrchestrator} = require('./services/alert_ingest_orchestrator');
-const {createPostCommitPayload} = require('./services/post_commit_payload');
-const {createAlertPersistence} = require('./services/alert_persistence');
-const {createSuppressionPersistence} = require('./services/suppression_persistence');
-const {createRescorePersistence} = require('./services/rescore_persistence');
-const {createAutomaticResponseRouting} = require('./services/automatic_response_routing');
 const {createDurableBackgroundDrains} = require('./services/durable_background_drains');
 const {createServiceRuntimeLifecycle} = require('./services/service_runtime_lifecycle');
 const {createHttpRequestBoundary} = require('./services/http_request_boundary');
@@ -72,6 +47,7 @@ const {createRouteComposition} = require('./composition/route_composition');
 const {
   createControlledIncidentComposition,
 } = require('./composition/controlled_incident_composition');
+const {createApplicationComposition} = require('./composition/application_composition');
 const {createNotificationService} = require('./services/notification_service');
 const {createAlertGroupService} = require('./services/alert_group_service');
 const {createScoringPolicy} = require('./lib/scoring_policy');
@@ -1045,186 +1021,120 @@ const aiAnalysisAcceptance = createAiAnalysisAcceptance({
   incidentAnalysisCompletion,
   aiCorrelationRepository,
 });
-const controlledEvaluationSchema = createControlledEvaluationSchema({
-  all,
-  get,
-  initializeDurableJobs,
-  initializePipelineMetrics,
-});
-const alertStoreSchemaFoundation = createAlertStoreSchemaFoundation({
-  run,
-  ensureColumn,
-  assertControlledSchema: assertControlledEvaluationSchema,
-  controlledEvaluationMode,
-  sqliteBusyTimeoutMs,
-  allowedJournalModes,
-  sqliteJournalMode,
-  allowedSynchronousModes,
-  sqliteSynchronous,
-  allowedTempStoreModes,
-  sqliteTempStore,
-  alertGroupKeySql,
-});
-const incidentAnalysisSchema = createIncidentAnalysisSchema({run, ensureColumn});
-const aiReviewSchema = createAiReviewSchema({run, ensureColumn});
-const notificationEnrichmentSchema = createNotificationEnrichmentSchema({
-  run,
-  nowUtc,
-  installEnrichmentCache: () => enrichmentCache.install(),
-});
-const pcapSchema = createPcapSchema({
-  run,
-  ensureColumn,
-  backfillOutcomes: () => pcapRequestRepository.backfillOutcomes(),
-});
-const authorizedCampaignPersistence = createAuthorizedCampaignPersistence({
-  all,
-  get,
-  run,
-  withImmediateTransaction,
-  policy: authorizedActivityPolicy,
-  matchAuthorizedActivity,
-  parseJsonObject,
-  normalizeTimestampValue,
-  nowUtc,
-  jsonText,
-  integerField,
-  completePendingJobs: (...args) => durableJobs.completePendingByDedupeKeys(...args),
-  stableGroupKey,
-  stableGroupId,
-  buildAlertObservables,
-  extractAlertIndicators,
-});
-const analystReviewProjection = analystReviewDefinitions.createAnalystReviewProjection({
-  get,
-  all,
-  resolveDashboardAlertGroup,
-  safeString,
-  parseJsonObject,
-  conservativeReviewerTelemetry,
-  reviewerAutomationAuthorization,
-  reviewerFailureStatuses,
-});
-const analystDecisionPersistence = createAnalystDecisionPersistence({
-  get,
-  all,
-  run,
-  withWriteGate: withSqliteWriteGate,
-  reviewState: analystReviewState,
-  validGroupId: validAnalystGroupId,
-  validCaseId: validIncidentCaseId,
-  safeString,
-  adjudicationOutcomes: analystAdjudicationOutcomes,
-  adjudicationConfidences: analystAdjudicationConfidences,
-  eventStatuses: analystEventStatuses,
-  detectionValidities: analystDetectionValidities,
-  activityDispositions: analystActivityDispositions,
-  handlingValues: analystHandlingValues,
-  verdictContradictions: analystVerdictContradictions,
-  adjudicationTextMaxLength: analystAdjudicationTextMaxLength,
-  statusReasonMaxLength: analystStatusReasonMaxLength,
-  nowUtc,
-  randomUUID: crypto.randomUUID,
-  jsonText,
-});
-const suppressionPersistence = createSuppressionPersistence({
-  findSuppressRule,
-  stableGroupId,
-  nestedField,
-  pendingHumanReview: stableGroupHasPendingHumanReview,
-  suppressionKey,
-  ruleName,
-  get,
-  run,
-});
-const rescorePersistence = createRescorePersistence({
-  all,
-  run,
-  scoreAlert,
-  nestedField,
-  integerField,
-  jsonText,
-  enrichmentRecord,
-  rebuildGroupSummaries: rebuildAlertGroupSummariesUnlocked,
-  scoringRulesName: path.basename(scoringRulesPath),
-});
-const automaticResponseRouting = createAutomaticResponseRouting({
-  nestedField,
-  readPolicy: () => socAnalysisPolicy.read(),
-  matchesPcap: (level) => socAnalysisPolicy.matchesPcap(level),
-  matchesIncident: (level) => socAnalysisPolicy.matchesIncident(level),
-  groupKeyFromRow: alertGroupKeyFromRow,
-  groupIdFromKey: alertGroupId,
-  get,
-  run,
-  parseJsonObject,
-  jsonText,
-  nowUtc,
-  createPcapRequest: (...args) => pcapRequestRepository.createRequest(...args),
-  pcapRequestDefaultWindowSeconds,
-  queueIncidentResponseForGroup,
-  severityRank,
-});
-const alertPersistence = createAlertPersistence({
-  currentGroupKey: currentAlertGroupKey,
-  nowUtc,
-  findDropRule,
-  nestedField,
-  ruleName,
-  normalizeTimestampValue,
-  integerField,
-  jsonText,
-  enrichmentRecord,
-  run,
-  get,
-  applySuppression: applySuppressionPolicy,
-  persistStableIdentity,
-  indexObservables: indexAlertObservables,
-  recordCampaign: recordAuthorizedActivityCampaign,
-  groupKeyFromRow: alertGroupKeyFromRow,
-  refreshGroupSummary: refreshAlertGroupSummary,
-  queueAutomaticPcap: maybeQueueAutomaticPcapRequest,
-  queueAutomaticIncident: maybeQueueAutomaticIncidentResponse,
-});
-const postCommitPayload = createPostCommitPayload({nowUtc, nestedField});
-const alertIngestOrchestrator = createAlertIngestOrchestrator({
-  scoreAlert,
-  withWriteGate: withSqliteWriteGate,
-  withTransaction: withImmediateTransaction,
-  storeUnlocked: storeAlertUnlocked,
-  queueNotification: queueTelegramNotification,
-  nowUtc,
-  buildPostCommitPayload: postCommitPayload.build,
-  enqueueJob: (...args) => durableJobs.enqueue(...args),
-  recordMetric: (...args) => pipelineMetrics.record(...args),
-  severityRank,
-  postCommitMaxAttempts: n8nPostCommitMaxAttempts,
-  hasUsableExternalIntel,
-  nestedField,
-  enrichmentMaxAttempts: enrichmentWorkerMaxAttempts,
-  groupKeyFromRow: alertGroupKeyFromRow,
-  groupIdFromKey: alertGroupId,
-  matchesAnalysis: (level) => socAnalysisPolicy.matchesAnalysis(level),
-  signalAiWorkers,
-  drainNotificationOutbox: drainTelegramOutbox,
-  drainEnrichmentJobs,
-  drainPostCommitJobs: drainN8nPostCommitJobs,
-});
-const startupPersistenceOrchestrator = createStartupPersistenceOrchestrator({
-  initializeDurableJobs,
-  installDurableJobs: () => durableJobs.install(),
-  initializePostgresShadowOutbox,
-  installPostgresShadowOutbox: () => postgresShadowOutbox.install(),
-  initializePostgresShadowProjector,
-  reconcileRecoveredIncidentAttempts: incidentReanalysisRecovery.reconcile,
-  initializePipelineMetrics,
-  installPipelineMetrics: () => pipelineMetrics.install(),
-  backfillStableGroupIdentity,
-  backfillAuthorizedActivityCampaigns,
-  reconcileAuthorizedActivityBacklog,
-  backfillAlertObservables,
-  rebuildAlertGroupSummaries,
-  refreshGroupAliases,
+const {
+  aiReviewSchema,
+  alertIngestOrchestrator,
+  alertPersistence,
+  alertStoreSchemaFoundation,
+  analystDecisionPersistence,
+  analystReviewProjection,
+  authorizedCampaignPersistence,
+  automaticResponseRouting,
+  controlledEvaluationSchema,
+  incidentAnalysisSchema,
+  notificationEnrichmentSchema,
+  pcapSchema,
+  rescorePersistence,
+  startupPersistenceOrchestrator,
+  suppressionPersistence,
+} = createApplicationComposition({
+  database: {
+    get,
+    all,
+    run,
+    withWriteGate: withSqliteWriteGate,
+    withTransaction: withImmediateTransaction,
+    ensureColumn,
+  },
+  schema: {
+    controlledEvaluationMode,
+    sqliteBusyTimeoutMs,
+    allowedJournalModes,
+    sqliteJournalMode,
+    allowedSynchronousModes,
+    sqliteSynchronous,
+    allowedTempStoreModes,
+    sqliteTempStore,
+    alertGroupKeySql,
+  },
+  policy: {
+    authorizedActivityPolicy,
+    matchAuthorizedActivity,
+    integerField,
+    stableGroupKey,
+    stableGroupId,
+    buildAlertObservables,
+    extractAlertIndicators,
+    createAnalystReviewProjection: analystReviewDefinitions.createAnalystReviewProjection,
+    safeString,
+    conservativeReviewerTelemetry,
+    reviewerAutomationAuthorization,
+    reviewerFailureStatuses,
+    validAnalystGroupId,
+    validIncidentCaseId,
+    analystAdjudicationOutcomes,
+    analystAdjudicationConfidences,
+    analystEventStatuses,
+    analystDetectionValidities,
+    analystActivityDispositions,
+    analystHandlingValues,
+    analystVerdictContradictions,
+    analystAdjudicationTextMaxLength,
+    analystStatusReasonMaxLength,
+    findSuppressRule,
+    nestedField,
+    suppressionKey,
+    ruleName,
+    scoreAlert,
+    enrichmentRecord,
+    scoringRulesName: path.basename(scoringRulesPath),
+    readSocAnalysisPolicy: () => socAnalysisPolicy.read(),
+    matchesPcap: (level) => socAnalysisPolicy.matchesPcap(level),
+    matchesIncident: (level) => socAnalysisPolicy.matchesIncident(level),
+    matchesAnalysis: (level) => socAnalysisPolicy.matchesAnalysis(level),
+    groupKeyFromRow: alertGroupKeyFromRow,
+    groupIdFromKey: alertGroupId,
+    currentGroupKey: currentAlertGroupKey,
+    findDropRule,
+    pcapRequestDefaultWindowSeconds,
+    severityRank,
+    postCommitMaxAttempts: n8nPostCommitMaxAttempts,
+    hasUsableExternalIntel,
+    enrichmentMaxAttempts: enrichmentWorkerMaxAttempts,
+  },
+  services: {
+    installEnrichmentCache: () => enrichmentCache.install(),
+    backfillPcapOutcomes: () => pcapRequestRepository.backfillOutcomes(),
+    completePendingJobs: (...args) => durableJobs.completePendingByDedupeKeys(...args),
+    resolveDashboardAlertGroup,
+    randomUUID: crypto.randomUUID,
+    rebuildGroupSummaries: rebuildAlertGroupSummariesUnlocked,
+    createPcapRequest: (...args) => pcapRequestRepository.createRequest(...args),
+    queueIncidentResponseForGroup,
+    persistStableIdentity,
+    refreshGroupSummary: refreshAlertGroupSummary,
+    queueNotification: queueTelegramNotification,
+    enqueueJob: (...args) => durableJobs.enqueue(...args),
+    recordMetric: (...args) => pipelineMetrics.record(...args),
+    signalAiWorkers,
+    drainNotificationOutbox: drainTelegramOutbox,
+    drainEnrichmentJobs,
+    drainPostCommitJobs: drainN8nPostCommitJobs,
+  },
+  lifecycle: {
+    initializeDurableJobs,
+    installDurableJobs: () => durableJobs.install(),
+    initializePostgresShadowOutbox,
+    installPostgresShadowOutbox: () => postgresShadowOutbox.install(),
+    initializePostgresShadowProjector,
+    reconcileRecoveredIncidentAttempts: incidentReanalysisRecovery.reconcile,
+    initializePipelineMetrics,
+    installPipelineMetrics: () => pipelineMetrics.install(),
+    backfillStableGroupIdentity,
+    rebuildAlertGroupSummaries,
+    refreshGroupAliases,
+  },
+  serialization: {nowUtc, parseJsonObject, jsonText, normalizeTimestampValue},
 });
 async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppression, campaign = null) {
   return automaticResponseRouting.queuePcap(
