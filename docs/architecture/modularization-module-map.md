@@ -2669,6 +2669,16 @@ replace database, clock, retry, and repository ports without changing the
 portal's public functions. Production mutations remain owned by alert-store;
 the direct SQLite save path remains limited to the existing offline DR flow.
 
+### SOC PCAP runtime
+
+`portal_soc_pcap_runtime.py` owns the late-bound compatibility wiring for
+admitted PCAP artifacts, bounded artifact caching, request-state projection,
+request normalization, SQLite request persistence, and alert-store request
+dispatch. Injected runtime ports preserve the existing database, clock,
+filesystem, cache, and loopback service test seams. Capture evidence remains
+read-only in the portal, and production request ownership remains with
+alert-store.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:

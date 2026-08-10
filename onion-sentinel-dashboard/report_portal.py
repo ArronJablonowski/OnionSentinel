@@ -45,6 +45,7 @@ import portal_admin_runtime
 import portal_operational_runtime
 import portal_settings_runtime
 import portal_soc_status_runtime
+import portal_soc_pcap_runtime
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
@@ -1623,59 +1624,29 @@ def directory_size_bytes(path: Path) -> int:
     return total
 
 
-def soc_alert_has_parsed_pcap(record: dict) -> bool:
-    """Return true only for admitted parsed capture artifacts."""
-    return _modular_has_parsed_pcap(record)
-
-
-def read_artifact_cache(name: str, path: Path) -> object | None:
-    return SOC_ALERT_ARTIFACT_CACHE.get(name, path)
-
-
-def write_artifact_cache(name: str, path: Path, value: object) -> object:
-    return SOC_ALERT_ARTIFACT_CACHE.put(name, path, value)
-
-
-def _soc_pcap_artifact_sources() -> PcapArtifactSources:
-    return PcapArtifactSources(
-        paths=lambda: SOC_ALERT_PCAP_ANALYSIS_DIR.glob("*-pcap-analysis.json"),
-        read_record=lambda path: json.loads(path.read_text(encoding="utf-8")),
-        modified_time=lambda path: path.stat().st_mtime,
-    )
-
-
-def soc_alert_pcap_analysis_index() -> dict[str, object]:
-    """Index parsed Zeek/TShark artifacts once per API response."""
-    return SOC_ALERT_ARTIFACT_CACHE.get_or_compute(
-        "pcap-analysis-index", SOC_ALERT_PCAP_ANALYSIS_DIR,
-        lambda: build_pcap_analysis_index(_soc_pcap_artifact_sources()),
-    )
-
-
-def soc_alert_pcap_request_statuses(conn: sqlite3.Connection, rows: list[sqlite3.Row | dict]) -> dict[str, dict]:
-    """Return page-bounded PCAP request state through the modular repository."""
-    dependencies = SocPcapStatusDependencies(
-        table_exists=sqlite_table_exists,
-        dashboard_group_id=soc_alert_group_id,
-    )
-    return load_pcap_request_statuses(conn, rows, dependencies)
-
-
-def soc_alert_pcap_status(group_id: str, alert_id: str, analysis_index: dict[str, object], request_statuses: dict[str, dict]) -> dict:
-    """Return the compact PCAP status through the modular policy."""
-    return compose_pcap_status(group_id, alert_id, analysis_index, request_statuses)
-
-
-def soc_alert_pcap_analysis_record(group_id: str) -> dict | None:
-    """Return newest parsed PCAP evidence for a grouped alert detail fragment."""
-    if not SOC_ALERT_PCAP_ANALYSIS_DIR.exists():
-        return None
-    return newest_pcap_analysis_record(group_id, _soc_pcap_artifact_sources())
-
-
-def soc_alert_pcap_summary_html(record: dict) -> str:
-    """Render bounded parsed packet evidence through the modular renderer."""
-    return render_pcap_summary(record)
+_SOC_PCAP_RUNTIME = sys.modules[__name__]
+soc_alert_has_parsed_pcap = partial(portal_soc_pcap_runtime.soc_alert_has_parsed_pcap, _SOC_PCAP_RUNTIME)
+read_artifact_cache = partial(portal_soc_pcap_runtime.read_artifact_cache, _SOC_PCAP_RUNTIME)
+write_artifact_cache = partial(portal_soc_pcap_runtime.write_artifact_cache, _SOC_PCAP_RUNTIME)
+_soc_pcap_artifact_sources = partial(portal_soc_pcap_runtime.soc_pcap_artifact_sources, _SOC_PCAP_RUNTIME)
+soc_alert_pcap_analysis_index = partial(portal_soc_pcap_runtime.soc_alert_pcap_analysis_index, _SOC_PCAP_RUNTIME)
+soc_alert_pcap_request_statuses = partial(portal_soc_pcap_runtime.soc_alert_pcap_request_statuses, _SOC_PCAP_RUNTIME)
+soc_alert_pcap_status = partial(portal_soc_pcap_runtime.soc_alert_pcap_status, _SOC_PCAP_RUNTIME)
+soc_alert_pcap_analysis_record = partial(portal_soc_pcap_runtime.soc_alert_pcap_analysis_record, _SOC_PCAP_RUNTIME)
+soc_alert_pcap_summary_html = partial(portal_soc_pcap_runtime.soc_alert_pcap_summary_html, _SOC_PCAP_RUNTIME)
+sqlite_table_exists = partial(portal_soc_pcap_runtime.sqlite_table_exists, _SOC_PCAP_RUNTIME)
+sqlite_table_columns = partial(portal_soc_pcap_runtime.sqlite_table_columns, _SOC_PCAP_RUNTIME)
+bounded_int = partial(portal_soc_pcap_runtime.bounded_int, _SOC_PCAP_RUNTIME)
+pcap_request_id = partial(portal_soc_pcap_runtime.pcap_request_id, _SOC_PCAP_RUNTIME)
+normalize_pcap_timestamp = partial(portal_soc_pcap_runtime.normalize_pcap_timestamp, _SOC_PCAP_RUNTIME)
+pcap_capture_file_from_json = partial(portal_soc_pcap_runtime.pcap_capture_file_from_json, _SOC_PCAP_RUNTIME)
+pcap_request_store_sources = partial(portal_soc_pcap_runtime.pcap_request_store_sources, _SOC_PCAP_RUNTIME)
+pcap_request_candidate_from_group = partial(portal_soc_pcap_runtime.pcap_request_candidate_from_group, _SOC_PCAP_RUNTIME)
+pcap_request_policy_sources = partial(portal_soc_pcap_runtime.pcap_request_policy_sources, _SOC_PCAP_RUNTIME)
+normalize_pcap_request = partial(portal_soc_pcap_runtime.normalize_pcap_request, _SOC_PCAP_RUNTIME)
+insert_pcap_request = partial(portal_soc_pcap_runtime.insert_pcap_request, _SOC_PCAP_RUNTIME)
+pcap_request_service_sources = partial(portal_soc_pcap_runtime.pcap_request_service_sources, _SOC_PCAP_RUNTIME)
+soc_alert_pcap_request_response = partial(portal_soc_pcap_runtime.soc_alert_pcap_request_response, _SOC_PCAP_RUNTIME)
 
 
 SOC_ALERT_DETAIL_LAYOUT_VERSION = "2026-07-15.1"
@@ -1803,73 +1774,6 @@ def soc_alert_collapse_detail_sections(detail_html: str) -> str:
     chunks.append(detail_html[cursor:])
     return "".join(chunks)
 
-
-def sqlite_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
-    try:
-        row = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-            (table_name,),
-        ).fetchone()
-    except sqlite3.Error:
-        return False
-    return bool(row)
-
-
-def sqlite_table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
-    try:
-        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-    except sqlite3.Error:
-        return set()
-    return {str(row[1]) for row in rows}
-
-
-def bounded_int(value: object, default: int, low: int, high: int) -> int:
-    return bounded_pcap_int(value, default, low, high)
-
-
-def pcap_request_id(seed: dict) -> str:
-    return projected_pcap_request_id(seed)
-
-
-def normalize_pcap_timestamp(value: object) -> str:
-    if not value:
-        return ""
-    try:
-        return format_iso_timestamp(parse_iso_timestamp(value), utc_z=True)
-    except Exception:
-        return ""
-
-
-def pcap_capture_file_from_json(*values: object) -> str | None:
-    return extract_pcap_capture_file(*values)
-
-
-def pcap_request_store_sources() -> PcapRequestStoreSources:
-    return PcapRequestStoreSources(
-        table_exists=sqlite_table_exists,
-        table_columns=sqlite_table_columns,
-        now_iso=now_iso_utc,
-    )
-
-
-def pcap_request_candidate_from_group(conn: sqlite3.Connection, group_id: str) -> dict:
-    return read_pcap_request_candidate(
-        pcap_request_store_sources(), conn, group_id
-    )
-
-
-def pcap_request_policy_sources() -> PcapRequestPolicySources:
-    return PcapRequestPolicySources(normalize_timestamp=normalize_pcap_timestamp)
-
-
-def normalize_pcap_request(payload: dict, candidate: dict) -> tuple[dict | None, str]:
-    return normalize_pcap_request_policy(
-        pcap_request_policy_sources(), payload, candidate
-    )
-
-
-def insert_pcap_request(conn: sqlite3.Connection, request: dict) -> sqlite3.Row:
-    return store_pcap_request(pcap_request_store_sources(), conn, request)
 
 
 def asset_store_write_token() -> str:
@@ -2051,23 +1955,6 @@ def alert_store_get_json(path: str, timeout: float = 5.0) -> dict:
         raise RuntimeError(str(result.get("reason") or result.get("error") or "alert-store returned invalid metrics"))
     return result
 
-
-def pcap_request_service_sources() -> PcapRequestServiceSources:
-    return PcapRequestServiceSources(
-        connect_write=soc_alert_db_write_connect,
-        table_exists=sqlite_table_exists,
-        read_candidate=pcap_request_candidate_from_group,
-        normalize_request=normalize_pcap_request,
-        insert_request=insert_pcap_request,
-        post_alert_store=alert_store_post_json,
-        alert_store_configured=bool(SOC_ALERT_STORE_API_URL),
-    )
-
-
-def soc_alert_pcap_request_response(group_id: str, payload: dict) -> tuple[int, dict]:
-    return request_soc_alert_pcap(
-        pcap_request_service_sources(), group_id, payload
-    )
 
 
 _SOC_STATUS_RUNTIME = sys.modules[__name__]
