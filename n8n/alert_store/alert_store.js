@@ -71,6 +71,9 @@ const {
 const {
   createIncidentReanalysisAttemptLifecycle,
 } = require('./services/incident_reanalysis_attempt_lifecycle');
+const {
+  createIncidentReanalysisRecovery,
+} = require('./services/incident_reanalysis_recovery');
 const {createIncidentAnalysisCompletion} = require('./services/incident_analysis_completion');
 const {createIncidentReanalysisBindingService} = require('./services/incident_reanalysis_binding');
 const {createHealthRoutes} = require('./routes/health_routes');
@@ -4379,229 +4382,8 @@ async function queueCurrentIncidentReanalysisRun(job) {
   return incidentReanalysisAttemptLifecycle.queue(job);
 }
 async function reconcileRecoveredIncidentReanalysisAttempts() {
-  if (!durableJobs) return 0;
-  let reconciled = 0;
-  const affectedCases = new Map();
-  // A result is committed before the worker acknowledges its durable lease.
-  // If the worker exits in that narrow window, recovery must retire the
-  // already-satisfied job instead of launching duplicate inference with a new
-  // lease that has no valid immutable attempt.
-  const satisfiableJobs = await all(
-    `SELECT id, job_type, dedupe_key, payload_json, status
-     FROM durable_jobs
-     WHERE job_type = 'incident_response_analysis'
-       AND status IN ('pending', 'processing')`,
-  );
-  for (const job of satisfiableJobs) {
-    if (
-      await retireCompletedIncidentReanalysisJob(job)
-      || await retireSupersededIncidentReanalysisJob(job)
-    ) {
-      reconciled += 1;
-    }
-  }
-  // Repair the narrow crash window between durable lease acquisition and
-  // attempt-ledger insertion before evaluating stranded older attempts.
-  const processingJobs = await all(
-    `SELECT dedupe_key, payload_json, status, attempt_count, lease_token, last_error
-     FROM durable_jobs
-     WHERE job_type = 'incident_response_analysis' AND status = 'processing'`,
-  );
-  for (const job of processingJobs) {
-    const currentAttemptId = incidentReanalysisAttemptId(job.lease_token);
-    if (!currentAttemptId) continue;
-    const currentAttempt = await get(
-      `SELECT 1 AS present FROM incident_reanalysis_attempts
-       WHERE attempt_id = ?`,
-      [currentAttemptId],
-    );
-    if (!currentAttempt) {
-      const repaired = await beginIncidentReanalysisAttempt(
-        job,
-        job.lease_token,
-        safeString(job.dedupe_key, 64).toLowerCase(),
-      );
-      if (repaired) {
-        affectedCases.set(repaired.case_id, {
-          group_id: safeString(job.dedupe_key, 64).toLowerCase(),
-          latest_error: '',
-        });
-        reconciled += 1;
-      }
-    }
-  }
-
-  const runningAttempts = await all(
-    `SELECT a.attempt_id, a.run_id, a.case_id, a.group_id,
-            d.status AS durable_status, d.payload_json,
-            d.lease_token, d.last_error
-     FROM incident_reanalysis_attempts AS a
-     LEFT JOIN durable_jobs AS d
-       ON d.job_type = 'incident_response_analysis'
-      AND d.dedupe_key = a.group_id
-     WHERE a.status = 'running'`,
-  );
-  const affectedRuns = new Set();
-  for (const attempt of runningAttempts) {
-    const ownsCurrentLease = (
-      attempt.durable_status === 'processing'
-      && incidentReanalysisAttemptId(attempt.lease_token) === attempt.attempt_id
-    );
-    if (ownsCurrentLease) continue;
-    const updatedAt = nowUtc();
-    const currentCase = await get(
-      `SELECT group_id FROM incident_response_cases WHERE case_id = ?`,
-      [attempt.case_id],
-    );
-    const newerRunCase = await get(
-      `SELECT 1 AS present
-       FROM incident_reanalysis_run_cases
-       WHERE case_id = ? AND run_id != ? AND status != 'skipped'
-         AND rowid > COALESCE((
-           SELECT rowid FROM incident_reanalysis_run_cases
-           WHERE run_id = ? AND case_id = ?
-         ), 0)
-       LIMIT 1`,
-      [
-        attempt.case_id,
-        attempt.run_id,
-        attempt.run_id,
-        attempt.case_id,
-      ],
-    );
-    const currentCaseGroup = safeString(
-      currentCase?.group_id,
-      64,
-    ).toLowerCase();
-    const migratedToSuccessor = Boolean(
-      currentCaseGroup
-      && currentCaseGroup !== safeString(attempt.group_id, 64).toLowerCase()
-      && newerRunCase,
-    );
-    const currentPayload = incidentReanalysisJobPayload(attempt);
-    const durableOwnsSameRun = (
-      !migratedToSuccessor
-      && safeString(currentPayload?.reanalysis_run_id, 80) === attempt.run_id
-      && validIncidentCaseId(currentPayload?.case_id) === attempt.case_id
-    );
-    const durableCompleted = (
-      attempt.durable_status === 'completed'
-      && durableOwnsSameRun
-    );
-    const latestError = durableCompleted
-      ? null
-      : migratedToSuccessor
-        ? 'Worker lease expired after stable identity migrated to a successor run'
-        : safeString(
-          attempt.last_error || 'worker lease expired before completion',
-          1000,
-        );
-    await run(
-      `UPDATE incident_reanalysis_attempts
-       SET status = ?, latest_error = ?, completed_at = ?, updated_at = ?
-       WHERE attempt_id = ? AND status = 'running'`,
-      [
-        durableCompleted ? 'completed' : 'failed',
-        latestError,
-        updatedAt,
-        updatedAt,
-        attempt.attempt_id,
-      ],
-    );
-    const retryOwnsSameRun = (
-      attempt.durable_status === 'pending'
-      && durableOwnsSameRun
-    );
-    const caseStatus = durableCompleted
-      ? 'completed'
-      : retryOwnsSameRun ? 'queued' : 'failed';
-    await run(
-      `UPDATE incident_reanalysis_run_cases
-       SET status = ?, latest_error = ?,
-           completed_at = CASE WHEN ? = 'queued' THEN NULL ELSE ? END,
-           latest_attempt_id = ?, updated_at = ?
-       WHERE run_id = ? AND case_id = ?
-         AND status NOT IN ('completed', 'skipped')`,
-      [
-        caseStatus,
-        latestError,
-        caseStatus,
-        updatedAt,
-        attempt.attempt_id,
-        updatedAt,
-        attempt.run_id,
-        attempt.case_id,
-      ],
-    );
-    if (migratedToSuccessor && attempt.durable_status === 'pending') {
-      await run(
-        `UPDATE durable_jobs
-         SET status = 'completed', lease_expires_at = NULL, lease_token = NULL,
-             last_error = NULL, completed_at = COALESCE(completed_at, ?),
-             last_completed_at = COALESCE(last_completed_at, ?),
-             processing_started_at = NULL, rerun_requested = 0, updated_at = ?
-         WHERE job_type = 'incident_response_analysis'
-           AND dedupe_key = ? AND status = 'pending' AND payload_json = ?`,
-        [
-          updatedAt,
-          updatedAt,
-          updatedAt,
-          safeString(attempt.group_id, 64).toLowerCase(),
-          String(attempt.payload_json || ''),
-        ],
-      );
-    }
-    affectedCases.set(attempt.case_id, {
-      group_id: migratedToSuccessor
-        ? currentCaseGroup
-        : safeString(attempt.group_id, 64).toLowerCase(),
-      latest_error: latestError,
-    });
-    affectedRuns.add(String(attempt.run_id || ''));
-    reconciled += 1;
-  }
-  for (const runId of affectedRuns) {
-    await refreshIncidentReanalysisRun(runId);
-  }
-  // Multiple immutable attempts may refer to the same mutable deduped job.
-  // Publish case status once, after all attempt reconciliation, from the
-  // durable job that currently owns the queue slot. This prevents closing a
-  // stale attempt from overwriting a replacement lease's "analyzing" state.
-  for (const [caseId, affected] of affectedCases.entries()) {
-    const currentJob = await get(
-      `SELECT status, payload_json, last_error
-       FROM durable_jobs
-       WHERE job_type = 'incident_response_analysis' AND dedupe_key = ?`,
-      [affected.group_id],
-    );
-    const currentPayload = incidentReanalysisJobPayload(currentJob);
-    const currentCaseId = validIncidentCaseId(currentPayload?.case_id);
-    const durableOwnsCase = !currentCaseId || currentCaseId === caseId;
-    const agentStatus = durableOwnsCase
-      ? ({
-        pending: 'queued',
-        processing: 'analyzing',
-        completed: 'analyzed',
-        failed: 'failed',
-      }[currentJob?.status] || 'failed')
-      : 'failed';
-    const latestError = agentStatus === 'failed'
-      ? safeString(
-        currentJob?.last_error || affected.latest_error
-          || 'worker lease expired before completion',
-        1000,
-      )
-      : null;
-    await run(
-      `UPDATE incident_response_cases
-       SET agent_status = ?, latest_error = ?, updated_at = ?
-       WHERE case_id = ?`,
-      [agentStatus, latestError, nowUtc(), caseId],
-    );
-  }
-  return reconciled;
+  return incidentReanalysisRecovery.reconcile();
 }
-
 async function updateIncidentReanalysisProgress(options) {
   return incidentReanalysisAttemptLifecycle.update(options);
 }
@@ -5486,6 +5268,21 @@ const incidentReanalysisAttemptLifecycle = createIncidentReanalysisAttemptLifecy
   closeStale: closeStaleIncidentReanalysisAttempts,
   get,
   run,
+  nowUtc,
+  refreshRun: refreshIncidentReanalysisRun,
+});
+const incidentReanalysisRecovery = createIncidentReanalysisRecovery({
+  durableJobsAvailable: () => Boolean(durableJobs),
+  all,
+  get,
+  run,
+  retireCompleted: retireCompletedIncidentReanalysisJob,
+  retireSuperseded: retireSupersededIncidentReanalysisJob,
+  attemptId: incidentReanalysisAttemptId,
+  beginAttempt: beginIncidentReanalysisAttempt,
+  safeString,
+  jobPayload: incidentReanalysisJobPayload,
+  validCaseId: validIncidentCaseId,
   nowUtc,
   refreshRun: refreshIncidentReanalysisRun,
 });
