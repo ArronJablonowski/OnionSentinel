@@ -422,6 +422,18 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("function enrichmentRecord", self.alert_value_normalization)
         self.assertIn("function normalizeTriageLevel", self.alert_value_normalization)
         self.assertIn("function safeFileToken", self.alert_value_normalization)
+        for forwarding_function in (
+            "isRelayHeartbeat",
+            "nestedField",
+            "integerField",
+            "nonNegativeIntegerField",
+            "enrichmentRecord",
+            "normalizeTriageLevel",
+            "safeString",
+            "safeFileToken",
+            "parseJsonObject",
+        ):
+            self.assertNotIn(f"function {forwarding_function}", self.code)
 
     def test_sqlite_runtime_owns_admission_promises_and_transaction_serialization(self) -> None:
         self.assertIn("createSqliteRuntime", self.code)

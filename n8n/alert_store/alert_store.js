@@ -148,7 +148,16 @@ const {createEnrichmentPolicy} = require('./lib/enrichment_policy');
 const {createPcapPolicy} = require('./lib/pcap_policy');
 const {createProjectSerialization} = require('./lib/project_serialization');
 const {createRuntimeConfiguration} = require('./lib/runtime_configuration');
-const alertValueNormalization = require('./lib/alert_value_normalization');
+const {
+  isRelayHeartbeat,
+  nestedField,
+  integerField,
+  nonNegativeIntegerField,
+  enrichmentRecord,
+  normalizeTriageLevel,
+  safeString,
+  parseJsonObject,
+} = require('./lib/alert_value_normalization');
 const {createEnrichmentProviderClient} = require('./services/enrichment_provider_client');
 const {createEnrichmentOrchestrator} = require('./services/enrichment_orchestrator');
 const {
@@ -480,26 +489,6 @@ function writeN8nBeacon(stage, alert = {}, result = null, error = null) {
   return beaconPersistence.writeBeacon(stage, alert, result, error);
 }
 
-function isRelayHeartbeat(payload) {
-  return alertValueNormalization.isRelayHeartbeat(payload);
-}
-
-function nestedField(value, dottedPath) {
-  return alertValueNormalization.nestedField(value, dottedPath);
-}
-
-function integerField(value) {
-  return alertValueNormalization.integerField(value);
-}
-
-function nonNegativeIntegerField(value) {
-  return alertValueNormalization.nonNegativeIntegerField(value);
-}
-
-function enrichmentRecord(alert) {
-  return alertValueNormalization.enrichmentRecord(alert);
-}
-
 const sqliteBusyTimeoutMs = Number(process.env.ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS || 30000);
 const sqliteRuntime = createSqliteRuntime({
   fs,
@@ -517,10 +506,6 @@ const sqliteTempStore = String(process.env.ALERT_STORE_SQLITE_TEMP_STORE || 'DEF
 const allowedJournalModes = new Set(['DELETE', 'TRUNCATE', 'PERSIST', 'MEMORY', 'WAL', 'OFF']);
 const allowedSynchronousModes = new Set(['OFF', 'NORMAL', 'FULL', 'EXTRA']);
 const allowedTempStoreModes = new Set(['DEFAULT', 'FILE', 'MEMORY']);
-function normalizeTriageLevel(value, fallback = '') {
-  return alertValueNormalization.normalizeTriageLevel(value, fallback);
-}
-
 const alertGroupKeySql = `
   COALESCE(
     NULLIF(suppression_key, ''),
@@ -1046,18 +1031,6 @@ async function rescoreAlertsUnlocked() {
 async function rescoreAlerts() {
   // Maintenance writes must not interleave with multi-statement ingestion.
   return withSqliteWriteGate(rescoreAlertsUnlocked);
-}
-
-function safeString(value, maxLength = 240) {
-  return alertValueNormalization.safeString(value, maxLength);
-}
-
-function safeFileToken(value, fallback = 'artifact') {
-  return alertValueNormalization.safeFileToken(value, fallback);
-}
-
-function parseJsonObject(value) {
-  return alertValueNormalization.parseJsonObject(value);
 }
 
 const {
