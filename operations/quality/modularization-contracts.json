@@ -1187,6 +1187,74 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/ac_hunter_review.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/ac_hunter_review.py",
+      "required_symbols": [
+        "AcHunterReviewService",
+        "atomic_write_cache",
+        "database_review_response",
+        "load_cache",
+        "load_config",
+        "normalize_collection"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/ac_hunter_config.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/ac_hunter_config.py",
+      "required_symbols": [
+        "AcHunterConfigurationError",
+        "AcHunterError",
+        "load_config",
+        "load_credentials"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/ac_hunter_transport.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/ac_hunter_transport.py",
+      "required_symbols": [
+        "AcHunterApiClient",
+        "RelayTransport"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/ac_hunter_normalization.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/ac_hunter_normalization.py",
+      "required_symbols": [
+        "_normalize_finding"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/ac_hunter_scoring.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/ac_hunter_scoring.py",
+      "required_symbols": [
+        "_score_finding"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/ac_hunter_collection.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/ac_hunter_collection.py",
+      "required_symbols": [
+        "normalize_collection"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/ac_hunter_service.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/ac_hunter_service.py",
+      "required_symbols": [
+        "AcHunterReviewService",
+        "atomic_write_cache",
+        "database_review_response",
+        "load_cache"
+      ]
+    },
+    {
       "path": "n8n/bin/pcap_processor_contract.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/pcap_processor_contract.py",
