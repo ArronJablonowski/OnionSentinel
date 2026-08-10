@@ -1,6 +1,7 @@
 import concurrent.futures
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -338,6 +339,50 @@ class AgentMemoryTests(unittest.TestCase):
         for prompt_file in MEMORY.AGENT_SECOND_OPINION_PROMPT_FILES.values():
             self.assertIn(prompt_file, installer)
         self.assertIn('if [[ ! -f "$STACK_DIR/config/$reviewer_prompt" ]]', installer)
+
+    def test_installer_deploys_the_complete_agent_memory_module_set(self) -> None:
+        installer = (ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh").read_text(
+            encoding="utf-8"
+        )
+        for module in (
+            "agent_memory.py",
+            "agent_memory_validation.py",
+            "agent_memory_journal.py",
+            "agent_memory_promotion.py",
+        ):
+            self.assertIn(
+                f'cp "$REPO_DIR/n8n/bin/{module}" "$STACK_DIR/bin/{module}"',
+                installer,
+            )
+
+    def test_compatibility_facade_imports_from_a_flat_deployment(self) -> None:
+        deployed_bin = self.root / "bin"
+        deployed_bin.mkdir()
+        for module in (
+            "agent_memory.py",
+            "agent_memory_validation.py",
+            "agent_memory_journal.py",
+            "agent_memory_promotion.py",
+        ):
+            shutil.copy2(ROOT / "n8n" / "bin" / module, deployed_bin / module)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                (
+                    "import sys; "
+                    f"sys.path.insert(0, {str(deployed_bin)!r}); "
+                    "import agent_memory; "
+                    "assert agent_memory.normalize_memory_candidates([]) == []; "
+                    "assert len(agent_memory.MEMORY_ROLES) == 5"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
 
     def test_execution_context_binds_prompt_and_both_memories(self) -> None:
         for filename in MEMORY.AGENT_MEMORY_FILES.values():

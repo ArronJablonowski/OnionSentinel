@@ -303,7 +303,8 @@ $HOME/n8n-local/soc-alerts/agent-memory/shared-agent-memory.md
 ```
 
 Do not overwrite these files during normal DR redeploys if they have been tuned
-or populated in production. The installer deploys `agent_memory.py` and
+or populated in production. The installer deploys the `agent_memory.py`
+compatibility facade, its validation/journal/promotion modules, and
 `manage-agent-memory.py`; it never replaces existing memory files. Managed
 records are atomically updated inside delimited sections while operator notes
 outside those sections remain intact. Include the runtime memory directory in

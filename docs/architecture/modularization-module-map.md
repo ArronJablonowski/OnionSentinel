@@ -450,6 +450,26 @@ The wrapper must continue to re-export symbols used by the existing model
 routing, investigation loop, controlled evaluation, PCAP, memory writeback,
 reviewer, and resource-monitor test modules until those tests migrate.
 
+## Agent Memory
+
+`n8n/bin/agent_memory.py` is a package-free, 102-line compatibility facade. It
+preserves the import surface used by prompt construction, the analysis runner,
+the management CLI, the deployment verifier, and isolated file-loader tests.
+Implementation ownership points inward through three acyclic flat-bin modules:
+
+| Module | Ownership | Side effects and dependency direction |
+| --- | --- | --- |
+| `agent_memory_validation.py` | canonical role/prompt registry, candidate schema, redaction, TTLs, stable IDs, provenance records | pure standard-library policy; imports no other memory module |
+| `agent_memory_journal.py` | managed Markdown parsing/rendering, advisory locks, bounded relevance retrieval, atomic replacement, initialization | imports validation; owns filesystem read/write primitives |
+| `agent_memory_promotion.py` | reinforcement/replay policy, retention ordering, BPFDoor quarantine, role/shared persistence results | imports validation and journal; owns promotion transactions |
+
+The installer copies the facade and all three owners into the same runtime
+`bin` directory before verification. Memory Markdown, prompts, credentials,
+and operator-authored notes remain runtime-owned and are never copied back to
+the repository. Characterization tests exercise flat-bin imports, owner-only
+modes, manual-note preservation, malformed-section refusal, provenance,
+concurrent writers, replay idempotency, and quarantine safety.
+
 ## Scheduler and Harness
 
 ### `auto-run-ai-analysis.py`
@@ -2682,6 +2702,7 @@ required before extracted code is imported in production:
 
 | Source tree | Runtime tree | Deployment rule |
 | --- | --- | --- |
+| `n8n/bin/agent_memory*.py` | `$HOME/n8n-local/bin` | copy the facade plus validation, journal, and promotion owners before running the memory verifier |
 | `n8n/onion_sentinel` | `$HOME/n8n-local/onion_sentinel` | staged complete-tree copy and atomic replacement |
 | `onion-sentinel-dashboard/portal` | `$HOME/n8n-local/onion-sentinel-dashboard/portal` | staged complete-tree copy |
 | `onion-sentinel-dashboard/pages` and `components` | corresponding dashboard runtime directories | staged complete-tree copy |
