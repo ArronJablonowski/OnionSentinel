@@ -1381,6 +1381,13 @@ GeoIP response schema. Its source bundle exposes normalization, CLI readiness,
 route composition/identity, GeoIP projection, roles, the settings path, and
 lock; HTTP authorization and response serialization remain outside the module.
 
+`portal_settings_runtime.py` owns the late-bound compatibility orchestration
+across prompt and memory allowlists, AI settings normalization/persistence,
+MaxMind readiness metadata, Ollama catalog inspection, and CLI/Hermes startup
+readiness. It resolves all paths, locks, process/network ports, and patchable
+policy callbacks through the injected facade runtime and does not import the
+HTTP handler.
+
 `portal_agent_content_store.py` owns trusted prompt reads, normalized and
 atomic owner-only prompt writes, fixed-map route selection, and read-only agent
 memory viewing. Memory reads require an allowlisted key, resolved containment

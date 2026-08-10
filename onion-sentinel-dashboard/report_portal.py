@@ -25,6 +25,7 @@ import uuid
 from contextlib import contextmanager
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from http import HTTPStatus
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -40,6 +41,7 @@ import soc_alert_api
 import software_inventory
 import cti_program
 import portal_asset_runtime
+import portal_settings_runtime
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
@@ -1165,314 +1167,43 @@ def expired_admin_session_cookie_header() -> str:
     return compose_expired_admin_session_cookie(ADMIN_SESSION_COOKIE)
 
 
-def read_prompt_file(path: Path, label: str) -> dict:
-    """Read one allowlisted settings prompt without accepting a caller-supplied path."""
-    return read_agent_prompt_file(path, label)
-
-
-def read_soc_analyst_prompt() -> dict:
-    """Return the current SOC Analyst system prompt shown on the Settings page."""
-    return read_prompt_file(SOC_ANALYST_PROMPT_FILE, "SOC Analyst")
-
-
-def read_siem_engineer_prompt() -> dict:
-    """Return the current SIEM Engineer system prompt shown on the Settings page."""
-    return read_prompt_file(SIEM_ENGINEER_PROMPT_FILE, "SIEM Engineer")
-
-
-def read_threat_hunter_prompt() -> dict:
-    """Return the current Threat Hunter system prompt shown on the Settings page."""
-    return read_prompt_file(THREAT_HUNTER_PROMPT_FILE, "Threat Hunter")
-
-
-def read_cyber_threat_intel_prompt() -> dict:
-    """Return the current Cyber Threat Intel Analyst system prompt shown on the Settings page."""
-    return read_prompt_file(CYBER_THREAT_INTEL_PROMPT_FILE, "Cyber Threat Intel")
-
-
-def read_incident_responder_prompt() -> dict:
-    """Return the current Incident Responder system prompt shown on the Settings page."""
-    return read_prompt_file(INCIDENT_RESPONDER_PROMPT_FILE, "Incident Responder")
-
-
-def read_settings_prompt(api_path: str) -> dict:
-    """Read a primary or reviewer prompt selected only from the fixed API route map."""
-    return read_allowlisted_prompt(api_path, SOC_SETTINGS_PROMPT_FILES)
-
-
-def agent_memory_files() -> dict[str, tuple[str, Path]]:
-    """Return the only agent memory files the read-only Settings API may expose."""
-    return {
-        "soc-analyst": ("SOC Analyst Memory", SOC_ANALYST_MEMORY_FILE),
-        "incident-responder": ("Incident Responder Memory", INCIDENT_RESPONDER_MEMORY_FILE),
-        "siem-engineer": ("SIEM Engineer Memory", SIEM_ENGINEER_MEMORY_FILE),
-        "cyber-threat-intel": ("Cyber Threat Intel Memory", CYBER_THREAT_INTEL_MEMORY_FILE),
-        "threat-hunter": ("Threat Hunter Memory", THREAT_HUNTER_MEMORY_FILE),
-        "shared": ("Shared Agent Memory", SHARED_AGENT_MEMORY_FILE),
-    }
-
-
-def read_agent_memory(memory_key: object) -> tuple[int, dict]:
-    """Read one allowlisted Markdown memory file without permitting path input."""
-    return read_allowlisted_agent_memory(
-        AgentMemorySources(
-            directory=AGENT_MEMORY_DIR,
-            files=agent_memory_files(),
-            max_bytes=AGENT_MEMORY_VIEW_MAX_BYTES,
-        ),
-        memory_key,
-    )
-
-
-def save_prompt_file(prompt: object, path: Path, label: str) -> tuple[bool, dict]:
-    """Atomically save an editable SOC settings prompt."""
-    return save_agent_prompt_file(
-        prompt,
-        path,
-        label,
-        max_bytes=SOC_ANALYST_PROMPT_MAX_BYTES,
-    )
-
-
-def save_soc_analyst_prompt(prompt: object) -> tuple[bool, dict]:
-    """Atomically save the editable SOC Analyst system prompt."""
-    return save_prompt_file(prompt, SOC_ANALYST_PROMPT_FILE, "SOC Analyst")
-
-
-def save_siem_engineer_prompt(prompt: object) -> tuple[bool, dict]:
-    """Atomically save the editable SIEM Engineer system prompt."""
-    return save_prompt_file(prompt, SIEM_ENGINEER_PROMPT_FILE, "SIEM Engineer")
-
-
-def save_threat_hunter_prompt(prompt: object) -> tuple[bool, dict]:
-    """Atomically save the editable Threat Hunter system prompt."""
-    return save_prompt_file(prompt, THREAT_HUNTER_PROMPT_FILE, "Threat Hunter")
-
-
-def save_cyber_threat_intel_prompt(prompt: object) -> tuple[bool, dict]:
-    """Atomically save the editable Cyber Threat Intel Analyst system prompt."""
-    return save_prompt_file(prompt, CYBER_THREAT_INTEL_PROMPT_FILE, "Cyber Threat Intel")
-
-
-def save_incident_responder_prompt(prompt: object) -> tuple[bool, dict]:
-    """Atomically save the editable Incident Responder system prompt."""
-    return save_prompt_file(prompt, INCIDENT_RESPONDER_PROMPT_FILE, "Incident Responder")
-
-
-def save_settings_prompt(api_path: str, prompt: object) -> tuple[bool, dict]:
-    """Save a primary or reviewer prompt selected only from the fixed API route map."""
-    return save_allowlisted_prompt(
-        api_path,
-        prompt,
-        SOC_SETTINGS_PROMPT_FILES,
-        max_bytes=SOC_ANALYST_PROMPT_MAX_BYTES,
-    )
-
-
 SOC_AI_SETTINGS_LOCK = threading.RLock()
+_SETTINGS_RUNTIME = sys.modules[__name__]
 
-
-def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
-    """Validate and normalize editable SOC AI model routing settings."""
-    policy = SocAiSettingsNormalizationPolicy(
-        defaults=default_soc_ai_settings,
-        maxmind_databases=MAXMIND_GEOIP_DATABASE_SETTINGS,
-        codex_efforts=CODEX_CLI_REASONING_EFFORTS,
-        hermes_effort=HERMES_AGENT_REASONING_EFFORT,
-        codex_catalog=CODEX_CLI_MODEL_CATALOG,
-        severity_thresholds=SOC_ANALYSIS_SEVERITY_THRESHOLDS,
-        openclaw_ollama_urls=OPENCLAW_SUPPORTED_OLLAMA_URLS,
-        normalized_model_list=_normalized_model_list,
-        boolean_setting=_boolean_setting,
-        derive_model_mode=_derive_model_mode,
-        valid_cli_path=_valid_cli_executable_path,
-        valid_provider_model=_valid_provider_model,
-        valid_openclaw_model=_valid_openclaw_model,
-        normalize_codex_models=_normalize_codex_cli_models,
-        enabled_routes=_enabled_agent_model_routes,
-        normalize_primary_models=_normalize_agent_models,
-        normalize_reviewer_models=_normalize_agent_second_opinion_models,
-        normalize_adjudicator_models=_normalize_agent_adjudicator_models,
-    )
-    return normalize_ai_settings(payload, policy)
-
-
-def maxmind_geoip_database_status(settings: dict, database_type: str = "city") -> dict:
-    """Expose one database's readiness without reading or returning contents."""
-    if database_type not in MAXMIND_GEOIP_DATABASE_SETTINGS:
-        raise ValueError(f"Unsupported MaxMind database type: {database_type}")
-    setting_key, default_path = MAXMIND_GEOIP_DATABASE_SETTINGS[database_type]
-    configured = str(settings.get(setting_key) or "").strip()
-    if database_type == "city" and not configured:
-        configured = str(settings.get("maxmind_geoip_db_path") or "").strip()
-    configured = configured or default_path
-    path = Path(configured).expanduser()
-    status = {
-        "database_type": database_type,
-        "setting_key": setting_key,
-        "state": "missing",
-        "configured_path": configured,
-        "filename": path.name,
-    }
-    try:
-        stat = path.stat()
-    except FileNotFoundError:
-        return status
-    except OSError:
-        status["state"] = "unreadable"
-        return status
-    if not path.is_file() or not os.access(path, os.R_OK):
-        status["state"] = "unreadable"
-        return status
-    status.update({
-        "state": "ready",
-        "size_bytes": stat.st_size,
-        "modified_at": dt.datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat().replace("T", "  "),
-    })
-    return status
-
-
-def maxmind_geoip_databases_status(settings: dict) -> dict:
-    """Return independent readiness for ASN, City, and Country databases."""
-    return {
-        database_type: maxmind_geoip_database_status(settings, database_type)
-        for database_type in MAXMIND_GEOIP_DATABASE_SETTINGS
-    }
-
-
-def _enabled_model_routes_for_settings(settings: dict) -> list[str]:
-    return _enabled_agent_model_routes(
-        settings["enabled_ollama_models"],
-        settings["codex_cli_models"],
-        hermes_agent_enabled=settings["hermes_agent_enabled"],
-        hermes_agent_model=settings["hermes_agent_model"],
-        hermes_agent_reasoning_effort=settings["hermes_agent_reasoning_effort"],
-        openclaw_enabled=settings["openclaw_enabled"],
-        openclaw_model=settings["openclaw_model"],
-        openclaw_reasoning_effort=settings["openclaw_reasoning_effort"],
-    )
-
-
-def soc_ai_settings_store_sources() -> AiSettingsStoreSources:
-    return AiSettingsStoreSources(
-        path=SOC_AI_SETTINGS_FILE,
-        lock=SOC_AI_SETTINGS_LOCK,
-        normalize=normalize_soc_ai_settings,
-        readiness=_enabled_cli_harnesses_ready,
-        enabled_routes=_enabled_model_routes_for_settings,
-        route_identity=_model_route_identity,
-        geoip_databases=maxmind_geoip_databases_status,
-        geoip_city=lambda settings: maxmind_geoip_database_status(
-            settings, "city"
-        ),
-        roles=CYBER_SECURITY_AGENT_ROLES,
-    )
-
-
-def read_soc_ai_settings() -> dict:
-    """Return the current SOC AI model-routing settings."""
-    return read_persisted_soc_ai_settings(soc_ai_settings_store_sources())
-
-
-def list_ollama_models() -> list[str]:
-    """Return locally installed Ollama model names from `ollama ls`."""
-    return discover_ollama_models(
-        run=subprocess.run, env=ADMIN_COMMAND_ENV
-    )
-
-
-def _ollama_context_length(model_info: object) -> int:
-    """Return the largest declared context window from Ollama model metadata."""
-    return ollama_context_length(model_info)
-
-
-def classify_ollama_model_compatibility(model: str, metadata: object) -> dict:
-    """Assess only capabilities the current bounded SOC analysis exchange requires."""
-    return classify_ollama_compatibility(
-        model,
-        metadata,
-        min_context_tokens=OLLAMA_MODEL_MIN_CONTEXT_TOKENS,
-    )
-
-
-def ollama_model_compatibility(model: str, ollama_url: str) -> dict:
-    """Read bounded local Ollama metadata and cache the compatibility decision."""
-    return load_ollama_model_compatibility(
-        OllamaMetadataSources(
-            cache_get_or_compute=OLLAMA_MODEL_COMPATIBILITY_CACHE.get_or_compute,
-            open_url=urllib_request.urlopen,
-            read_json=read_bounded_json,
-            max_bytes=OLLAMA_MODEL_SHOW_MAX_BYTES,
-            min_context_tokens=OLLAMA_MODEL_MIN_CONTEXT_TOKENS,
-        ),
-        model,
-        ollama_url,
-    )
-
-
-def ollama_catalog_sources() -> OllamaCatalogSources:
-    return OllamaCatalogSources(
-        read_settings=read_soc_ai_settings,
-        default_settings=default_soc_ai_settings,
-        list_models=list_ollama_models,
-        normalize_models=_normalized_model_list,
-        compatibility=ollama_model_compatibility,
-        clear_cache=OLLAMA_MODEL_COMPATIBILITY_CACHE.clear,
-    )
-
-
-def ollama_models_response(force_refresh: bool = False) -> dict:
-    return compose_ollama_models_response(
-        ollama_catalog_sources(), force_refresh=force_refresh
-    )
-
-
-def _write_soc_ai_settings(normalized: dict) -> tuple[bool, dict]:
-    """Write one fully normalized settings document while the caller holds the lock."""
-    return write_persisted_soc_ai_settings(
-        soc_ai_settings_store_sources(), normalized
-    )
-
-
-def _resolve_cli_harness_for_settings(
-    configured: object,
-    basename: str,
-) -> Path | None:
-    """Resolve one harness without executing it, in the runner's fixed order."""
-    return resolve_cli_harness(
-        configured, basename, home=HOME, discover=shutil.which
-    )
-
-
-def _hermes_auth_readiness_error() -> str:
-    """Return a safe operator-facing error for the dedicated Hermes credential."""
-    return hermes_auth_readiness_error(
-        DEFAULT_HERMES_AUTH_FILE, HERMES_AUTH_MAX_BYTES
-    )
-
-
-def _enabled_cli_harnesses_ready(settings: dict) -> tuple[bool, str]:
-    """Fail a settings save when an enabled harness cannot start."""
-    return enabled_cli_harnesses_ready(
-        settings,
-        boolean_setting=_boolean_setting,
-        resolve=_resolve_cli_harness_for_settings,
-        hermes_auth_error=_hermes_auth_readiness_error,
-    )
-
-
-def save_soc_ai_settings(payload: object) -> tuple[bool, dict]:
-    """Atomically save the complete SOC AI model-routing configuration."""
-    return save_persisted_soc_ai_settings(
-        soc_ai_settings_store_sources(), payload
-    )
-
-
-def save_soc_agent_model(payload: object) -> tuple[bool, dict]:
-    """Atomically update one agent's primary, reviewer, and adjudicator routes."""
-    return save_persisted_soc_agent_model(
-        soc_ai_settings_store_sources(), payload
-    )
+read_prompt_file = partial(portal_settings_runtime.read_prompt_file, _SETTINGS_RUNTIME)
+read_soc_analyst_prompt = partial(portal_settings_runtime.read_soc_analyst_prompt, _SETTINGS_RUNTIME)
+read_siem_engineer_prompt = partial(portal_settings_runtime.read_siem_engineer_prompt, _SETTINGS_RUNTIME)
+read_threat_hunter_prompt = partial(portal_settings_runtime.read_threat_hunter_prompt, _SETTINGS_RUNTIME)
+read_cyber_threat_intel_prompt = partial(portal_settings_runtime.read_cyber_threat_intel_prompt, _SETTINGS_RUNTIME)
+read_incident_responder_prompt = partial(portal_settings_runtime.read_incident_responder_prompt, _SETTINGS_RUNTIME)
+read_settings_prompt = partial(portal_settings_runtime.read_settings_prompt, _SETTINGS_RUNTIME)
+agent_memory_files = partial(portal_settings_runtime.agent_memory_files, _SETTINGS_RUNTIME)
+read_agent_memory = partial(portal_settings_runtime.read_agent_memory, _SETTINGS_RUNTIME)
+save_prompt_file = partial(portal_settings_runtime.save_prompt_file, _SETTINGS_RUNTIME)
+save_soc_analyst_prompt = partial(portal_settings_runtime.save_soc_analyst_prompt, _SETTINGS_RUNTIME)
+save_siem_engineer_prompt = partial(portal_settings_runtime.save_siem_engineer_prompt, _SETTINGS_RUNTIME)
+save_threat_hunter_prompt = partial(portal_settings_runtime.save_threat_hunter_prompt, _SETTINGS_RUNTIME)
+save_cyber_threat_intel_prompt = partial(portal_settings_runtime.save_cyber_threat_intel_prompt, _SETTINGS_RUNTIME)
+save_incident_responder_prompt = partial(portal_settings_runtime.save_incident_responder_prompt, _SETTINGS_RUNTIME)
+save_settings_prompt = partial(portal_settings_runtime.save_settings_prompt, _SETTINGS_RUNTIME)
+normalize_soc_ai_settings = partial(portal_settings_runtime.normalize_soc_ai_settings, _SETTINGS_RUNTIME)
+maxmind_geoip_database_status = partial(portal_settings_runtime.maxmind_geoip_database_status, _SETTINGS_RUNTIME)
+maxmind_geoip_databases_status = partial(portal_settings_runtime.maxmind_geoip_databases_status, _SETTINGS_RUNTIME)
+_enabled_model_routes_for_settings = partial(portal_settings_runtime.enabled_model_routes_for_settings, _SETTINGS_RUNTIME)
+soc_ai_settings_store_sources = partial(portal_settings_runtime.soc_ai_settings_store_sources, _SETTINGS_RUNTIME)
+read_soc_ai_settings = partial(portal_settings_runtime.read_soc_ai_settings, _SETTINGS_RUNTIME)
+list_ollama_models = partial(portal_settings_runtime.list_ollama_models, _SETTINGS_RUNTIME)
+_ollama_context_length = partial(portal_settings_runtime.ollama_context_length, _SETTINGS_RUNTIME)
+classify_ollama_model_compatibility = partial(portal_settings_runtime.classify_ollama_model_compatibility, _SETTINGS_RUNTIME)
+ollama_model_compatibility = partial(portal_settings_runtime.ollama_model_compatibility, _SETTINGS_RUNTIME)
+ollama_catalog_sources = partial(portal_settings_runtime.ollama_catalog_sources, _SETTINGS_RUNTIME)
+ollama_models_response = partial(portal_settings_runtime.ollama_models_response, _SETTINGS_RUNTIME)
+_write_soc_ai_settings = partial(portal_settings_runtime.write_soc_ai_settings, _SETTINGS_RUNTIME)
+_resolve_cli_harness_for_settings = partial(portal_settings_runtime.resolve_cli_harness_for_settings, _SETTINGS_RUNTIME)
+_hermes_auth_readiness_error = partial(portal_settings_runtime.hermes_auth_readiness_error, _SETTINGS_RUNTIME)
+_enabled_cli_harnesses_ready = partial(portal_settings_runtime.enabled_cli_harnesses_ready, _SETTINGS_RUNTIME)
+save_soc_ai_settings = partial(portal_settings_runtime.save_soc_ai_settings, _SETTINGS_RUNTIME)
+save_soc_agent_model = partial(portal_settings_runtime.save_soc_agent_model, _SETTINGS_RUNTIME)
 
 
 def admin_status_path(action_id: str) -> Path:

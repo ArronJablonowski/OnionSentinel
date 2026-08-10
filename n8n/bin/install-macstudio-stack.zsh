@@ -1014,6 +1014,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/portal_cli_provider_readiness.py" "$DASHB
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_ollama_catalog.py" "$DASHBOARD_RUNTIME_DIR/portal_ollama_catalog.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_ai_settings_normalizer.py" "$DASHBOARD_RUNTIME_DIR/portal_ai_settings_normalizer.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_ai_settings_store.py" "$DASHBOARD_RUNTIME_DIR/portal_ai_settings_store.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_settings_runtime.py" "$DASHBOARD_RUNTIME_DIR/portal_settings_runtime.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_agent_content_store.py" "$DASHBOARD_RUNTIME_DIR/portal_agent_content_store.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_catalog_routes.py" "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_report_catalog.py" "$DASHBOARD_RUNTIME_DIR/portal_report_catalog.py"
