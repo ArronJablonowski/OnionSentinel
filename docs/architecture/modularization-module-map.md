@@ -2698,6 +2698,15 @@ presentation ports remain injected so the facade's compatibility seams and
 failure-path tests remain effective. Paths, pagination, sorting, response
 schemas, and exclusion of manually escalated incident groups are preserved.
 
+### Incident action runtime
+
+`portal_incident_action_runtime.py` owns late-bound SOC queue/escalation,
+append-only adjudication, incident status changes, single and bulk reanalysis,
+controlled-dispatch identity forwarding, progress reads, current-analysis
+resolution, and adjudication-history composition. Alert-store remains the
+production mutation owner. Database, transport, clock, policy, and history
+ports remain injected, preserving status/error contracts and test isolation.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:

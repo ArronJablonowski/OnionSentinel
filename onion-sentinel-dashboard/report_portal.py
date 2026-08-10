@@ -48,6 +48,7 @@ import portal_soc_status_runtime
 import portal_soc_pcap_runtime
 import portal_llm_runtime
 import portal_soc_query_runtime
+import portal_incident_action_runtime
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
@@ -2542,282 +2543,27 @@ def soc_alert_group_representative_alert_id(group_id: str) -> str:
     return ""
 
 
-def _forward_controlled_dispatch_contract(
-    payload: dict,
-    request_payload: dict,
-) -> None:
-    """Forward frozen route fields only for a controlled cohort dispatch."""
-    forward_controlled_dispatch_contract(payload, request_payload)
-
-
-def soc_action_service_sources() -> SocActionServiceSources:
-    """Bind portal transport, error, and clock dependencies for SOC actions."""
-    return SocActionServiceSources(
-        post_json=alert_store_post_json,
-        api_error=soc_alert_api_error,
-        now_local=now_iso_local,
-        request_error_status=lambda exc: (
-            exc.status_code if isinstance(exc, AlertStoreRequestError) else None
-        ),
-    )
-
-
-def soc_alert_queue_analysis_response(group_id: str, payload: dict | None = None) -> tuple[int, dict]:
-    """Record durable reanalysis intent; the worker builds fresh evidence later."""
-    return queue_soc_alert_analysis(soc_action_service_sources(), group_id, payload)
-
-
-def soc_alert_escalate_response(group_id: str, payload: dict | None = None) -> tuple[int, dict]:
-    """Create or refresh one durable Incident Response case for an alert group."""
-    return escalate_soc_alert(soc_action_service_sources(), group_id, payload)
-
-
-def _soc_legacy_verdict_factors(outcome: str) -> dict[str, str | None]:
-    return legacy_verdict_factors(outcome)
-
-
-def _soc_derive_legacy_detection_outcome(
-    factors: dict[str, str | None],
-) -> str:
-    return derive_legacy_detection_outcome(factors)
-
-
-def _soc_adjudication_verdict_contradictions(
-    outcome: str,
-    explicit_factors: dict[str, str | None],
-) -> list[str]:
-    return adjudication_verdict_contradictions(outcome, explicit_factors)
-
-
-def normalize_soc_adjudication_payload(
-    payload: dict | None,
-    *,
-    group_id: str,
-    case_id: str = "",
-) -> tuple[bool, dict]:
-    return normalize_adjudication_payload(
-        payload,
-        group_id=group_id,
-        case_id=case_id,
-    )
-
-
-def _soc_alert_store_mutation(
-    path: str,
-    payload: dict,
-    *,
-    success_status: int = 200,
-) -> tuple[int, dict]:
-    if not SOC_ALERT_STORE_API_URL:
-        return soc_alert_api_error(
-            "Alert-store API is required for append-only analyst review writes.",
-            503,
-        )
-    try:
-        result = alert_store_post_json(path, payload, timeout=10.0)
-    except AlertStoreRequestError as exc:
-        return soc_alert_api_error(str(exc), exc.status_code)
-    return success_status, result
-
-
-def soc_alert_adjudication_response(
-    group_id: str,
-    payload: dict | None = None,
-) -> tuple[int, dict]:
-    ok, normalized = normalize_soc_adjudication_payload(
-        payload,
-        group_id=str(group_id or "").strip().lower(),
-    )
-    if not ok:
-        return HTTPStatus.BAD_REQUEST, normalized
-    return _soc_alert_store_mutation(
-        "/adjudications",
-        normalized,
-        success_status=HTTPStatus.CREATED,
-    )
-
-
-def _soc_incident_case_group_id(case_id: str) -> tuple[int, str]:
-    case_id = str(case_id or "").strip().lower()
-    if not re.fullmatch(r"ir-[a-z0-9_-]{1,64}", case_id):
-        return HTTPStatus.BAD_REQUEST, ""
-    try:
-        with soc_alert_db_connect() as conn:
-            row = conn.execute(
-                "SELECT dashboard_group_id FROM incident_response_cases WHERE case_id = ?",
-                (case_id,),
-            ).fetchone()
-    except (FileNotFoundError, sqlite3.Error):
-        row = None
-    return (HTTPStatus.OK, str(row["dashboard_group_id"] or "")) if row else (HTTPStatus.NOT_FOUND, "")
-
-
-def soc_incident_adjudication_response(
-    case_id: str,
-    payload: dict | None = None,
-) -> tuple[int, dict]:
-    status, group_id = _soc_incident_case_group_id(case_id)
-    if status != HTTPStatus.OK:
-        return soc_alert_api_error(
-            "Incident case not found" if status == HTTPStatus.NOT_FOUND else "Invalid incident case id",
-            status,
-        )
-    ok, normalized = normalize_soc_adjudication_payload(
-        payload,
-        group_id=group_id,
-        case_id=case_id,
-    )
-    if not ok:
-        return HTTPStatus.BAD_REQUEST, normalized
-    return _soc_alert_store_mutation(
-        "/adjudications",
-        normalized,
-        success_status=HTTPStatus.CREATED,
-    )
-
-
-def soc_incident_status_response(
-    case_id: str,
-    payload: dict | None = None,
-) -> tuple[int, dict]:
-    status, _group_id = _soc_incident_case_group_id(case_id)
-    if status != HTTPStatus.OK:
-        return soc_alert_api_error(
-            "Incident case not found" if status == HTTPStatus.NOT_FOUND else "Invalid incident case id",
-            status,
-        )
-    try:
-        request_payload = normalize_incident_status_payload(case_id, payload)
-    except IncidentStatusPayloadError as exc:
-        return soc_alert_api_error(str(exc))
-    return _soc_alert_store_mutation(
-        "/incidents/status",
-        request_payload,
-    )
-
-
-def soc_incident_reanalysis_response(
-    case_id: str,
-    payload: dict | None = None,
-) -> tuple[int, dict]:
-    status, _group_id = _soc_incident_case_group_id(case_id)
-    if status != HTTPStatus.OK:
-        return soc_alert_api_error(
-            "Incident case not found" if status == HTTPStatus.NOT_FOUND else "Invalid incident case id",
-            status,
-        )
-    payload = payload if isinstance(payload, dict) else {}
-    request_payload = {
-        "case_id": case_id,
-        "reason": str(
-            payload.get("reason")
-            or "Analyst requested fresh Incident Responder analysis"
-        )[:1000],
-        "requested_by": str(payload.get("requested_by") or "dashboard")[:100],
-    }
-    for identity_field in (
-        "representative_alert_id",
-        "stable_group_id",
-        "stable_group_key",
-        "cohort_id",
-        "dispatch_id",
-    ):
-        if identity_field in payload:
-            request_payload[identity_field] = payload[identity_field]
-    _forward_controlled_dispatch_contract(payload, request_payload)
-    return _soc_alert_store_mutation(
-        "/incidents/reanalyze",
-        request_payload,
-        success_status=HTTPStatus.ACCEPTED,
-    )
-
-
-def soc_incident_bulk_reanalysis_response(
-    payload: dict | None = None,
-) -> tuple[int, dict]:
-    payload = payload if isinstance(payload, dict) else {}
-    return _soc_alert_store_mutation(
-        "/incidents/reanalyze-all",
-        {
-            "reason": str(
-                payload.get("reason")
-                or "Analyst requested fresh analysis of all incident cases"
-            )[:1000],
-            "requested_by": str(payload.get("requested_by") or "dashboard")[:100],
-        },
-        success_status=HTTPStatus.ACCEPTED,
-    )
-
-
-def soc_incident_reanalysis_runs_response(
-    query: dict[str, list[str]],
-) -> tuple[int, dict]:
-    try:
-        run_id = parse_reanalysis_run_id(query)
-    except IncidentReanalysisQueryError as exc:
-        return soc_alert_api_error(str(exc))
-    try:
-        with soc_alert_db_connect() as conn:
-            progress = load_reanalysis_progress(conn, run_id)
-    except (FileNotFoundError, sqlite3.Error) as exc:
-        return soc_alert_api_error(
-            f"Incident reanalysis progress unavailable: {exc}",
-            HTTPStatus.SERVICE_UNAVAILABLE,
-        )
-    return 200, compose_reanalysis_progress_payload(progress)
-
-
-def soc_incident_current_analysis(
-    conn: sqlite3.Connection,
-    case: dict[str, object],
-) -> dict[str, object]:
-    """Resolve a case's current IR run without trusting a stale foreign pointer."""
-    return load_current_incident_analysis(conn, case)
-
-
-def soc_adjudication_history_sources() -> SocAdjudicationHistorySources:
-    return SocAdjudicationHistorySources(
-        connect=soc_alert_db_connect,
-        table_exists=sqlite_table_exists,
-        table_columns=sqlite_table_columns,
-        review_defaults=_soc_review_defaults,
-        alert_review_state=soc_alert_review_state_for_group,
-        current_incident_analysis=soc_incident_current_analysis,
-        parse_review_json=_soc_review_json,
-        incident_review_state=soc_incident_review_state,
-    )
-
-
-def soc_adjudication_history_response(
-    group_id: str,
-    *,
-    case_id: str = "",
-    limit: int = 25,
-) -> tuple[int, dict]:
-    return read_soc_adjudication_history(
-        soc_adjudication_history_sources(),
-        group_id,
-        case_id=case_id,
-        limit=limit,
-    )
-
-
-def soc_incident_agent_display_state(
-    agent_status: object,
-    analysis_id: object,
-    reviewer_status: object,
-) -> tuple[str, str]:
-    """Distinguish a failed refresh or review from a missing primary analysis."""
-    status = str(agent_status or "queued").strip().lower()
-    has_analysis = bool(str(analysis_id or "").strip())
-    review = str(reviewer_status or "not_requested").strip().lower()
-    if status != "failed":
-        return status, status.replace("_", " ")
-    if not has_analysis:
-        return "analysis_failed", "Analysis failed"
-    if review in {"failed", "invalid"}:
-        return "review_failed", "Primary ready · review failed"
-    return "refresh_failed", "Analysis ready · refresh failed"
+_INCIDENT_ACTION_RUNTIME = sys.modules[__name__]
+_forward_controlled_dispatch_contract = partial(portal_incident_action_runtime.forward_controlled_dispatch_contract, _INCIDENT_ACTION_RUNTIME)
+soc_action_service_sources = partial(portal_incident_action_runtime.soc_action_service_sources, _INCIDENT_ACTION_RUNTIME)
+soc_alert_queue_analysis_response = partial(portal_incident_action_runtime.soc_alert_queue_analysis_response, _INCIDENT_ACTION_RUNTIME)
+soc_alert_escalate_response = partial(portal_incident_action_runtime.soc_alert_escalate_response, _INCIDENT_ACTION_RUNTIME)
+_soc_legacy_verdict_factors = partial(portal_incident_action_runtime.soc_legacy_verdict_factors, _INCIDENT_ACTION_RUNTIME)
+_soc_derive_legacy_detection_outcome = partial(portal_incident_action_runtime.soc_derive_legacy_detection_outcome, _INCIDENT_ACTION_RUNTIME)
+_soc_adjudication_verdict_contradictions = partial(portal_incident_action_runtime.soc_adjudication_verdict_contradictions, _INCIDENT_ACTION_RUNTIME)
+normalize_soc_adjudication_payload = partial(portal_incident_action_runtime.normalize_soc_adjudication_payload, _INCIDENT_ACTION_RUNTIME)
+_soc_alert_store_mutation = partial(portal_incident_action_runtime.soc_alert_store_mutation, _INCIDENT_ACTION_RUNTIME)
+soc_alert_adjudication_response = partial(portal_incident_action_runtime.soc_alert_adjudication_response, _INCIDENT_ACTION_RUNTIME)
+_soc_incident_case_group_id = partial(portal_incident_action_runtime.soc_incident_case_group_id, _INCIDENT_ACTION_RUNTIME)
+soc_incident_adjudication_response = partial(portal_incident_action_runtime.soc_incident_adjudication_response, _INCIDENT_ACTION_RUNTIME)
+soc_incident_status_response = partial(portal_incident_action_runtime.soc_incident_status_response, _INCIDENT_ACTION_RUNTIME)
+soc_incident_reanalysis_response = partial(portal_incident_action_runtime.soc_incident_reanalysis_response, _INCIDENT_ACTION_RUNTIME)
+soc_incident_bulk_reanalysis_response = partial(portal_incident_action_runtime.soc_incident_bulk_reanalysis_response, _INCIDENT_ACTION_RUNTIME)
+soc_incident_reanalysis_runs_response = partial(portal_incident_action_runtime.soc_incident_reanalysis_runs_response, _INCIDENT_ACTION_RUNTIME)
+soc_incident_current_analysis = partial(portal_incident_action_runtime.soc_incident_current_analysis, _INCIDENT_ACTION_RUNTIME)
+soc_adjudication_history_sources = partial(portal_incident_action_runtime.soc_adjudication_history_sources, _INCIDENT_ACTION_RUNTIME)
+soc_adjudication_history_response = partial(portal_incident_action_runtime.soc_adjudication_history_response, _INCIDENT_ACTION_RUNTIME)
+soc_incident_agent_display_state = partial(portal_incident_action_runtime.soc_incident_agent_display_state, _INCIDENT_ACTION_RUNTIME)
 
 
 INCIDENT_ROW_CALLBACKS = IncidentRowCallbacks(
