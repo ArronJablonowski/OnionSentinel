@@ -60,6 +60,15 @@ DEFAULT_ALLOWED_AGENT_ROLES = ("incident-responder",)
 class LiveOsqueryClientError(RuntimeError):
     """The local live-query client could not satisfy its restricted contract."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str = "configuration_error",
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
 
 def project_now() -> str:
     return dt.datetime.now().astimezone().isoformat().replace("T", "  ")
@@ -649,21 +658,11 @@ def collect_live_osquery(
         str(config["port"]),
         f"{config['relay_user']}@{config['relay_host']}",
     ]
-    try:
-        completed = run_bounded_command(
-            command,
-            stdin_text=stdin_text,
-            timeout_seconds=float(config["timeout_seconds"]),
-            max_stdout_bytes=MAX_RESPONSE_BYTES,
-            max_stderr_bytes=MAX_STDERR_BYTES,
-        )
-    except (OSError, BoundedProcessError) as exc:
-        raise LiveOsqueryClientError(f"restricted live OSQuery transport failed: {exc}") from exc
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()[:1000]
-        raise LiveOsqueryClientError(
-            f"restricted live OSQuery transport exited {completed.returncode}: {detail}"
-        )
+    completed = _run_restricted_transport(
+        command,
+        stdin_text=stdin_text,
+        timeout_seconds=float(config["timeout_seconds"]),
+    )
     try:
         raw_result = json.loads(completed.stdout)
         artifact = validate_result_artifact(
@@ -672,11 +671,13 @@ def collect_live_osquery(
         )
     except (json.JSONDecodeError, LiveOsqueryContractError) as exc:
         raise LiveOsqueryClientError(
-            f"restricted live OSQuery response was invalid: {exc}"
+            f"restricted live OSQuery response was invalid: {exc}",
+            reason_code="invalid_response",
         ) from exc
     if artifact["case_id"] != payload["case_id"]:
         raise LiveOsqueryClientError(
-            "restricted live OSQuery response case_id did not match the request"
+            "restricted live OSQuery response case_id did not match the request",
+            reason_code="response_mismatch",
         )
     if not artifact.get("generated_at"):
         artifact["generated_at"] = project_now()
@@ -696,3 +697,45 @@ def collect_live_osquery(
             ),
         )
     return artifact
+
+
+def _run_restricted_transport(
+    command: list[str],
+    *,
+    stdin_text: str,
+    timeout_seconds: float,
+):
+    try:
+        completed = run_bounded_command(
+            command,
+            stdin_text=stdin_text,
+            timeout_seconds=timeout_seconds,
+            max_stdout_bytes=MAX_RESPONSE_BYTES,
+            max_stderr_bytes=MAX_STDERR_BYTES,
+        )
+    except BoundedProcessError as exc:
+        reason_code = (
+            "broker_timeout"
+            if "timed out" in str(exc).lower()
+            else "transport_failure"
+        )
+        raise LiveOsqueryClientError(
+            f"restricted live OSQuery transport failed: {exc}",
+            reason_code=reason_code,
+        ) from exc
+    except OSError as exc:
+        raise LiveOsqueryClientError(
+            f"restricted live OSQuery transport failed: {exc}",
+            reason_code="connect_failure",
+        ) from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()[:1000]
+        raise LiveOsqueryClientError(
+            f"restricted live OSQuery transport exited {completed.returncode}: {detail}",
+            reason_code=(
+                "connect_failure"
+                if completed.returncode == 255
+                else "broker_rejection"
+            ),
+        )
+    return completed
