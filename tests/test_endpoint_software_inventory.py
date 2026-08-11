@@ -271,6 +271,31 @@ class EndpointSoftwareInventoryTests(unittest.TestCase):
             for forbidden in ("endpoint-a", "do-not-log", "raw-row"):
                 self.assertNotIn(forbidden, encoded)
 
+    def test_main_rejects_symlink_lock_without_touching_its_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "cache.json"
+            target = root / "unrelated.txt"
+            target.write_text("preserve me", encoding="utf-8")
+            target.chmod(0o640)
+            cache.with_suffix(".json.lock").symlink_to(target)
+            argv = [
+                str(SCRIPT),
+                "--config", str(root / "config.json"),
+                "--cache", str(cache),
+                "--log", str(root / "collector.jsonl"),
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(self.module, "collect") as collect,
+            ):
+                status = self.module.main()
+
+            self.assertEqual(status, 1)
+            collect.assert_not_called()
+            self.assertEqual(target.read_text(encoding="utf-8"), "preserve me")
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o640)
+
 
 if __name__ == "__main__":
     unittest.main()

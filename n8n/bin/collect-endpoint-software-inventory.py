@@ -454,6 +454,31 @@ def _bounded_cli_int(label: str, minimum: int, maximum: int):
     return parse
 
 
+def open_collector_lock(path: Path) -> int:
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise EndpointInventoryError(
+            "endpoint inventory collector lock is unavailable",
+            reason_code="invalid_lock",
+        ) from exc
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            raise EndpointInventoryError(
+                "endpoint inventory collector lock is not owner-controlled",
+                reason_code="invalid_lock",
+            )
+        os.fchmod(descriptor, 0o600)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_FILE)
@@ -480,8 +505,7 @@ def main() -> int:
     previous: dict[str, Any] | None = None
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-        os.fchmod(descriptor, 0o600)
+        descriptor = open_collector_lock(lock_path)
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         previous = load_cache(args.cache)
         result = collect_with_retries(
