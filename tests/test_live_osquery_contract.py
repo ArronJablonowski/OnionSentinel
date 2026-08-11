@@ -54,6 +54,7 @@ from live_osquery_client import (  # noqa: E402
     load_live_osquery_config,
     scheduled_inventory_approved,
 )
+from bounded_process import BoundedProcessError  # noqa: E402
 
 
 def load_security_onion_wrapper():
@@ -1209,6 +1210,25 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
 
 
 class LiveOsqueryClientConfigTests(unittest.TestCase):
+    @staticmethod
+    def scheduled_config(temp_name: str) -> dict[str, object]:
+        return {
+            "enabled": True,
+            "allowed_target_aliases": ["endpoint-a"],
+            "scheduled_inventory_approval": {
+                "approved": True,
+                "target_aliases": ["endpoint-a"],
+            },
+            "relay_host": "relay.invalid",
+            "relay_user": "broker",
+            "identity_file": Path(temp_name) / "identity",
+            "known_hosts": Path(temp_name) / "known_hosts",
+            "connect_timeout_seconds": 5,
+            "timeout_seconds": 30,
+            "port": 22,
+            "artifact_dir": Path(temp_name) / "artifacts",
+        }
+
     def test_capability_exposes_only_explicit_darwin_schemas(self):
         descriptor = capability_descriptor(
             {
@@ -1402,6 +1422,64 @@ class LiveOsqueryClientConfigTests(unittest.TestCase):
                 config=config,
                 persist=False,
             )
+
+    def test_collector_preserves_broker_timeout_failure_code(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            with (
+                mock.patch(
+                    "live_osquery_client.run_bounded_command",
+                    side_effect=BoundedProcessError(
+                        "command timed out after 60 seconds"
+                    ),
+                ),
+                self.assertRaisesRegex(
+                    LiveOsqueryClientError,
+                    "transport failed",
+                ) as raised,
+            ):
+                collect_live_osquery(
+                    case_id="case-timeout",
+                    requests=[{
+                        "target_alias": "endpoint-a",
+                        "query": "SELECT hostname FROM system_info LIMIT 1;",
+                        "purpose": "verify endpoint",
+                    }],
+                    config=self.scheduled_config(temp_name),
+                    persist=False,
+                    approval_scope="scheduled_inventory",
+                )
+
+        self.assertEqual(raised.exception.reason_code, "broker_timeout")
+
+    def test_collector_distinguishes_connect_failure_and_broker_rejection(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            config = self.scheduled_config(temp_name)
+            for returncode, expected in ((255, "connect_failure"), (17, "broker_rejection")):
+                completed = SimpleNamespace(
+                    returncode=returncode,
+                    stdout="",
+                    stderr="restricted transport rejected the request",
+                )
+                with (
+                    self.subTest(returncode=returncode),
+                    mock.patch(
+                        "live_osquery_client.run_bounded_command",
+                        return_value=completed,
+                    ),
+                    self.assertRaises(LiveOsqueryClientError) as raised,
+                ):
+                    collect_live_osquery(
+                        case_id="case-rejected",
+                        requests=[{
+                            "target_alias": "endpoint-a",
+                            "query": "SELECT hostname FROM system_info LIMIT 1;",
+                            "purpose": "verify endpoint",
+                        }],
+                        config=config,
+                        persist=False,
+                        approval_scope="scheduled_inventory",
+                    )
+                self.assertEqual(raised.exception.reason_code, expected)
 
     def test_collector_persists_immutable_batches_with_bounded_manifest(self):
         query = "SELECT hostname FROM system_info LIMIT 1;"

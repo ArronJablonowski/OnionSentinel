@@ -149,6 +149,128 @@ class EndpointSoftwareInventoryTests(unittest.TestCase):
                 "osquery.live:os_version",
             )
 
+    def test_transient_timeout_retries_once_with_redacted_classification(self):
+        expected = {"schema": self.module.SCHEMA, "records": [], "targets": []}
+        logger = mock.Mock()
+        timeout = self.module.LiveOsqueryClientError(
+            "restricted live OSQuery transport timed out at endpoint-a",
+            reason_code="broker_timeout",
+        )
+        with (
+            mock.patch.object(
+                self.module,
+                "collect",
+                side_effect=[timeout, expected],
+            ) as collect,
+            mock.patch.object(self.module.time, "sleep") as sleep,
+        ):
+            result = self.module.collect_with_retries(
+                self.config(),
+                {"updated_at": "2026-08-09T20:32:59.752Z"},
+                attempts=2,
+                retry_delay_seconds=7,
+                logger=logger,
+            )
+
+        self.assertIs(result, expected)
+        self.assertEqual(collect.call_count, 2)
+        sleep.assert_called_once_with(7)
+        logger.log.assert_called_once_with(
+            "warning",
+            "endpoint_software_inventory.retry",
+            attempt=1,
+            attempts=2,
+            failure_code="broker_timeout",
+            retry_delay_seconds=7,
+            last_good_cache_state="stale",
+        )
+
+    def test_non_retryable_configuration_failure_does_not_retry(self):
+        logger = mock.Mock()
+        failure = self.module.LiveOsqueryClientError(
+            "operator approval is missing",
+            reason_code="configuration_error",
+        )
+        with (
+            mock.patch.object(self.module, "collect", side_effect=failure) as collect,
+            mock.patch.object(self.module.time, "sleep") as sleep,
+            self.assertRaises(self.module.LiveOsqueryClientError),
+        ):
+            self.module.collect_with_retries(
+                self.config(),
+                None,
+                attempts=3,
+                retry_delay_seconds=7,
+                logger=logger,
+            )
+
+        collect.assert_called_once()
+        sleep.assert_not_called()
+        logger.log.assert_not_called()
+
+    def test_persistent_failure_preserves_cache_and_omits_raw_evidence_from_log(self):
+        prior = {
+            "schema": self.module.SCHEMA,
+            "version": 1,
+            "updated_at": "2026-08-09T20:32:59.752Z",
+            "complete": True,
+            "targets": [],
+            "records": [],
+        }
+        secret_text = "endpoint-a token=do-not-log response={raw-row}"
+        failure = self.module.LiveOsqueryClientError(
+            secret_text,
+            reason_code="broker_timeout",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "cache.json"
+            log = root / "collector.jsonl"
+            self.module.atomic_write(cache, prior)
+            before = cache.read_bytes()
+            argv = [
+                str(SCRIPT),
+                "--config", str(root / "config.json"),
+                "--cache", str(cache),
+                "--log", str(log),
+                "--attempts", "2",
+                "--retry-delay-seconds", "7",
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    self.module,
+                    "load_live_osquery_config",
+                    return_value=self.config(),
+                ),
+                mock.patch.object(
+                    self.module,
+                    "collect",
+                    side_effect=failure,
+                ) as collect,
+                mock.patch.object(self.module.time, "sleep") as sleep,
+            ):
+                status = self.module.main()
+
+            self.assertEqual(status, 1)
+            self.assertEqual(collect.call_count, 2)
+            sleep.assert_called_once_with(7)
+            self.assertEqual(cache.read_bytes(), before)
+            receipts = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(
+                [receipt["event"] for receipt in receipts],
+                [
+                    "endpoint_software_inventory.retry",
+                    "endpoint_software_inventory.failed",
+                ],
+            )
+            self.assertEqual(receipts[-1]["failure_code"], "broker_timeout")
+            self.assertEqual(receipts[-1]["attempts"], 2)
+            self.assertEqual(receipts[-1]["last_good_cache_state"], "stale")
+            encoded = json.dumps(receipts)
+            for forbidden in ("endpoint-a", "do-not-log", "raw-row"):
+                self.assertNotIn(forbidden, encoded)
+
 
 if __name__ == "__main__":
     unittest.main()
