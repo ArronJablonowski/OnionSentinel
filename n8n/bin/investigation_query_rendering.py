@@ -78,9 +78,11 @@ def dataset_clause(datasets: list[str]) -> dict[str, Any]:
     }
 
 
-def build_query_dsl(query: dict[str, Any]) -> dict[str, Any]:
-    pack = PACKS[query["pack"]]
-    filters = [
+def _query_filters(
+    query: dict[str, Any],
+    pack: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return [
         {
             "range": {
                 "@timestamp": {
@@ -97,12 +99,17 @@ def build_query_dsl(query: dict[str, Any]) -> dict[str, Any]:
             else []
         ),
     ]
-    filtered_query: dict[str, Any] = {"bool": {"filter": filters}}
+
+
+def _compiled_query(
+    query: dict[str, Any],
+    filtered_query: dict[str, Any],
+) -> dict[str, Any]:
     if query["aggregation"] == "anchor_nearest":
         start = _parse_utc(query["window"]["start"], "query window start")
         end = _parse_utc(query["window"]["end"], "query window end")
         scale_seconds = max(1, round((end - start).total_seconds() / 2))
-        compiled_query: dict[str, Any] = {
+        return {
             "function_score": {
                 "query": filtered_query,
                 "gauss": {
@@ -115,9 +122,15 @@ def build_query_dsl(query: dict[str, Any]) -> dict[str, Any]:
                 "boost_mode": "replace",
             }
         }
-    else:
-        compiled_query = filtered_query
-    body: dict[str, Any] = {
+    return filtered_query
+
+
+def _query_body(
+    query: dict[str, Any],
+    pack: dict[str, Any],
+    compiled_query: dict[str, Any],
+) -> dict[str, Any]:
+    body = {
         "size": 0 if query["aggregation"] == "count" else query["size"],
         "track_total_hits": True,
         "timeout": "30s",
@@ -138,6 +151,13 @@ def build_query_dsl(query: dict[str, Any]) -> dict[str, Any]:
                 "_shard_doc",
             ]
     return body
+
+
+def build_query_dsl(query: dict[str, Any]) -> dict[str, Any]:
+    pack = PACKS[query["pack"]]
+    filters = _query_filters(query, pack)
+    filtered_query = {"bool": {"filter": filters}}
+    return _query_body(query, pack, _compiled_query(query, filtered_query))
 
 
 def _quote(value: str) -> str:

@@ -2,6 +2,7 @@
 """Characterize deterministic investigation Query DSL composition."""
 from __future__ import annotations
 
+import ast
 import copy
 import sys
 import unittest
@@ -11,6 +12,7 @@ from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BIN_DIR = REPO_ROOT / "n8n" / "bin"
+SCRIPT = BIN_DIR / "investigation_query_rendering.py"
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
@@ -45,6 +47,52 @@ def query_for(aggregation: str = "timeline") -> dict:
     }
 
 
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+    class Complexity(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.value = 1
+
+        def visit_FunctionDef(self, node) -> None:
+            return
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_If(self, node) -> None:
+            self.value += 1
+            self.generic_visit(node)
+
+        visit_For = visit_If
+        visit_While = visit_If
+
+        def visit_Try(self, node) -> None:
+            self.value += len(node.handlers)
+            self.generic_visit(node)
+
+        def visit_BoolOp(self, node) -> None:
+            self.value += max(0, len(node.values) - 1)
+            self.generic_visit(node)
+
+        def visit_IfExp(self, node) -> None:
+            self.value += 1
+            self.generic_visit(node)
+
+        def visit_comprehension(self, node) -> None:
+            self.value += 1 + len(node.ifs)
+            self.generic_visit(node)
+
+    complexity = Complexity()
+    for statement in target.body:
+        complexity.visit(statement)
+    return target.end_lineno - target.lineno + 1, complexity.value
+
+
 class InvestigationQueryDslCharacterizationTests(unittest.TestCase):
     def setUp(self) -> None:
         PACK["datasets"] = ["logs.alpha", "logs.beta"]
@@ -63,6 +111,19 @@ class InvestigationQueryDslCharacterizationTests(unittest.TestCase):
         self.fields = self.fields_patch.start()
         self.addCleanup(self.fields_patch.stop)
         self.addCleanup(self.pack_patch.stop)
+
+    def test_changed_owner_architecture_is_bounded(self) -> None:
+        for name in (
+            "_query_filters",
+            "_compiled_query",
+            "_query_body",
+            "build_query_dsl",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
+        self.assertLessEqual(len(SCRIPT.read_text().splitlines()), 600)
 
     def expected_filters(self) -> list[dict]:
         return [
