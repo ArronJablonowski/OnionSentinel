@@ -501,6 +501,11 @@ steps: exact lowercase-hex token syntax, then an owner-only regular descriptor
 whose complete payload matches the private prefix and token. The compatibility
 surface and nested process-group ownership decision remain unchanged.
 
+The termination owner separates freshly verified process-group delivery from
+the second-snapshot individual-PID pass. Private delivery helpers retain group
+deduplication, self-exclusion, lookup/permission race handling, and propagation
+of unexpected failures into the existing fail-closed cleanup fallback.
+
 ## Scheduler and Harness
 
 ### `auto-run-ai-analysis.py`

@@ -19,16 +19,12 @@ from bounded_process_policy import (
 )
 
 
-def _signal_verified_tree(
-    tracker: _DescendantTracker,
+def __signal_verified_groups(
+    records: list[_ProcessRecord],
     signal_number: int,
-) -> list[_ProcessRecord]:
-    """Signal only identities reverified in a fresh snapshot."""
-
-    snapshot = tracker.observe(force=True, root_may_have_exited=True) or {}
-    records = tracker.verified_records(snapshot, include_root=True)
-    self_pid = os.getpid()
-    self_pgid = os.getpgrp()
+    *,
+    self_pgid: int,
+) -> None:
     signaled_groups: set[int] = set()
     for record in records:
         pgid = record.identity.pgid
@@ -40,15 +36,45 @@ def _signal_verified_tree(
             pass
         signaled_groups.add(pgid)
 
-    snapshot = tracker.observe(force=True, root_may_have_exited=True) or {}
-    remaining = tracker.verified_records(snapshot, include_root=True)
-    for record in remaining:
+
+def __signal_verified_processes(
+    records: list[_ProcessRecord],
+    signal_number: int,
+    *,
+    self_pid: int,
+) -> None:
+    for record in records:
         if record.identity.pid == self_pid:
             continue
         try:
             os.kill(record.identity.pid, signal_number)
         except (ProcessLookupError, PermissionError):
             pass
+
+
+def _signal_verified_tree(
+    tracker: _DescendantTracker,
+    signal_number: int,
+) -> list[_ProcessRecord]:
+    """Signal only identities reverified in a fresh snapshot."""
+
+    snapshot = tracker.observe(force=True, root_may_have_exited=True) or {}
+    records = tracker.verified_records(snapshot, include_root=True)
+    self_pid = os.getpid()
+    self_pgid = os.getpgrp()
+    __signal_verified_groups(
+        records,
+        signal_number,
+        self_pgid=self_pgid,
+    )
+
+    snapshot = tracker.observe(force=True, root_may_have_exited=True) or {}
+    remaining = tracker.verified_records(snapshot, include_root=True)
+    __signal_verified_processes(
+        remaining,
+        signal_number,
+        self_pid=self_pid,
+    )
     return remaining
 
 
