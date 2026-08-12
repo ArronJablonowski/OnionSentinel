@@ -53,8 +53,18 @@ RETRYABLE_FAILURE_CODES = frozenset(
         "transport_failure",
         "incomplete_artifact",
         "incomplete_evidence",
+        "remote_timeout",
+        "remote_error",
+        "remote_invalid_response",
+        "remote_cancelled",
     }
 )
+REMOTE_FAILURE_CODES = {
+    "timeout": "remote_timeout",
+    "error": "remote_error",
+    "invalid_response": "remote_invalid_response",
+    "cancelled": "remote_cancelled",
+}
 APPS_COLUMNS = (
     "name,path,bundle_identifier,bundle_name,bundle_short_version,"
     "bundle_version,bundle_package_type"
@@ -107,13 +117,27 @@ def _query(
         approval_scope="scheduled_inventory",
     )
     results = artifact.get("results") or []
-    if artifact.get("complete") is not True or len(results) != 1:
+    if len(results) != 1:
         raise EndpointInventoryError(
             "scheduled endpoint query did not complete",
             reason_code="incomplete_artifact",
         )
     result = results[0]
-    if result.get("status") != "ok" or result.get("truncated") is True:
+    status = str(result.get("status") or "invalid_response").strip().lower()
+    if status != "ok":
+        raise EndpointInventoryError(
+            "scheduled endpoint query returned a remote failure",
+            reason_code=REMOTE_FAILURE_CODES.get(
+                status,
+                "remote_invalid_response",
+            ),
+        )
+    if artifact.get("complete") is not True:
+        raise EndpointInventoryError(
+            "scheduled endpoint query did not complete",
+            reason_code="incomplete_artifact",
+        )
+    if result.get("truncated") is True:
         raise EndpointInventoryError(
             "scheduled endpoint query returned incomplete evidence",
             reason_code="incomplete_evidence",
