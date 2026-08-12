@@ -98,6 +98,43 @@ class EndpointSoftwareInventoryTests(unittest.TestCase):
         )
         self.assertTrue(any("ORDER BY path" in query for query in calls))
 
+    def test_query_preserves_safe_remote_failure_classification(self):
+        expected_codes = {
+            "timeout": "remote_timeout",
+            "error": "remote_error",
+            "invalid_response": "remote_invalid_response",
+            "cancelled": "remote_cancelled",
+        }
+        for status, expected_code in expected_codes.items():
+            artifact = {
+                "complete": False,
+                "results": [{
+                    "status": status,
+                    "truncated": False,
+                    "rows": [],
+                    "error": "raw remote detail must not cross this boundary",
+                }],
+            }
+            with (
+                self.subTest(status=status),
+                mock.patch.object(
+                    self.module,
+                    "collect_live_osquery",
+                    return_value=artifact,
+                ),
+                self.assertRaises(self.module.EndpointInventoryError) as raised,
+            ):
+                self.module._query(
+                    self.config(),
+                    "studio",
+                    "SELECT hostname FROM system_info LIMIT 1;",
+                    "Bind endpoint identity",
+                    "scheduled-endpoint-software-20260811",
+                )
+
+            self.assertEqual(raised.exception.reason_code, expected_code)
+            self.assertNotIn("raw remote detail", str(raised.exception))
+
     def test_cache_is_private_and_main_collector_accepts_live_provenance(self):
         value = {
             "schema": self.module.SCHEMA,
