@@ -90,7 +90,26 @@ class DashboardTimelineArchitectureTests(unittest.TestCase):
         signature = inspect.signature(self.timeline.alert_seen_timeline_html)
         self.assertEqual(list(signature.parameters), ["row"])
         self.assertEqual(str(signature.return_annotation), "str")
-        self.assertEqual(function_metrics("alert_seen_timeline_html"), (171, 45))
+        for name in (
+            "_timeline_event_times",
+            "_normalized_timeline_event",
+            "_normalized_timeline_events",
+            "_accumulate_timeline_bucket",
+            "_timeline_observation_rows",
+            "_timeline_buckets_and_rows",
+            "_timeline_bucket_marker",
+            "_timeline_markers",
+            "_timeline_clusters",
+            "_timeline_burst_band",
+            "_timeline_burst_bands",
+            "_timeline_seen_window",
+            "_timeline_pagination",
+            "_timeline_html",
+            "alert_seen_timeline_html",
+        ):
+            lines, complexity = function_metrics(name)
+            self.assertLessEqual(lines, 50)
+            self.assertLessEqual(complexity, 10)
         self.assertLessEqual(len(TIMELINE_PATH.read_text().splitlines()), 600)
         factory = (
             SCRIPTS / "dashboard_alert_report_factory.py"

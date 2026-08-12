@@ -38,7 +38,7 @@ dependency.
 | `scripts/dashboard_builder_*.py` | Bounded builder contract, settings, report/detail, executive/SIEM composition, remaining page composition, publication, and runtime layers. |
 | `scripts/dashboard_executive_metrics.py` | Bounded read-only Home metrics for exact hourly alert intake and enrichment-cache efficiency. |
 | `scripts/dashboard_metric_components.py` | Small tested render helpers for the SOC Alerts metric cards. |
-| `scripts/dashboard_timeline_components.py` | Grouped-observation timeline rendering, including single-observation reports. |
+| `scripts/dashboard_timeline_components.py` | Pure grouped-event normalization, observation rows, marker/burst geometry, seen-window pagination, and escaped timeline HTML composition. |
 | `scripts/dashboard_system_health_components.py` | System Health page markup, PCAP workflow panel styles, and browser refresh logic. |
 | `assets/` | Onion Sentinel, metric, privacy, brand, and dashboard CSS assets used by the dashboard. |
 
