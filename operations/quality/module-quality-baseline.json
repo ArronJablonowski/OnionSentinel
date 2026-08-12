@@ -126,14 +126,6 @@
     "n8n/bin/pcap_processor_storage.py::signature_context_for_request": {
       "max_lines": 114
     },
-    "n8n/bin/pcap_processor_tshark.py::run_tshark": {
-      "max_complexity": 49,
-      "max_lines": 541
-    },
-    "n8n/bin/pcap_processor_tshark.py::run_tshark.on_line": {
-      "max_complexity": 88,
-      "max_lines": 239
-    },
     "n8n/bin/pcap_processor_workflow.py::build_markdown": {
       "max_complexity": 18,
       "max_lines": 124

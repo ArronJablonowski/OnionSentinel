@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import ast
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,6 +18,14 @@ ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "n8n" / "bin"
 sys.path.insert(0, str(BIN))
 TSHARK = importlib.import_module("pcap_processor_tshark")
+OWNER_FILES = (
+    "pcap_processor_tshark_contract.py",
+    "pcap_processor_tshark_state.py",
+    "pcap_processor_tshark_parser.py",
+    "pcap_processor_tshark_projection.py",
+    "pcap_processor_tshark_workflow.py",
+    "pcap_processor_tshark.py",
+)
 
 FIELD_NAMES = (
     "frame_number", "timestamp_epoch", "frame_length", "protocol",
@@ -156,6 +166,108 @@ class PcapProcessorTsharkCharacterizationTests(unittest.TestCase):
         self.assertEqual(result["commands"][0]["returncode"], 124)
         self.assertEqual(result["commands"][0]["stderr"], "bounded timeout")
         self.assertEqual(result["coverage"]["per_file"][0]["pcap"], "failed.pcap")
+
+    def test_malformed_icmp_frame_length_remains_zero_not_terminal(self):
+        line = packet_line(
+            frame_number=1,
+            timestamp_epoch="2.5",
+            frame_length="not-a-number",
+            protocol="ICMP",
+            ipv4_src="192.0.2.1",
+            ipv4_dst="198.51.100.2",
+            icmp_type=8,
+            icmp_code=0,
+        )
+
+        def stream(command, on_line, **kwargs):
+            on_line(line)
+            return {
+                "ok": True,
+                "returncode": 0,
+                "stderr": "",
+                "command": command,
+                "line_count": 1,
+                "stream_bytes": len(line),
+            }
+
+        with (
+            mock.patch.object(TSHARK, "tool_path", return_value="/usr/bin/tshark"),
+            mock.patch.object(TSHARK, "stream_isolated_lines", side_effect=stream),
+        ):
+            result = TSHARK.run_tshark([Path("malformed.pcap")], Path("missing.mmdb"))
+
+        self.assertTrue(result["coverage"]["complete"])
+        self.assertEqual(result["icmp_size_review"]["maximum_frame_bytes"], 0)
+
+
+class PcapProcessorTsharkArchitectureTests(unittest.TestCase):
+    def test_facade_and_owners_obey_size_and_dependency_boundaries(self):
+        expected_imports = {
+            "pcap_processor_tshark_contract.py": set(),
+            "pcap_processor_tshark_state.py": set(),
+            "pcap_processor_tshark_parser.py": {
+                "pcap_processor_tshark_contract",
+                "pcap_processor_tshark_state",
+            },
+            "pcap_processor_tshark_projection.py": {
+                "pcap_processor_tshark_state",
+            },
+            "pcap_processor_tshark_workflow.py": {
+                "pcap_processor_tshark_contract",
+                "pcap_processor_tshark_parser",
+                "pcap_processor_tshark_projection",
+                "pcap_processor_tshark_state",
+            },
+            "pcap_processor_tshark.py": {
+                "pcap_processor_contract",
+                "pcap_processor_storage",
+                "pcap_processor_zeek",
+                "pcap_processor_tshark_workflow",
+            },
+        }
+        for name in OWNER_FILES:
+            with self.subTest(name=name):
+                source = (BIN / name).read_text(encoding="utf-8")
+                limit = 250 if name == "pcap_processor_tshark.py" else 800
+                self.assertLessEqual(len(source.splitlines()), limit)
+                imports = {
+                    node.module
+                    for node in ast.walk(ast.parse(source))
+                    if isinstance(node, ast.ImportFrom)
+                    and node.module
+                    and node.module.startswith("pcap_processor")
+                }
+                self.assertEqual(imports, expected_imports[name])
+
+    def test_tshark_owners_import_from_an_isolated_flat_dependency_unit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            for name in OWNER_FILES[:-1]:
+                (target / name).write_bytes((BIN / name).read_bytes())
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-c",
+                    (
+                        "import sys; sys.path.insert(0, sys.argv[1]); "
+                        "import pcap_processor_tshark_workflow as w; "
+                        "assert callable(w.run_tshark)"
+                    ),
+                    directory,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_mac_installer_copies_the_complete_tshark_dependency_unit(self):
+        installer = (BIN / "install-macstudio-stack.zsh").read_text(encoding="utf-8")
+        for name in OWNER_FILES:
+            with self.subTest(name=name):
+                self.assertIn(f"n8n/bin/{name}", installer)
 
 
 if __name__ == "__main__":

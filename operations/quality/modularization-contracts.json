@@ -1643,6 +1643,48 @@
       ]
     },
     {
+      "path": "n8n/bin/pcap_processor_tshark_contract.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_processor_tshark_contract.py",
+      "required_symbols": [
+        "FIELD_NAMES",
+        "TSHARK_FIELDS",
+        "tshark_command"
+      ]
+    },
+    {
+      "path": "n8n/bin/pcap_processor_tshark_state.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_processor_tshark_state.py",
+      "required_symbols": [
+        "TsharkState"
+      ]
+    },
+    {
+      "path": "n8n/bin/pcap_processor_tshark_parser.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_processor_tshark_parser.py",
+      "required_symbols": [
+        "parse_tshark_line"
+      ]
+    },
+    {
+      "path": "n8n/bin/pcap_processor_tshark_projection.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_processor_tshark_projection.py",
+      "required_symbols": [
+        "project_tshark_result"
+      ]
+    },
+    {
+      "path": "n8n/bin/pcap_processor_tshark_workflow.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_processor_tshark_workflow.py",
+      "required_symbols": [
+        "run_tshark"
+      ]
+    },
+    {
       "path": "n8n/bin/pcap_processor_tshark.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/pcap_processor_tshark.py",

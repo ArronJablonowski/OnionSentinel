@@ -2706,15 +2706,24 @@ capture, invokes a parser or shell, accepts a caller path, or reaches a network.
 facade. Configuration and shared bounded utilities live in
 `pcap_processor_contract.py`; database and artifact admission in
 `pcap_processor_storage.py`; payload-free Zeek projection and aggregation in
-`pcap_processor_zeek.py`; bounded packet/protocol analysis in
-`pcap_processor_tshark.py`; and report persistence, cleanup, and orchestration
-in `pcap_processor_workflow.py`.
+`pcap_processor_zeek.py`; and report persistence, cleanup, and orchestration in
+`pcap_processor_workflow.py`. `pcap_processor_tshark.py` is the stable TShark
+compatibility facade. Its immutable field and command schema lives in
+`pcap_processor_tshark_contract.py`; bounded mutable counters and reservoirs in
+`pcap_processor_tshark_state.py`; per-line protocol, ICMP, and marker
+classification in `pcap_processor_tshark_parser.py`; provenance-safe public and
+local-query evidence composition in `pcap_processor_tshark_projection.py`; and
+bounded subprocess streaming and per-file failure orchestration in
+`pcap_processor_tshark_workflow.py`.
 
 The facade forwards legacy runtime overrides to the owning layer before each
 compatibility call. Existing operator/test injection remains available without
 allowing lower layers to import the facade. The installer stages every module
 beside the entrypoint. Raw captures remain path-confined and read-only; derived
 claims retain tool, timestamp, direction, coverage, and cleanup provenance.
+The TShark owners receive subprocess, parsing, GeoIP, sanitization, and limit
+capabilities explicitly from the facade; they do not import the facade, open
+captures themselves, retain raw payloads, or acquire network authority.
 
 ## Detection Validation
 
