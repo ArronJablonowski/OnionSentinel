@@ -850,9 +850,11 @@ provenance object, early rejection returns that exact object, and rejection
 after a trusted binding returns the exact bound observation.
 
 `n8n/bin/harness_memory.py` owns the pure post-analysis memory-promotion
-decision. It preserves the existing unresolved-reference, corroborating-source,
-confidence, independent-review, shared-memory approval, and role-capability
-gates without gaining persistence or runtime credential access.
+decision. Named pure phases preserve guardrail-first refusal precedence,
+unresolved-reference and corroborating-source provenance, confidence,
+independent-review, shared-memory approval, and final role-capability gates.
+The module has no persistence, network, model, query, evidence-mutation, or
+runtime credential authority, and its former complexity allowance is retired.
 
 `n8n/bin/harness_run_completion.py` owns response-ledger recording, completion
 budget enforcement, post-commit memory/SLO audit events, and terminal success or

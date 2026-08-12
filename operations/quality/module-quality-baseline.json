@@ -42,9 +42,6 @@
     "n8n/bin/export-adjudicated-analysis-replays.py::replay_case": {
       "max_complexity": 28
     },
-    "n8n/bin/harness_memory.py::memory_promotion_decision": {
-      "max_complexity": 24
-    },
     "n8n/bin/harness_run_execution.py::HarnessRunExecution.model_call": {
       "max_complexity": 18,
       "max_lines": 123
