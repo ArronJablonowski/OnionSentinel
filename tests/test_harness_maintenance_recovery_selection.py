@@ -2,6 +2,7 @@
 """Characterize read-only stale harness reconciliation selection."""
 from __future__ import annotations
 
+import ast
 import datetime as dt
 import importlib.util
 import inspect
@@ -33,6 +34,30 @@ def load_recovery():
 
 
 RECOVERY = load_recovery()
+
+
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse(
+        (BIN / "harness_maintenance_recovery.py").read_text(encoding="utf-8")
+    )
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    complexity = 1
+    for node in ast.walk(target):
+        if node is target:
+            continue
+        if isinstance(node, (ast.If, ast.For, ast.While, ast.IfExp, ast.Assert)):
+            complexity += 1
+        elif isinstance(node, ast.Try):
+            complexity += len(node.handlers)
+        elif isinstance(node, ast.BoolOp):
+            complexity += max(0, len(node.values) - 1)
+        elif isinstance(node, ast.comprehension):
+            complexity += 1 + len(node.ifs)
+    return target.end_lineno - target.lineno + 1, complexity
 
 
 class FakeCursor:
@@ -87,6 +112,16 @@ class HarnessMaintenanceRecoverySelectionCharacterizationTests(unittest.TestCase
             "stale_running_seconds: 'int', limit: 'int') -> "
             "'list[dict[str, Any]]'",
         )
+
+    def test_changed_selection_phases_stay_within_architecture_budget(self) -> None:
+        for name in (
+            "select_stale_running_reconciliations",
+            "_stale_running_candidates",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
 
     def test_success_preserves_connection_query_match_and_close_order(self) -> None:
         lifecycle: list[Any] = []

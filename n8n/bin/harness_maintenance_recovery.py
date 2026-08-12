@@ -55,19 +55,11 @@ def select_stale_running_reconciliations(
                 raise MaintenanceError(
                     "alert-store SQLite is missing durable_jobs"
                 )
-            candidates = harness_connection.execute(
-                """
-                SELECT run_id, correlation_id, case_id, role, started_at,
-                       updated_at
-                FROM harness_runs
-                WHERE status = 'running'
-                  AND role IN ('soc-analyst', 'incident-responder')
-                  AND datetime(replace(updated_at, '  ', 'T')) <= datetime(?)
-                ORDER BY datetime(replace(updated_at, '  ', 'T')), run_id
-                LIMIT ?
-                """,
-                (cutoff, limit),
-            ).fetchall()
+            candidates = _stale_running_candidates(
+                harness_connection,
+                cutoff,
+                limit,
+            )
             return _match_durable_jobs(
                 harness_connection,
                 alert_connection,
@@ -77,6 +69,26 @@ def select_stale_running_reconciliations(
         raise MaintenanceError(
             f"stale harness reconciliation query failed: {exc}"
         ) from None
+
+
+def _stale_running_candidates(
+    harness_connection: sqlite3.Connection,
+    cutoff: str,
+    limit: int,
+) -> list[sqlite3.Row]:
+    return harness_connection.execute(
+        """
+        SELECT run_id, correlation_id, case_id, role, started_at,
+               updated_at
+        FROM harness_runs
+        WHERE status = 'running'
+          AND role IN ('soc-analyst', 'incident-responder')
+          AND datetime(replace(updated_at, '  ', 'T')) <= datetime(?)
+        ORDER BY datetime(replace(updated_at, '  ', 'T')), run_id
+        LIMIT ?
+        """,
+        (cutoff, limit),
+    ).fetchall()
 
 
 def _match_durable_jobs(
