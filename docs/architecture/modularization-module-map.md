@@ -1994,11 +1994,17 @@ response facades.
 `portal_cti_program_service.py` owns CTI workspace request orchestration:
 route acceptance, same-origin-before-Administration authorization ordering,
 JSON parsing, conflict/validation/storage error mapping, success-only audit
-triggering, and public response projection. `cti_program.py` remains the sole
-owner of workspace schema validation, optimistic revisions, credential-reference
-policy, atomic persistence, and public redaction. `report_portal.py` retains the
-concrete browser-origin and Administration-session checks, runtime storage
-configuration, HTTP serialization, security headers, and socket writes.
+triggering, and public response projection. `cti_program.py` is the exact legacy
+namespace facade: `cti_program_contract.py` owns schema constants, governed
+defaults, limits, the process lock, and typed errors;
+`cti_program_validation.py` owns pure workspace normalization, URL restrictions,
+and credential-reference-only policy; and `cti_program_store.py` owns guarded
+regular-file reads, optimistic revisions, owner-only atomic persistence,
+metadata-only digests, and public redaction. The dependency direction is
+contract -> validation -> store -> facade; owners do not import the facade.
+`report_portal.py` retains the concrete browser-origin and Administration-session
+checks, runtime storage configuration, HTTP serialization, security headers,
+and socket writes.
 
 `portal_soc_settings_write.py` owns the classified prompt, AI-model, and
 agent-model settings write families; legacy empty-object JSON fallback;

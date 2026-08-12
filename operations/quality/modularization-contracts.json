@@ -3003,6 +3003,57 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/cti_program.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/cti_program.py",
+      "required_symbols": [
+        "CTIProgramError",
+        "CTIProgramConflict",
+        "normalize_program",
+        "load_program",
+        "save_program",
+        "program_digest",
+        "public_response"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/cti_program_contract.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/cti_program_contract.py",
+      "required_symbols": [
+        "SCHEMA_VERSION",
+        "PROGRAM_LOCK",
+        "DEFAULT_PROGRAM_FILE",
+        "DEFAULT_SOURCES",
+        "DEFAULT_TECHNOLOGIES",
+        "_default_program"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/cti_program_validation.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/cti_program_validation.py",
+      "required_symbols": [
+        "_endpoint",
+        "_secret_reference",
+        "_normalize_source",
+        "_normalize_technology",
+        "normalize_program"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/cti_program_store.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/cti_program_store.py",
+      "required_symbols": [
+        "_safe_metadata",
+        "load_program",
+        "save_program",
+        "program_digest",
+        "public_response"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_soc_settings_write.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_settings_write.py",

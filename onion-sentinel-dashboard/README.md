@@ -17,6 +17,10 @@ dependency.
 | `portal_runtime_config.py` | Exact thin compatibility facade for the report portal's historical runtime namespace. |
 | `portal_runtime_*_dependencies.py` | Ordered standard, settings, admin/operational, and SOC/incident dependency manifests and legacy aliases. |
 | `portal_runtime_constants.py` | Host paths, credential locations, bounded caches/locks, limits, and service/action policy constants. |
+| `cti_program.py` | Exact compatibility facade for the owner-managed CTI workspace namespace. |
+| `cti_program_contract.py` | CTI schema, limits, defaults, lock, and typed validation/conflict errors. |
+| `cti_program_validation.py` | Pure CTI normalization, URL restrictions, and credential-reference-only policy. |
+| `cti_program_store.py` | Guarded reads, optimistic revisions, owner-only atomic persistence, digesting, and public projection. |
 | `software_inventory.py` | Thin compatibility facade for the collector-produced Software Inventory snapshot. |
 | `software_inventory_assets.py` | Complete-inventory asset labeling and fail-closed endpoint OS correlation policy. |
 | `software_inventory_query.py` | Fixed filter contract, freshness classification, public evidence projection, and bounded error payloads. |
