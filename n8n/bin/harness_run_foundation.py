@@ -18,6 +18,7 @@ from harness_policy import (
     query_backend_capability,
     query_backend_is_approval_gated,
 )
+from harness_run_model_preflight import preflight_model_call as _preflight_model_call
 from harness_store_foundation import _connect
 
 
@@ -178,99 +179,18 @@ class HarnessRunFoundation:
         purpose: str,
         independent_review: bool = False,
     ) -> None:
-        call_id = _valid_identifier(call_id, "model call_id", 128)
-        requested_route = _model_route(
-            requested_route,
-            "requested model route",
-        )
-        expected_route = (
-            self.envelope.assigned_reviewer_route
-            if independent_review
-            else self.envelope.assigned_route
-        )
-        route_allowed = (
-            bool(expected_route) and requested_route == expected_route
-        )
-        route_reason = (
-            "requested route matches the immutable reviewer assignment"
-            if route_allowed and independent_review
-            else "requested route matches the immutable primary assignment"
-            if route_allowed
-            else "no reviewer route was assigned to this run"
-            if independent_review and not expected_route
-            else "no primary route was assigned to this run"
-            if not expected_route
-            else "requested route does not match the immutable run assignment"
-        )
-        model_stage = (
-            Stage.INDEPENDENT_REVIEW.value
-            if independent_review
-            else Stage.PRIMARY_ANALYSIS.value
-        )
-        self.store.append_event(
-            self.run_id,
-            "policy.model-route",
-            model_stage,
-            {
-                "call_id": call_id,
-                "purpose": _redacted_string(purpose, 160),
-                "requested_route": requested_route,
-                "expected_route": expected_route,
-                "independent_review": independent_review,
-                "allowed": route_allowed,
-                "reason": route_reason,
-                "policy_mode": self.policy.mode,
-            },
-            idempotency_key=f"policy.model-route:{call_id}",
-        )
-        if not route_allowed and self.policy.mode == "enforce":
-            raise HarnessPolicyError(route_reason)
-        prompt_bytes = len(canonical_json(input_value).encode("utf-8"))
-        evidence_rows = approximate_evidence_rows(input_value)
-        elapsed_seconds = self._elapsed_seconds()
-        violations: list[str] = []
-        if prompt_bytes > self.policy.budgets["max_prompt_evidence_bytes"]:
-            violations.append("max_prompt_evidence_bytes")
-        if evidence_rows > self.policy.budgets["max_prompt_evidence_rows"]:
-            violations.append("max_prompt_evidence_rows")
-        if elapsed_seconds > self.policy.budgets["max_run_seconds"]:
-            violations.append("max_run_seconds")
-        reservation = self.store.reserve_budget_operation(
-            self.run_id,
-            reservation_type="model-call",
-            reservation_id=call_id,
-            amount=1,
-            max_total=self.policy.budgets["max_model_calls"],
-            max_operations=self.policy.budgets["max_model_calls"],
-            enforce=self.policy.mode == "enforce",
-            preexisting_violations=violations,
-        )
-        violations = list(reservation["violations"])
-        if reservation["reserved"]:
-            self._model_calls = max(
-                self._model_calls,
-                int(reservation["total"]),
-            )
-        next_model_call = int(reservation["operation_count"])
-        self._enforce_budget(
-            operation_id=f"model:{call_id}",
-            operation="model call",
-            stage=model_stage,
-            observed={
-                "call_id": call_id,
-                "purpose": _redacted_string(purpose, 160),
-                "requested_route": requested_route,
-                "expected_route": expected_route,
-                "route_allowed": route_allowed,
-                "independent_review": independent_review,
-                "next_model_call": next_model_call,
-                "prompt_bytes": prompt_bytes,
-                "approximate_evidence_rows": evidence_rows,
-                "reserved": bool(
-                    reservation["reserved"]
-                ),
-            },
-            violations=violations,
+        _preflight_model_call(
+            self,
+            call_id=call_id,
+            input_value=input_value,
+            requested_route=requested_route,
+            purpose=purpose,
+            independent_review=independent_review,
+            valid_identifier=_valid_identifier,
+            model_route=_model_route,
+            redacted_string=_redacted_string,
+            canonical_json=canonical_json,
+            approximate_evidence_rows=approximate_evidence_rows,
         )
 
     def authorize_tool(

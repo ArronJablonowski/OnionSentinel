@@ -894,11 +894,15 @@ hypothesis-manifest and payload digests, event-chain continuity, constant-time
 digest comparisons, and verification-before-export behavior.
 
 `n8n/bin/harness_run_foundation.py` owns durable run identity and counters,
-elapsed-time enforcement, prompt-evidence cataloguing, model preflight,
-role/capability tool authorization, and atomic query-batch budget reservation.
-It receives the store as a port and retains shadow-vs-enforce semantics,
-approval gates, exact route binding, collision-safe reservations, and bounded
-prompt evidence accounting.
+elapsed-time enforcement, prompt-evidence cataloguing, role/capability tool
+authorization, and atomic query-batch budget reservation. Its stable model
+preflight method delegates to `harness_run_model_preflight.py`, which owns exact
+immutable route admission, bounded prompt measurement, atomic model-call
+reservation, and the corresponding policy events. The inward owner receives the
+run and helper bindings as ports and never imports the facade. Shadow-vs-enforce
+semantics, refusal-before-measurement ordering, exact route binding,
+collision-safe reservations, and bounded prompt evidence accounting remain
+unchanged.
 
 `n8n/bin/harness_run_execution.py` is the stable mixin facade for
 phase-to-stage projection and delegates to two inward owners.

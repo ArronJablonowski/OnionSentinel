@@ -14,6 +14,7 @@ if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
 
 FOUNDATION = importlib.import_module("harness_run_foundation")
+PREFLIGHT = importlib.import_module("harness_run_model_preflight")
 
 
 class FakeStore:
@@ -69,6 +70,15 @@ class SyntheticFoundation(FOUNDATION.HarnessRunFoundation):
 
 
 class HarnessModelPreflightArchitectureTests(unittest.TestCase):
+    def test_inward_owner_does_not_import_facade(self) -> None:
+        source = inspect.getsource(PREFLIGHT)
+        self.assertNotIn("import harness_run_foundation", source)
+        self.assertNotIn("from harness_run_foundation", source)
+        facade_source = inspect.getsource(
+            FOUNDATION.HarnessRunFoundation.preflight_model_call
+        )
+        self.assertLessEqual(len(facade_source.splitlines()), 30)
+
     def test_stable_surface_and_signatures(self) -> None:
         self.assertEqual(
             str(

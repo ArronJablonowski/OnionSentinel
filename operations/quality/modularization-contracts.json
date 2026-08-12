@@ -2665,6 +2665,14 @@
       ]
     },
     {
+      "path": "n8n/bin/harness_run_model_preflight.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_run_model_preflight.py",
+      "required_symbols": [
+        "preflight_model_call"
+      ]
+    },
+    {
       "path": "n8n/bin/harness_run_query_execution.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/harness_run_query_execution.py",
