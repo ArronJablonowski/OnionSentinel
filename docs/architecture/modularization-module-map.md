@@ -832,12 +832,18 @@ it has no database lifecycle, network, model, or query execution authority.
 Unchanged legacy complexity allowances for skill attestation and job-envelope
 parsing move exactly to this owner and remain ratcheting.
 
-`n8n/bin/harness_query_contract.py` owns bounded returned-count observation,
-recursive truncation detection, and exact per-query status resolution from a
-Security Onion batch. Individual status is admitted only when outer response,
-read-only controls, query ordering, audit ordering, query/result digests,
-semantic validity, timeout state, and successful shard accounting agree. The
-full outer result remains the durable provenance object.
+`n8n/bin/harness_query_contract.py` is the stable facade for query-result
+observation and exact per-query status resolution from a Security Onion batch.
+`harness_query_observation.py` owns bounded returned-count and recursive
+truncation observation. `harness_query_binding_envelope.py` owns outer-response,
+read-only-control, query-order, and audit-order admission;
+`harness_query_binding_validation.py` owns constant-time query/result digest,
+semantic-validity, timeout-state, and successful-shard checks; and
+`harness_query_binding.py` composes those pure decisions. Dependencies flow
+from the facade to the binding/observation owners and inward to harness policy;
+owners never import the facade. The full outer result remains the durable
+provenance object, early rejection returns that exact object, and rejection
+after a trusted binding returns the exact bound observation.
 
 `n8n/bin/harness_memory.py` owns the pure post-analysis memory-promotion
 decision. It preserves the existing unresolved-reference, corroborating-source,

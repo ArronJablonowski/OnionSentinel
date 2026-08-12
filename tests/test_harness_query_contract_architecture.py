@@ -2,9 +2,12 @@
 """Characterization and architecture gates for harness query binding."""
 from __future__ import annotations
 
+import ast
 import copy
 import inspect
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -29,6 +32,13 @@ EXPECTED_SIGNATURES = {
     "observed_truncation": "(value: 'Any', *, depth: 'int' = 0) -> 'bool'",
     "resolve_query_binding": "(result: 'Mapping[str, Any]', query_id: 'str') -> 'tuple[str, Any]'",
 }
+
+OWNER_MODULES = (
+    "harness_query_observation.py",
+    "harness_query_binding_envelope.py",
+    "harness_query_binding_validation.py",
+    "harness_query_binding.py",
+)
 
 
 def batch_result(*, outer_status: str = "partial") -> dict:
@@ -236,6 +246,50 @@ class HarnessQueryContractCharacterizationTests(unittest.TestCase):
         self.assertIs(
             observation["result"], failure["evidence"]["results"][1]
         )
+
+    def test_facade_and_owners_remain_bounded_and_acyclic(self) -> None:
+        facade = BIN / "harness_query_contract.py"
+        self.assertLessEqual(len(facade.read_text(encoding="utf-8").splitlines()), 250)
+        for name in OWNER_MODULES:
+            path = BIN / name
+            self.assertLess(len(path.read_text(encoding="utf-8").splitlines()), 800)
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            imported = {
+                node.module
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.module
+            }
+            self.assertNotIn("harness_query_contract", imported)
+
+    def test_facade_imports_from_an_isolated_flat_bin(self) -> None:
+        sources = [
+            *sorted(BIN.glob("harness_policy*.py")),
+            *(BIN / name for name in OWNER_MODULES),
+            BIN / "harness_query_contract.py",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for source in sources:
+                (root / source.name).write_bytes(source.read_bytes())
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-c",
+                    (
+                        "import sys; sys.path.insert(0, sys.argv[1]); "
+                        "import harness_query_contract as module; "
+                        "assert callable(module.resolve_query_binding)"
+                    ),
+                    directory,
+                ],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

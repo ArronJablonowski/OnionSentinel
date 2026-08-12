@@ -2590,6 +2590,55 @@
       ]
     },
     {
+      "path": "n8n/bin/harness_query_contract.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_query_contract.py",
+      "required_symbols": [
+        "observed_returned_count",
+        "observed_truncation",
+        "resolve_query_binding"
+      ]
+    },
+    {
+      "path": "n8n/bin/harness_query_observation.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_query_observation.py",
+      "required_symbols": [
+        "RETURNED_COUNT_KEYS",
+        "observed_returned_count",
+        "observed_truncation"
+      ]
+    },
+    {
+      "path": "n8n/bin/harness_query_binding_envelope.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_query_binding_envelope.py",
+      "required_symbols": [
+        "bound_query_objects",
+        "outer_query_status"
+      ]
+    },
+    {
+      "path": "n8n/bin/harness_query_binding_validation.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_query_binding_validation.py",
+      "required_symbols": [
+        "QUERY_SUCCESS_STATUSES",
+        "SECURITY_ONION_QUERY_STATUSES",
+        "semantic_binding_is_valid",
+        "successful_shards_are_valid",
+        "validated_nested_status"
+      ]
+    },
+    {
+      "path": "n8n/bin/harness_query_binding.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_query_binding.py",
+      "required_symbols": [
+        "resolve_query_binding"
+      ]
+    },
+    {
       "path": "n8n/bin/build-ai-investigation-prompt.py",
       "deployment": "versioned-query-runtime",
       "runtime_path": "$STACK_DIR/bin/build-ai-investigation-prompt.py",

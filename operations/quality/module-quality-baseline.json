@@ -52,10 +52,6 @@
     "n8n/bin/harness_memory.py::memory_promotion_decision": {
       "max_complexity": 24
     },
-    "n8n/bin/harness_query_contract.py::resolve_query_binding": {
-      "max_complexity": 84,
-      "max_lines": 183
-    },
     "n8n/bin/harness_run_execution.py::HarnessRunExecution.model_call": {
       "max_complexity": 18,
       "max_lines": 123
