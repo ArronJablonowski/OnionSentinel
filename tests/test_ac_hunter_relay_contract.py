@@ -2,7 +2,9 @@
 """Security and routing contracts for the restricted AC Hunter relay."""
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import inspect
 import json
 import subprocess
 import sys
@@ -63,6 +65,21 @@ class AcHunterRelayContractTests(unittest.TestCase):
             )
         )
         return request.path
+
+    def relay_response(self, **overrides: object) -> dict[str, object]:
+        response: dict[str, object] = {
+            "contract": self.contract.CONTRACT,
+            "request_id": "a" * 32,
+            "ok": True,
+            "status": 200,
+            "content_type": "application/json",
+            "headers": {"location": "", "set_cookie": []},
+            "body": {"data": []},
+            "duration_ms": 15,
+            "error": "",
+        }
+        response.update(overrides)
+        return response
 
     def test_all_data_operations_compile_to_fixed_ac_hunter_paths(self) -> None:
         expected = {
@@ -232,20 +249,78 @@ class AcHunterRelayContractTests(unittest.TestCase):
                 )
             )
 
+    def test_login_encoding_optional_order_and_request_shape_are_exact(self) -> None:
+        cases = (
+            (
+                {
+                    "email": "service@example.invalid",
+                    "password": "opaque value",
+                    "csrf_token": "csrf/value",
+                    "next": "/jwt/json",
+                    "remember": True,
+                },
+                b"email=service%40example.invalid&password=opaque+value&next=%2Fjwt%2Fjson&submit=Login&csrf_token=csrf%2Fvalue&remember=y",
+            ),
+            (
+                {
+                    "email": "service@example.invalid",
+                    "password": "opaque value",
+                },
+                b"email=service%40example.invalid&password=opaque+value&next=&submit=Login",
+            ),
+        )
+        for body, expected in cases:
+            with self.subTest(body=body):
+                _request_id, request = self.contract.compile_request(
+                    self.envelope(
+                        "login",
+                        headers={"cookie": "session=synthetic"},
+                        body=body,
+                    )
+                )
+                self.assertEqual(
+                    request,
+                    self.contract.UpstreamRequest(
+                        method="POST",
+                        path="/auth/login",
+                        headers={
+                            "Accept": "text/html, application/xhtml+xml;q=0.9",
+                            "User-Agent": "Onion-Sentinel-AC-Hunter/1.0",
+                            "Cookie": "session=synthetic",
+                            "Content-Type": "application/x-www-form-urlencoded",
+                        },
+                        body=expected,
+                        response_kind="none",
+                        allowed_statuses=(302, 303),
+                    ),
+                )
+
+    def test_login_validation_errors_and_precedence_are_exact(self) -> None:
+        base = {
+            "email": "service@example.invalid",
+            "password": "opaque",
+        }
+        cases = (
+            ({**base, "extra": True}, "body contains unsupported fields: extra"),
+            ({**base, "email": "invalid"}, "email is invalid"),
+            ({**base, "password": ""}, "password is empty or exceeds its byte limit"),
+            ({**base, "next": "/admin"}, "next is outside the AC Hunter auth flow"),
+            ({**base, "remember": 1}, "remember must be boolean"),
+            (
+                {"email": "invalid", "password": "", "remember": 1},
+                "email is invalid",
+            ),
+        )
+        for body, expected in cases:
+            with self.subTest(body=body):
+                with self.assertRaises(self.contract.AcHunterContractError) as caught:
+                    self.contract.compile_request(self.envelope("login", body=body))
+                self.assertEqual(str(caught.exception), expected)
+
     def test_relay_response_is_bound_to_request_and_has_bounded_shape(
         self,
     ) -> None:
-        payload = {
-            "contract": self.contract.CONTRACT,
-            "request_id": "a" * 32,
-            "ok": True,
-            "status": 200,
-            "content_type": "application/json",
-            "headers": {"location": "", "set_cookie": []},
-            "body": {"data": []},
-            "duration_ms": 15,
-            "error": "",
-        }
+        payload = self.relay_response()
         self.assertIs(
             self.contract.validate_relay_response(payload, "a" * 32),
             payload,
@@ -256,6 +331,74 @@ class AcHunterRelayContractTests(unittest.TestCase):
                 mismatched,
                 "a" * 32,
             )
+
+    def test_relay_response_validation_errors_and_precedence_are_exact(self) -> None:
+        cases = (
+            ({"extra": True}, "relay response contains unsupported fields: extra"),
+            ({"request_id": "b" * 32}, "relay response binding is invalid"),
+            ({"ok": 1}, "relay response ok must be boolean"),
+            ({"status": True}, "relay response status is invalid"),
+            ({"status": 600}, "relay response status is invalid"),
+            ({"duration_ms": False}, "relay response duration is invalid"),
+            ({"duration_ms": 300001}, "relay response duration is invalid"),
+            ({"headers": []}, "relay response headers must be an object"),
+            (
+                {"headers": {"location": "", "set_cookie": [], "extra": 1}},
+                "relay response headers contains unsupported fields: extra",
+            ),
+            (
+                {"headers": {"location": "bad\nvalue", "set_cookie": []}},
+                "relay response location contains a forbidden control character",
+            ),
+            (
+                {"headers": {"location": "", "set_cookie": ["x"] * 9}},
+                "relay response cookie list is invalid",
+            ),
+            (
+                {"headers": {"location": "", "set_cookie": [""]}},
+                "relay response cookie is empty or exceeds its byte limit",
+            ),
+            ({"error": "bad\rvalue"}, "relay response error contains a forbidden control character"),
+            (
+                {"content_type": "x" * 257},
+                "relay response content type is empty or exceeds its byte limit",
+            ),
+            (
+                {"ok": 1, "status": 600, "duration_ms": 300001},
+                "relay response ok must be boolean",
+            ),
+        )
+        for overrides, expected in cases:
+            with self.subTest(overrides=overrides):
+                payload = self.relay_response(**overrides)
+                with self.assertRaises(self.contract.AcHunterContractError) as caught:
+                    self.contract.validate_relay_response(payload, "a" * 32)
+                self.assertEqual(str(caught.exception), expected)
+
+    def test_contract_namespace_and_public_signatures_are_exact(self) -> None:
+        names = sorted(
+            name for name in dir(self.contract) if not name.startswith("__")
+        )
+        encoded = json.dumps(
+            names,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        self.assertEqual(
+            (len(names), hashlib.sha256(encoded).hexdigest()),
+            (46, "39d83b34d47fdfb7ac7b803a78d1e18e2d80ac4da24ccf22fc606847b238a7bf"),
+        )
+        signatures = {
+            name: str(inspect.signature(getattr(self.contract, name)))
+            for name in ("compile_request", "validate_relay_response")
+        }
+        self.assertEqual(
+            signatures,
+            {
+                "compile_request": "(payload: 'object') -> 'tuple[str, UpstreamRequest]'",
+                "validate_relay_response": "(payload: 'object', request_id: 'str') -> 'dict[str, Any]'",
+            },
+        )
 
     def test_broker_source_has_one_fixed_upstream_and_no_request_logging(
         self,
