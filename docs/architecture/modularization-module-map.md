@@ -2902,6 +2902,10 @@ Private time-coverage phases separately collect accepted row timestamps,
 project the exact fallback hour, partition complete four-day coverage, or make
 the bounded middle evidence gap explicit through first-day/latest-three-day
 windows. The Relay request order and public coverage notes remain stable.
+Observable extraction keeps reviewed ECS paths as declarative private policy.
+Private phases preserve stable alert-store endpoint priority, source-document
+order, address classification, sensor-host exclusions, supplemental context,
+and the ordered per-kind/global budget before any Relay query is authorized.
 
 ### Operational SLO evaluator
 

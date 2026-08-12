@@ -58,6 +58,25 @@ ALERT_INDEX_RE = re.compile(
     r"|\.ds-logs-(?:suricata\.alerts|detections\.alerts)-so-\d{4}\.\d{2}\.\d{2}-\d{6}"
     r")$"
 )
+__PRIMARY_IP_PATHS = ("source.ip", "destination.ip", "client.ip", "server.ip")
+__PRIMARY_ADDRESS_PATHS = (
+    "source.address", "destination.address", "client.address", "server.address"
+)
+__SUPPLEMENTAL_IP_PATHS = ("dns.resolved_ip", "related.ip")
+__DOMAIN_PATHS = (
+    "dns.question.name", "dns.query.name", "url.domain", "tls.server.name",
+    "ssl.server_name", "http.virtual_host", "quic.server_name", "source.domain",
+    "destination.domain", "client.domain", "server.domain",
+)
+__HOST_PATHS = (
+    "host.hostname", "host.name", "host.id", "agent.id", "agent.name",
+    "related.hosts",
+)
+__USER_PATHS = (
+    "user.name", "source.user.name", "destination.user.name",
+    "client.user.name", "user.id", "related.user",
+)
+__OBSERVABLE_KINDS = ("ips", "domains", "hosts", "users")
 
 
 def parse_args() -> argparse.Namespace:
@@ -278,97 +297,71 @@ def network_sensor_alert(
     )
 
 
-def observables(grouped: list[sqlite3.Row]) -> dict[str, list[str]]:
-    """Derive bounded pivots from explicit alert-source ECS paths.
-
-    Alert JSON can contain nested external-intelligence provider responses.
-    Those values describe enrichment about an indicator; they are not
-    observables seen in the selected detection and must never become SIEM
-    query pivots. Collector/sensor host metadata is likewise excluded from
-    network-sensor detections.
-    """
-    found = {"ips": [], "domains": [], "hosts": [], "users": []}
-    primary_ip_paths = (
-        "source.ip",
-        "destination.ip",
-        "client.ip",
-        "server.ip",
-    )
-    primary_address_paths = (
-        "source.address",
-        "destination.address",
-        "client.address",
-        "server.address",
-    )
-    supplemental_ip_paths = (
-        "dns.resolved_ip",
-        "related.ip",
-    )
-    domain_paths = (
-        "dns.question.name",
-        "dns.query.name",
-        "url.domain",
-        "tls.server.name",
-        "ssl.server_name",
-        "http.virtual_host",
-        "quic.server_name",
-        "source.domain",
-        "destination.domain",
-        "client.domain",
-        "server.domain",
-    )
-    host_paths = (
-        "host.hostname",
-        "host.name",
-        "host.id",
-        "agent.id",
-        "agent.name",
-        "related.hosts",
-    )
-    user_paths = (
-        "user.name",
-        "source.user.name",
-        "destination.user.name",
-        "client.user.name",
-        "user.id",
-        "related.user",
-    )
-
-    # Stable alert-store endpoints are the highest-confidence pivots, so
-    # collect them for the complete duplicate group before any optional ECS
-    # context can consume a category limit.
+def __collect_stable_endpoints(
+    found: dict[str, list[str]],
+    grouped: list[sqlite3.Row],
+) -> None:
     for item in grouped:
         keys = set(item.keys())
-        add_unique(found["ips"], item["source_ip"] if "source_ip" in keys else None, valid_ip)
-        add_unique(found["ips"], item["destination_ip"] if "destination_ip" in keys else None, valid_ip)
+        add_unique(
+            found["ips"],
+            item["source_ip"] if "source_ip" in keys else None,
+            valid_ip,
+        )
+        add_unique(
+            found["ips"],
+            item["destination_ip"] if "destination_ip" in keys else None,
+            valid_ip,
+        )
 
-    parsed_rows = [
+
+def __parsed_observable_rows(
+    grouped: list[sqlite3.Row],
+) -> list[tuple[list[dict], sqlite3.Row]]:
+    return [
         (
             parsed_observable_documents(item),
             item,
         )
         for item in grouped
     ]
-    # Preserve explicit event endpoints before supplemental related/dns values
-    # can consume the per-category bound.
-    for documents, _item in parsed_rows:
-        for document in documents:
-            for path in primary_ip_paths:
-                add_values(
-                    found["ips"],
-                    nested_value(document, path),
-                    valid_ip,
-                )
 
-    # ECS address fields can contain either an IP address or a domain name.
+
+def __add_document_paths(
+    target: list[str],
+    document: dict,
+    paths: tuple[str, ...],
+    validator,
+) -> None:
+    for path in paths:
+        add_values(target, nested_value(document, path), validator)
+
+
+def __collect_primary_observables(
+    found: dict[str, list[str]],
+    parsed_rows: list[tuple[list[dict], sqlite3.Row]],
+) -> None:
     for documents, _item in parsed_rows:
         for document in documents:
-            for path in primary_address_paths:
+            __add_document_paths(
+                found["ips"],
+                document,
+                __PRIMARY_IP_PATHS,
+                valid_ip,
+            )
+    for documents, _item in parsed_rows:
+        for document in documents:
+            for path in __PRIMARY_ADDRESS_PATHS:
                 add_address_values(
                     found,
                     nested_value(document, path),
                 )
 
+
+def __collect_supplemental_observables(
+    found: dict[str, list[str]],
+    parsed_rows: list[tuple[list[dict], sqlite3.Row]],
+) -> None:
     for documents, item in parsed_rows:
         sensor_alert = network_sensor_alert(item, documents)
         for document in documents:
@@ -378,35 +371,39 @@ def observables(grouped: list[sqlite3.Row]) -> dict[str, list[str]]:
                     nested_value(document, "host.ip"),
                     valid_ip,
                 )
-            for path in supplemental_ip_paths:
-                add_values(
-                    found["ips"],
-                    nested_value(document, path),
-                    valid_ip,
-                )
-            for path in domain_paths:
-                add_values(
-                    found["domains"],
-                    nested_value(document, path),
-                    valid_domain,
-                )
+            __add_document_paths(
+                found["ips"],
+                document,
+                __SUPPLEMENTAL_IP_PATHS,
+                valid_ip,
+            )
+            __add_document_paths(
+                found["domains"],
+                document,
+                __DOMAIN_PATHS,
+                valid_domain,
+            )
             if not sensor_alert:
-                for path in host_paths:
-                    add_values(
-                        found["hosts"],
-                        nested_value(document, path),
-                        valid_atom,
-                    )
-            for path in user_paths:
-                add_values(
-                    found["users"],
-                    nested_value(document, path),
+                __add_document_paths(
+                    found["hosts"],
+                    document,
+                    __HOST_PATHS,
                     valid_atom,
                 )
+            __add_document_paths(
+                    found["users"],
+                    document,
+                    __USER_PATHS,
+                    valid_atom,
+            )
 
+
+def __bounded_observables(
+    found: dict[str, list[str]],
+) -> dict[str, list[str]]:
     bounded: dict[str, list[str]] = {}
     remaining = MAX_TOTAL_OBSERVABLES
-    for kind in ("ips", "domains", "hosts", "users"):
+    for kind in __OBSERVABLE_KINDS:
         category_limit = min(
             remaining,
             MAX_OBSERVABLES_BY_KIND[kind],
@@ -414,6 +411,16 @@ def observables(grouped: list[sqlite3.Row]) -> dict[str, list[str]]:
         bounded[kind] = found[kind][:category_limit]
         remaining -= len(bounded[kind])
     return bounded
+
+
+def observables(grouped: list[sqlite3.Row]) -> dict[str, list[str]]:
+    """Derive bounded pivots from explicit alert-source ECS paths only."""
+    found = {kind: [] for kind in __OBSERVABLE_KINDS}
+    __collect_stable_endpoints(found, grouped)
+    parsed_rows = __parsed_observable_rows(grouped)
+    __collect_primary_observables(found, parsed_rows)
+    __collect_supplemental_observables(found, parsed_rows)
+    return __bounded_observables(found)
 
 
 def __evidence_timestamps(grouped: list[sqlite3.Row]) -> list[dt.datetime]:
