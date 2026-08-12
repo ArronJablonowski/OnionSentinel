@@ -2282,6 +2282,9 @@ Current owner:
 projection now have dedicated owners; `dashboard_builder_pages.py` retains the
 historical flat compatibility surface for the remaining page composition.
 Every builder layer is below 600 lines and is installed beside the entrypoint.
+The publication owner keeps ordered static-page dispatch in bounded internal
+helpers; double-private helper names are excluded from the composed runtime so
+the historical flat namespace and late-bound override surface remain exact.
 
 | Boundary | Responsibilities |
 | --- | --- |

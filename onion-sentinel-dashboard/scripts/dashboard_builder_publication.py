@@ -28,7 +28,10 @@ def copy_static_assets() -> None:
     publish_static_assets(_publication_paths())
 
 
-def _static_page_content(page_key: str, reports: list[AlertReport]) -> tuple[str, object | None]:
+def __leading_static_page_content(
+    page_key: str,
+    reports: list[AlertReport],
+) -> tuple[str, object | None] | None:
     if page_key == 'home':
         return executive_home_section(reports), inject_executive_home_assets
     if page_key == 'flow':
@@ -45,6 +48,13 @@ def _static_page_content(page_key: str, reports: list[AlertReport]) -> tuple[str
         return ac_hunter_page_section(), None
     if page_key == 'settings':
         return settings_page_section(), inject_settings_assets
+    return None
+
+
+def _static_page_content(page_key: str, reports: list[AlertReport]) -> tuple[str, object | None]:
+    leading = __leading_static_page_content(page_key, reports)
+    if leading is not None:
+        return leading
     if page_key == 'siem_engineering':
         return siem_engineering_page_section(reports), inject_siem_engineering_assets
     if page_key == 'cyber_threat_intel':
