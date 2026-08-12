@@ -2762,6 +2762,12 @@ validation are isolated in private helpers while the operation allowlist,
 encoded request bytes, validation precedence, bounds, errors, and public
 contract surface remain exact.
 
+The scheduled `collect-ac-hunter.py` publisher keeps its flat-bin CLI and fixed
+loopback write endpoint. Private phases separately enforce exact owner-only
+runtime-environment metadata, parse its bounded key/value content, and select
+the existing write-token precedence. Credential values never enter errors,
+logs, repository defaults, or the dashboard read path.
+
 Agent-memory promotion keeps per-record add/replay/reinforcement accounting in
 a private accumulator. The bounded promotion owner retains exact expiration,
 operator-confirmed precedence, reinforcement recency, truncation, provenance,

@@ -51,7 +51,7 @@ def load_module(path: Path) -> ModuleType:
     return module
 
 
-def database_write_token(path: Path) -> str:
+def __require_owner_controlled_environment(path: Path) -> None:
     metadata = path.lstat()
     if (
         not path.is_file()
@@ -61,6 +61,9 @@ def database_write_token(path: Path) -> str:
         or metadata.st_size > 1024 * 1024
     ):
         raise RuntimeError("runtime environment file is not owner-controlled")
+
+
+def __environment_values(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
@@ -68,12 +71,21 @@ def database_write_token(path: Path) -> str:
             continue
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip()
+    return values
+
+
+def __database_token(values: dict[str, str]) -> str:
     token = values.get("ASSET_STORE_WRITE_TOKEN") or values.get(
         "N8N_POST_COMMIT_TOKEN"
     )
     if not token or len(token) < 32:
         raise RuntimeError("AC Hunter database write token is missing")
     return token
+
+
+def database_write_token(path: Path) -> str:
+    __require_owner_controlled_environment(path)
+    return __database_token(__environment_values(path))
 
 
 def publish(api_url: str, token: str, snapshot: dict[str, Any]) -> dict[str, Any]:
