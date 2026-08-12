@@ -2,6 +2,7 @@
 """Characterize harness maintenance policy and lock-owned phase ordering."""
 from __future__ import annotations
 
+import ast
 import fcntl
 import importlib.util
 import os
@@ -31,6 +32,26 @@ def load_cli():
 
 CLI = load_cli()
 REAL_FLOCK = fcntl.flock
+
+
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse((BIN_DIR / "harness_maintenance_cli.py").read_text())
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    complexity = 1
+    for node in ast.walk(target):
+        if isinstance(node, (ast.If, ast.For, ast.While, ast.IfExp)):
+            complexity += 1
+        elif isinstance(node, ast.Try):
+            complexity += len(node.handlers)
+        elif isinstance(node, ast.BoolOp):
+            complexity += max(0, len(node.values) - 1)
+        elif isinstance(node, ast.comprehension):
+            complexity += 1 + len(node.ifs)
+    return target.end_lineno - target.lineno + 1, complexity
 
 
 class TracedArgs:
@@ -73,6 +94,22 @@ def policy_args(**overrides: Any) -> TracedArgs:
 
 
 class HarnessMaintenanceCliPhasesCharacterizationTests(unittest.TestCase):
+    def test_changed_phase_owners_stay_small_and_cohesive(self) -> None:
+        for name in (
+            "validated_policy",
+            "_retention_policy",
+            "_database_limits",
+            "_recovery_policy",
+            "run_maintenance",
+            "_reconcile_stale_runs",
+            "_database_policy",
+            "_maintain_locked_database",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
+
     def test_validated_policy_preserves_argument_bound_and_key_order(self) -> None:
         args = policy_args()
         calls: list[tuple[Any, ...]] = []

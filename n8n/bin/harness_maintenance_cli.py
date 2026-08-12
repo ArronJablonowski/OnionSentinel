@@ -71,6 +71,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def validated_policy(args: argparse.Namespace) -> dict[str, int]:
+    return {
+        **_retention_policy(args),
+        **_database_limits(args),
+        **_recovery_policy(args),
+    }
+
+
+def _retention_policy(args: argparse.Namespace) -> dict[str, int]:
     retention_days = bounded_int(
         args.retention_days,
         name="retention days",
@@ -92,6 +100,11 @@ def validated_policy(args: argparse.Namespace) -> dict[str, int]:
             minimum=0,
             maximum=max_terminal_runs,
         ),
+    }
+
+
+def _database_limits(args: argparse.Namespace) -> dict[str, int]:
+    return {
         "max_delete_runs": bounded_int(
             args.max_delete_runs,
             name="maximum deletions per pass",
@@ -110,6 +123,11 @@ def validated_policy(args: argparse.Namespace) -> dict[str, int]:
             minimum=0,
             maximum=65_536,
         ),
+    }
+
+
+def _recovery_policy(args: argparse.Namespace) -> dict[str, int]:
+    return {
         "max_backup_age_seconds": bounded_int(
             args.max_backup_age_seconds,
             name="maximum backup age",
@@ -169,54 +187,76 @@ def run_maintenance(
     with lock_path.open("w", encoding="utf-8") as lock:
         os.chmod(lock_path, 0o600)
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        reconciliation = reconcile_stale_running_runs(
-            db_path,
-            paths["alert_db"],
-            worker_lock_paths=(
-                paths["stack_dir"] / "run/ai-analysis-ollama-worker.lock",
-                paths["stack_dir"] / "run/ai-analysis-cli-worker.lock",
-            ),
-            now=utc_now(),
-            stale_running_seconds=policy["stale_running_seconds"],
-            limit=policy["max_reconcile_runs"],
-            apply=args.apply,
-        )
-        database_policy = {
-            key: policy[key]
-            for key in (
-                "retention_days",
-                "max_terminal_runs",
-                "min_terminal_runs",
-                "max_delete_runs",
-                "max_live_bytes",
-                "incremental_vacuum_pages",
-            )
-        }
-        preview = maintain_database(
-            db_path,
-            now=utc_now(),
-            apply=False,
-            backup=None,
-            **database_policy,
-        )
-        backup = _verified_backup_for_candidates(
+        reconciliation = _reconcile_stale_runs(args, paths, policy, db_path)
+        result = _maintain_locked_database(
             args,
             paths,
             policy,
-            preview,
-        )
-        result = (
-            maintain_database(
-                db_path,
-                now=utc_now(),
-                apply=True,
-                backup=backup,
-                **database_policy,
-            )
-            if args.apply
-            else preview
+            db_path,
         )
     return {"stale_run_reconciliation": reconciliation, **result}
+
+
+def _reconcile_stale_runs(
+    args: argparse.Namespace,
+    paths: dict[str, Path],
+    policy: dict[str, int],
+    db_path: Path,
+) -> dict[str, Any]:
+    return reconcile_stale_running_runs(
+        db_path,
+        paths["alert_db"],
+        worker_lock_paths=(
+            paths["stack_dir"] / "run/ai-analysis-ollama-worker.lock",
+            paths["stack_dir"] / "run/ai-analysis-cli-worker.lock",
+        ),
+        now=utc_now(),
+        stale_running_seconds=policy["stale_running_seconds"],
+        limit=policy["max_reconcile_runs"],
+        apply=args.apply,
+    )
+
+
+def _database_policy(policy: dict[str, int]) -> dict[str, int]:
+    return {
+        key: policy[key]
+        for key in (
+            "retention_days",
+            "max_terminal_runs",
+            "min_terminal_runs",
+            "max_delete_runs",
+            "max_live_bytes",
+            "incremental_vacuum_pages",
+        )
+    }
+
+
+def _maintain_locked_database(
+    args: argparse.Namespace,
+    paths: dict[str, Path],
+    policy: dict[str, int],
+    db_path: Path,
+) -> dict[str, Any]:
+    database_policy = _database_policy(policy)
+    preview = maintain_database(
+        db_path,
+        now=utc_now(),
+        apply=False,
+        backup=None,
+        **database_policy,
+    )
+    backup = _verified_backup_for_candidates(args, paths, policy, preview)
+    return (
+        maintain_database(
+            db_path,
+            now=utc_now(),
+            apply=True,
+            backup=backup,
+            **database_policy,
+        )
+        if args.apply
+        else preview
+    )
 
 
 def _verified_backup_for_candidates(
