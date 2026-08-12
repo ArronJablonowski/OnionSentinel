@@ -27,15 +27,8 @@ def record_model_call(
     connect: Callable[[Any], Any],
 ) -> None:
     call_id = _valid_identifier(call_id, "model call_id", 128)
-    requested_route = _model_route(
-        requested_route,
-        "completed model route",
-    )
-    authorization = _model_authorization(
-        run,
-        call_id,
-        connect=connect,
-    )
+    requested_route = _model_route(requested_route, "completed model route")
+    authorization = _model_authorization(run, call_id, connect=connect)
     observation = _model_observation(
         run,
         call_id=call_id,
@@ -54,6 +47,33 @@ def record_model_call(
         independent_review=independent_review,
         reservation=reservation,
     )
+    _persist_model_call(
+        run,
+        call_id=call_id,
+        purpose=purpose,
+        requested_route=requested_route,
+        response=response,
+        input_value=input_value,
+        duration_seconds=duration_seconds,
+        independent_review=independent_review,
+        status=status,
+        reservation=reservation,
+    )
+
+
+def _persist_model_call(
+    run: Any,
+    *,
+    call_id: str,
+    purpose: str,
+    requested_route: str,
+    response: Mapping[str, Any],
+    input_value: Any,
+    duration_seconds: float,
+    independent_review: bool,
+    status: str,
+    reservation: Mapping[str, Any],
+) -> None:
     run.store.record_model_call(
         run.run_id,
         call_id=call_id,
