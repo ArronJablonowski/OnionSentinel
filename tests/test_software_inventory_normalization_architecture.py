@@ -64,6 +64,32 @@ class SoftwareInventoryNormalizationArchitectureTests(unittest.TestCase):
             expected_window=self.window,
         )
 
+    def test_owner_dependency_chain_is_inward_and_bounded(self) -> None:
+        facade = (BIN / "software_inventory_normalization.py").read_text()
+        record_owner = (
+            BIN / "software_inventory_record_normalization.py"
+        ).read_text()
+        state_owner = (
+            BIN / "software_inventory_state_validation.py"
+        ).read_text()
+        self.assertLessEqual(len(facade.splitlines()), 250)
+        self.assertLessEqual(len(record_owner.splitlines()), 600)
+        self.assertLessEqual(len(state_owner.splitlines()), 600)
+        self.assertNotIn("software_inventory_normalization", record_owner)
+        self.assertNotIn("software_inventory_normalization", state_owner)
+        self.assertIn(
+            "from software_inventory_record_normalization import normalize_record",
+            state_owner,
+        )
+        self.assertIn(
+            "normalize_record as _normalize_record",
+            facade,
+        )
+        self.assertIn(
+            "from software_inventory_state_validation import",
+            facade,
+        )
+
     def test_public_signatures_and_record_projection_are_exact(self) -> None:
         self.assertEqual(
             str(inspect.signature(normalization._normalize_record)),

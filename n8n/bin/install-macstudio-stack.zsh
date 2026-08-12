@@ -810,6 +810,8 @@ cp "$REPO_DIR/n8n/bin/dhcp_asset_workflow.py" "$STACK_DIR/bin/dhcp_asset_workflo
 cp "$REPO_DIR/n8n/bin/collect-dhcp-asset-discovery.py" "$STACK_DIR/bin/collect-dhcp-asset-discovery.py"
 cp "$REPO_DIR/n8n/bin/collect-endpoint-software-inventory.py" "$STACK_DIR/bin/collect-endpoint-software-inventory.py"
 cp "$REPO_DIR/n8n/bin/software_inventory_contract.py" "$STACK_DIR/bin/software_inventory_contract.py"
+cp "$REPO_DIR/n8n/bin/software_inventory_record_normalization.py" "$STACK_DIR/bin/software_inventory_record_normalization.py"
+cp "$REPO_DIR/n8n/bin/software_inventory_state_validation.py" "$STACK_DIR/bin/software_inventory_state_validation.py"
 cp "$REPO_DIR/n8n/bin/software_inventory_normalization.py" "$STACK_DIR/bin/software_inventory_normalization.py"
 cp "$REPO_DIR/n8n/bin/software_inventory_transport.py" "$STACK_DIR/bin/software_inventory_transport.py"
 cp "$REPO_DIR/n8n/bin/software_inventory_validation.py" "$STACK_DIR/bin/software_inventory_validation.py"

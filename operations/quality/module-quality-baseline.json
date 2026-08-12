@@ -106,13 +106,6 @@
     "n8n/bin/run-recovery-restore-drill.py::verify_bundle": {
       "max_complexity": 32
     },
-    "n8n/bin/software_inventory_normalization.py::_normalize_record": {
-      "max_complexity": 38,
-      "max_lines": 188
-    },
-    "n8n/bin/software_inventory_normalization.py::validate_state": {
-      "max_complexity": 24
-    },
     "n8n/bin/verify-agent-memory.py::verify_setup": {
       "max_complexity": 20
     },

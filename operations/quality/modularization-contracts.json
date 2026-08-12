@@ -1553,6 +1553,25 @@
       ]
     },
     {
+      "path": "n8n/bin/software_inventory_record_normalization.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/software_inventory_record_normalization.py",
+      "required_symbols": [
+        "normalize_record"
+      ]
+    },
+    {
+      "path": "n8n/bin/software_inventory_state_validation.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/software_inventory_state_validation.py",
+      "required_symbols": [
+        "normalize_source_status",
+        "normalize_window",
+        "source_status",
+        "validate_state"
+      ]
+    },
+    {
       "path": "n8n/bin/software_inventory_normalization.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/software_inventory_normalization.py",

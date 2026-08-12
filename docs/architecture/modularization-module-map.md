@@ -2830,8 +2830,13 @@ cross into deterministic result projection.
 
 `n8n/bin/collect-software-inventory.py` is a bounded CLI/import compatibility
 facade. `software_inventory_contract.py` owns schemas, source policy,
-configuration, and bounded primitives; `software_inventory_normalization.py`
-owns record, cursor, tier, freshness, and state validation;
+configuration, and bounded primitives;
+`software_inventory_record_normalization.py` owns ordered record, evidence,
+tier, asset, product, operating-system provenance, observation-window, and count
+normalization; `software_inventory_state_validation.py` owns window, freshness,
+source-status, collection-state, duplicate-evidence, and complete-state
+validation; `software_inventory_normalization.py` is the stable cursor and
+normalization compatibility facade;
 `software_inventory_transport.py` owns owner-controlled file access, private
 persistence, and bounded read-only relay pagination. Its stable cache and
 response validators delegate already-loaded objects to
