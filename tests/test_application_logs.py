@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import hashlib
+import inspect
 import json
 import multiprocessing
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -78,6 +81,90 @@ class ApplicationLogTests(unittest.TestCase):
             path.write_text(content, encoding="utf-8")
         os.chmod(path, 0o600)
         return path
+
+    def test_compatibility_surface_signatures_and_specs_are_stable(self) -> None:
+        required_names = {
+            "ApplicationLogError", "LogSpec", "DEFAULT_TAIL_LINES",
+            "MAX_TAIL_LINES", "MAX_TAIL_BYTES", "MAX_ENV_BYTES",
+            "DEFAULT_ROTATION_BYTES", "DEFAULT_ROTATION_BACKUPS",
+            "MAX_FAMILY_MEMBERS", "LOG_ID_RE", "ENSURE_STACK_RE",
+            "SECRET_ASSIGNMENT_RE", "BEARER_RE", "COOKIE_RE",
+            "AUTHORIZATION_RE", "PRIVATE_KEY_RE", "STRUCTURED_SPECS",
+            "LAUNCHD_STEMS", "OTHER_SPECS", "LOG_SPECS",
+            "LOG_SPECS_BY_ID", "is_application_log_id", "_roots",
+            "_root_descriptor", "_validate_basename", "_member_metadata",
+            "_iso_timestamp", "_safe_env_values", "_bounded_int",
+            "_alert_store_policy", "_fixed_members", "_family_members",
+            "_spec_catalog_item", "catalog_response", "_resolve_member",
+            "_open_regular", "_redact", "_utf8_tail", "_bounded_tail",
+            "content_response",
+        }
+        self.assertFalse(required_names.difference(vars(application_logs)))
+        self.assertEqual(
+            application_logs.__all__,
+            [
+                "ApplicationLogError", "DEFAULT_TAIL_LINES", "LOG_SPECS",
+                "MAX_TAIL_BYTES", "MAX_TAIL_LINES", "catalog_response",
+                "content_response", "is_application_log_id",
+            ],
+        )
+        self.assertEqual(
+            tuple(application_logs.LogSpec.__dataclass_fields__),
+            (
+                "id", "label", "category", "root", "basename",
+                "description", "format", "rotation", "retention",
+                "backups", "bounded", "family",
+            ),
+        )
+        expected_signatures = {
+            "is_application_log_id": "(value: 'str') -> 'bool'",
+            "catalog_response": "(home: 'Path | None' = None) -> 'dict[str, object]'",
+            "content_response": "(log_id: 'str', member: 'str' = '', lines: 'int' = 200, home: 'Path | None' = None) -> 'dict[str, object]'",
+            "_root_descriptor": "(root: 'Path') -> 'int'",
+            "_member_metadata": "(root: 'Path', basename: 'str') -> 'dict[str, object] | None'",
+            "_alert_store_policy": "(home: 'Path') -> 'tuple[int, int]'",
+            "_resolve_member": "(spec: 'LogSpec', root: 'Path', requested: 'str', home: 'Path') -> 'tuple[str, str]'",
+            "_open_regular": "(root: 'Path', basename: 'str') -> 'tuple[int, os.stat_result]'",
+            "_utf8_tail": "(content: 'str', maximum_bytes: 'int') -> 'tuple[str, int, bool]'",
+        }
+        self.assertEqual(
+            {
+                name: str(inspect.signature(getattr(application_logs, name)))
+                for name in expected_signatures
+            },
+            expected_signatures,
+        )
+        projection = [
+            {
+                name: getattr(spec, name)
+                for name in application_logs.LogSpec.__dataclass_fields__
+            }
+            for spec in application_logs.LOG_SPECS
+        ]
+        digest = hashlib.sha256(
+            json.dumps(
+                projection, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(len(projection), 45)
+        self.assertEqual(
+            digest,
+            "58b7ddb17e13de6def87e63d35eb33607ea439ecaa84e75fc280274627c8014c",
+        )
+
+    def test_application_logs_starts_from_an_isolated_dashboard_directory(self) -> None:
+        source = DASHBOARD_DIR / "application_logs.py"
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / source.name
+            target.write_bytes(source.read_bytes())
+            result = subprocess.run(
+                [sys.executable, "-I", "-B", str(target)],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_catalog_is_fixed_unique_and_confined_to_runtime_roots(self) -> None:
         response = application_logs.catalog_response(home=self.home)
