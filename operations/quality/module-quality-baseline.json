@@ -1,10 +1,6 @@
 {
   "files": {},
   "functions": {
-    "n8n/bin/collect-endpoint-software-inventory.py::collect": {
-      "max_complexity": 25,
-      "max_lines": 118
-    },
     "n8n/bin/configure-post-commit-env.py::render_env": {
       "max_complexity": 16
     },
@@ -141,5 +137,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "0a8a1625bed91cbfd4e766c052d2dbbef10d6b7c"
+  "source_release": "0875e2c345af0224eb9780deb5af22ab95085763"
 }
