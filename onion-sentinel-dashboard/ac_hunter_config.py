@@ -36,6 +36,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from ac_hunter_config_admission import normalize_client_config
 from ac_hunter_secure_files import read_secure_file_bytes
 
 
@@ -244,101 +245,22 @@ def load_config(path: Path = DEFAULT_CONFIG) -> Dict[str, Any]:
     """Load and validate the owner-only Mac-side client configuration."""
 
     source = _private_json(path, MAX_CONFIG_BYTES)
-    allowed = {
-        "schema",
-        "enabled",
-        "dataset",
-        "relay_host",
-        "relay_user",
-        "relay_port",
-        "ssh_key",
-        "known_hosts",
-        "credentials_file",
-        "cache_file",
-        "cache_ttl_seconds",
-        "connect_timeout_seconds",
-        "timeout_seconds",
-        "max_response_bytes",
-        "max_stderr_bytes",
-    }
-    if set(source) - allowed or source.get("schema") != CONFIG_SCHEMA:
-        raise AcHunterConfigurationError(
-            "AC Hunter client configuration schema is unsupported"
-        )
-    if not isinstance(source.get("enabled"), bool):
-        raise AcHunterConfigurationError("AC Hunter enabled must be boolean")
-    if source.get("dataset") != FIXED_DATASET:
-        raise AcHunterConfigurationError(
-            "AC Hunter dataset is outside the fixed allowlist"
-        )
-    if source.get("relay_host") != FIXED_RELAY_HOST:
-        raise AcHunterConfigurationError(
-            "AC Hunter Relay host is outside the fixed allowlist"
-        )
-    if source.get("relay_user") != FIXED_RELAY_USER:
-        raise AcHunterConfigurationError(
-            "AC Hunter Relay user is outside the fixed allowlist"
-        )
-    relay_port = _bounded_int(
-        source.get("relay_port", FIXED_RELAY_PORT),
-        minimum=FIXED_RELAY_PORT,
-        maximum=FIXED_RELAY_PORT,
-        label="AC Hunter Relay port",
+    normalized = normalize_client_config(
+        source,
+        config_path=path,
+        expected_cache=DEFAULT_CACHE,
+        policy={
+            "schema": CONFIG_SCHEMA,
+            "dataset": FIXED_DATASET,
+            "relay_host": FIXED_RELAY_HOST,
+            "relay_user": FIXED_RELAY_USER,
+            "relay_port": FIXED_RELAY_PORT,
+            "max_stderr_bytes": MAX_RELAY_STDERR_BYTES,
+        },
+        bounded_int=_bounded_int,
+        configured_path=_configured_path,
+        error_type=AcHunterConfigurationError,
     )
-    normalized: Dict[str, Any] = {
-        "schema": CONFIG_SCHEMA,
-        "enabled": source["enabled"],
-        "dataset": FIXED_DATASET,
-        "relay_host": FIXED_RELAY_HOST,
-        "relay_user": FIXED_RELAY_USER,
-        "relay_port": relay_port,
-        "ssh_key": _configured_path(source.get("ssh_key"), "AC Hunter SSH key"),
-        "known_hosts": _configured_path(
-            source.get("known_hosts"), "AC Hunter known_hosts"
-        ),
-        "credentials_file": _configured_path(
-            source.get("credentials_file"), "AC Hunter credentials file"
-        ),
-        "cache_file": _configured_path(
-            source.get("cache_file"), "AC Hunter cache file"
-        ),
-    }
-    configured_cache = Path(
-        os.path.abspath(str(normalized["cache_file"]))
-    )
-    expected_cache = Path(os.path.abspath(str(DEFAULT_CACHE)))
-    if configured_cache != expected_cache:
-        raise AcHunterConfigurationError(
-            "AC Hunter cache path is outside the fixed runtime location"
-        )
-    protected_paths = (
-        Path(path).expanduser(),
-        normalized["ssh_key"],
-        normalized["known_hosts"],
-        normalized["credentials_file"],
-        normalized["cache_file"],
-    )
-    resolved_paths = [
-        candidate.resolve(strict=False) for candidate in protected_paths
-    ]
-    if len(set(resolved_paths)) != len(resolved_paths):
-        raise AcHunterConfigurationError(
-            "AC Hunter configuration, trust, credential, and cache paths "
-            "must be distinct"
-        )
-    for key, default, minimum, maximum in (
-        ("cache_ttl_seconds", 300, 30, 3600),
-        ("connect_timeout_seconds", 8, 1, 15),
-        ("timeout_seconds", 45, 5, 120),
-        ("max_response_bytes", 8 * 1024 * 1024, 1024, 8 * 1024 * 1024),
-        ("max_stderr_bytes", MAX_RELAY_STDERR_BYTES, 1024, MAX_RELAY_STDERR_BYTES),
-    ):
-        normalized[key] = _bounded_int(
-            source.get(key, default),
-            minimum=minimum,
-            maximum=maximum,
-            label=f"AC Hunter {key}",
-        )
     if normalized["enabled"]:
         _secure_file_bytes(
             normalized["ssh_key"], maximum_bytes=MAX_KEY_BYTES

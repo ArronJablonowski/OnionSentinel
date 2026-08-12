@@ -2889,7 +2889,9 @@ facade and the modularization contract verifies their runtime symbols.
 `onion-sentinel-dashboard/ac_hunter_review.py` is a bounded compatibility
 facade. Configuration policy lives in `ac_hunter_config.py`; owner-only,
 no-follow, descriptor-identity-checked bounded trust-file I/O lives in
-`ac_hunter_secure_files.py`; Relay-only transport and short-lived
+`ac_hunter_secure_files.py`; deterministic schema, fixed-route, path,
+distinctness, and numeric-bound admission lives in
+`ac_hunter_config_admission.py`; Relay-only transport and short-lived
 authentication in `ac_hunter_transport.py`; bounded primitive compatibility
 and response projection in `ac_hunter_normalization.py`; pure finding identity,
 observable,
@@ -2915,7 +2917,8 @@ The secure-file, finding-normalization, scoring-policy, cache-validation, and
 three collection owners import inward only; none can call AC Hunter, the Relay,
 a cache, a database, or a compatibility facade. The secure-file owner has only
 bounded filesystem authority and no configuration, credential-semantic,
-transport, cache, or service authority. Cache validation keeps
+transport, cache, or service authority. The configuration-admission owner can
+normalize paths but cannot read file contents or validate credentials. Cache validation keeps
 the exact recursion, cardinality, key, text, scalar, credential-rejection, and
 error-precedence policy without filesystem or service authority. The
 normalization facade preserves the legacy

@@ -13,13 +13,13 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD = ROOT / "onion-sentinel-dashboard"
+ADMISSION_PATH = DASHBOARD / "ac_hunter_config_admission.py"
 BASELINE = ROOT / "operations/quality/module-quality-baseline.json"
 
 
 def load_config_module():
     if str(DASHBOARD) not in sys.path:
         sys.path.insert(0, str(DASHBOARD))
-    sys.modules.pop("ac_hunter_config", None)
     return importlib.import_module("ac_hunter_config")
 
 
@@ -123,7 +123,7 @@ class AcHunterConfigAdmissionArchitectureTests(unittest.TestCase):
         self.assertEqual(source, before)
         return outcome, trace
 
-    def test_signature_current_debt_defaults_order_types_and_io_are_exact(
+    def test_signature_module_boundaries_defaults_order_types_and_io_are_exact(
         self,
     ) -> None:
         signature = inspect.signature(self.config.load_config)
@@ -134,12 +134,26 @@ class AcHunterConfigAdmissionArchitectureTests(unittest.TestCase):
         )
         self.assertEqual(str(signature.return_annotation), "Dict[str, Any]")
         baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
-        self.assertEqual(
-            baseline["functions"][
-                "onion-sentinel-dashboard/ac_hunter_config.py::load_config"
-            ],
-            {"max_lines": 108},
+        self.assertNotIn(
+            "onion-sentinel-dashboard/ac_hunter_config.py::load_config",
+            baseline["functions"],
         )
+        self.assertLessEqual(len(ADMISSION_PATH.read_text().splitlines()), 600)
+        self.assertNotIn(
+            "from ac_hunter_config import",
+            ADMISSION_PATH.read_text(),
+        )
+        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
+        config_copy = (
+            'ac_hunter_config.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_config.py"'
+        )
+        owner_copy = (
+            'ac_hunter_config_admission.py" '
+            '"$DASHBOARD_RUNTIME_DIR/ac_hunter_config_admission.py"'
+        )
+        self.assertIn(config_copy, installer)
+        self.assertIn(owner_copy, installer)
+        self.assertLess(installer.index(owner_copy), installer.index(config_copy))
 
         outcome, trace = self.call(self.source())
         self.assertEqual(outcome["status"], "ok")

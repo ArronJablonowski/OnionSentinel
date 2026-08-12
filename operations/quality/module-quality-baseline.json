@@ -72,9 +72,6 @@
     "n8n/bin/verify-agent-memory.py::verify_setup": {
       "max_complexity": 20
     },
-    "onion-sentinel-dashboard/ac_hunter_config.py::load_config": {
-      "max_lines": 108
-    },
     "onion-sentinel-dashboard/ac_hunter_transport.py::AcHunterApiClient._authenticate": {
       "max_complexity": 16
     },
