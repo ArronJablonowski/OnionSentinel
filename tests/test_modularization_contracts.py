@@ -57,6 +57,39 @@ def top_level_function(path: Path, name: str) -> ast.FunctionDef:
 
 
 class ModularizationCompatibilityContractTests(unittest.TestCase):
+    def test_undefined_global_analysis_ignores_only_postponed_annotations(
+        self,
+    ) -> None:
+        source = """\
+from __future__ import annotations
+
+def build(value: AnnotationOnly) -> AnnotationOnly:
+    return value
+"""
+        self.assertEqual(undefined_global_names(source, "postponed.py"), set())
+
+    def test_undefined_global_analysis_keeps_executable_references(self) -> None:
+        source = """\
+from __future__ import annotations
+
+def build(value: UsedAsAnnotation) -> UsedAsAnnotation:
+    return MissingAtRuntime(value)
+"""
+        self.assertEqual(
+            undefined_global_names(source, "runtime.py"),
+            {"MissingAtRuntime"},
+        )
+
+    def test_undefined_global_analysis_keeps_eager_annotations(self) -> None:
+        source = """\
+def build(value: MissingAtDefinition) -> MissingAtDefinition:
+    return value
+"""
+        self.assertEqual(
+            undefined_global_names(source, "eager.py"),
+            {"MissingAtDefinition"},
+        )
+
     def test_relay_supports_isolated_file_loader_import(self) -> None:
         relay = ROOT / "relay" / "app" / "relay.py"
         script = (
