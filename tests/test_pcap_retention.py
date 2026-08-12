@@ -11,6 +11,7 @@ import tempfile
 import sqlite3
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -148,6 +149,285 @@ class PcapRetentionTest(unittest.TestCase):
 
         self.assertEqual(result["matched_requests"], 1)
         self.assertFalse(request_dir.exists())
+
+    def test_analyzed_admission_order_projection_and_receipt_merge_are_exact(self) -> None:
+        payloads = {
+            "z-invalid-pcap-analysis.json": "{bad-json",
+            "a-list-pcap-analysis.json": "[]",
+            "b-empty-pcap-analysis.json": json.dumps({"request": {"request_id": ""}}),
+            "c-incomplete-pcap-analysis.json": json.dumps({
+                "request": {"request_id": "incomplete"},
+                "complete": False,
+            }),
+            "d-escape-pcap-analysis.json": json.dumps({
+                "request": {"request_id": "../escape"},
+                "complete": True,
+            }),
+            "e-missing-dir-pcap-analysis.json": json.dumps({
+                "request": {"request_id": "missing"},
+                "complete": True,
+            }),
+            "f-complete-pcap-analysis.json": json.dumps({
+                "request": {"request_id": "complete"},
+                "complete": True,
+            }),
+        }
+        for name, value in payloads.items():
+            (self.analysis_dir / name).write_text(value, encoding="utf-8")
+        complete = self.artifact_dir / "complete"
+        (complete / "nested").mkdir(parents=True)
+        (complete / "one.bin").write_bytes(b"123")
+        (complete / "nested" / "two.bin").write_bytes(b"4567")
+        completion_calls = []
+        deletion_calls = []
+
+        def completed(value):
+            completion_calls.append(value["request"]["request_id"])
+            return bool(value.get("complete"))
+
+        def delete(root, request_id):
+            deletion_calls.append([root, request_id])
+            return {
+                "request_id": "receipt-identity",
+                "files": 99,
+                "deleted": True,
+            }
+
+        with (
+            mock.patch.object(self.module, "analysis_completed", side_effect=completed),
+            mock.patch.object(
+                self.module,
+                "delete_request_artifacts",
+                side_effect=delete,
+            ),
+        ):
+            dry_run = self.module.cleanup_analyzed_artifacts(
+                self.artifact_dir,
+                self.analysis_dir,
+                False,
+            )
+            applied = self.module.cleanup_analyzed_artifacts(
+                self.artifact_dir,
+                self.analysis_dir,
+                True,
+            )
+
+        self.assertEqual(
+            completion_calls,
+            ["incomplete", "../escape", "missing", "complete"] * 2,
+        )
+        self.assertEqual(dry_run, {
+            "matched_requests": 1,
+            "matched_bytes": 7,
+            "requests": [{"request_id": "complete", "bytes": 7, "files": 2}],
+        })
+        self.assertEqual(applied, {
+            "matched_requests": 1,
+            "matched_bytes": 7,
+            "requests": [{
+                "request_id": "receipt-identity",
+                "bytes": 7,
+                "files": 99,
+                "deleted": True,
+            }],
+        })
+        self.assertEqual(
+            deletion_calls,
+            [[self.artifact_dir.resolve(), "complete"]],
+        )
+
+    def test_per_request_io_and_value_failures_skip_without_stopping_later_rows(self) -> None:
+        for request_id in ("io-failure", "value-failure", "accepted"):
+            (self.analysis_dir / f"{request_id}-pcap-analysis.json").write_text(
+                json.dumps({
+                    "request": {"request_id": request_id},
+                    "complete": True,
+                }),
+                encoding="utf-8",
+            )
+            directory = self.artifact_dir / request_id
+            directory.mkdir()
+            (directory / "capture.pcap").write_bytes(b"data")
+        calls = []
+
+        def delete(root, request_id):
+            calls.append(request_id)
+            if request_id == "io-failure":
+                raise OSError("synthetic I/O failure")
+            if request_id == "value-failure":
+                raise ValueError("synthetic value failure")
+            return {"deleted": True}
+
+        with (
+            mock.patch.object(self.module, "analysis_completed", return_value=True),
+            mock.patch.object(
+                self.module,
+                "delete_request_artifacts",
+                side_effect=delete,
+            ),
+        ):
+            result = self.module.cleanup_analyzed_artifacts(
+                self.artifact_dir,
+                self.analysis_dir,
+                True,
+            )
+
+        self.assertEqual(calls, ["accepted", "io-failure", "value-failure"])
+        self.assertEqual(result, {
+            "matched_requests": 1,
+            "matched_bytes": 4,
+            "requests": [{
+                "request_id": "accepted",
+                "bytes": 4,
+                "files": 1,
+                "deleted": True,
+            }],
+        })
+
+    def test_non_isolated_completion_and_deletion_errors_still_propagate(self) -> None:
+        analysis_path = self.analysis_dir / "request-pcap-analysis.json"
+        analysis_path.write_text(
+            json.dumps({"request": {"request_id": "request"}}),
+            encoding="utf-8",
+        )
+        request_dir = self.artifact_dir / "request"
+        request_dir.mkdir()
+        (request_dir / "capture.pcap").write_bytes(b"data")
+
+        with (
+            mock.patch.object(
+                self.module,
+                "analysis_completed",
+                side_effect=RuntimeError("completion failure"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "completion failure"),
+        ):
+            self.module.cleanup_analyzed_artifacts(
+                self.artifact_dir,
+                self.analysis_dir,
+                False,
+            )
+        with (
+            mock.patch.object(self.module, "analysis_completed", return_value=True),
+            mock.patch.object(
+                self.module,
+                "delete_request_artifacts",
+                side_effect=RuntimeError("deletion failure"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "deletion failure"),
+        ):
+            self.module.cleanup_analyzed_artifacts(
+                self.artifact_dir,
+                self.analysis_dir,
+                True,
+            )
+
+    def test_terminal_database_contract_row_order_and_close_are_exact(self) -> None:
+        db_path = self.safe_root / "alert_store_data" / "alerts.sqlite3"
+        db_path.parent.mkdir(parents=True)
+        db_path.touch()
+        for request_id in ("second", "first"):
+            directory = self.artifact_dir / request_id
+            directory.mkdir()
+            (directory / "capture.pcap").write_bytes(request_id.encode())
+        trace = []
+
+        class Cursor:
+            def fetchall(self):
+                trace.append(["fetchall"])
+                return [("second",), ("../escape",), ("missing",), ("first",)]
+
+        class Connection:
+            def execute(self, statement):
+                trace.append(["execute", statement])
+                return Cursor()
+
+            def close(self):
+                trace.append(["close"])
+
+        def connect(connection_uri, *, uri=True):
+            trace.append(["connect", connection_uri, uri])
+            return Connection()
+
+        def delete(root, request_id):
+            trace.append(["delete", str(root), request_id])
+            return {"deleted": request_id}
+
+        with (
+            mock.patch.object(self.module.sqlite3, "connect", side_effect=connect),
+            mock.patch.object(
+                self.module,
+                "delete_request_artifacts",
+                side_effect=delete,
+            ),
+        ):
+            result = self.module.cleanup_terminal_artifacts(
+                self.artifact_dir,
+                db_path,
+                True,
+            )
+
+        self.assertEqual(trace[0], ["connect", f"file:{db_path}?mode=ro", True])
+        self.assertIn("WHERE status IN ('failed', 'rejected')", trace[1][1])
+        self.assertIn("outcome IN ('no_packets_available', 'expired', 'oversize')", trace[1][1])
+        self.assertEqual(trace[2:4], [["fetchall"], ["close"]])
+        self.assertEqual(
+            [event[-1] for event in trace if event[0] == "delete"],
+            ["second", "first"],
+        )
+        self.assertEqual(
+            [item["request_id"] for item in result["requests"]],
+            ["second", "first"],
+        )
+        self.assertEqual(
+            result["matched_bytes"],
+            len("second") + len("first"),
+        )
+
+    def test_terminal_fetch_failure_closes_connection_and_missing_db_is_bounded(self) -> None:
+        missing = self.safe_root / "missing.sqlite3"
+        self.assertEqual(
+            self.module.cleanup_terminal_artifacts(
+                self.artifact_dir,
+                missing,
+                False,
+            ),
+            {
+                "matched_requests": 0,
+                "matched_bytes": 0,
+                "requests": [],
+                "reason": "database not found",
+            },
+        )
+        database = self.safe_root / "failing.sqlite3"
+        database.touch()
+        trace = []
+
+        class Cursor:
+            def fetchall(self):
+                raise sqlite3.DatabaseError("synthetic fetch failure")
+
+        class Connection:
+            def execute(self, _statement):
+                return Cursor()
+
+            def close(self):
+                trace.append("closed")
+
+        with (
+            mock.patch.object(
+                self.module.sqlite3,
+                "connect",
+                return_value=Connection(),
+            ),
+            self.assertRaisesRegex(sqlite3.DatabaseError, "synthetic fetch failure"),
+        ):
+            self.module.cleanup_terminal_artifacts(
+                self.artifact_dir,
+                database,
+                False,
+            )
+        self.assertEqual(trace, ["closed"])
 
 
 if __name__ == "__main__":
