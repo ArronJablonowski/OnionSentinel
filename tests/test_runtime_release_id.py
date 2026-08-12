@@ -11,6 +11,8 @@ import unittest
 import urllib.error
 import urllib.request
 
+from tests.dashboard_startup_diagnostics import startup_failure_diagnostic
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "n8n" / "bin" / "set-runtime-release-id.py"
@@ -229,9 +231,15 @@ class RuntimeReleaseIdTests(unittest.TestCase):
                 )
                 try:
                     health = None
+                    last_probe = "not attempted"
                     deadline = time.monotonic() + 10
                     while time.monotonic() < deadline:
-                        if process.poll() is not None:
+                        returncode = process.poll()
+                        if returncode is not None:
+                            last_probe = (
+                                "child exited before readiness: "
+                                f"returncode={returncode}"
+                            )
                             break
                         try:
                             with urllib.request.urlopen(
@@ -239,14 +247,26 @@ class RuntimeReleaseIdTests(unittest.TestCase):
                                 timeout=1,
                             ) as response:
                                 health = json.load(response)
+                                last_probe = (
+                                    f"http_status={response.status}; "
+                                    f"ok={bool(health.get('ok'))}"
+                                )
                             break
-                        except (OSError, urllib.error.URLError):
+                        except urllib.error.HTTPError as exc:
+                            last_probe = f"http_status={int(exc.code)}"
+                            exc.close()
+                            time.sleep(0.05)
+                        except (OSError, urllib.error.URLError) as exc:
+                            last_probe = f"{type(exc).__name__}: {exc}"
                             time.sleep(0.05)
                     if health is None:
-                        log.seek(0)
                         self.fail(
                             "dedicated web service did not become healthy: "
-                            + log.read()
+                            + startup_failure_diagnostic(
+                                process,
+                                log,
+                                last_probe=last_probe,
+                            )
                         )
                     self.assertTrue(health["ok"])
                     self.assertEqual(health["service"], "onion-sentinel")

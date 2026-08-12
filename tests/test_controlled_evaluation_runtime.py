@@ -30,6 +30,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from tests.dashboard_startup_diagnostics import startup_failure_diagnostic
+
 
 ROOT = Path(__file__).resolve().parents[1]
 ALERT_STORE_DIR = ROOT / "n8n" / "alert_store"
@@ -4438,17 +4440,37 @@ class ControlledDashboardTests(unittest.TestCase):
             text=True,
         )
         deadline = time.monotonic() + 10
+        last_probe = "not attempted"
         while time.monotonic() < deadline:
-            if self.process.poll() is not None:
+            returncode = self.process.poll()
+            if returncode is not None:
+                last_probe = (
+                    "child exited before readiness: "
+                    f"returncode={returncode}"
+                )
                 break
             try:
-                if request_json(f"{self.base_url}/healthz")[0] == 200:
+                status, health = request_json(f"{self.base_url}/healthz")
+                last_probe = (
+                    f"http_status={status}; "
+                    f"ok={bool(health.get('ok'))}; "
+                    "dashboard_ready="
+                    f"{bool(health.get('dashboard_ready'))}; "
+                    "alert_store_ready="
+                    f"{bool(health.get('alert_store_ready'))}"
+                )
+                if status == 200:
                     return
-            except (OSError, urllib.error.URLError):
+            except (OSError, urllib.error.URLError) as exc:
+                last_probe = f"{type(exc).__name__}: {exc}"
                 time.sleep(0.05)
         self.fail(
             "controlled dashboard did not become healthy: "
-            + process_output(self.log_file)
+            + startup_failure_diagnostic(
+                self.process,
+                self.log_file,
+                last_probe=last_probe,
+            )
         )
 
     def tearDown(self) -> None:
