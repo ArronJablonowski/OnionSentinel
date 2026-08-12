@@ -163,6 +163,33 @@ class AcHunterApiClient:
             f"{name}={value}" for name, value in sorted(self._cookies.items())
         )
 
+    @staticmethod
+    def _parsed_cookie_items(raw: object) -> Iterable[Tuple[str, Any]]:
+        if not isinstance(raw, str):
+            return ()
+        parsed = SimpleCookie()
+        try:
+            parsed.load(raw)
+        except Exception:
+            return ()
+        return parsed.items()
+
+    @staticmethod
+    def _cookie_value_is_admissible(name: str, value: str) -> bool:
+        return bool(
+            re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", name)
+            and len(value.encode("utf-8")) <= 4096
+            and not any(character in value for character in ("\r", "\n", "\x00", ";"))
+        )
+
+    def _apply_cookie_item(self, name: str, value: str) -> None:
+        if not self._cookie_value_is_admissible(name, value):
+            return
+        if value:
+            self._cookies[name] = value
+        else:
+            self._cookies.pop(name, None)
+
     def _accept_cookies(self, response: Mapping[str, Any]) -> None:
         response_headers = response.get("headers")
         if not isinstance(response_headers, dict):
@@ -171,26 +198,8 @@ class AcHunterApiClient:
         if not isinstance(raw_values, list):
             return
         for raw in raw_values:
-            if not isinstance(raw, str):
-                continue
-            parsed = SimpleCookie()
-            try:
-                parsed.load(raw)
-            except Exception:
-                continue
-            for name, morsel in parsed.items():
-                if (
-                    re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", name)
-                    and len(morsel.value.encode("utf-8")) <= 4096
-                    and not any(
-                        character in morsel.value
-                        for character in ("\r", "\n", "\x00", ";")
-                    )
-                ):
-                    if morsel.value:
-                        self._cookies[name] = morsel.value
-                    else:
-                        self._cookies.pop(name, None)
+            for name, morsel in self._parsed_cookie_items(raw):
+                self._apply_cookie_item(name, morsel.value)
         if len(self._cookies) > 16:
             self._cookies = dict(sorted(self._cookies.items())[:16])
 

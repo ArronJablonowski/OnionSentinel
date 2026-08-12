@@ -90,7 +90,15 @@ class AcHunterCookieAdmissionArchitectureTests(unittest.TestCase):
         )
         self.assertEqual(list(signature.parameters), ["self", "response"])
         self.assertEqual(str(signature.return_annotation), "None")
-        self.assertEqual(function_metrics("_accept_cookies"), (30, 13))
+        for name in (
+            "_parsed_cookie_items",
+            "_cookie_value_is_admissible",
+            "_apply_cookie_item",
+            "_accept_cookies",
+        ):
+            lines, complexity = function_metrics(name)
+            self.assertLessEqual(lines, 50)
+            self.assertLessEqual(complexity, 10)
         self.assertLessEqual(len(TRANSPORT_PATH.read_text().splitlines()), 600)
 
     def test_response_and_header_type_admission_return_without_mutation(self) -> None:

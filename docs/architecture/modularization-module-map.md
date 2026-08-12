@@ -2891,8 +2891,9 @@ facade. Configuration policy lives in `ac_hunter_config.py`; owner-only,
 no-follow, descriptor-identity-checked bounded trust-file I/O lives in
 `ac_hunter_secure_files.py`; deterministic schema, fixed-route, path,
 distinctness, and numeric-bound admission lives in
-`ac_hunter_config_admission.py`; Relay-only transport and phased short-lived
-authentication state, login, JWT issuance, and token admission in
+`ac_hunter_config_admission.py`; Relay-only transport, bounded in-memory cookie
+admission, and phased short-lived authentication state, login, JWT issuance,
+and token admission in
 `ac_hunter_transport.py`; bounded primitive compatibility
 and response projection in `ac_hunter_normalization.py`; pure finding identity,
 observable,
