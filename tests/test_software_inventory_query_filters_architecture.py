@@ -37,6 +37,18 @@ class SoftwareInventoryQueryFilterArchitectureTests(unittest.TestCase):
         self.assertEqual(list(query.parse_filters(None)), list(expected))
         self.assertTrue(callable(query._one))
 
+    def test_filter_phases_are_bounded_inside_the_existing_owner(self) -> None:
+        source = (DASHBOARD / "software_inventory_query.py").read_text()
+        self.assertLessEqual(len(source.splitlines()), 300)
+        for symbol in (
+            "_reject_unknown",
+            "_integer_filters",
+            "_search_filter",
+            "_named_filters",
+            "_validate_named",
+        ):
+            self.assertTrue(callable(getattr(query, symbol)))
+
     def test_all_valid_values_preserve_exact_normalization(self) -> None:
         result = query.parse_filters(
             {

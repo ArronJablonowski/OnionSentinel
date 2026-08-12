@@ -19,18 +19,8 @@ from software_inventory_state import (
 )
 
 
-def _one(query: dict[str, list[str]], key: str, default: str) -> str:
-    values = query.get(key)
-    if not values:
-        return default
-    if len(values) != 1:
-        raise InventoryQueryError(f"{key} must appear once")
-    return str(values[0])
-
-
-def parse_filters(query: dict[str, list[str]] | None) -> dict[str, object]:
-    query = query or {}
-    allowed = {
+ALLOWED_QUERY_PARAMETERS = frozenset(
+    {
         "limit",
         "offset",
         "search",
@@ -42,11 +32,27 @@ def parse_filters(query: dict[str, list[str]] | None) -> dict[str, object]:
         "sort",
         "direction",
     }
-    unknown = set(query) - allowed
+)
+
+
+def _one(query: dict[str, list[str]], key: str, default: str) -> str:
+    values = query.get(key)
+    if not values:
+        return default
+    if len(values) != 1:
+        raise InventoryQueryError(f"{key} must appear once")
+    return str(values[0])
+
+
+def _reject_unknown(query: dict[str, list[str]]) -> None:
+    unknown = set(query) - ALLOWED_QUERY_PARAMETERS
     if unknown:
         raise InventoryQueryError(
             f"unsupported query parameter: {sorted(unknown)[0]}"
         )
+
+
+def _integer_filters(query: dict[str, list[str]]) -> tuple[int, int]:
     try:
         limit = int(_one(query, "limit", str(DEFAULT_LIMIT)))
         offset = int(_one(query, "offset", "0"))
@@ -56,45 +62,77 @@ def parse_filters(query: dict[str, list[str]] | None) -> dict[str, object]:
         raise InventoryQueryError(f"limit must be between 1 and {MAX_LIMIT}")
     if not 0 <= offset <= MAX_OFFSET:
         raise InventoryQueryError(f"offset must be between 0 and {MAX_OFFSET}")
+    return limit, offset
+
+
+def _search_filter(query: dict[str, list[str]]) -> str:
     search = _one(query, "search", "").strip()
     if len(search) > 253 or any(ord(char) < 32 for char in search):
         raise InventoryQueryError("search is invalid")
-    tier = _one(query, "tier", "all").strip().lower()
-    confidence = _one(query, "confidence", "all").strip().lower()
-    freshness = _one(query, "freshness", "all").strip().lower()
-    platform = _one(query, "platform", "all").strip()
-    window = _one(query, "window", "30d").strip().lower()
-    sort_field = _one(query, "sort", "last_seen").strip().lower()
-    direction = _one(query, "direction", "desc").strip().lower()
-    if tier != "all" and tier not in TIERS:
-        raise InventoryQueryError("tier is unsupported")
-    if confidence != "all" and confidence not in CONFIDENCES:
-        raise InventoryQueryError("confidence is unsupported")
-    if freshness != "all" and freshness not in FRESHNESS_VALUES:
-        raise InventoryQueryError("freshness is unsupported")
+    return search
+
+
+def _named_filters(query: dict[str, list[str]]) -> dict[str, str]:
+    return {
+        "tier": _one(query, "tier", "all").strip().lower(),
+        "confidence": _one(query, "confidence", "all").strip().lower(),
+        "freshness": _one(query, "freshness", "all").strip().lower(),
+        "platform": _one(query, "platform", "all").strip(),
+        "window": _one(query, "window", "30d").strip().lower(),
+        "sort": _one(query, "sort", "last_seen").strip().lower(),
+        "direction": _one(query, "direction", "desc").strip().lower(),
+    }
+
+
+def _validate_choice(
+    value: str,
+    allowed: frozenset[str],
+    error: str,
+) -> None:
+    if value != "all" and value not in allowed:
+        raise InventoryQueryError(error)
+
+
+def _validate_platform(platform: str) -> None:
     if (
         not platform
         or len(platform) > 160
         or any(ord(char) < 32 for char in platform)
     ):
         raise InventoryQueryError("platform is invalid")
-    if window not in WINDOWS:
+
+
+def _validate_named(filters: dict[str, str]) -> None:
+    _validate_choice(filters["tier"], TIERS, "tier is unsupported")
+    _validate_choice(
+        filters["confidence"], CONFIDENCES, "confidence is unsupported"
+    )
+    _validate_choice(
+        filters["freshness"],
+        FRESHNESS_VALUES,
+        "freshness is unsupported",
+    )
+    _validate_platform(filters["platform"])
+    if filters["window"] not in WINDOWS:
         raise InventoryQueryError("window is unsupported")
-    if sort_field not in SORT_FIELDS:
+    if filters["sort"] not in SORT_FIELDS:
         raise InventoryQueryError("sort is unsupported")
-    if direction not in {"asc", "desc"}:
+    if filters["direction"] not in {"asc", "desc"}:
         raise InventoryQueryError("direction is unsupported")
+
+
+def parse_filters(query: dict[str, list[str]] | None) -> dict[str, object]:
+    query = query or {}
+    _reject_unknown(query)
+    limit, offset = _integer_filters(query)
+    search = _search_filter(query)
+    named = _named_filters(query)
+    _validate_named(named)
     return {
         "limit": limit,
         "offset": offset,
         "search": search,
-        "tier": tier,
-        "confidence": confidence,
-        "freshness": freshness,
-        "platform": platform,
-        "window": window,
-        "sort": sort_field,
-        "direction": direction,
+        **named,
     }
 
 
