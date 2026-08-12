@@ -532,6 +532,12 @@ namespace, so source-loader tests and operational overrides remain effective.
 drain validation, wake/dashboard signaling, read-only reconciliation, indexed
 capability detection, and the final application delegate.
 
+The standalone AI queue-consistency diagnostic keeps its CLI in one flat-bin
+script while private phases own group-wide prompt classification, explicitly
+authorized cleanup, stable result composition, issue evaluation, and text/JSON
+rendering. Its default path remains read-only, and cleanup failures remain
+bounded operator-visible records rather than widening deletion authority.
+
 `scheduler_application.py` owns the preflight-to-settlement application flow:
 single-process nonblocking lock acquisition, locked initialization, repeated
 selection and processing, controlled-run state projection, and final

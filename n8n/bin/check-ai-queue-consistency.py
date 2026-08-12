@@ -192,30 +192,32 @@ def __print_stale_prompt(item: dict[str, Any]) -> None:
     print(f"STALE {item['path']} alert_ids={','.join(item['alert_ids'])}")
 
 
-def main() -> int:
-    args = parse_args()
-    if not args.db.exists():
-        print(f"ERROR db not found: {args.db}", file=sys.stderr)
-        return 2
-
-    with closing(sqlite3.connect(args.db)) as conn:
-        state, alert_to_group, group_members = db_state(conn)
-    analysis_mtimes, _analysis_paths = artifact_index(args.analysis_dir, ".json")
-    prompt_mtimes, prompt_paths = artifact_index(args.prompt_dir, "-ai-prompt.json", prompt_mode=True)
-
+def __classify_prompt_paths(
+    prompt_paths: dict[Path, set[str]],
+    analysis_mtimes: dict[str, float],
+    alert_to_group: dict[str, str],
+    group_members: dict[str, set[str]],
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
     stale_prompts: list[dict[str, Any]] = []
     resolved_prompts: list[str] = []
     orphan_prompts: list[str] = []
     for path, alert_ids in prompt_paths.items():
         prompt_mtime = path.stat().st_mtime
-        known_ids = [alert_id for alert_id in alert_ids if alert_id in alert_to_group]
+        known_ids = [
+            alert_id for alert_id in alert_ids if alert_id in alert_to_group
+        ]
         if not known_ids:
             orphan_prompts.append(str(path))
             continue
         group_ids: set[str] = set()
         for alert_id in known_ids:
-            group_ids.update(group_members.get(alert_to_group[alert_id], {alert_id}))
-        latest_group_analysis = max((analysis_mtimes.get(alert_id, 0) for alert_id in group_ids), default=0)
+            group_ids.update(
+                group_members.get(alert_to_group[alert_id], {alert_id})
+            )
+        latest_group_analysis = max(
+            (analysis_mtimes.get(alert_id, 0) for alert_id in group_ids),
+            default=0,
+        )
         if prompt_mtime > latest_group_analysis:
             stale_prompts.append(
                 {
@@ -228,7 +230,16 @@ def main() -> int:
             )
         else:
             resolved_prompts.append(str(path))
+    return stale_prompts, resolved_prompts, orphan_prompts
 
+
+def __cleanup_selected_prompts(
+    args: argparse.Namespace,
+    *,
+    stale_prompts: list[dict[str, Any]],
+    resolved_prompts: list[str],
+    orphan_prompts: list[str],
+) -> list[str]:
     deleted_prompts: list[str] = []
     if args.delete_resolved_prompts:
         __delete_prompt_paths(
@@ -242,8 +253,20 @@ def main() -> int:
             stale_prompts,
             deleted_prompts,
         )
+    return deleted_prompts
 
-    result = {
+
+def __consistency_result(
+    *,
+    state: dict[str, Any],
+    prompt_paths: dict[Path, set[str]],
+    analysis_mtimes: dict[str, float],
+    stale_prompts: list[dict[str, Any]],
+    resolved_prompts: list[str],
+    orphan_prompts: list[str],
+    deleted_prompts: list[str],
+) -> dict[str, Any]:
+    return {
         "db": state,
         "artifacts": {
             "prompt_packages": len(prompt_paths),
@@ -257,41 +280,107 @@ def main() -> int:
         "orphan_prompts": orphan_prompts,
         "deleted_resolved_prompts": deleted_prompts,
     }
-    issues = [
-        state["quick_check"] != "ok",
-        state["bad_alert_filters"],
-        state["bad_summary_filters"],
-        state["orphan_summaries"],
-        state["missing_summaries"],
-        stale_prompts,
-        orphan_prompts,
-    ]
+
+
+def __has_consistency_issues(
+    state: dict[str, Any],
+    stale_prompts: list[dict[str, Any]],
+    orphan_prompts: list[str],
+) -> bool:
+    return any(
+        [
+            state["quick_check"] != "ok",
+            state["bad_alert_filters"],
+            state["bad_summary_filters"],
+            state["orphan_summaries"],
+            state["missing_summaries"],
+            stale_prompts,
+            orphan_prompts,
+        ]
+    )
+
+
+def __print_text_result(result: dict[str, Any]) -> None:
+    state = result["db"]
+    artifacts = result["artifacts"]
+    print(f"quick_check: {state['quick_check']}")
+    print(
+        "groups: "
+        f"alerts={state['alert_groups']} summary={state['summary_groups']} "
+        f"missing={state['missing_summaries']} orphan={state['orphan_summaries']}"
+    )
+    print(
+        "filters: "
+        f"bad_alert_filters={state['bad_alert_filters']} "
+        f"bad_summary_filters={state['bad_summary_filters']}"
+    )
+    print(
+        "ai prompts: "
+        f"prompt_packages={artifacts['prompt_packages']} "
+        f"stale={artifacts['stale_prompts']} "
+        f"resolved={artifacts['resolved_prompts']} "
+        f"orphan={artifacts['orphan_prompts']}"
+    )
+    if result["deleted_resolved_prompts"]:
+        print(
+            "deleted_resolved_prompts: "
+            f"{len(result['deleted_resolved_prompts'])}"
+        )
+    for item in result["stale_prompts"][:20]:
+        __print_stale_prompt(item)
+    for path in result["orphan_prompts"][:20]:
+        print(f"ORPHAN {path}")
+
+
+def __render_result(args: argparse.Namespace, result: dict[str, Any]) -> None:
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
-        print(f"quick_check: {state['quick_check']}")
-        print(
-            "groups: "
-            f"alerts={state['alert_groups']} summary={state['summary_groups']} "
-            f"missing={state['missing_summaries']} orphan={state['orphan_summaries']}"
-        )
-        print(
-            "filters: "
-            f"bad_alert_filters={state['bad_alert_filters']} "
-            f"bad_summary_filters={state['bad_summary_filters']}"
-        )
-        print(
-            "ai prompts: "
-            f"prompt_packages={len(prompt_paths)} stale={len(stale_prompts)} "
-            f"resolved={len(resolved_prompts)} orphan={len(orphan_prompts)}"
-        )
-        if deleted_prompts:
-            print(f"deleted_resolved_prompts: {len(deleted_prompts)}")
-        for item in stale_prompts[:20]:
-            __print_stale_prompt(item)
-        for path in orphan_prompts[:20]:
-            print(f"ORPHAN {path}")
-    return 1 if args.fail_on_issue and any(issues) else 0
+        __print_text_result(result)
+
+
+def main() -> int:
+    args = parse_args()
+    if not args.db.exists():
+        print(f"ERROR db not found: {args.db}", file=sys.stderr)
+        return 2
+
+    with closing(sqlite3.connect(args.db)) as conn:
+        state, alert_to_group, group_members = db_state(conn)
+    analysis_mtimes, _analysis_paths = artifact_index(args.analysis_dir, ".json")
+    _prompt_mtimes, prompt_paths = artifact_index(
+        args.prompt_dir,
+        "-ai-prompt.json",
+        prompt_mode=True,
+    )
+    stale_prompts, resolved_prompts, orphan_prompts = __classify_prompt_paths(
+        prompt_paths,
+        analysis_mtimes,
+        alert_to_group,
+        group_members,
+    )
+    deleted_prompts = __cleanup_selected_prompts(
+        args,
+        stale_prompts=stale_prompts,
+        resolved_prompts=resolved_prompts,
+        orphan_prompts=orphan_prompts,
+    )
+    result = __consistency_result(
+        state=state,
+        prompt_paths=prompt_paths,
+        analysis_mtimes=analysis_mtimes,
+        stale_prompts=stale_prompts,
+        resolved_prompts=resolved_prompts,
+        orphan_prompts=orphan_prompts,
+        deleted_prompts=deleted_prompts,
+    )
+    __render_result(args, result)
+    issues = __has_consistency_issues(
+        state,
+        stale_prompts,
+        orphan_prompts,
+    )
+    return 1 if args.fail_on_issue and issues else 0
 
 
 if __name__ == "__main__":
