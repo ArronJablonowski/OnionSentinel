@@ -113,13 +113,6 @@
     "n8n/bin/software_inventory_normalization.py::validate_state": {
       "max_complexity": 24
     },
-    "n8n/bin/software_inventory_transport.py::load_endpoint_cache": {
-      "max_complexity": 23
-    },
-    "n8n/bin/software_inventory_transport.py::validate_response": {
-      "max_complexity": 52,
-      "max_lines": 161
-    },
     "n8n/bin/verify-agent-memory.py::verify_setup": {
       "max_complexity": 20
     },

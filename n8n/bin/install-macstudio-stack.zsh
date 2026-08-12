@@ -812,6 +812,7 @@ cp "$REPO_DIR/n8n/bin/collect-endpoint-software-inventory.py" "$STACK_DIR/bin/co
 cp "$REPO_DIR/n8n/bin/software_inventory_contract.py" "$STACK_DIR/bin/software_inventory_contract.py"
 cp "$REPO_DIR/n8n/bin/software_inventory_normalization.py" "$STACK_DIR/bin/software_inventory_normalization.py"
 cp "$REPO_DIR/n8n/bin/software_inventory_transport.py" "$STACK_DIR/bin/software_inventory_transport.py"
+cp "$REPO_DIR/n8n/bin/software_inventory_validation.py" "$STACK_DIR/bin/software_inventory_validation.py"
 cp "$REPO_DIR/n8n/bin/software_inventory_workflow.py" "$STACK_DIR/bin/software_inventory_workflow.py"
 cp "$REPO_DIR/n8n/bin/collect-software-inventory.py" "$STACK_DIR/bin/collect-software-inventory.py"
 cp "$REPO_DIR/n8n/bin/collect-ac-hunter.py" "$STACK_DIR/bin/collect-ac-hunter.py"

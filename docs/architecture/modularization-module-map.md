@@ -2832,8 +2832,13 @@ cross into deterministic result projection.
 facade. `software_inventory_contract.py` owns schemas, source policy,
 configuration, and bounded primitives; `software_inventory_normalization.py`
 owns record, cursor, tier, freshness, and state validation;
-`software_inventory_transport.py` owns private persistence and bounded
-read-only relay pagination; and `software_inventory_workflow.py` owns source
+`software_inventory_transport.py` owns owner-controlled file access, private
+persistence, and bounded read-only relay pagination. Its stable cache and
+response validators delegate already-loaded objects to
+`software_inventory_validation.py`, which owns cache freshness/coverage,
+fixed-query audit and transport-receipt binding, result/page/cursor accounting,
+and normalized public response projection without filesystem or network
+authority. `software_inventory_workflow.py` owns source
 collection, snapshot composition, failure states, and CLI orchestration.
 
 Installed, network-observed, and user-agent-inferred records retain distinct

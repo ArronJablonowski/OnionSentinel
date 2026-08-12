@@ -18,6 +18,7 @@ if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
 
 import software_inventory_transport as transport
+import software_inventory_validation as validation_owner
 
 
 class SoftwareInventoryTransportArchitectureTests(unittest.TestCase):
@@ -175,6 +176,23 @@ class SoftwareInventoryTransportArchitectureTests(unittest.TestCase):
 
         received = self.with_receipt(response, page_size=2)
         self.assertEqual(self.validate(received), received)
+        with self.assertRaisesRegex(ValueError, "software inventory cursor"):
+            self.validate(response, previous_after={"invalid": "cursor"})
+
+    def test_validation_owner_is_inward_and_facades_are_bounded(self) -> None:
+        source = inspect.getsource(validation_owner)
+        self.assertNotIn("import software_inventory_transport", source)
+        self.assertNotIn("from software_inventory_transport", source)
+        self.assertNotIn("urlopen", source)
+        self.assertNotIn("run_bounded_command", source)
+        self.assertLessEqual(
+            len(inspect.getsource(transport.validate_response).splitlines()),
+            18,
+        )
+        self.assertLessEqual(
+            len(inspect.getsource(transport.load_endpoint_cache).splitlines()),
+            14,
+        )
 
     def test_response_rejection_precedence_and_messages_are_exact(self) -> None:
         base = self.response(records=[self.record("zeek_software")])

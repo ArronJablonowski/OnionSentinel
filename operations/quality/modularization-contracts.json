@@ -1573,6 +1573,15 @@
       ]
     },
     {
+      "path": "n8n/bin/software_inventory_validation.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/software_inventory_validation.py",
+      "required_symbols": [
+        "validated_endpoint_cache",
+        "validate_relay_response"
+      ]
+    },
+    {
       "path": "n8n/bin/software_inventory_workflow.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/software_inventory_workflow.py",
