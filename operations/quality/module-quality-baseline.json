@@ -1,30 +1,9 @@
 {
   "files": {},
   "functions": {
-    "n8n/bin/asset_inventory.py::resolve_asset_context": {
-      "max_complexity": 41,
-      "max_lines": 142
-    },
-    "n8n/bin/asset_inventory.py::validate_asset_inventory": {
-      "max_complexity": 24
-    },
-    "n8n/bin/backup-onion-sentinel-runtime.py::create_bundle": {
-      "max_lines": 101
-    },
-    "n8n/bin/check-ai-queue-consistency.py::main": {
-      "max_complexity": 21,
-      "max_lines": 104
-    },
-    "n8n/bin/check-onion-sentinel-readiness.py::check_providers": {
-      "max_complexity": 22
-    },
     "n8n/bin/collect-endpoint-software-inventory.py::collect": {
       "max_complexity": 25,
       "max_lines": 118
-    },
-    "n8n/bin/collect-incident-evidence.py::observables": {
-      "max_complexity": 20,
-      "max_lines": 136
     },
     "n8n/bin/configure-post-commit-env.py::render_env": {
       "max_complexity": 16
@@ -50,19 +29,6 @@
     },
     "n8n/bin/investigation_skills_v2.py::validate_manifest": {
       "max_complexity": 40
-    },
-    "n8n/bin/live_osquery_client.py::_open_locked_case_manifest": {
-      "max_complexity": 17
-    },
-    "n8n/bin/live_osquery_client.py::_persist_live_osquery_artifact": {
-      "max_complexity": 21
-    },
-    "n8n/bin/live_osquery_client.py::collect_live_osquery": {
-      "max_lines": 103
-    },
-    "n8n/bin/live_osquery_client.py::load_live_osquery_config": {
-      "max_complexity": 61,
-      "max_lines": 215
     },
     "n8n/bin/maintain-pcap-evidence.py::cleanup_analyzed_artifacts": {
       "max_complexity": 17
@@ -103,9 +69,6 @@
     "n8n/bin/report-production-soak.py::summarize": {
       "max_complexity": 28
     },
-    "n8n/bin/run-recovery-restore-drill.py::verify_bundle": {
-      "max_complexity": 32
-    },
     "n8n/bin/verify-agent-memory.py::verify_setup": {
       "max_complexity": 20
     },
@@ -136,9 +99,6 @@
     },
     "onion-sentinel-dashboard/ac_hunter_transport.py::AcHunterApiClient._authenticate": {
       "max_complexity": 16
-    },
-    "onion-sentinel-dashboard/cti_program.py::normalize_program": {
-      "max_complexity": 20
     },
     "onion-sentinel-dashboard/scripts/dashboard_pcap_components.py::render_pcap_evidence_markdown": {
       "max_complexity": 22
