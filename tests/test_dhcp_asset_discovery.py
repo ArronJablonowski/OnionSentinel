@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import importlib.machinery
 import importlib.util
+import inspect
 import io
 import json
 import stat
@@ -206,6 +207,146 @@ class DhcpCollectorTests(unittest.TestCase):
             "sensor": "so-sensor-1",
             "evidence_id": evidence_id,
         }
+
+    def test_public_compatibility_surface_and_signatures_are_stable(self) -> None:
+        expected = {
+            "asset_store_token": "(path: 'Path') -> 'str'",
+            "persist_database_state": "(api_url: 'str', token: 'str', state: 'dict') -> 'dict'",
+            "utc_now": "() -> 'dt.datetime'",
+            "parse_timestamp": "(value: 'object') -> 'dt.datetime'",
+            "format_timestamp": "(value: 'dt.datetime') -> 'str'",
+            "bounded_json": "(path: 'Path', maximum_bytes: 'int') -> 'object'",
+            "load_config": "(path: 'Path') -> 'dict'",
+            "empty_state": "(status: 'str' = 'never_run') -> 'dict'",
+            "load_state": "(path: 'Path') -> 'dict'",
+            "atomic_write_json": "(path: 'Path', payload: 'dict') -> 'None'",
+            "validate_response": "(payload: 'object', expected_window: 'dict | None' = None) -> 'dict'",
+            "observation_identity": "(item: 'dict') -> 'tuple[str, str]'",
+            "merge_observations": "(state: 'dict', incoming: 'list[dict]', now: 'dt.datetime', retention_days: 'int') -> 'list[dict]'",
+            "collection_window": "(state: 'dict', now: 'dt.datetime', default_minutes: 'int') -> 'tuple[dt.datetime, dt.datetime]'",
+            "query_dhcp": "(config: 'dict', start: 'dt.datetime', end: 'dt.datetime', size: 'int') -> 'dict'",
+            "relay_failure_diagnostic": "(stdout: 'object', stderr: 'object') -> 'str'",
+            "query_complete_window": "(config: 'dict', start: 'dt.datetime', end: 'dt.datetime', size: 'int', *, max_segments: 'int' = 16) -> 'dict'",
+            "backfill": "(config: 'dict', state: 'dict', now: 'dt.datetime', days: 'int') -> 'dict'",
+            "collect": "(config: 'dict', state: 'dict', now: 'dt.datetime') -> 'dict'",
+            "main": "() -> 'int'",
+        }
+        self.assertEqual(
+            {name: str(inspect.signature(getattr(self.collector, name))) for name in expected},
+            expected,
+        )
+        self.assertEqual(self.collector.CONTRACT, "onion-sentinel-dhcp-asset-discovery-v1")
+        self.assertEqual(self.collector.STATE_SCHEMA, "onion-sentinel-dhcp-asset-observations-v1")
+
+    def test_asset_store_token_requires_owner_only_file_and_prefers_dedicated_token(self) -> None:
+        environment = self.root / ".env"
+        environment.write_text(
+            "ASSET_STORE_WRITE_TOKEN=" + "a" * 32 + "\n"
+            "N8N_POST_COMMIT_TOKEN=" + "b" * 32 + "\n",
+            encoding="utf-8",
+        )
+        environment.chmod(0o600)
+        self.assertEqual(self.collector.asset_store_token(environment), "a" * 32)
+        environment.chmod(0o640)
+        with self.assertRaisesRegex(ValueError, "owner-controlled"):
+            self.collector.asset_store_token(environment)
+
+    def test_main_persists_database_before_publishing_cache(self) -> None:
+        state_path = self.root / "state.json"
+        log_path = self.root / "collector.jsonl"
+        updated = self.collector.empty_state()
+        updated["observations"] = [{"discovery_id": "a" * 20}]
+        updated["collection"].update({
+            "status": "ok",
+            "last_returned": 1,
+            "last_truncated": False,
+        })
+        calls = []
+
+        def persist(_url: str, token: str, state: dict) -> dict:
+            calls.append(("persist", token, state))
+            return {"ok": True, "retained": 1}
+
+        def publish(path: Path, state: dict) -> None:
+            calls.append(("publish", path, state))
+
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "collector",
+                "--config", str(self.root / "config.json"),
+                "--state", str(state_path),
+                "--log", str(log_path),
+                "--env", str(self.root / ".env"),
+                "--require-database",
+            ],
+        ), mock.patch.object(
+            self.collector, "load_config", return_value={"enabled": True}
+        ), mock.patch.object(
+            self.collector, "load_state", return_value=self.collector.empty_state()
+        ), mock.patch.object(
+            self.collector, "collect", return_value=updated
+        ), mock.patch.object(
+            self.collector, "asset_store_token", return_value="t" * 32
+        ), mock.patch.object(
+            self.collector, "persist_database_state", side_effect=persist
+        ), mock.patch.object(
+            self.collector, "atomic_write_json", side_effect=publish
+        ):
+            self.assertEqual(self.collector.main(), 0)
+
+        self.assertEqual([call[0] for call in calls], ["persist", "publish"])
+        self.assertIs(calls[0][2], updated)
+        self.assertIs(calls[1][2], updated)
+
+    def test_main_database_failure_records_failed_state_but_never_publishes_candidate(self) -> None:
+        state_path = self.root / "state.json"
+        log_path = self.root / "collector.jsonl"
+        original = self.collector.empty_state()
+        candidate = self.collector.empty_state()
+        candidate["observations"] = [{"discovery_id": "candidate"}]
+        candidate["collection"].update({
+            "status": "ok",
+            "last_returned": 1,
+            "last_truncated": False,
+        })
+        published = []
+
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "collector",
+                "--config", str(self.root / "config.json"),
+                "--state", str(state_path),
+                "--log", str(log_path),
+                "--env", str(self.root / ".env"),
+                "--require-database",
+            ],
+        ), mock.patch.object(
+            self.collector, "load_config", return_value={"enabled": True}
+        ), mock.patch.object(
+            self.collector, "load_state", side_effect=[original, original]
+        ), mock.patch.object(
+            self.collector, "collect", return_value=candidate
+        ), mock.patch.object(
+            self.collector, "asset_store_token", return_value="t" * 32
+        ), mock.patch.object(
+            self.collector,
+            "persist_database_state",
+            side_effect=RuntimeError("database unavailable"),
+        ), mock.patch.object(
+            self.collector,
+            "atomic_write_json",
+            side_effect=lambda _path, state: published.append(state),
+        ):
+            self.assertEqual(self.collector.main(), 1)
+
+        self.assertEqual(len(published), 1)
+        self.assertNotIn({"discovery_id": "candidate"}, published[0]["observations"])
+        self.assertEqual(published[0]["collection"]["status"], "failed")
+        self.assertIn("database unavailable", published[0]["collection"]["last_error"])
 
     def test_merge_tracks_ip_movement_by_mac_without_promoting_inventory(self) -> None:
         now = dt.datetime(2026, 7, 29, 18, tzinfo=dt.timezone.utc)
