@@ -153,40 +153,89 @@ def _verify_run_event_chain(
     previous = "0" * 64
     for expected_sequence, row in enumerate(rows, start=1):
         try:
-            sequence = int(row["sequence"])
-            payload_json = str(row["payload_json"])
-            payload_digest = hashlib.sha256(
-                payload_json.encode("utf-8")
-            ).hexdigest()
-            body = {
-                "run_id": run_id,
-                "sequence": sequence,
-                "idempotency_key": row["idempotency_key"],
-                "event_type": row["event_type"],
-                "stage": row["stage"],
-                "created_at": row["created_at"],
-                "payload_sha256": row["payload_sha256"],
-                "previous_event_sha256": row["previous_event_sha256"],
-            }
-            event_digest = digest_json(body)
+            sequence, payload_digest, event_digest = _event_chain_digests(
+                run_id,
+                row,
+            )
         except (IndexError, KeyError, TypeError, ValueError, OverflowError):
             return False
-        if (
-            sequence != expected_sequence
-            or str(row["payload_sha256"]) != payload_digest
-            or str(row["previous_event_sha256"]) != previous
-            or str(row["event_sha256"]) != event_digest
-            or str(row["event_id"]) != f"evt-{event_digest[:32]}"
+        if not _event_chain_row_is_valid(
+            row,
+            sequence=sequence,
+            expected_sequence=expected_sequence,
+            payload_digest=payload_digest,
+            previous=previous,
+            event_digest=event_digest,
         ):
             return False
         previous = str(row["event_sha256"])
     return True
 
 
+def _event_chain_digests(
+    run_id: str,
+    row: sqlite3.Row,
+) -> tuple[int, str, str]:
+    sequence = int(row["sequence"])
+    payload_json = str(row["payload_json"])
+    payload_digest = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    body = {
+        "run_id": run_id,
+        "sequence": sequence,
+        "idempotency_key": row["idempotency_key"],
+        "event_type": row["event_type"],
+        "stage": row["stage"],
+        "created_at": row["created_at"],
+        "payload_sha256": row["payload_sha256"],
+        "previous_event_sha256": row["previous_event_sha256"],
+    }
+    return sequence, payload_digest, digest_json(body)
+
+
+def _event_chain_row_is_valid(
+    row: sqlite3.Row,
+    *,
+    sequence: int,
+    expected_sequence: int,
+    payload_digest: str,
+    previous: str,
+    event_digest: str,
+) -> bool:
+    return (
+        sequence == expected_sequence
+        and str(row["payload_sha256"]) == payload_digest
+        and str(row["previous_event_sha256"]) == previous
+        and str(row["event_sha256"]) == event_digest
+        and str(row["event_id"]) == f"evt-{event_digest[:32]}"
+    )
+
+
 def database_snapshot(
     connection: sqlite3.Connection,
     path: Path,
 ) -> dict[str, Any]:
+    quick_check, foreign_key_errors = _validated_database_health(connection)
+    pages = _database_page_state(connection)
+    run_counts = _database_run_counts(connection)
+    accounting = sqlite_file_accounting(path)
+    return {
+        "quick_check": quick_check,
+        "foreign_key_check_rows": foreign_key_errors,
+        "journal_mode": pages["journal_mode"],
+        "auto_vacuum": pages["auto_vacuum"],
+        "page_size": pages["page_size"],
+        "page_count": pages["page_count"],
+        "freelist_pages": pages["freelist_pages"],
+        "live_page_bytes": pages["live_page_bytes"],
+        "reclaimable_page_bytes": pages["reclaimable_page_bytes"],
+        "run_counts": run_counts,
+        **accounting,
+    }
+
+
+def _validated_database_health(
+    connection: sqlite3.Connection,
+) -> tuple[str, int]:
     quick_check = str(connection.execute("PRAGMA quick_check").fetchone()[0])
     if quick_check != "ok":
         raise MaintenanceError(
@@ -205,6 +254,10 @@ def database_snapshot(
             "harness SQLite foreign_key_check failed: "
             f"{foreign_key_errors} row(s)"
         )
+    return quick_check, foreign_key_errors
+
+
+def _database_page_state(connection: sqlite3.Connection) -> dict[str, Any]:
     page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
     page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
     freelist_count = int(
@@ -212,6 +265,18 @@ def database_snapshot(
     )
     journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0])
     auto_vacuum = int(connection.execute("PRAGMA auto_vacuum").fetchone()[0])
+    return {
+        "journal_mode": journal_mode.lower(),
+        "auto_vacuum": auto_vacuum,
+        "page_size": page_size,
+        "page_count": page_count,
+        "freelist_pages": freelist_count,
+        "live_page_bytes": max(0, page_count - freelist_count) * page_size,
+        "reclaimable_page_bytes": freelist_count * page_size,
+    }
+
+
+def _database_run_counts(connection: sqlite3.Connection) -> dict[str, int]:
     counts = connection.execute(
         """
         SELECT
@@ -222,23 +287,10 @@ def database_snapshot(
         """,
         (*TERMINAL_STATUSES, *TERMINAL_STATUSES),
     ).fetchone()
-    accounting = sqlite_file_accounting(path)
     return {
-        "quick_check": quick_check,
-        "foreign_key_check_rows": foreign_key_errors,
-        "journal_mode": journal_mode.lower(),
-        "auto_vacuum": auto_vacuum,
-        "page_size": page_size,
-        "page_count": page_count,
-        "freelist_pages": freelist_count,
-        "live_page_bytes": max(0, page_count - freelist_count) * page_size,
-        "reclaimable_page_bytes": freelist_count * page_size,
-        "run_counts": {
-            "total": int(counts[0] or 0),
-            "terminal": int(counts[1] or 0),
-            "active": int(counts[2] or 0),
-        },
-        **accounting,
+        "total": int(counts[0] or 0),
+        "terminal": int(counts[1] or 0),
+        "active": int(counts[2] or 0),
     }
 
 
@@ -284,21 +336,13 @@ def _verify_backup_bundle(
 ) -> dict[str, Any] | None:
     manifest_path = bundle / "manifest.json"
     harness_path = bundle / "investigation-harness.sqlite3"
-    if (
-        not owner_only_regular_file(manifest_path)
-        or not owner_only_regular_file(harness_path)
-        or manifest_path.stat().st_size > MAX_BACKUP_MANIFEST_BYTES
-    ):
+    if not _backup_files_are_admissible(manifest_path, harness_path):
         return None
     metadata = _load_backup_metadata(manifest_path)
     if metadata is None:
         return None
     manifest, created, harness_manifest, file_manifest = metadata
-    age_seconds = (
-        int((now - created).total_seconds())
-        if created is not None
-        else max_age_seconds + 1
-    )
+    age_seconds = _backup_age_seconds(now, created, max_age_seconds)
     if not _backup_age_is_valid(
         created,
         harness_manifest,
@@ -307,19 +351,41 @@ def _verify_backup_bundle(
     ):
         return None
     expected_digest = str(file_manifest.get("sha256") or "")
-    if len(expected_digest) != 64 or sha256_file(harness_path) != expected_digest:
-        return None
-    snapshot = _inspect_backup_database(harness_path, required_run_ids)
+    snapshot = _verified_backup_snapshot(
+        harness_path,
+        required_run_ids,
+        expected_digest,
+    )
     if snapshot is None:
         return None
     runs, covered_run_ids, candidate_chains_valid = snapshot
-    if (
-        runs != int(harness_manifest.get("rows", -1))
-        or runs != int(manifest.get("harness_runs", -1))
-        or covered_run_ids != set(required_run_ids)
-        or not candidate_chains_valid
+    if not _backup_snapshot_matches_manifest(
+        runs,
+        covered_run_ids,
+        candidate_chains_valid,
+        harness_manifest,
+        manifest,
+        required_run_ids,
     ):
         return None
+    return _backup_verification_result(
+        bundle,
+        age_seconds,
+        expected_digest,
+        runs,
+        covered_run_ids,
+        candidate_chains_valid,
+    )
+
+
+def _backup_verification_result(
+    bundle: Path,
+    age_seconds: int,
+    expected_digest: str,
+    runs: int,
+    covered_run_ids: set[str],
+    candidate_chains_valid: bool,
+) -> dict[str, Any]:
     return {
         "verified": True,
         "bundle": bundle.name,
@@ -330,6 +396,43 @@ def _verify_backup_bundle(
         "candidate_event_chains_valid": candidate_chains_valid,
         "_covered_run_ids": tuple(sorted(covered_run_ids)),
     }
+
+
+def _backup_files_are_admissible(
+    manifest_path: Path,
+    harness_path: Path,
+) -> bool:
+    return (
+        owner_only_regular_file(manifest_path)
+        and owner_only_regular_file(harness_path)
+        and manifest_path.stat().st_size <= MAX_BACKUP_MANIFEST_BYTES
+    )
+
+
+def _verified_backup_snapshot(
+    harness_path: Path,
+    required_run_ids: tuple[str, ...],
+    expected_digest: str,
+) -> tuple[int, set[str], bool] | None:
+    if len(expected_digest) != 64 or sha256_file(harness_path) != expected_digest:
+        return None
+    return _inspect_backup_database(harness_path, required_run_ids)
+
+
+def _backup_snapshot_matches_manifest(
+    runs: int,
+    covered_run_ids: set[str],
+    candidate_chains_valid: bool,
+    harness_manifest: dict,
+    manifest: dict,
+    required_run_ids: tuple[str, ...],
+) -> bool:
+    return (
+        runs == int(harness_manifest.get("rows", -1))
+        and runs == int(manifest.get("harness_runs", -1))
+        and covered_run_ids == set(required_run_ids)
+        and candidate_chains_valid
+    )
 
 
 def _load_backup_metadata(
@@ -363,6 +466,18 @@ def _backup_age_is_valid(
         and bool(harness_manifest.get("present"))
         and age_seconds >= -300
         and age_seconds <= max_age_seconds
+    )
+
+
+def _backup_age_seconds(
+    now: dt.datetime,
+    created: dt.datetime | None,
+    max_age_seconds: int,
+) -> int:
+    return (
+        int((now - created).total_seconds())
+        if created is not None
+        else max_age_seconds + 1
     )
 
 

@@ -2,6 +2,7 @@
 """Characterize fail-closed harness maintenance integrity proofs."""
 from __future__ import annotations
 
+import ast
 import copy
 import datetime as dt
 import hashlib
@@ -32,6 +33,32 @@ def load_integrity():
 
 
 INTEGRITY = load_integrity()
+
+
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse(
+        (BIN_DIR / "harness_maintenance_integrity.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    complexity = 1
+    for node in ast.walk(target):
+        if node is target:
+            continue
+        if isinstance(node, (ast.If, ast.For, ast.While, ast.IfExp, ast.Assert)):
+            complexity += 1
+        elif isinstance(node, ast.Try):
+            complexity += len(node.handlers)
+        elif isinstance(node, ast.BoolOp):
+            complexity += max(0, len(node.values) - 1)
+        elif isinstance(node, ast.comprehension):
+            complexity += 1 + len(node.ifs)
+    return target.end_lineno - target.lineno + 1, complexity
 
 
 class TracedRow(dict):
@@ -107,6 +134,28 @@ class FakeConnection:
 
 
 class HarnessMaintenanceIntegrityPhasesCharacterizationTests(unittest.TestCase):
+    def test_changed_integrity_phases_stay_within_architecture_budget(self) -> None:
+        functions = (
+            "_verify_run_event_chain",
+            "_event_chain_digests",
+            "_event_chain_row_is_valid",
+            "database_snapshot",
+            "_validated_database_health",
+            "_database_page_state",
+            "_database_run_counts",
+            "_verify_backup_bundle",
+            "_backup_verification_result",
+            "_backup_files_are_admissible",
+            "_verified_backup_snapshot",
+            "_backup_snapshot_matches_manifest",
+            "_backup_age_seconds",
+        )
+        for name in functions:
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
+
     def test_event_chain_preserves_row_access_and_digest_order(self) -> None:
         run_id = "run-1"
         first = event_row(
