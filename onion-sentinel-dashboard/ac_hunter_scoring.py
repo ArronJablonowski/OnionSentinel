@@ -13,6 +13,9 @@ from ac_hunter_normalization import (  # noqa: F401
     _rows,
     _string_list,
 )
+from ac_hunter_scoring_policy import apply_scoring_policy
+
+
 def _known_benign_explanation(finding: Mapping[str, Any]) -> str:
     evidence = finding.get("evidence")
     ptr = (
@@ -59,143 +62,12 @@ def _score_finding(
     rare_signature_count: int = 0,
 ) -> Dict[str, Any]:
     """Apply deterministic behavioral priority; never infer malware."""
-
-    points = 0
-    reasons: List[str] = []
-    module = str(finding.get("module") or "")
-    score = _number(finding.get("score"), 0.0)
-    duration = _number(finding.get("duration_seconds"), 0.0)
-    fqdn = _safe_text(finding.get("fqdn"), 512)
-    source = _safe_text(finding.get("source_ip"), 128)
-    destination = _safe_text(finding.get("destination_ip"), 128)
-    port = _integer_value(finding.get("port"))
-    protocol = _safe_text(finding.get("protocol"), 64)
-    searchable = (
-        fqdn
-        + " "
-        + json.dumps(finding.get("evidence", {}), sort_keys=True)
-    ).lower()
-    benign = _known_benign_explanation(finding)
-    generic_infrastructure = any(
-        marker in searchable for marker in GENERIC_INFRASTRUCTURE_MARKERS
+    return apply_scoring_policy(
+        finding,
+        module_count,
+        rare_signature_count,
+        _known_benign_explanation,
     )
-
-    if module == "blacklist":
-        points += 70
-        reasons.append("AC Hunter reported a blacklist match")
-    if module == "strobe":
-        points += 55
-        reasons.append("AC Hunter reported strobe/scanning behavior")
-    if score >= 0.95:
-        points += 35
-        reasons.append(f"high AC Hunter behavioral score ({score:.3f})")
-    elif score >= 0.80:
-        points += 22
-        reasons.append(f"elevated AC Hunter behavioral score ({score:.3f})")
-    elif score >= 0.50:
-        points += 12
-        reasons.append(f"AC Hunter behavioral score met the review threshold ({score:.3f})")
-    if not fqdn and module in {
-        "beacons",
-        "beacons_sni",
-        "beacons_proxy",
-        "long_connections",
-        "unexpected_ports",
-    }:
-        points += 12
-        reasons.append("no FQDN/SNI/DNS explanation was present")
-    if generic_infrastructure:
-        points += 12
-        reasons.append("destination context is generic cloud/VPS infrastructure")
-    elif (fqdn or destination) and not benign:
-        points += 8
-        reasons.append(
-            "destination was not recognized as a common vendor, update, "
-            "push, or other expected service"
-        )
-    if module == "unexpected_ports":
-        points += 25
-        reasons.append("protocol/port behavior was unexpected")
-    if duration >= 18_000:
-        points += 20
-        reasons.append(f"connection lasted {duration / 3600:.1f} hours")
-    if module_count > 1:
-        added = min(30, (module_count - 1) * 10)
-        points += added
-        reasons.append(f"source appeared across {module_count} AC Hunter modules")
-    if rare_signature_count >= 10:
-        points += 10
-        reasons.append(
-            f"source was associated with {rare_signature_count} rare client-signature observations"
-        )
-
-    watch_one = (
-        source == "10.66.6.209"
-        and destination == "208.70.182.48"
-        and port == 1610
-        and protocol
-        in {
-            "",
-            "TCP",
-            "TLS",
-            "SSL",
-            "UNKNOWN",
-            "TLS/UNKNOWN",
-            "SSL/UNKNOWN",
-        }
-        and not fqdn
-    )
-    watch_two = (
-        source == "10.100.4.245"
-        and destination == "98.84.79.102"
-        and port == 443
-        and duration >= 18_000
-    )
-    if watch_one:
-        points = max(points, 40)
-        reasons.append(
-            "environment watch: TCP/1610 TLS/unknown traffic to 208.70.182.48 lacks FQDN context"
-        )
-    if watch_two:
-        points = max(points, 40)
-        reasons.append(
-            "environment watch: very long TCP/443 connection to a generic AWS destination"
-        )
-
-    hard_signal = module in {"blacklist", "strobe"} or watch_one or watch_two
-    if benign and not hard_signal:
-        points = max(0, points - 35)
-        if (
-            score >= 0.95
-            and module
-            in {"beacons", "beacons_sni", "beacons_proxy"}
-        ):
-            # Recognized vendor context lowers urgency but cannot erase a
-            # strong periodicity signal on its own.
-            points = max(points, 25)
-        reasons.append(f"lowered priority: {benign}")
-
-    # These environment-specific pivots were supplied as "Needs review"
-    # exemplars. Keep that label stable even when correlation adds enough
-    # generic points to cross the broad high-concern threshold; a blacklist or
-    # strobe module remains independently high concern.
-    if (watch_one or watch_two) and module not in {"blacklist", "strobe"}:
-        verdict = "Needs review"
-    elif points >= 65:
-        verdict = "High concern"
-    elif points >= 25:
-        verdict = "Needs review"
-    elif benign:
-        verdict = "Likely benign"
-    else:
-        verdict = "Informational"
-    if not reasons:
-        reasons.append("behavioral evidence is limited and requires context before escalation")
-    finding["priority_score"] = points
-    finding["verdict"] = verdict
-    finding["reason"] = "; ".join(reasons)
-    finding["watch_match"] = bool(watch_one or watch_two)
-    return finding
 
 
 def _count_value(value: object) -> int:

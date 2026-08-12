@@ -1269,6 +1269,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_write_dispatch.py" "$DASHBOARD
 cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_config.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_config.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_transport.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_transport.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_normalization.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_normalization.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_scoring_policy.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_scoring_policy.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_scoring.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_scoring.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_collection_findings.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_collection_findings.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_collection_hosts.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_collection_hosts.py"
