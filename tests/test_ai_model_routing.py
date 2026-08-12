@@ -2819,7 +2819,7 @@ class AiModelRoutingTests(unittest.TestCase):
                     "sensitive server detail",
                     str(raised.exception),
                 )
-                self.assertIsNone(http_error.fp)
+                self.assertTrue(http_error.fp.closed)
 
     def test_active_analysis_path_is_scoped_to_one_sanitized_run_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

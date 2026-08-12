@@ -49,7 +49,8 @@ def request_json(url: str, method: str = "GET", payload: dict | None = None) -> 
         with urllib.request.urlopen(request, timeout=5) as response:
             return response.status, json.loads(response.read())
     except urllib.error.HTTPError as error:
-        return error.code, json.loads(error.read())
+        with closing(error):
+            return error.code, json.loads(error.read())
 
 
 class RequestJsonOwnershipTest(unittest.TestCase):
@@ -71,7 +72,7 @@ class RequestJsonOwnershipTest(unittest.TestCase):
                 (409, {"error": "synthetic"}),
             )
 
-        self.assertIsNone(error.fp)
+        self.assertTrue(error.fp.closed)
 
 
 class AlertStorePcapRetryTest(unittest.TestCase):

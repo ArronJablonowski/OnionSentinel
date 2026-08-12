@@ -142,8 +142,11 @@ def post(
         with urllib.request.urlopen(request, timeout=timeout) as response:
             result = read_bounded_json(response, max_bytes=max_response_bytes)
     except urllib.error.HTTPError as exc:
-        response_body = exc.read(max_response_bytes + 1)
-        status_code = int(exc.code)
+        try:
+            response_body = exc.read(max_response_bytes + 1)
+            status_code = int(exc.code)
+        finally:
+            exc.close()
         retryable = status_code >= 500 or status_code in {408, 425, 429}
         raise submission_error(
             f"analysis index HTTP {status_code}",
