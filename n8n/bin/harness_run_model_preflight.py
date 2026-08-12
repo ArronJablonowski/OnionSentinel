@@ -21,6 +21,41 @@ def preflight_model_call(
     approximate_evidence_rows: Callable[[Any], int],
 ) -> None:
     """Authorize one immutable route and reserve its model-call budget."""
+    call_id, requested_route, decision = _authorize_model_route(
+        run,
+        call_id=call_id,
+        requested_route=requested_route,
+        purpose=purpose,
+        independent_review=independent_review,
+        valid_identifier=valid_identifier,
+        model_route=model_route,
+        redacted_string=redacted_string,
+    )
+    _complete_model_preflight(
+        run,
+        call_id=call_id,
+        input_value=input_value,
+        requested_route=requested_route,
+        purpose=purpose,
+        independent_review=independent_review,
+        decision=decision,
+        redacted_string=redacted_string,
+        canonical_json=canonical_json,
+        approximate_evidence_rows=approximate_evidence_rows,
+    )
+
+
+def _authorize_model_route(
+    run: Any,
+    *,
+    call_id: str,
+    requested_route: str,
+    purpose: str,
+    independent_review: bool,
+    valid_identifier: Callable[[Any, str, int], str],
+    model_route: Callable[[Any, str], str],
+    redacted_string: Callable[[Any, int], str],
+) -> tuple[str, str, dict[str, Any]]:
     call_id = valid_identifier(call_id, "model call_id", 128)
     requested_route = model_route(
         requested_route,
@@ -42,7 +77,22 @@ def preflight_model_call(
     )
     if not decision["allowed"] and run.policy.mode == "enforce":
         raise HarnessPolicyError(str(decision["reason"]))
+    return call_id, requested_route, decision
 
+
+def _complete_model_preflight(
+    run: Any,
+    *,
+    call_id: str,
+    input_value: Any,
+    requested_route: str,
+    purpose: str,
+    independent_review: bool,
+    decision: Mapping[str, Any],
+    redacted_string: Callable[[Any, int], str],
+    canonical_json: Callable[[Any], str],
+    approximate_evidence_rows: Callable[[Any], int],
+) -> None:
     measurements = _prompt_measurements(
         run,
         input_value,
