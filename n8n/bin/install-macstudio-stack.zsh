@@ -843,6 +843,11 @@ cp "$REPO_DIR/n8n/bin/install-investigation-query-runtime.py" "$STACK_DIR/bin/in
   --runtime-bin "$STACK_DIR/bin" \
   --config "$STACK_DIR/config/incident-evidence.json"
 cp "$REPO_DIR/n8n/bin/live_osquery_contract.py" "$STACK_DIR/bin/live_osquery_contract.py"
+cp "$REPO_DIR/n8n/bin/live_osquery_client_primitives.py" "$STACK_DIR/bin/live_osquery_client_primitives.py"
+cp "$REPO_DIR/n8n/bin/live_osquery_client_config.py" "$STACK_DIR/bin/live_osquery_client_config.py"
+cp "$REPO_DIR/n8n/bin/live_osquery_client_policy.py" "$STACK_DIR/bin/live_osquery_client_policy.py"
+cp "$REPO_DIR/n8n/bin/live_osquery_client_transport.py" "$STACK_DIR/bin/live_osquery_client_transport.py"
+cp "$REPO_DIR/n8n/bin/live_osquery_client_custody.py" "$STACK_DIR/bin/live_osquery_client_custody.py"
 cp "$REPO_DIR/n8n/bin/live_osquery_client.py" "$STACK_DIR/bin/live_osquery_client.py"
 cp "$REPO_DIR/n8n/bin/collect-live-osquery.py" "$STACK_DIR/bin/collect-live-osquery.py"
 cp "$REPO_DIR/n8n/bin/ac_hunter_contract.py" "$STACK_DIR/bin/ac_hunter_contract.py"

@@ -99,6 +99,11 @@ class LiveOsqueryClientArchitectureTests(unittest.TestCase):
                 "bounded_process_runtime.py",
                 "bounded_process.py",
                 "live_osquery_contract.py",
+                "live_osquery_client_primitives.py",
+                "live_osquery_client_config.py",
+                "live_osquery_client_policy.py",
+                "live_osquery_client_transport.py",
+                "live_osquery_client_custody.py",
                 "live_osquery_client.py",
             )
         ]

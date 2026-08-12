@@ -2653,6 +2653,21 @@ helpers, CLI, request/response digests, evidence withholding, destination
 layout, and V1 bundle remain unchanged; only the fixed read-only broker path
 retains transport authority.
 
+`live_osquery_client.py` remains the stable local read-only endpoint-query
+facade. `live_osquery_client_primitives.py` owns shared limits, safe-name
+policy, defaults, time projection, and the canonical client error identity.
+`live_osquery_client_config.py` owns owner-only configuration admission,
+target/role/binding normalization, approval normalization, and enabled SSH
+identity validation. `live_osquery_client_policy.py` owns fail-closed harness
+and scheduled approval decisions plus the model-safe capability view.
+`live_osquery_client_transport.py` owns the fixed restricted-SSH command,
+bounded process/error classification, response validation, and case binding.
+`live_osquery_client_custody.py` owns 0700 case directories, no-follow
+same-inode 0600 locks, immutable artifact/manifest publication, digests, and
+safe bounded retention. Dependencies flow from the facade into these owners
+and from owners into primitives/contracts only; no owner receives endpoint
+mutation authority or Security Onion credentials.
+
 ## PCAP Evidence Processor
 
 ### Derived PCAP evidence query
