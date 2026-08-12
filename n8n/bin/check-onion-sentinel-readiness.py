@@ -24,6 +24,20 @@ from typing import Any, Callable
 MAX_CONFIG_BYTES = 1024 * 1024
 MAX_HEALTH_BYTES = 64 * 1024
 RELEASE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{6,99}$")
+__PROVIDER_EXECUTABLES = {
+    "codex-cli": ("codex_cli_path", "codex"),
+    "hermes-agent": ("hermes_agent_path", ""),
+    "openclaw": ("openclaw_path", ""),
+}
+__SUPERVISED_LABELS = (
+    "com.arron.onion-sentinel.web",
+    "com.arron.soc.alert-store",
+    "com.arron.soc.ai-analysis",
+    "com.arron.soc.ai-analysis-cli",
+    "com.arron.n8n.ensure-stack",
+    "com.arron.n8n.monitor-stack",
+)
+__PROVIDER_LANES = ("ollama", "cli")
 
 
 def result(component: str, state: str, reason: str, started: float) -> dict[str, Any]:
@@ -152,6 +166,42 @@ def configured_routes(settings: dict[str, Any]) -> list[str]:
     return sorted(set(routes))
 
 
+def __validate_ollama_endpoint(settings: dict[str, Any]) -> None:
+    endpoint = urllib.parse.urlsplit(str(settings.get("ollama_url") or ""))
+    if (
+        endpoint.scheme not in {"http", "https"}
+        or not endpoint.hostname
+        or endpoint.username
+        or endpoint.password
+        or endpoint.query
+        or endpoint.fragment
+    ):
+        raise ValueError("ollama_endpoint_invalid")
+
+
+def __provider_executable(settings: dict[str, Any], provider: str) -> str:
+    field_and_default = __PROVIDER_EXECUTABLES.get(provider)
+    if field_and_default is None:
+        raise ValueError("unsupported_assigned_provider")
+    field, default = field_and_default
+    candidate = str(settings.get(field) or default)
+    return candidate if os.path.isabs(candidate) else str(shutil.which(candidate) or "")
+
+
+def __validate_assigned_route(settings: dict[str, Any], route: str) -> None:
+    provider = route.split(":", 1)[0]
+    if provider == "ollama":
+        __validate_ollama_endpoint(settings)
+        return
+    executable = __provider_executable(settings, provider)
+    if (
+        not executable
+        or not os.path.isfile(executable)
+        or not os.access(executable, os.X_OK)
+    ):
+        raise ValueError(f"{provider}_executable_unavailable")
+
+
 def check_providers(stack: Path) -> dict[str, Any]:
     started = time.monotonic()
     try:
@@ -160,32 +210,7 @@ def check_providers(stack: Path) -> dict[str, Any]:
         if not routes:
             raise ValueError("no_assigned_routes")
         for route in routes:
-            provider = route.split(":", 1)[0]
-            if provider == "codex-cli":
-                candidate = str(settings.get("codex_cli_path") or "codex")
-            elif provider == "ollama":
-                endpoint = urllib.parse.urlsplit(
-                    str(settings.get("ollama_url") or "")
-                )
-                if (
-                    endpoint.scheme not in {"http", "https"}
-                    or not endpoint.hostname
-                    or endpoint.username
-                    or endpoint.password
-                    or endpoint.query
-                    or endpoint.fragment
-                ):
-                    raise ValueError("ollama_endpoint_invalid")
-                continue
-            elif provider == "hermes-agent":
-                candidate = str(settings.get("hermes_agent_path") or "")
-            elif provider == "openclaw":
-                candidate = str(settings.get("openclaw_path") or "")
-            else:
-                raise ValueError("unsupported_assigned_provider")
-            executable = candidate if os.path.isabs(candidate) else shutil.which(candidate)
-            if not executable or not os.path.isfile(executable) or not os.access(executable, os.X_OK):
-                raise ValueError(f"{provider}_executable_unavailable")
+            __validate_assigned_route(settings, route)
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
         return result("providers", "failed", str(exc), started)
     item = result("providers", "ready", "assigned_executables_available", started)
@@ -216,60 +241,83 @@ def check_services() -> dict[str, Any]:
     return result("services", "ready", "identity_health_ready", started)
 
 
+def __active_restart_quarantine(stack: Path) -> bool:
+    budget_path = stack / "logs" / "onion-sentinel-web-restart-budget.json"
+    if not budget_path.exists():
+        return False
+    budget = read_json(budget_path, owner_only=True)
+    updated_at = float(budget.get("updated_at") or 0)
+    window = int(budget.get("window_seconds") or 0)
+    return bool(
+        budget.get("quarantined") is True
+        and 0 <= time.time() - updated_at <= window
+    )
+
+
+def __bounded_process_check(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=2,
+    )
+
+
+def __required_jobs_registered() -> bool:
+    for label in __SUPERVISED_LABELS:
+        completed = __bounded_process_check(
+            ["/bin/launchctl", "print", f"gui/{os.getuid()}/{label}"]
+        )
+        if completed.returncode != 0:
+            return False
+    return True
+
+
+def __duplicate_worker_lane() -> str | None:
+    for lane in __PROVIDER_LANES:
+        completed = __bounded_process_check(
+            [
+                "/usr/bin/pgrep",
+                "-f",
+                f"auto-run-ai-analysis.py --provider-lane {lane}",
+            ]
+        )
+        count = len(
+            [line for line in completed.stdout.splitlines() if line.isdigit()]
+        )
+        if count > 1:
+            return lane
+    return None
+
+
 def check_supervision(stack: Path) -> dict[str, Any]:
     started = time.monotonic()
-    budget_path = stack / "logs" / "onion-sentinel-web-restart-budget.json"
-    if budget_path.exists():
-        try:
-            budget = read_json(budget_path, owner_only=True)
-            updated_at = float(budget.get("updated_at") or 0)
-            window = int(budget.get("window_seconds") or 0)
-            quarantined = budget.get("quarantined") is True
-        except (OSError, TypeError, ValueError, json.JSONDecodeError):
-            return result("supervision", "failed", "restart_budget_invalid", started)
-        if quarantined and 0 <= time.time() - updated_at <= window:
-            return result("supervision", "failed", "web_restart_quarantined", started)
+    try:
+        quarantined = __active_restart_quarantine(stack)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return result("supervision", "failed", "restart_budget_invalid", started)
+    if quarantined:
+        return result("supervision", "failed", "web_restart_quarantined", started)
 
-    labels = (
-        "com.arron.onion-sentinel.web",
-        "com.arron.soc.alert-store",
-        "com.arron.soc.ai-analysis",
-        "com.arron.soc.ai-analysis-cli",
-        "com.arron.n8n.ensure-stack",
-        "com.arron.n8n.monitor-stack",
-    )
-    for label in labels:
-        try:
-            completed = subprocess.run(
-                ["/bin/launchctl", "print", f"gui/{os.getuid()}/{label}"],
-                capture_output=True,
-                check=False,
-                text=True,
-                timeout=2,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return result("supervision", "failed", "launchd_check_failed", started)
-        if completed.returncode != 0:
-            return result("supervision", "failed", "required_job_unregistered", started)
+    try:
+        registered = __required_jobs_registered()
+    except (OSError, subprocess.SubprocessError):
+        return result("supervision", "failed", "launchd_check_failed", started)
+    if not registered:
+        return result("supervision", "failed", "required_job_unregistered", started)
 
-    for lane in ("ollama", "cli"):
-        try:
-            completed = subprocess.run(
-                [
-                    "/usr/bin/pgrep",
-                    "-f",
-                    f"auto-run-ai-analysis.py --provider-lane {lane}",
-                ],
-                capture_output=True,
-                check=False,
-                text=True,
-                timeout=2,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return result("supervision", "failed", "worker_check_failed", started)
-        count = len([line for line in completed.stdout.splitlines() if line.isdigit()])
-        if count > 1:
-            return result("supervision", "failed", f"duplicate_{lane}_workers", started)
+    try:
+        duplicate_lane = __duplicate_worker_lane()
+    except (OSError, subprocess.SubprocessError):
+        return result("supervision", "failed", "worker_check_failed", started)
+    if duplicate_lane is not None:
+        return result(
+            "supervision",
+            "failed",
+            f"duplicate_{duplicate_lane}_workers",
+            started,
+        )
     return result("supervision", "ready", "jobs_registered_no_duplicates", started)
 
 

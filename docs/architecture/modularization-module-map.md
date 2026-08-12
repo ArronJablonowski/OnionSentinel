@@ -2904,6 +2904,15 @@ owns bounded local HTTP probes, runtime file discovery, and exit/output
 translation. The facade re-exports the historical evaluation, timestamp, and
 state helpers used by operational characterization tests.
 
+### Production readiness diagnostic
+
+`check-onion-sentinel-readiness.py` remains a flat-bin, non-mutating diagnostic.
+Private provider phases own assigned-route validation, Ollama endpoint policy,
+and executable resolution. Private supervision phases own restart-quarantine
+evaluation, bounded launchd registration probes, and duplicate worker-lane
+detection. The public checks retain their stable, secret-safe component results;
+network contact remains an explicit Relay TCP opt-in owned by `check_relay`.
+
 ## Deployment Map
 
 The current production installer copies individual files. These additions are
