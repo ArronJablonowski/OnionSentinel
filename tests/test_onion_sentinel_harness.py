@@ -145,12 +145,21 @@ class OnionSentinelHarnessTests(unittest.TestCase):
         )
 
     def test_harness_policy_imports_from_an_isolated_flat_bin(self) -> None:
-        policy_path = ROOT / "n8n" / "bin" / "harness_policy.py"
+        policy_paths = [
+            ROOT / "n8n" / "bin" / name
+            for name in (
+                "harness_policy.py",
+                "harness_policy_capabilities.py",
+                "harness_policy_document.py",
+                "harness_policy_primitives.py",
+            )
+        ]
         with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / policy_path.name
-            target.write_bytes(policy_path.read_bytes())
+            for policy_path in policy_paths:
+                target = Path(directory) / policy_path.name
+                target.write_bytes(policy_path.read_bytes())
             result = subprocess.run(
-                [sys.executable, "-I", "-B", str(target)],
+                [sys.executable, "-I", "-B", str(Path(directory) / "harness_policy.py")],
                 text=True,
                 capture_output=True,
                 timeout=10,

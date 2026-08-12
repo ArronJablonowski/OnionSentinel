@@ -2040,6 +2040,59 @@
       ]
     },
     {
+      "path": "n8n/bin/harness_policy.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_policy.py",
+      "required_symbols": [
+        "HarnessPolicy",
+        "PolicyDecision",
+        "load_policy",
+        "should_start_onion_sentinel_harness",
+        "task_kind_for_role"
+      ]
+    },
+    {
+      "path": "n8n/bin/harness_policy_primitives.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_policy_primitives.py",
+      "required_symbols": [
+        "AgentRole",
+        "HarnessError",
+        "HarnessIntegrityError",
+        "HarnessPolicyError",
+        "RunStatus",
+        "Stage",
+        "TaskKind",
+        "TrustTier",
+        "canonical_json",
+        "digest_json",
+        "task_kind_for_role",
+        "utc_now"
+      ]
+    },
+    {
+      "path": "n8n/bin/harness_policy_capabilities.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_policy_capabilities.py",
+      "required_symbols": [
+        "PolicyDecision",
+        "external_agent_harness_provider",
+        "policy_decision_is_effective",
+        "query_backend_capability",
+        "query_backend_is_approval_gated",
+        "should_start_onion_sentinel_harness"
+      ]
+    },
+    {
+      "path": "n8n/bin/harness_policy_document.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_policy_document.py",
+      "required_symbols": [
+        "HarnessPolicy",
+        "load_policy"
+      ]
+    },
+    {
       "path": "n8n/bin/build-ai-investigation-prompt.py",
       "deployment": "versioned-query-runtime",
       "runtime_path": "$STACK_DIR/bin/build-ai-investigation-prompt.py",

@@ -308,17 +308,20 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
         )
         self.assertEqual(len(envelope.decorator_list), 1)
 
-        policy_path = ROOT / "n8n" / "bin" / "harness_policy.py"
-        policy_tree = ast.parse(
-            policy_path.read_text(encoding="utf-8"), filename=str(policy_path)
-        )
-        policy_classes = {
-            node.name: node
-            for node in policy_tree.body
-            if isinstance(node, ast.ClassDef)
+        policy_owners = {
+            "PolicyDecision": ROOT / "n8n" / "bin" / "harness_policy_capabilities.py",
+            "HarnessPolicy": ROOT / "n8n" / "bin" / "harness_policy_document.py",
         }
-        for name in ("PolicyDecision", "HarnessPolicy"):
+        for name, policy_path in policy_owners.items():
             with self.subTest(name=name):
+                policy_tree = ast.parse(
+                    policy_path.read_text(encoding="utf-8"), filename=str(policy_path)
+                )
+                policy_classes = {
+                    node.name: node
+                    for node in policy_tree.body
+                    if isinstance(node, ast.ClassDef)
+                }
                 self.assertEqual(len(policy_classes[name].decorator_list), 1)
 
     def test_software_inventory_supports_isolated_file_loader_import(self) -> None:

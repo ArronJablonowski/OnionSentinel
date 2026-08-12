@@ -103,10 +103,6 @@
     "n8n/bin/harness_memory.py::memory_promotion_decision": {
       "max_complexity": 24
     },
-    "n8n/bin/harness_policy.py::HarnessPolicy.from_dict": {
-      "max_complexity": 35,
-      "max_lines": 130
-    },
     "n8n/bin/harness_query_contract.py::resolve_query_binding": {
       "max_complexity": 84,
       "max_lines": 183
@@ -409,5 +405,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "1528f6d99b6c0e7cb1fcc9e785b4b0e9b52409ae"
+  "source_release": "81a56de864ec1f2df143d77a4176094c8c6d0651"
 }

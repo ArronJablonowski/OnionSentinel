@@ -789,14 +789,19 @@ SQLite connector and status reporter at call time.
 | Memory promotion decision | `harness.memory` | decision only; promotion remains post-commit |
 | Maintenance/reconciliation | `harness.maintenance` | separate supervised operation |
 
-The first ARR-86 extraction implements the policy boundary as
-`n8n/bin/harness_policy.py`. It owns external-harness exclusion, role/task/run/
-stage/trust identities, capability and approval policy, bounded budgets,
-default-deny policy parsing, immutable authorization decisions, safe disabled
-defaults, and owner-controlled policy-file loading. The legacy harness re-exports
-the exact symbols; SQLite and run execution depend inward on this policy module.
-The unchanged legacy `HarnessPolicy.from_dict` validator retains its exact
-ratcheting allowance under the new owner and may not grow.
+The ARR-145 policy checkpoint retains `n8n/bin/harness_policy.py` as a stable
+78-line compatibility facade and splits its implementation into three inward
+owners. `harness_policy_primitives.py` owns schemas, role/task/run/stage/trust
+identities, digest helpers, identifier validation, and secret classifiers.
+`harness_policy_capabilities.py` owns external-harness exclusion, capability
+catalogs, query-backend mapping, immutable authorization decisions, and
+shadow-mode effectiveness. `harness_policy_document.py` owns bounded budgets,
+strict default-deny document parsing, safe disabled defaults, authorization,
+and owner-controlled policy-file loading. None of these modules owns SQLite,
+network, model, query-execution, credential, or evidence-persistence effects.
+The facade and legacy harness re-export the exact historical public symbols;
+SQLite and run execution depend inward on this policy unit. The former
+`HarnessPolicy.from_dict` size/complexity allowance is retired.
 
 `n8n/bin/harness_contracts.py` owns immutable job envelopes, bounded and
 secret-safe audit metadata, content-free investigation-skill attestations,
@@ -2817,6 +2822,7 @@ required before extracted code is imported in production:
 | `n8n/bin/agent_memory*.py` | `$HOME/n8n-local/bin` | copy the facade plus validation, journal, and promotion owners before running the memory verifier |
 | `n8n/bin/bounded_process*.py` | `$HOME/n8n-local/bin` | copy the facade plus policy, observation, I/O, termination, and runtime owners as one flat-bin unit |
 | `n8n/bin/maintain-investigation-harness.py` and `harness_maintenance*.py` | `$HOME/n8n-local/bin` | copy all maintenance owners before the package-free compatibility facade |
+| `n8n/bin/harness_policy.py` and `harness_policy_{primitives,capabilities,document}.py` | `$HOME/n8n-local/bin` | copy the three policy owners before the stable harness-policy facade |
 | `n8n/bin/pcap_evidence_query*.py` | `$HOME/n8n-local/bin` | copy validation, matching, selection, projection, and response owners before the policy facade |
 | `n8n/bin/incident_evidence_contract.py` and `incident_evidence_*_contract.py` plus shared primitives | `$HOME/n8n-local/bin` | copy validation, scope/digest, search, OSQuery, control, and artifact owners before the stable contract facade |
 | `n8n/bin/evaluate-operational-slos.py` and `operational_slo_*.py` | `$HOME/n8n-local/bin` | copy timestamp, resilience, and aggregate policy owners before validating the stable launchd-facing evaluator |
