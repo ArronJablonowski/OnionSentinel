@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import symtable
 import sys
+from typing import Optional
 import unittest
 
 
@@ -56,6 +57,96 @@ def top_level_function(path: Path, name: str) -> ast.FunctionDef:
     raise AssertionError(f"missing top-level function: {name}")
 
 
+class _ReferenceContextVisitor(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.annotation_names: set[str] = set()
+        self.runtime_names: set[str] = set()
+        self._annotation_depth = 0
+
+    def _visit_annotation(self, node: Optional[ast.AST]) -> None:
+        if node is None:
+            return
+        self._annotation_depth += 1
+        try:
+            self.visit(node)
+        finally:
+            self._annotation_depth -= 1
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Load):
+            target = (
+                self.annotation_names
+                if self._annotation_depth
+                else self.runtime_names
+            )
+            target.add(node.id)
+
+    def visit_arg(self, node: ast.arg) -> None:
+        self._visit_annotation(node.annotation)
+
+    def _visit_function(self, node: ast.AST) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        self.visit(node.args)
+        self._visit_annotation(node.returns)
+        for statement in node.body:
+            self.visit(statement)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self.visit(node.target)
+        self._visit_annotation(node.annotation)
+        if node.value is not None:
+            self.visit(node.value)
+
+
+def undefined_global_names(source: str, filename: str) -> set[str]:
+    tree = ast.parse(source, filename=filename)
+    postponed_annotations = any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "__future__"
+        and any(alias.name == "annotations" for alias in node.names)
+        for node in tree.body
+    )
+    annotation_only: set[str] = set()
+    if postponed_annotations:
+        visitor = _ReferenceContextVisitor()
+        visitor.visit(tree)
+        annotation_only = visitor.annotation_names - visitor.runtime_names
+
+    table = symtable.symtable(source, filename, "exec")
+    defined = {
+        symbol.get_name()
+        for symbol in table.get_symbols()
+        if symbol.is_imported()
+        or symbol.is_assigned()
+        or symbol.is_namespace()
+    }
+    referenced: set[str] = set()
+
+    def collect(scope: symtable.SymbolTable) -> None:
+        referenced.update(
+            symbol.get_name()
+            for symbol in scope.get_symbols()
+            if symbol.is_global() and symbol.is_referenced()
+        )
+        for child in scope.get_children():
+            collect(child)
+
+    collect(table)
+    allowed = set(dir(builtins)) | {
+        "__conditional_annotations__",
+        "__file__",
+        "__name__",
+    }
+    return referenced - defined - allowed - annotation_only
+
+
 class ModularizationCompatibilityContractTests(unittest.TestCase):
     def test_undefined_global_analysis_ignores_only_postponed_annotations(
         self,
@@ -73,11 +164,11 @@ def build(value: AnnotationOnly) -> AnnotationOnly:
 from __future__ import annotations
 
 def build(value: UsedAsAnnotation) -> UsedAsAnnotation:
-    return MissingAtRuntime(value)
+    return UsedAsAnnotation(value)
 """
         self.assertEqual(
             undefined_global_names(source, "runtime.py"),
-            {"MissingAtRuntime"},
+            {"UsedAsAnnotation"},
         )
 
     def test_undefined_global_analysis_keeps_eager_annotations(self) -> None:
@@ -146,36 +237,10 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_extracted_harness_modules_have_no_undefined_globals(self) -> None:
-        allowed = set(dir(builtins)) | {
-            "__conditional_annotations__",
-            "__file__",
-            "__name__",
-        }
         for path in sorted((ROOT / "n8n" / "bin").glob("harness_*.py")):
             with self.subTest(path=path.name):
-                table = symtable.symtable(
-                    path.read_text(encoding="utf-8"), str(path), "exec"
-                )
-                defined = {
-                    symbol.get_name()
-                    for symbol in table.get_symbols()
-                    if symbol.is_imported()
-                    or symbol.is_assigned()
-                    or symbol.is_namespace()
-                }
-                referenced: set[str] = set()
-
-                def collect(scope: symtable.SymbolTable) -> None:
-                    referenced.update(
-                        symbol.get_name()
-                        for symbol in scope.get_symbols()
-                        if symbol.is_global() and symbol.is_referenced()
-                    )
-                    for child in scope.get_children():
-                        collect(child)
-
-                collect(table)
-                self.assertEqual(sorted(referenced - defined - allowed), [])
+                source = path.read_text(encoding="utf-8")
+                self.assertEqual(sorted(undefined_global_names(source, str(path))), [])
 
     def test_harness_supports_isolated_file_loader_import(self) -> None:
         harness = ROOT / "n8n" / "bin" / "onion_sentinel_harness.py"
