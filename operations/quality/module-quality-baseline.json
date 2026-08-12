@@ -22,10 +22,6 @@
     "n8n/bin/manage-agent-memory.py::main": {
       "max_lines": 102
     },
-    "n8n/bin/pcap_processor_workflow.py::process_one": {
-      "max_complexity": 29,
-      "max_lines": 123
-    },
     "n8n/bin/pcap_processor_zeek.py::run_zeek": {
       "max_complexity": 23
     },

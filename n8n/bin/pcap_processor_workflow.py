@@ -41,128 +41,35 @@ def report_analysis_status(base_url: str, request_id: str, status: str, error: s
 
 
 def process_one(request: dict[str, Any], args: argparse.Namespace, direct_pcap: Path | None = None) -> dict[str, Any]:
-    request_id = safe_filename(request.get("request_id") or (direct_pcap.stem if direct_pcap else "pcap"))
-    rule_context, playbook = signature_context_for_request(
-        Path(getattr(args, "db", DEFAULT_DB)),
+    workflow = __import__("pcap_processor_workflow_phases")
+    return workflow.process_one(
         request,
-        Path(getattr(args, "detection_playbooks", DEFAULT_DETECTION_PLAYBOOKS)),
+        args,
+        direct_pcap,
+        policy=workflow.WorkflowPolicy(
+            default_db=DEFAULT_DB,
+            default_detection_playbooks=DEFAULT_DETECTION_PLAYBOOKS,
+            default_ai_settings=DEFAULT_AI_SETTINGS,
+        ),
+        dependencies=workflow.WorkflowDependencies(
+            safe_filename=safe_filename,
+            signature_context=signature_context_for_request,
+            marker_specs=detection_marker_specs,
+            materialize=materialize_pcap_files,
+            sha256_file=sha256_file,
+            run_zeek=run_zeek,
+            configured_maxmind_paths=configured_maxmind_db_paths,
+            icmp_scope=icmp_evidence_scope,
+            run_tshark=run_tshark,
+            project_now=project_now,
+            tool_path=tool_path,
+            analysis_json_path=analysis_json_path,
+            atomic_write_text=atomic_write_text,
+            build_markdown=build_markdown,
+            analysis_completed=analysis_completed,
+            delete_request_artifacts=delete_request_artifacts,
+        ),
     )
-    playbook_policy = (
-        rule_context.get("playbook_policy")
-        if isinstance(rule_context.get("playbook_policy"), dict)
-        else {
-            "status": "not_evaluated",
-            "fail_closed": True,
-            "evidence_gap": "Detection-playbook policy status was unavailable.",
-        }
-    )
-    markers = detection_marker_specs(rule_context, playbook)
-    with tempfile.TemporaryDirectory(prefix="onion-sentinel-pcap-") as temp_name:
-        work_dir = Path(temp_name)
-        pcap_files, artifact_state = materialize_pcap_files(request, args, work_dir, direct_pcap)
-        pcap_meta = [
-            {
-                "path": str(path),
-                "name": path.name,
-                "size_bytes": path.stat().st_size,
-                "sha256": sha256_file(path),
-            }
-            for path in pcap_files
-            if path.exists()
-        ]
-        zeek = run_zeek(pcap_files, work_dir) if pcap_files else {"available": False, "reason": artifact_state}
-        settings_path = Path(getattr(args, "ai_settings", DEFAULT_AI_SETTINGS))
-        tshark = run_tshark(
-            pcap_files,
-            configured_maxmind_db_paths(settings_path),
-            markers,
-            icmp_evidence_scope(request),
-        ) if pcap_files else {"available": False, "reason": artifact_state}
-        analysis = {
-            "analysis_type": "soc-pcap-analysis",
-            "generated_at": project_now(),
-            "request": request,
-            "detection_context": {
-                "policy_status": str(playbook_policy.get("status") or "not_evaluated")[:80],
-                "policy_fail_closed": bool(playbook_policy.get("fail_closed", True)),
-                "evidence_gaps": (
-                    [str(playbook_policy.get("evidence_gap") or "")[:500]]
-                    if str(playbook_policy.get("evidence_gap") or "")
-                    else []
-                ),
-                "playbook_registry_version": playbook_policy.get("registry_version"),
-                "rule": {
-                    "sid": rule_context.get("sid"),
-                    "revision": rule_context.get("revision"),
-                    "name": rule_context.get("name"),
-                    "ruleset": rule_context.get("ruleset"),
-                    "rule_sha256": (
-                        (rule_context.get("parsed_rule") or {}).get("rule_sha256")
-                        if isinstance(rule_context.get("parsed_rule"), dict)
-                        else ""
-                    ),
-                },
-                "playbook": {
-                    "id": playbook.get("id"),
-                    "version": playbook.get("version"),
-                    "status": playbook.get("status"),
-                } if isinstance(playbook, dict) else None,
-            },
-            "artifact_state": artifact_state,
-            "pcap_files": pcap_meta,
-            "tool_paths": {
-                "zeek": tool_path("ZEEK_BIN", "zeek"),
-                "zeek_cut": tool_path("ZEEK_CUT_BIN", "zeek-cut"),
-                "tshark": tool_path("TSHARK_BIN", "tshark"),
-            },
-            "coverage": {
-                "pcap_files_total": len(pcap_meta),
-                "source_bytes": sum(int(item.get("size_bytes") or 0) for item in pcap_meta),
-                "zeek": zeek.get("coverage") if isinstance(zeek.get("coverage"), dict) else {},
-                "tshark": tshark.get("coverage") if isinstance(tshark.get("coverage"), dict) else {},
-                "complete": bool(
-                    pcap_meta
-                    and isinstance(zeek.get("coverage"), dict)
-                    and zeek["coverage"].get("complete")
-                    and isinstance(tshark.get("coverage"), dict)
-                    and tshark["coverage"].get("complete")
-                ),
-            },
-            "evidence_security": {
-                "raw_packet_payloads_included": False,
-                "packet_derived_strings_trust": "untrusted-evidence-only",
-                "follow_up_query_mode": "sanitized-derived-evidence-allowlist",
-                "parser_network_access": (
-                    "denied-by-sandbox-exec"
-                    if sys.platform == "darwin" and shutil.which("sandbox-exec")
-                    else "not-enforced-by-operating-system"
-                ),
-                "hosted_packet_samples_allowed": False,
-            },
-            "zeek": zeek,
-            "tshark": tshark,
-        }
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-    json_path = analysis_json_path(args.out_dir, request_id)
-    md_path = args.out_dir / f"{request_id}-pcap-analysis.md"
-    atomic_write_text(json_path, json.dumps(analysis, indent=2, sort_keys=True) + "\n")
-    atomic_write_text(md_path, build_markdown(analysis))
-    # Re-open both outputs before deleting runtime packet data. A parser failure,
-    # partial output write, direct/manual PCAP, or operator retain flag preserves
-    # the source artifact for troubleshooting and retry.
-    json.loads(json_path.read_text(encoding="utf-8"))
-    if not md_path.read_text(encoding="utf-8").strip():
-        raise RuntimeError("PCAP Markdown analysis output is empty")
-    cleanup = {"deleted": False, "bytes": 0, "files": 0}
-    if direct_pcap is None and not getattr(args, "retain_artifact", False) and analysis_completed(analysis):
-        cleanup = delete_request_artifacts(args.artifact_dir, request.get("request_id"))
-    analysis["raw_artifact_cleanup"] = cleanup
-    # Preserve cleanup telemetry when possible. The already validated first
-    # version remains durable if this metadata-only rewrite is interrupted.
-    atomic_write_text(json_path, json.dumps(analysis, indent=2, sort_keys=True) + "\n")
-    analysis["_json_path"] = str(json_path)
-    analysis["_markdown_path"] = str(md_path)
-    return analysis
 
 
 def main() -> int:
