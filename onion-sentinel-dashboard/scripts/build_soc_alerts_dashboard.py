@@ -52,6 +52,31 @@ def main() -> int:
     return _runtime.main()
 
 
+__CLI_HELP = """usage: build_soc_alerts_dashboard.py [-h]
+
+Build and publish the Onion Sentinel SOC dashboard.
+
+options:
+  -h, --help  show this help message and exit
+"""
+
+
+def __run_cli(argv: list[str]) -> int:
+    """Admit only the historical no-argument publication invocation."""
+    if not argv:
+        return main()
+    if argv in (["-h"], ["--help"]):
+        sys.stdout.write(__CLI_HELP)
+        return 0
+    sys.stderr.write("usage: build_soc_alerts_dashboard.py [-h]\n")
+    sys.stderr.write(
+        "build_soc_alerts_dashboard.py: error: unrecognized arguments: "
+        + " ".join(argv)
+        + "\n"
+    )
+    return 2
+
+
 class _DashboardBuilderFacade(types.ModuleType):
     """Forward reads and test/runtime overrides to the implementation module."""
 
@@ -94,6 +119,6 @@ class _DashboardBuilderFacade(types.ModuleType):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(__run_cli(sys.argv[1:]))
 
 sys.modules[__name__].__class__ = _DashboardBuilderFacade

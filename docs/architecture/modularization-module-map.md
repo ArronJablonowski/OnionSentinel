@@ -2316,6 +2316,11 @@ overrides into each layer. This preserves legacy imports and runtime injection
 while page renderers continue to receive validated view models and publication
 remains behind one deterministic orchestration boundary.
 
+The compatibility entrypoint admits the historical zero-argument publication
+command and handles help before invoking the runtime. Any other CLI arguments
+fail closed with no report loading or publication, so startup qualification can
+inspect the executable without writing to its default live output path.
+
 First extraction checkpoint:
 `onion-sentinel-dashboard/scripts/dashboard_shell_components.py` owns the
 immutable page registry, navigation icons, accessible navigation rendering,
