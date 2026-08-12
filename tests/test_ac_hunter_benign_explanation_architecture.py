@@ -66,9 +66,15 @@ class AcHunterBenignExplanationArchitectureTests(unittest.TestCase):
         signature = inspect.signature(self.scoring._known_benign_explanation)
         self.assertEqual(list(signature.parameters), ["finding"])
         self.assertEqual(str(signature.return_annotation), "str")
-        self.assertEqual(
-            function_metrics("_known_benign_explanation"), (38, 15)
-        )
+        for name in (
+            "_known_domain_explanation",
+            "_known_network_explanation",
+            "_known_service_explanation",
+            "_known_benign_explanation",
+        ):
+            lines, complexity = function_metrics(name)
+            self.assertLessEqual(lines, 50)
+            self.assertLessEqual(complexity, 10)
         captured = []
 
         def policy(*args):

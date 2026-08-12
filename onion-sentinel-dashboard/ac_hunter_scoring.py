@@ -16,17 +16,8 @@ from ac_hunter_normalization import (  # noqa: F401
 from ac_hunter_scoring_policy import apply_scoring_policy
 
 
-def _known_benign_explanation(finding: Mapping[str, Any]) -> str:
-    evidence = finding.get("evidence")
-    ptr = (
-        _safe_text(evidence.get("ptr"), 512)
-        if isinstance(evidence, dict)
-        else ""
-    )
-    for raw_hostname in (
-        _safe_text(finding.get("fqdn"), 512),
-        ptr,
-    ):
+def _known_domain_explanation(hostnames: Iterable[str]) -> str:
+    for raw_hostname in hostnames:
         hostname = raw_hostname.strip().lower().rstrip(".")
         if not re.fullmatch(
             r"(?=.{1,253}\Z)[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?",
@@ -36,17 +27,21 @@ def _known_benign_explanation(finding: Mapping[str, Any]) -> str:
         for domain, explanation in KNOWN_BENIGN_DOMAINS:
             if hostname == domain or hostname.endswith("." + domain):
                 return explanation
-    destination = _safe_text(finding.get("destination_ip"), 128)
+    return ""
+
+
+def _known_network_explanation(destination: str) -> str:
     try:
         destination_address = ipaddress.ip_address(destination)
     except ValueError:
-        destination_address = None
-    if destination_address is not None:
-        for network, explanation in KNOWN_BENIGN_NETWORKS:
-            if destination_address in network:
-                return explanation
-    port = _integer_value(finding.get("port"))
-    protocol = _safe_text(finding.get("protocol"), 32).upper()
+        return ""
+    for network, explanation in KNOWN_BENIGN_NETWORKS:
+        if destination_address in network:
+            return explanation
+    return ""
+
+
+def _known_service_explanation(port: int, protocol: str) -> str:
     if port == 123 and protocol in {"", "UDP", "NTP"}:
         return "expected NTP pool traffic"
     if port == 5228:
@@ -54,6 +49,29 @@ def _known_benign_explanation(finding: Mapping[str, Any]) -> str:
     if port == 4070:
         return "common Spotify service port"
     return ""
+
+
+def _known_benign_explanation(finding: Mapping[str, Any]) -> str:
+    evidence = finding.get("evidence")
+    ptr = (
+        _safe_text(evidence.get("ptr"), 512)
+        if isinstance(evidence, dict)
+        else ""
+    )
+    explanation = _known_domain_explanation(
+        (_safe_text(finding.get("fqdn"), 512), ptr)
+    )
+    if explanation:
+        return explanation
+    explanation = _known_network_explanation(
+        _safe_text(finding.get("destination_ip"), 128)
+    )
+    if explanation:
+        return explanation
+    return _known_service_explanation(
+        _integer_value(finding.get("port")),
+        _safe_text(finding.get("protocol"), 32).upper(),
+    )
 
 
 def _score_finding(

@@ -2901,7 +2901,8 @@ in `ac_hunter_normalization.py`; pure finding identity,
 observable,
 metric, tuple-fallback, and evidence phases in
 `ac_hunter_finding_normalization.py`;
-benign context and the scoring compatibility facade in `ac_hunter_scoring.py`;
+benign hostname/domain, destination-network, and well-known-service context plus
+the scoring compatibility facade in `ac_hunter_scoring.py`;
 pure deterministic scoring phases in `ac_hunter_scoring_policy.py`; collection
 compatibility and operation policy in `ac_hunter_collection.py`; finding
 admission and cross-module scoring context in
