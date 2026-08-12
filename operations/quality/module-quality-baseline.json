@@ -72,10 +72,6 @@
     "n8n/bin/verify-agent-memory.py::verify_setup": {
       "max_complexity": 20
     },
-    "n8n/bin/write-daily-soc-rollup.py::build_rollup": {
-      "max_complexity": 22,
-      "max_lines": 289
-    },
     "onion-sentinel-dashboard/ac_hunter_collection.py::normalize_collection": {
       "max_complexity": 40,
       "max_lines": 280

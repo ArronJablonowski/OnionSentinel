@@ -1037,6 +1037,8 @@ cp "$REPO_DIR/n8n/bin/pcap_lifecycle.py" "$STACK_DIR/bin/pcap_lifecycle.py"
 cp "$REPO_DIR/n8n/bin/maintain-pcap-evidence.py" "$STACK_DIR/bin/maintain-pcap-evidence.py"
 cp "$REPO_DIR/n8n/bin/refresh-soc-dashboard.py" "$STACK_DIR/bin/refresh-soc-dashboard.py"
 cp "$REPO_DIR/n8n/bin/write-daily-soc-rollup.py" "$STACK_DIR/bin/write-daily-soc-rollup.py"
+cp "$REPO_DIR/n8n/bin/daily_soc_rollup_data.py" "$STACK_DIR/bin/daily_soc_rollup_data.py"
+cp "$REPO_DIR/n8n/bin/daily_soc_rollup_markdown.py" "$STACK_DIR/bin/daily_soc_rollup_markdown.py"
 chmod +x "$STACK_DIR/bin/"*.zsh
 chmod +x "$STACK_DIR/bin/"*.py
 chmod 0755 "$STACK_DIR/bin/reconcile-postgres-shadow.js"

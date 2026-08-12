@@ -8,6 +8,7 @@ import inspect
 import io
 import json
 import sqlite3
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,6 +27,8 @@ REPORT_DATE = "2026-08-12"
 
 
 def load_rollup_module():
+    if str(SCRIPT.parent) not in sys.path:
+        sys.path.insert(0, str(SCRIPT.parent))
     spec = importlib.util.spec_from_file_location("daily_soc_rollup", SCRIPT)
     if spec is None or spec.loader is None:
         raise AssertionError("daily SOC rollup script could not be loaded")
@@ -333,20 +336,29 @@ class DailySocRollupArchitectureTests(unittest.TestCase):
             )
             self.assertEqual(hashlib.sha256(database.read_bytes()).hexdigest(), before)
 
-    def test_current_quality_debt_and_installer_contract_are_explicit(self) -> None:
+    def test_module_budgets_direction_and_installer_contract(self) -> None:
         baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
-        self.assertEqual(
-            baseline["functions"][
-                "n8n/bin/write-daily-soc-rollup.py::build_rollup"
-            ],
-            {"max_complexity": 22, "max_lines": 289},
+        self.assertNotIn(
+            "n8n/bin/write-daily-soc-rollup.py::build_rollup",
+            baseline["functions"],
         )
+        data_owner = ROOT / "n8n/bin/daily_soc_rollup_data.py"
+        markdown_owner = ROOT / "n8n/bin/daily_soc_rollup_markdown.py"
+        self.assertLessEqual(len(SCRIPT.read_text().splitlines()), 250)
+        self.assertLessEqual(len(data_owner.read_text().splitlines()), 600)
+        self.assertLessEqual(len(markdown_owner.read_text().splitlines()), 600)
+        self.assertNotIn("write_daily_soc_rollup", data_owner.read_text())
+        self.assertNotIn("write_daily_soc_rollup", markdown_owner.read_text())
+        self.assertNotIn("daily_soc_rollup_data", markdown_owner.read_text())
         installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text(
             encoding="utf-8"
         )
-        self.assertIn(
-            'write-daily-soc-rollup.py" "$STACK_DIR/bin/', installer
-        )
+        for filename in (
+            "write-daily-soc-rollup.py",
+            "daily_soc_rollup_data.py",
+            "daily_soc_rollup_markdown.py",
+        ):
+            self.assertIn(f'{filename}" "$STACK_DIR/bin/', installer)
 
 
 if __name__ == "__main__":

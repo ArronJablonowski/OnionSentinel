@@ -3527,6 +3527,21 @@ report writes, while `harness_maintenance_cli.py` composes paths, policy,
 locking, preview/backup/apply ordering, report schemas, and exit codes. The Mac
 Studio installer copies every implementation module before the facade.
 
+## Daily SOC Rollup
+
+`write-daily-soc-rollup.py` is the stable Mac Studio CLI and compatibility
+facade. It owns argument/default validation, project-local time selection,
+read-only SQLite connection setup, output naming/publication, stdout, and exit
+behavior. Existing helper symbols remain available through imported aliases.
+
+`daily_soc_rollup_data.py` owns the fixed read-only SQLite predicates, query
+parameters, grouping, ordering, limits, and seven bounded result projections.
+`daily_soc_rollup_markdown.py` is a leaf with no database or filesystem
+authority; it owns escaping, table rendering, short identifiers, front matter,
+sections, and byte-deterministic Markdown composition. Dependencies flow from
+the facade to the data and Markdown owners only. The Mac Studio installer
+copies both inward owners beside the executable facade.
+
 ## Relay Runtime
 
 `relay.py` is the package-free, executable compatibility facade for the

@@ -27,6 +27,11 @@ DR repo copy:
 n8n/bin/write-daily-soc-rollup.py
 ```
 
+The executable is a thin compatibility facade. Its fixed read-only SQLite
+projections live in `n8n/bin/daily_soc_rollup_data.py`; deterministic Markdown
+composition lives in `n8n/bin/daily_soc_rollup_markdown.py`. Production
+installation keeps all three files together under `$HOME/n8n-local/bin`.
+
 LaunchAgent:
 
 ```text
