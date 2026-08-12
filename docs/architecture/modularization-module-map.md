@@ -2728,8 +2728,12 @@ counters, entropy, and deployed/playbook marker normalization;
 modifier, match-window, and ordered relative-cursor semantics; and
 `detection_validation_packet_buffers.py` owns bounded HTTP, DNS, and TLS sticky
 buffer projection. `detection_validation_features.py` owns group evidence
-aggregation; `detection_validation_policy.py` owns versioned playbooks and
-deterministic predicate policy; and `detection_validation_result.py` owns the
+aggregation. `detection_validation_policy.py` is the stable policy facade;
+`detection_validation_policy_registry.py` owns bounded versioned-registry
+admission, `detection_validation_policy_resolution.py` owns exact deployed-rule
+resolution, `detection_validation_policy_predicates.py` owns numeric evidence
+projection, and `detection_validation_policy_stun.py` owns the fail-closed STUN
+rule and xbit inference policy. `detection_validation_result.py` owns the
 conclusion-safe public result projection.
 
 The dependency chain is acyclic and never points back to the facade. A rule

@@ -33,22 +33,6 @@
       "max_complexity": 43,
       "max_lines": 266
     },
-    "n8n/bin/detection_validation_policy.py::_evaluate_numeric_predicate": {
-      "max_complexity": 18
-    },
-    "n8n/bin/detection_validation_policy.py::_infer_stun_response_xbits_state": {
-      "max_complexity": 34
-    },
-    "n8n/bin/detection_validation_policy.py::_validated_stun_rule_semantics": {
-      "max_complexity": 18
-    },
-    "n8n/bin/detection_validation_policy.py::load_detection_playbooks": {
-      "max_complexity": 64,
-      "max_lines": 116
-    },
-    "n8n/bin/detection_validation_policy.py::resolve_detection_playbook": {
-      "max_complexity": 28
-    },
     "n8n/bin/detection_validation_result.py::build_detection_validation": {
       "max_complexity": 136,
       "max_lines": 351

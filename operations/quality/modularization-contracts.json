@@ -1252,6 +1252,40 @@
       ]
     },
     {
+      "path": "n8n/bin/detection_validation_policy_registry.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation_policy_registry.py",
+      "required_symbols": [
+        "load_detection_playbooks"
+      ]
+    },
+    {
+      "path": "n8n/bin/detection_validation_policy_resolution.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation_policy_resolution.py",
+      "required_symbols": [
+        "resolve_detection_playbook"
+      ]
+    },
+    {
+      "path": "n8n/bin/detection_validation_policy_predicates.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation_policy_predicates.py",
+      "required_symbols": [
+        "_evaluate_numeric_predicate",
+        "_observed_values"
+      ]
+    },
+    {
+      "path": "n8n/bin/detection_validation_policy_stun.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation_policy_stun.py",
+      "required_symbols": [
+        "_infer_stun_response_xbits_state",
+        "_validated_stun_rule_semantics"
+      ]
+    },
+    {
       "path": "n8n/bin/detection_validation_policy.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/detection_validation_policy.py",
