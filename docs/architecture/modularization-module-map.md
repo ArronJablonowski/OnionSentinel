@@ -2746,6 +2746,11 @@ a private accumulator. The bounded promotion owner retains exact expiration,
 operator-confirmed precedence, reinforcement recency, truncation, provenance,
 and post-commit persistence semantics without widening its public facade.
 
+Historical AI-correlation backfill remains write-API-only. Its bounded artifact
+projection admits response and prompt context through one private mapping
+primitive while retaining deterministic analysis IDs, evidence hashes, model
+provenance, candidate projection, and idempotent upsert semantics.
+
 ## Alert Store
 
 Current owner: `n8n/alert_store/alert_store.js` (12,586 lines). The runtime

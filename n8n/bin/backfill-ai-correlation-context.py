@@ -64,17 +64,21 @@ def prompt_context(path_value: object) -> tuple[dict[str, Any], str]:
     return package, digest
 
 
+def __mapping(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 def artifact_payload(path: Path) -> dict[str, Any] | None:
     artifact = load_object(path)
     if not artifact:
         return None
-    response = artifact.get("response") if isinstance(artifact.get("response"), dict) else {}
+    response = __mapping(artifact.get("response"))
     alert_id = str(artifact.get("alert_id") or "").strip()
     generated_at = str(artifact.get("generated_at") or "").strip()
     if not alert_id or not response:
         return None
     package, evidence_hash = prompt_context(artifact.get("prompt_package"))
-    correlation = package.get("correlated_alert_context") if isinstance(package.get("correlated_alert_context"), dict) else {}
+    correlation = __mapping(package.get("correlated_alert_context"))
     seed = f"{path.name}\n{alert_id}\n{generated_at}".encode("utf-8")
     analysis_id = str(artifact.get("analysis_id") or hashlib.sha256(seed).hexdigest()[:24])
     return {
