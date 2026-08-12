@@ -3331,6 +3331,16 @@ coverage truthfulness, warnings, and revision projection. The 61-line
 `software_inventory.py` facade re-exports the legacy public and private symbols
 used by the portal and tests while performing no storage or response work.
 
+## Recovery Restore Drill
+
+`run-recovery-restore-drill.py` remains the package-free operational CLI. Its
+private phases independently own owner-only bundle/manifest admission, bounded
+hash and optional-component consistency, harness SQLite integrity projection,
+isolated no-network PostgreSQL startup/readiness/restore/schema verification,
+and unconditional exact-container cleanup. Separate workflow phases validate
+SQLite and optional PostgreSQL backups before composing and publishing the
+owner-only success or failure report with the legacy schema and exit contract.
+
 ## Investigation Harness Maintenance
 
 `maintain-investigation-harness.py` remains the package-free executable and

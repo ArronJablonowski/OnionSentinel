@@ -57,7 +57,7 @@ def newest_bundle(root: Path) -> Path:
     return bundles[-1]
 
 
-def verify_bundle(bundle: Path) -> dict[str, object]:
+def __require_owner_only_bundle(bundle: Path) -> None:
     bundle_metadata = bundle.lstat()
     if (
         bundle.is_symlink()
@@ -66,6 +66,9 @@ def verify_bundle(bundle: Path) -> dict[str, object]:
         or bundle_metadata.st_uid != os.getuid()
     ):
         raise RuntimeError("recovery bundle directory must be owner-only")
+
+
+def __load_owner_only_manifest(bundle: Path) -> dict[str, object]:
     manifest_path = bundle / "manifest.json"
     manifest_metadata = manifest_path.lstat()
     if (
@@ -75,61 +78,74 @@ def verify_bundle(bundle: Path) -> dict[str, object]:
         or manifest_metadata.st_uid != os.getuid()
     ):
         raise RuntimeError("recovery bundle manifest must be owner-only")
-    manifest = json.loads(manifest_path.read_text())
-    for name, metadata in dict(manifest.get("files") or {}).items():
-        pure_name = PurePosixPath(str(name))
-        if (
-            pure_name.is_absolute()
-            or len(pure_name.parts) != 1
-            or str(name) not in ALLOWED_BUNDLE_FILES
-        ):
-            raise RuntimeError("recovery bundle manifest contains an unsafe file")
-        path = bundle / name
-        try:
-            path_metadata = path.lstat()
-        except FileNotFoundError:
-            raise RuntimeError(f"bundle hash validation failed for {name}") from None
-        if (
-            path.is_symlink()
-            or not stat.S_ISREG(path_metadata.st_mode)
-            or stat.S_IMODE(path_metadata.st_mode) & 0o077
-            or path_metadata.st_uid != os.getuid()
-            or sha256_file(path) != metadata.get("sha256")
-        ):
-            raise RuntimeError(f"bundle hash validation failed for {name}")
+    return json.loads(manifest_path.read_text())
+
+
+def __validated_manifest_path(bundle: Path, name: object) -> Path:
+    pure_name = PurePosixPath(str(name))
+    if pure_name.is_absolute() or len(pure_name.parts) != 1 or str(name) not in ALLOWED_BUNDLE_FILES:
+        raise RuntimeError("recovery bundle manifest contains an unsafe file")
+    return bundle / str(name)
+
+
+def __verify_manifest_file(path: Path, name: object, metadata: object) -> None:
+    try:
+        path_metadata = path.lstat()
+    except FileNotFoundError:
+        raise RuntimeError(f"bundle hash validation failed for {name}") from None
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(path_metadata.st_mode)
+        or stat.S_IMODE(path_metadata.st_mode) & 0o077
+        or path_metadata.st_uid != os.getuid()
+        or sha256_file(path) != metadata.get("sha256")
+    ):
+        raise RuntimeError(f"bundle hash validation failed for {name}")
+
+
+def __verify_manifest_files(bundle: Path, files: dict[str, object]) -> None:
+    for name, metadata in files.items():
+        __verify_manifest_file(__validated_manifest_path(bundle, name), name, metadata)
+
+
+def __require_optional_manifest_match(
+    bundle: Path,
+    manifest: dict[str, object],
+    files: dict[str, object],
+    *,
+    section: str,
+    name: str,
+    message: str,
+) -> None:
+    metadata = dict(dict(manifest.get(section) or {}).get(
+        "investigation_harness" if section == "sqlite" else "alert_store_shadow"
+    ) or {})
+    present = (bundle / name).is_file()
+    if bool(metadata.get("present")) != present or bool(metadata.get("present")) != (name in files):
+        raise RuntimeError(message)
+
+
+def verify_bundle(bundle: Path) -> dict[str, object]:
+    __require_owner_only_bundle(bundle)
+    manifest = __load_owner_only_manifest(bundle)
+    files = dict(manifest.get("files") or {})
+    __verify_manifest_files(bundle, files)
     required = {"alerts.sqlite3", "n8n-postgres.dump", "runtime-secrets.tar.gz"}
-    if not required.issubset(set(dict(manifest.get("files") or {}))):
+    if not required.issubset(set(files)):
         raise RuntimeError("recovery bundle is missing required files")
-    harness = dict(
-        dict(manifest.get("sqlite") or {}).get("investigation_harness") or {}
+    __require_optional_manifest_match(
+        bundle, manifest, files,
+        section="sqlite", name="investigation-harness.sqlite3",
+        message="recovery bundle harness manifest does not match its files",
     )
-    harness_file = bundle / "investigation-harness.sqlite3"
-    harness_listed = (
-        "investigation-harness.sqlite3"
-        in set(dict(manifest.get("files") or {}))
-    )
-    if (
-        bool(harness.get("present")) != harness_file.is_file()
-        or bool(harness.get("present")) != harness_listed
-    ):
-        raise RuntimeError(
-            "recovery bundle harness manifest does not match its files"
-        )
-    shadow = dict(
-        dict(manifest.get("postgres") or {}).get("alert_store_shadow") or {}
-    )
-    shadow_file = bundle / "alert-store-postgres.dump"
-    shadow_listed = "alert-store-postgres.dump" in set(
-        dict(manifest.get("files") or {})
-    )
-    if (
-        bool(shadow.get("present")) != shadow_file.is_file()
-        or bool(shadow.get("present")) != shadow_listed
-    ):
-        raise RuntimeError(
+    __require_optional_manifest_match(
+        bundle, manifest, files,
+        section="postgres", name="alert-store-postgres.dump",
+        message=(
             "recovery bundle alert-store PostgreSQL manifest does not match "
             "its files"
-        )
+        ),
+    )
     return manifest
 
 
@@ -160,51 +176,45 @@ def validate_sqlite(source: Path, temp_dir: Path) -> dict[str, object]:
     return {"quick_check": quick_check, "alert_rows": alerts, "group_rows": groups}
 
 
-def validate_harness_sqlite(source: Path, temp_dir: Path) -> dict[str, object]:
-    """Restore and validate the optional investigation trace database."""
-    restored = temp_dir / "investigation-harness-restored.sqlite3"
-    shutil.copy2(source, restored)
-    with closing(sqlite3.connect(f"file:{restored}?mode=ro", uri=True)) as conn:
-        conn.execute("PRAGMA query_only = ON")
-        quick_check = str(conn.execute("PRAGMA quick_check").fetchone()[0])
-        foreign_key_errors = len(conn.execute("PRAGMA foreign_key_check").fetchall())
-        tables = {
-            str(row[0])
-            for row in conn.execute(
-                """
-                SELECT name FROM sqlite_master
-                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-                """
-            ).fetchall()
-        }
-        required = {
-            "harness_metadata",
-            "harness_runs",
-            "harness_events",
-            "harness_evidence",
-            "harness_hypotheses",
-            "harness_decisions",
-            "harness_model_calls",
-            "harness_tool_calls",
-            "harness_budget_reservations",
-        }
-        missing = sorted(required.difference(tables))
-        if missing:
-            raise RuntimeError(
-                "restored harness SQLite is missing table(s): "
-                + ", ".join(missing)
-            )
-        runs = int(conn.execute("SELECT COUNT(*) FROM harness_runs").fetchone()[0])
-        schema_row = conn.execute(
+def __harness_database_state(conn: sqlite3.Connection) -> dict[str, object]:
+    conn.execute("PRAGMA query_only = ON")
+    state: dict[str, object] = {
+        "quick_check": str(conn.execute("PRAGMA quick_check").fetchone()[0]),
+        "foreign_key_errors": len(conn.execute("PRAGMA foreign_key_check").fetchall()),
+    }
+    tables = {
+        str(row[0])
+        for row in conn.execute(
             """
-            SELECT value FROM harness_metadata
-            WHERE key = 'schema_version'
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
             """
-        ).fetchone()
+        ).fetchall()
+    }
+    required = {
+        "harness_metadata", "harness_runs", "harness_events", "harness_evidence",
+        "harness_hypotheses", "harness_decisions", "harness_model_calls",
+        "harness_tool_calls", "harness_budget_reservations",
+    }
+    missing = sorted(required.difference(tables))
+    if missing:
+        raise RuntimeError("restored harness SQLite is missing table(s): " + ", ".join(missing))
+    state["runs"] = int(conn.execute("SELECT COUNT(*) FROM harness_runs").fetchone()[0])
+    state["schema_row"] = conn.execute(
+        """
+        SELECT value FROM harness_metadata
+        WHERE key = 'schema_version'
+        """
+    ).fetchone()
+    return state
+
+
+def __validated_harness_summary(state: dict[str, object]) -> dict[str, object]:
+    quick_check = str(state["quick_check"])
+    foreign_key_errors = int(state["foreign_key_errors"])
+    schema_row = state["schema_row"]
     if quick_check != "ok":
-        raise RuntimeError(
-            f"restored harness SQLite quick_check failed: {quick_check}"
-        )
+        raise RuntimeError(f"restored harness SQLite quick_check failed: {quick_check}")
     if foreign_key_errors:
         raise RuntimeError(
             "restored harness SQLite foreign_key_check failed: "
@@ -218,9 +228,18 @@ def validate_harness_sqlite(source: Path, temp_dir: Path) -> dict[str, object]:
     return {
         "quick_check": quick_check,
         "foreign_key_check_rows": foreign_key_errors,
-        "run_rows": runs,
+        "run_rows": int(state["runs"]),
         "schema_version": schema_version,
     }
+
+
+def validate_harness_sqlite(source: Path, temp_dir: Path) -> dict[str, object]:
+    """Restore and validate the optional investigation trace database."""
+    restored = temp_dir / "investigation-harness-restored.sqlite3"
+    shutil.copy2(source, restored)
+    with closing(sqlite3.connect(f"file:{restored}?mode=ro", uri=True)) as conn:
+        state = __harness_database_state(conn)
+    return __validated_harness_summary(state)
 
 
 def docker_output(docker: str, args: list[str], **kwargs) -> str:
@@ -228,13 +247,7 @@ def docker_output(docker: str, args: list[str], **kwargs) -> str:
     return result.stdout.strip()
 
 
-def restore_postgres(
-    docker: str,
-    dump: Path,
-    *,
-    source_container: str = "n8n-postgres",
-    schema_kind: str = "n8n",
-) -> dict[str, object]:
+def __start_restore_postgres(docker: str, source_container: str) -> tuple[str, str]:
     image = docker_output(
         docker,
         ["inspect", "-f", "{{.Config.Image}}", source_container],
@@ -245,123 +258,185 @@ def restore_postgres(
         "--tmpfs", "/var/lib/postgresql/data:rw,nosuid,nodev,size=4g",
         "-e", "POSTGRES_HOST_AUTH_METHOD=trust", image,
     ])
+    return image, name
+
+
+def __wait_for_restore_postgres(docker: str, name: str) -> None:
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        probe = subprocess.run(
+            [docker, "exec", name, "pg_isready", "-U", "postgres"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if probe.returncode == 0:
+            return
+        time.sleep(1)
+    raise RuntimeError("temporary PostgreSQL did not become ready")
+
+
+def __load_restore_dump(docker: str, name: str, dump: Path) -> None:
+    docker_output(docker, ["exec", name, "createdb", "-U", "postgres", "n8n_restore_drill"])
+    with dump.open("rb") as stream:
+        subprocess.run(
+            [docker, "exec", "-i", name, "pg_restore", "-U", "postgres", "--no-owner", "--no-privileges", "-d", "n8n_restore_drill"],
+            stdin=stream, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            check=True, timeout=1800,
+        )
+
+
+def __psql_count(docker: str, name: str, query: str) -> int:
+    return int(docker_output(
+        docker,
+        ["exec", name, "psql", "-U", "postgres", "-d", "n8n_restore_drill", "-Atc", query],
+    ))
+
+
+def __shadow_restore_summary(docker: str, name: str, image: str) -> dict[str, object]:
+    schema_versions = __psql_count(
+        docker, name,
+        "SELECT CASE WHEN to_regclass('onion_sentinel_queue.schema_version') IS NULL THEN -1 ELSE (SELECT COUNT(*) FROM onion_sentinel_queue.schema_version) END;",
+    )
+    durable_jobs = __psql_count(
+        docker, name,
+        "SELECT CASE WHEN to_regclass('onion_sentinel_queue.shadow_durable_jobs') IS NULL THEN -1 ELSE (SELECT COUNT(*) FROM onion_sentinel_queue.shadow_durable_jobs) END;",
+    )
+    if schema_versions < 1 or durable_jobs < 0:
+        raise RuntimeError("restored PostgreSQL is missing alert-store shadow schema")
+    return {
+        "image": image, "schema_version_rows": schema_versions,
+        "durable_job_rows": durable_jobs, "network": "none",
+    }
+
+
+def __n8n_restore_summary(docker: str, name: str, image: str) -> dict[str, object]:
+    table_count = __psql_count(
+        docker, name,
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';",
+    )
+    workflow_count = __psql_count(
+        docker, name,
+        "SELECT CASE WHEN to_regclass('public.workflow_entity') IS NULL THEN -1 ELSE (SELECT COUNT(*) FROM workflow_entity) END;",
+    )
+    if table_count <= 0 or workflow_count < 0:
+        raise RuntimeError("restored PostgreSQL is missing n8n schema")
+    return {"image": image, "table_count": table_count, "workflow_count": workflow_count, "network": "none"}
+
+
+def restore_postgres(
+    docker: str,
+    dump: Path,
+    *,
+    source_container: str = "n8n-postgres",
+    schema_kind: str = "n8n",
+) -> dict[str, object]:
+    image, name = __start_restore_postgres(docker, source_container)
     try:
-        deadline = time.monotonic() + 90
-        while time.monotonic() < deadline:
-            probe = subprocess.run([docker, "exec", name, "pg_isready", "-U", "postgres"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if probe.returncode == 0:
-                break
-            time.sleep(1)
-        else:
-            raise RuntimeError("temporary PostgreSQL did not become ready")
-        docker_output(docker, ["exec", name, "createdb", "-U", "postgres", "n8n_restore_drill"])
-        with dump.open("rb") as stream:
-            subprocess.run(
-                [docker, "exec", "-i", name, "pg_restore", "-U", "postgres", "--no-owner", "--no-privileges", "-d", "n8n_restore_drill"],
-                stdin=stream, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True, timeout=1800,
-            )
+        __wait_for_restore_postgres(docker, name)
+        __load_restore_dump(docker, name, dump)
         if schema_kind == "alert-store-shadow":
-            schema_versions = int(docker_output(
-                docker,
-                ["exec", name, "psql", "-U", "postgres", "-d",
-                 "n8n_restore_drill", "-Atc",
-                 "SELECT CASE WHEN to_regclass('onion_sentinel_queue.schema_version') IS NULL THEN -1 ELSE (SELECT COUNT(*) FROM onion_sentinel_queue.schema_version) END;"],
-            ))
-            durable_jobs = int(docker_output(
-                docker,
-                ["exec", name, "psql", "-U", "postgres", "-d",
-                 "n8n_restore_drill", "-Atc",
-                 "SELECT CASE WHEN to_regclass('onion_sentinel_queue.shadow_durable_jobs') IS NULL THEN -1 ELSE (SELECT COUNT(*) FROM onion_sentinel_queue.shadow_durable_jobs) END;"],
-            ))
-            if schema_versions < 1 or durable_jobs < 0:
-                raise RuntimeError(
-                    "restored PostgreSQL is missing alert-store shadow schema"
-                )
-            return {
-                "image": image,
-                "schema_version_rows": schema_versions,
-                "durable_job_rows": durable_jobs,
-                "network": "none",
-            }
-        table_count = int(docker_output(docker, ["exec", name, "psql", "-U", "postgres", "-d", "n8n_restore_drill", "-Atc", "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';"]))
-        workflow_count = int(docker_output(docker, ["exec", name, "psql", "-U", "postgres", "-d", "n8n_restore_drill", "-Atc", "SELECT CASE WHEN to_regclass('public.workflow_entity') IS NULL THEN -1 ELSE (SELECT COUNT(*) FROM workflow_entity) END;"]))
-        if table_count <= 0 or workflow_count < 0:
-            raise RuntimeError("restored PostgreSQL is missing n8n schema")
-        return {"image": image, "table_count": table_count, "workflow_count": workflow_count, "network": "none"}
+            return __shadow_restore_summary(docker, name, image)
+        return __n8n_restore_summary(docker, name, image)
     finally:
         subprocess.run([docker, "rm", "-f", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def main() -> int:
+def __parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stack-dir", type=Path, default=Path.home() / "n8n-local")
     parser.add_argument("--bundle", type=Path)
     parser.add_argument("--docker", default="/usr/local/bin/docker")
-    args = parser.parse_args()
-    started = time.monotonic()
-    bundle = args.bundle or newest_bundle(args.stack_dir / "recovery_backups")
-    report: dict[str, object] = {
+    return parser.parse_args()
+
+
+def __initial_report(bundle: Path) -> dict[str, object]:
+    return {
         "started_at": dt.datetime.now().astimezone().replace(microsecond=0).isoformat().replace("T", "  "),
         "bundle": bundle.name,
         "status": "running",
     }
-    output_dir = args.stack_dir / "logs/restore-drills"
+
+
+def __report_destination(stack_dir: Path) -> Path:
+    output_dir = stack_dir / "logs/restore-drills"
     output_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     stamp = dt.datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
-    output = output_dir / f"restore-drill-{stamp}.json"
-    try:
-        manifest = verify_bundle(bundle)
-        with tempfile.TemporaryDirectory(prefix="onion-sentinel-restore-") as temp:
-            temp_dir = Path(temp)
-            report["sqlite"] = validate_sqlite(
-                bundle / "alerts.sqlite3",
-                temp_dir,
-            )
-            harness_path = bundle / "investigation-harness.sqlite3"
-            report["investigation_harness"] = (
-                validate_harness_sqlite(harness_path, temp_dir)
-                if harness_path.is_file()
-                else {"present": False}
-            )
-        if int(report["sqlite"]["alert_rows"]) != int(manifest.get("alert_rows") or -1):
-            raise RuntimeError("restored SQLite row count does not match bundle manifest")
-        if (bundle / "investigation-harness.sqlite3").is_file():
-            if int(report["investigation_harness"]["run_rows"]) != int(
-                manifest.get("harness_runs", -1)
-            ):
-                raise RuntimeError(
-                    "restored harness SQLite run count does not match "
-                    "bundle manifest"
-                )
-            report["investigation_harness"]["present"] = True
-        report["runtime_archive"] = validate_runtime_archive(bundle / "runtime-secrets.tar.gz")
-        report["postgres"] = restore_postgres(args.docker, bundle / "n8n-postgres.dump")
-        shadow_dump = bundle / "alert-store-postgres.dump"
-        report["alert_store_postgres_shadow"] = (
-            restore_postgres(
-                args.docker,
-                shadow_dump,
-                source_container="onion-sentinel-alert-store-postgres",
-                schema_kind="alert-store-shadow",
-            )
-            if shadow_dump.is_file()
+    return output_dir / f"restore-drill-{stamp}.json"
+
+
+def __validate_sqlite_backups(
+    bundle: Path, manifest: dict[str, object], report: dict[str, object],
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="onion-sentinel-restore-") as temp:
+        temp_dir = Path(temp)
+        report["sqlite"] = validate_sqlite(bundle / "alerts.sqlite3", temp_dir)
+        harness_path = bundle / "investigation-harness.sqlite3"
+        report["investigation_harness"] = (
+            validate_harness_sqlite(harness_path, temp_dir)
+            if harness_path.is_file()
             else {"present": False}
         )
-        if shadow_dump.is_file():
-            report["alert_store_postgres_shadow"]["present"] = True
-        report["manifest_alert_rows"] = int(manifest.get("alert_rows") or 0)
-        report["status"] = "passed"
+    if int(report["sqlite"]["alert_rows"]) != int(manifest.get("alert_rows") or -1):
+        raise RuntimeError("restored SQLite row count does not match bundle manifest")
+    if (bundle / "investigation-harness.sqlite3").is_file():
+        if int(report["investigation_harness"]["run_rows"]) != int(manifest.get("harness_runs", -1)):
+            raise RuntimeError("restored harness SQLite run count does not match bundle manifest")
+        report["investigation_harness"]["present"] = True
+
+
+def __restore_postgres_backups(
+    args: argparse.Namespace, bundle: Path, report: dict[str, object],
+) -> None:
+    report["postgres"] = restore_postgres(args.docker, bundle / "n8n-postgres.dump")
+    shadow_dump = bundle / "alert-store-postgres.dump"
+    report["alert_store_postgres_shadow"] = (
+        restore_postgres(
+            args.docker, shadow_dump,
+            source_container="onion-sentinel-alert-store-postgres",
+            schema_kind="alert-store-shadow",
+        )
+        if shadow_dump.is_file()
+        else {"present": False}
+    )
+    if shadow_dump.is_file():
+        report["alert_store_postgres_shadow"]["present"] = True
+
+
+def __execute_restore_drill(
+    args: argparse.Namespace, bundle: Path, report: dict[str, object],
+) -> None:
+    manifest = verify_bundle(bundle)
+    __validate_sqlite_backups(bundle, manifest, report)
+    report["runtime_archive"] = validate_runtime_archive(bundle / "runtime-secrets.tar.gz")
+    __restore_postgres_backups(args, bundle, report)
+    report["manifest_alert_rows"] = int(manifest.get("alert_rows") or 0)
+    report["status"] = "passed"
+
+
+def __publish_report(
+    report: dict[str, object], output: Path, started: float,
+) -> None:
+    report["runtime_seconds"] = round(time.monotonic() - started, 3)
+    report["completed_at"] = dt.datetime.now().astimezone().replace(microsecond=0).isoformat().replace("T", "  ")
+    output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    os.chmod(output, 0o600)
+    print(json.dumps({"ok": report["status"] == "passed", "report": str(output), **report}, sort_keys=True))
+
+
+def main() -> int:
+    args = __parse_args()
+    started = time.monotonic()
+    bundle = args.bundle or newest_bundle(args.stack_dir / "recovery_backups")
+    report = __initial_report(bundle)
+    output = __report_destination(args.stack_dir)
+    try:
+        __execute_restore_drill(args, bundle, report)
         return_code = 0
     except Exception as error:
         report["status"] = "failed"
         report["error"] = str(error)
         return_code = 2
     finally:
-        report["runtime_seconds"] = round(time.monotonic() - started, 3)
-        report["completed_at"] = dt.datetime.now().astimezone().replace(microsecond=0).isoformat().replace("T", "  ")
-        output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-        os.chmod(output, 0o600)
-        print(json.dumps({"ok": report["status"] == "passed", "report": str(output), **report}, sort_keys=True))
+        __publish_report(report, output, started)
     return return_code
 
 
