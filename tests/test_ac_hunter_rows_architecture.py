@@ -73,7 +73,10 @@ class AcHunterRowsArchitectureTests(unittest.TestCase):
         self.assertEqual(
             str(signature.return_annotation), "List[Dict[str, Any]]"
         )
-        self.assertEqual(function_metrics("_rows"), (34, 13))
+        for name in ("_bounded_dict_rows", "_keyed_object_rows", "_rows"):
+            lines, complexity = function_metrics(name)
+            self.assertLessEqual(lines, 50)
+            self.assertLessEqual(complexity, 10)
         self.assertIs(self.scoring._rows, self.normalization._rows)
         self.assertIs(self.collection._rows, self.normalization._rows)
         self.assertLessEqual(

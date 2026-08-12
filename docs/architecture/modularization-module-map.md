@@ -2895,8 +2895,9 @@ distinctness, and numeric-bound admission lives in
 `ac_hunter_config_admission.py`; Relay-only transport, bounded in-memory cookie
 admission, and phased short-lived authentication state, login, JWT issuance,
 and token admission in
-`ac_hunter_transport.py`; bounded primitive compatibility
-and response projection in `ac_hunter_normalization.py`; pure finding identity,
+`ac_hunter_transport.py`; bounded primitive compatibility, row-container
+admission, wrapper traversal, keyed-object projection, and response projection
+in `ac_hunter_normalization.py`; pure finding identity,
 observable,
 metric, tuple-fallback, and evidence phases in
 `ac_hunter_finding_normalization.py`;

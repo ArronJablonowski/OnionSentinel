@@ -25,9 +25,27 @@ def _first(mapping: object, names: Sequence[str]) -> object:
     return None
 
 
+def _bounded_dict_rows(value: List[object]) -> List[Dict[str, Any]]:
+    return [
+        item
+        for item in value[:MAX_FINDINGS_PER_MODULE]
+        if isinstance(item, dict)
+    ]
+
+
+def _keyed_object_rows(value: Dict[Any, Any]) -> List[Dict[str, Any]]:
+    converted: List[Dict[str, Any]] = []
+    for key, item in list(value.items())[:MAX_FINDINGS_PER_MODULE]:
+        if isinstance(item, dict):
+            row = dict(item)
+            row.setdefault("host", key)
+            converted.append(row)
+    return converted
+
+
 def _rows(value: object, names: Sequence[str] = ()) -> List[Dict[str, Any]]:
     if isinstance(value, list):
-        return [item for item in value[:MAX_FINDINGS_PER_MODULE] if isinstance(item, dict)]
+        return _bounded_dict_rows(value)
     if not isinstance(value, dict):
         return []
     priority = tuple(names) + (
@@ -42,23 +60,13 @@ def _rows(value: object, names: Sequence[str] = ()) -> List[Dict[str, Any]]:
     for key in priority:
         candidate = value.get(key)
         if isinstance(candidate, list):
-            return [
-                item
-                for item in candidate[:MAX_FINDINGS_PER_MODULE]
-                if isinstance(item, dict)
-            ]
+            return _bounded_dict_rows(candidate)
         if isinstance(candidate, dict):
             nested = _rows(candidate, ())
             if nested:
                 return nested
     # Some AC Hunter responses are objects keyed by an address/domain.
-    converted: List[Dict[str, Any]] = []
-    for key, item in list(value.items())[:MAX_FINDINGS_PER_MODULE]:
-        if isinstance(item, dict):
-            row = dict(item)
-            row.setdefault("host", key)
-            converted.append(row)
-    return converted
+    return _keyed_object_rows(value)
 
 
 def _number(value: object, default: float = 0.0) -> float:
