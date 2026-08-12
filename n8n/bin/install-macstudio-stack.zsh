@@ -1005,6 +1005,7 @@ cp "$REPO_DIR/n8n/bin/verify-agent-memory.py" "$STACK_DIR/bin/verify-agent-memor
 cp "$REPO_DIR/n8n/bin/set-runtime-release-id.py" "$STACK_DIR/bin/set-runtime-release-id.py"
 cp "$REPO_DIR/n8n/bin/upgrade-runtime-policy.py" "$STACK_DIR/bin/upgrade-runtime-policy.py"
 cp "$REPO_DIR/n8n/bin/backfill-ai-correlation-context.py" "$STACK_DIR/bin/backfill-ai-correlation-context.py"
+cp "$REPO_DIR/n8n/bin/pcap_geoip_workflow.py" "$STACK_DIR/bin/pcap_geoip_workflow.py"
 cp "$REPO_DIR/n8n/bin/pcap_processor_contract.py" "$STACK_DIR/bin/pcap_processor_contract.py"
 cp "$REPO_DIR/n8n/bin/pcap_processor_storage_requests.py" "$STACK_DIR/bin/pcap_processor_storage_requests.py"
 cp "$REPO_DIR/n8n/bin/pcap_processor_storage_scope.py" "$STACK_DIR/bin/pcap_processor_storage_scope.py"

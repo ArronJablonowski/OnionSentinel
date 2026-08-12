@@ -284,125 +284,21 @@ def maxmind_geoip_summary(
     is looked up at most once per ready database, and only compact merged fields
     are retained. A missing optional database never blocks PCAP analysis.
     """
-    if isinstance(database_paths, Path):
-        database_paths = {"city": database_paths}
-    normalized_paths = {
-        database_type: Path(path).expanduser()
-        for database_type, path in database_paths.items()
-        if database_type in DEFAULT_MAXMIND_DBS
-    }
-    summary: dict[str, Any] = {
-        "available": False,
-        "network_access": "none-offline-database-only",
-        "public_ip_candidates": 0,
-        "lookups_attempted": 0,
-        "records": [],
-        "databases": {},
-    }
-    candidate_rows = candidates.most_common(("ip", "role"), MAXMIND_GEOIP_MAX_LOOKUPS * 2)
-    by_ip: dict[str, dict[str, Any]] = {}
-    for item in candidate_rows:
-        address = public_ip(item.get("ip"))
-        if not address:
-            continue
-        current = by_ip.setdefault(address, {"count": 0, "roles": []})
-        current["count"] += int(item.get("count") or 0)
-        role = sanitize_evidence_text(item.get("role"), 24)
-        if role:
-            current["roles"].append(role)
-    summary["public_ip_candidates"] = len(by_ip)
-    for database_type in ("asn", "city", "country"):
-        path = normalized_paths.get(database_type)
-        if path is None:
-            continue
-        summary["databases"][database_type] = {
-            "state": "missing",
-            "database": path.name,
-            "lookups_attempted": 0,
-            "records_found": 0,
-            "records_not_found": 0,
-            "lookup_errors": 0,
-        }
-    ready_paths = {
-        database_type: path
-        for database_type, path in normalized_paths.items()
-        if path.is_file()
-    }
-    if not ready_paths:
-        summary["reason"] = "No configured MaxMind MMDB files are installed"
-        return summary
-    try:
-        import maxminddb  # type: ignore
-    except ImportError:
-        summary["reason"] = "maxminddb Python reader is not installed in the Onion Sentinel runtime"
-        return summary
-    readers: dict[str, Any] = {}
-    try:
-        for database_type, path in ready_paths.items():
-            database_status = summary["databases"][database_type]
-            try:
-                reader = maxminddb.open_database(str(path))
-                metadata = reader.metadata()
-            except Exception as exc:
-                database_status["state"] = "unreadable"
-                database_status["error"] = sanitize_evidence_text(exc, 240)
-                continue
-            readers[database_type] = reader
-            database_status["state"] = "ready"
-            database_status["database_type"] = sanitize_evidence_text(
-                getattr(metadata, "database_type", ""),
-                120,
-            )
-        for address, context in sorted(
-            by_ip.items(),
-            key=lambda item: (-item[1]["count"], item[0]),
-        )[:MAXMIND_GEOIP_MAX_LOOKUPS]:
-            merged: dict[str, Any] = {
-                "ip": address,
-                "roles": sorted(set(context["roles"])),
-                "packet_observations": context["count"],
-            }
-            sources: list[str] = []
-            for database_type in ("asn", "city", "country"):
-                reader = readers.get(database_type)
-                if reader is None:
-                    continue
-                database_status = summary["databases"][database_type]
-                database_status["lookups_attempted"] += 1
-                summary["lookups_attempted"] += 1
-                try:
-                    record = reader.get(address)
-                except Exception:
-                    database_status["lookup_errors"] += 1
-                    continue
-                if not isinstance(record, dict):
-                    database_status["records_not_found"] += 1
-                    continue
-                database_status["records_found"] += 1
-                sources.append(database_type)
-                compact = compact_maxmind_record(address, record, context["roles"], context["count"])
-                for key, value in compact.items():
-                    if key not in {"ip", "roles", "packet_observations"} and key not in merged:
-                        merged[key] = value
-            if sources:
-                merged["database_sources"] = sources
-                summary["records"].append(merged)
-    finally:
-        for reader in readers.values():
-            reader.close()
-    summary["available"] = bool(readers)
-    summary["records_found"] = len(summary["records"])
-    summary["records_not_found"] = sum(
-        int(status.get("records_not_found") or 0)
-        for status in summary["databases"].values()
+    workflow = __import__("pcap_geoip_workflow")
+    return workflow.summarize_geoip(
+        candidates,
+        database_paths,
+        policy=workflow.GeoipPolicy(
+            database_types=frozenset(DEFAULT_MAXMIND_DBS),
+            lookup_order=("asn", "city", "country"),
+            max_lookups=MAXMIND_GEOIP_MAX_LOOKUPS,
+        ),
+        dependencies=workflow.GeoipDependencies(
+            public_ip=public_ip,
+            sanitize=sanitize_evidence_text,
+            compact_record=compact_maxmind_record,
+        ),
     )
-    summary["lookup_errors"] = sum(
-        int(status.get("lookup_errors") or 0)
-        for status in summary["databases"].values()
-    )
-    if not readers:
-        summary["reason"] = "Configured MaxMind MMDB files could not be opened"
-    return summary
 
 
 def sha256_file(path: Path) -> str:

@@ -14,6 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "n8n/bin/pcap_processor_contract.py"
+WORKFLOW = ROOT / "n8n/bin/pcap_geoip_workflow.py"
 BIN = ROOT / "n8n/bin"
 if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
@@ -30,8 +31,8 @@ def load_contract():
     return module
 
 
-def function_metrics(name: str) -> tuple[int, int]:
-    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+def function_metrics(name: str, path: Path = SCRIPT) -> tuple[int, int]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     target = next(
         node
         for node in tree.body
@@ -120,8 +121,34 @@ class MaxmindGeoipSummaryArchitectureTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.contract = load_contract()
 
-    def test_signature_and_current_quality_debt_are_exact(self) -> None:
-        self.assertEqual(function_metrics("maxmind_geoip_summary"), (129, 31))
+    def test_signature_and_quality_boundaries_are_exact(self) -> None:
+        lines, complexity = function_metrics("maxmind_geoip_summary")
+        self.assertLessEqual(lines, 35)
+        self.assertLessEqual(complexity, 5)
+        for name in (
+            "_normalized_paths",
+            "_initial_summary",
+            "_candidate_contexts",
+            "_ready_paths",
+            "_reader_module",
+            "_open_readers",
+            "_lookup_record",
+            "_lookup_address",
+            "_lookup_candidates",
+            "_close_readers",
+            "_finalize_summary",
+            "summarize_geoip",
+        ):
+            lines, complexity = function_metrics(name, WORKFLOW)
+            self.assertLessEqual(lines, 50)
+            self.assertLessEqual(complexity, 10)
+        self.assertLessEqual(len(WORKFLOW.read_text().splitlines()), 600)
+        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
+        self.assertIn(
+            'cp "$REPO_DIR/n8n/bin/pcap_geoip_workflow.py" '
+            '"$STACK_DIR/bin/pcap_geoip_workflow.py"',
+            installer,
+        )
 
     def test_missing_paths_preserve_status_order_and_reason(self) -> None:
         candidates = FakeCandidates([
