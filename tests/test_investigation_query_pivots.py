@@ -8,6 +8,7 @@ import hashlib
 import io
 import importlib.machinery
 import importlib.util
+import inspect
 import json
 import subprocess
 import sys
@@ -52,6 +53,7 @@ from investigation_query_contract import (  # noqa: E402
     result_coverage,
     validate_investigation_query_response,
 )
+import investigation_query_response as QUERY_RESPONSE  # noqa: E402
 
 
 def load_source_module(name: str, path: Path):
@@ -330,6 +332,88 @@ def valid_response(request: dict) -> dict:
 
 
 class InvestigationQueryContractTests(unittest.TestCase):
+    def test_response_compatibility_surface_and_signatures_are_stable(self) -> None:
+        expected_names = {
+            "ALLOWED_AGGREGATIONS", "ALLOWED_DIALECTS", "ALLOWED_PURPOSES",
+            "EVENT_TUPLE_FIELDS", "EVENT_TUPLE_PATHS",
+            "INVESTIGATION_QUERY_CONTRACT", "InvestigationQueryContractError",
+            "SAFE_ATOM_RE", "authorize_investigation_query_request",
+            "build_query_dsl", "canonical_digest", "kql_equivalent",
+            "oql_equivalent", "pack_event_tuple_fields", "result_coverage",
+            "tuple_match_semantics", "validate_pack_observables",
+            "validate_authorized_investigation_query_request",
+            "validate_investigation_query_request",
+            "validate_investigation_query_response", "_leaf_items",
+            "_path_values", "_observable_matches",
+            "_event_tuple_value_matches", "_validate_hit_source",
+            "_validate_pivot_result", "_validate_control",
+        }
+        self.assertFalse(expected_names.difference(vars(QUERY_RESPONSE)))
+        self.assertEqual(
+            QUERY_RESPONSE.__all__,
+            [
+                "ALLOWED_AGGREGATIONS", "ALLOWED_DIALECTS",
+                "ALLOWED_PURPOSES", "EVENT_TUPLE_FIELDS",
+                "EVENT_TUPLE_PATHS", "INVESTIGATION_QUERY_CONTRACT",
+                "InvestigationQueryContractError", "SAFE_ATOM_RE",
+                "authorize_investigation_query_request", "build_query_dsl",
+                "canonical_digest", "kql_equivalent", "oql_equivalent",
+                "pack_event_tuple_fields", "result_coverage",
+                "tuple_match_semantics", "validate_pack_observables",
+                "validate_authorized_investigation_query_request",
+                "validate_investigation_query_request",
+                "validate_investigation_query_response",
+            ],
+        )
+        expected_signatures = {
+            "_leaf_items": "(value: 'object', prefix: 'str' = '') -> 'list[tuple[str, object]]'",
+            "_path_values": "(source: 'dict[str, Any]', path: 'str') -> 'list[object]'",
+            "_observable_matches": "(kind: 'str', expected: 'str', candidate: 'object') -> 'bool'",
+            "_event_tuple_value_matches": "(field: 'str', expected: 'Any', candidate: 'object') -> 'bool'",
+            "_validate_hit_source": "(source: 'object', expected_query: 'dict[str, Any]') -> 'None'",
+            "result_coverage": "(query: 'dict[str, Any]', *, status: 'str', total_hits: 'int', total_hits_relation: 'str', returned_hits: 'int') -> 'dict[str, Any]'",
+            "_validate_pivot_result": "(result: 'object', expected_query: 'dict[str, Any]') -> 'bool'",
+            "_validate_control": "(value: 'object', *, anchor: 'dict[str, str]', positive: 'bool') -> 'bool'",
+            "validate_investigation_query_response": "(response: 'object', request: 'object') -> 'dict[str, Any]'",
+        }
+        self.assertEqual(
+            {
+                name: str(inspect.signature(getattr(QUERY_RESPONSE, name)))
+                for name in expected_signatures
+            },
+            expected_signatures,
+        )
+
+    def test_response_imports_from_an_isolated_flat_bin(self) -> None:
+        sources = [
+            BIN_DIR / name
+            for name in (
+                "investigation_query_schema.py",
+                "investigation_query_normalization.py",
+                "investigation_query_authorization.py",
+                "investigation_query_rendering.py",
+                "investigation_query_response.py",
+            )
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            for source in sources:
+                (Path(directory) / source.name).write_bytes(source.read_bytes())
+            result = subprocess.run(
+                [
+                    sys.executable, "-I", "-B", "-c",
+                    (
+                        "import sys; sys.path.insert(0, sys.argv[1]); "
+                        "import investigation_query_response"
+                    ),
+                    directory,
+                ],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_authorizes_base_and_evidence_discovered_observables(self) -> None:
         request = authorize_investigation_query_request(proposal(), context())
 
