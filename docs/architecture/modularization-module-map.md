@@ -2642,6 +2642,20 @@ only after the exact v2 contract is selected. The bundled v1 facade, collector,
 and manifest remain frozen and byte-stable. No module receives credentials or
 transport authority, and Security Onion and Relay access remain read-only.
 
+`live_osquery_contract.py` remains the stable shared V1 facade installed on the
+Mac Studio, Relay, and Security Onion. `live_osquery_contract_schema.py` owns
+the immutable schema, limits, platform/table/column policy, lexical constants,
+bounded-text primitive, and canonical error identity.
+`live_osquery_contract_query.py` owns single-table SELECT normalization,
+projection admission, identifier checks, and enforced row limits.
+`live_osquery_contract_request.py` owns exact target aliases, request digests,
+batch deduplication, and transport-payload validation.
+`live_osquery_contract_result.py` owns submitted-request binding, exact row
+shape and accounting, status/completeness validation, and bounded compact JSON.
+The facade preserves the complete legacy import namespace while all three
+installers copy the same five-file unit. Dependencies flow schema to query to
+request/result to facade with no transport or credential authority.
+
 `collect-investigation-pivots.py` remains the stable installed v2 client.
 Private phases own authorization and the forced-command byte bound, restricted
 SSH settings/command/response handling, controls-gated model projection,

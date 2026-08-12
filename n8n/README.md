@@ -974,7 +974,8 @@ query, and every fixed local OSquery pack pass; a transport success or zero-hit
 response alone is insufficient.
 
 An Incident Responder response may propose one optional live endpoint OSQuery
-round. `bin/live_osquery_contract.py` validates the request before
+round. `bin/live_osquery_contract.py` is the stable facade over the shared
+schema, query, request, and result validators and validates the request before
 `bin/live_osquery_client.py` crosses a dedicated forced-command relay path. The
 same contract is revalidated on the relay and Security Onion. Exact endpoint
 aliases, Fleet IDs, and authorization are operator controlled; wildcard

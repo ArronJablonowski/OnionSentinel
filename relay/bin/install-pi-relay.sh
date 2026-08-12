@@ -49,6 +49,10 @@ install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/alert_delivery.py" /o
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/process_io.py" /opt/so-alert-relay/app/process_io.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/incident_evidence_broker.py" /opt/so-alert-relay/app/incident_evidence_broker.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/live_osquery_broker.py" /opt/so-alert-relay/app/live_osquery_broker.py
+install -o soalert -g soalert -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract_schema.py" /opt/so-alert-relay/app/live_osquery_contract_schema.py
+install -o soalert -g soalert -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract_query.py" /opt/so-alert-relay/app/live_osquery_contract_query.py
+install -o soalert -g soalert -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract_request.py" /opt/so-alert-relay/app/live_osquery_contract_request.py
+install -o soalert -g soalert -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract_result.py" /opt/so-alert-relay/app/live_osquery_contract_result.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract.py" /opt/so-alert-relay/app/live_osquery_contract.py
 install -o root -g root -m 0755 "$REPO_DIR/relay/bin/run-live-osquery-broker" /usr/local/sbin/run-live-osquery-broker
 install -o root -g root -m 0755 \

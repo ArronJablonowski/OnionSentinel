@@ -18,6 +18,10 @@ install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/export-software-ob
 install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/run-live-osquery" /usr/local/sbin/run-live-osquery
 install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/run-live-osquery-forced" /usr/local/sbin/run-live-osquery-forced
 install -o root -g root -m 0755 -d /usr/local/lib/onion-sentinel
+install -o root -g root -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract_schema.py" /usr/local/lib/onion-sentinel/live_osquery_contract_schema.py
+install -o root -g root -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract_query.py" /usr/local/lib/onion-sentinel/live_osquery_contract_query.py
+install -o root -g root -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract_request.py" /usr/local/lib/onion-sentinel/live_osquery_contract_request.py
+install -o root -g root -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract_result.py" /usr/local/lib/onion-sentinel/live_osquery_contract_result.py
 install -o root -g root -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract.py" /usr/local/lib/onion-sentinel/live_osquery_contract.py
 install -o root -g root -m 0440 "$REPO_DIR/security-onion/sudoers/90-so-ai-relay-export" /etc/sudoers.d/90-so-ai-relay-export
 # Always validate sudoers before relying on passwordless wrapper execution.

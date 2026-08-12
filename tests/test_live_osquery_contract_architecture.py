@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import inspect
 import json
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -14,6 +17,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "n8n" / "bin"
 CONTRACT = BIN / "live_osquery_contract.py"
+CONTRACT_FILES = (
+    "live_osquery_contract_schema.py",
+    "live_osquery_contract_query.py",
+    "live_osquery_contract_request.py",
+    "live_osquery_contract_result.py",
+    "live_osquery_contract.py",
+)
+MAC_INSTALLER = BIN / "install-macstudio-stack.zsh"
+RELAY_INSTALLER = ROOT / "relay" / "bin" / "install-pi-relay.sh"
+SECURITY_ONION_INSTALLER = (
+    ROOT / "security-onion" / "bin" / "install-security-onion-wrapper.sh"
+)
 
 
 def load_contract(name: str = "live_osquery_contract_characterization"):
@@ -214,6 +229,87 @@ class LiveOsqueryContractCharacterizationTests(unittest.TestCase):
                     f"^{__import__('re').escape(message)}$",
                 ):
                     invoke()
+
+
+class LiveOsqueryContractArchitectureTests(unittest.TestCase):
+    def test_facade_and_owner_modules_obey_size_and_dependency_boundaries(self):
+        expected_imports = {
+            "live_osquery_contract_schema.py": set(),
+            "live_osquery_contract_query.py": {"live_osquery_contract_schema"},
+            "live_osquery_contract_request.py": {
+                "live_osquery_contract_query",
+                "live_osquery_contract_schema",
+            },
+            "live_osquery_contract_result.py": {
+                "live_osquery_contract_query",
+                "live_osquery_contract_schema",
+            },
+            "live_osquery_contract.py": {
+                "live_osquery_contract_query",
+                "live_osquery_contract_request",
+                "live_osquery_contract_result",
+                "live_osquery_contract_schema",
+            },
+        }
+        for name in CONTRACT_FILES:
+            with self.subTest(name=name):
+                source = (BIN / name).read_text(encoding="utf-8")
+                limit = 250 if name == "live_osquery_contract.py" else 800
+                self.assertLessEqual(len(source.splitlines()), limit)
+                tree = ast.parse(source)
+                local_imports = {
+                    node.module
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.ImportFrom)
+                    and node.module
+                    and node.module.startswith("live_osquery_contract")
+                }
+                self.assertEqual(local_imports, expected_imports[name])
+
+    def test_contract_imports_from_an_isolated_flat_dependency_unit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            for name in CONTRACT_FILES:
+                (target / name).write_bytes((BIN / name).read_bytes())
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-c",
+                    (
+                        "import sys; sys.path.insert(0, sys.argv[1]); "
+                        "import live_osquery_contract as c; "
+                        "assert c.normalize_query('SELECT pid FROM processes') == "
+                        "'SELECT pid FROM processes LIMIT 100;'"
+                    ),
+                    directory,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_all_three_installers_copy_the_complete_contract_unit(self):
+        installers = {
+            "mac": MAC_INSTALLER.read_text(encoding="utf-8"),
+            "relay": RELAY_INSTALLER.read_text(encoding="utf-8"),
+            "security_onion": SECURITY_ONION_INSTALLER.read_text(encoding="utf-8"),
+        }
+        for boundary, installer in installers.items():
+            for name in CONTRACT_FILES:
+                with self.subTest(boundary=boundary, name=name):
+                    self.assertIn(f"n8n/bin/{name}", installer)
+        self.assertIn('$STACK_DIR/bin/live_osquery_contract.py', installers["mac"])
+        self.assertIn(
+            "/opt/so-alert-relay/app/live_osquery_contract.py",
+            installers["relay"],
+        )
+        self.assertIn(
+            "/usr/local/lib/onion-sentinel/live_osquery_contract.py",
+            installers["security_onion"],
+        )
 
 
 if __name__ == "__main__":

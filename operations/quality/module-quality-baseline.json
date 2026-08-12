@@ -158,14 +158,6 @@
       "max_complexity": 61,
       "max_lines": 215
     },
-    "n8n/bin/live_osquery_contract.py::normalize_query": {
-      "max_complexity": 42,
-      "max_lines": 121
-    },
-    "n8n/bin/live_osquery_contract.py::validate_result_artifact": {
-      "max_complexity": 42,
-      "max_lines": 190
-    },
     "n8n/bin/maintain-pcap-evidence.py::cleanup_analyzed_artifacts": {
       "max_complexity": 17
     },
