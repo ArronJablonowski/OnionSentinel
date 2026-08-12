@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPORTER_PATH = ROOT / "n8n/bin/export-adjudicated-analysis-replays.py"
+POLICY_PATH = ROOT / "n8n/bin/adjudication_contradiction_policy.py"
 
 
 def load_exporter():
@@ -22,8 +23,8 @@ def load_exporter():
     return module
 
 
-def function_metrics(name: str) -> tuple[int, int]:
-    tree = ast.parse(EXPORTER_PATH.read_text(encoding="utf-8"))
+def function_metrics(name: str, path: Path = EXPORTER_PATH) -> tuple[int, int]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     target = next(
         node
         for node in tree.body
@@ -123,19 +124,30 @@ class AdjudicationVerdictContradictionsArchitectureTests(unittest.TestCase):
         )
         self.assertEqual(str(signature.return_annotation), "list[str]")
         for name in (
-            "_normalized_contradiction_factors",
-            "_append_event_contradictions",
-            "_append_disposition_contradictions",
-            "_append_duplicate_contradictions",
-            "_append_false_positive_contradictions",
-            "adjudication_verdict_contradictions",
+            "_normalized_factors",
+            "_append_event",
+            "_append_disposition",
+            "_append_duplicate",
+            "_append_false_positive",
+            "verdict_contradictions",
         ):
-            lines, complexity = function_metrics(name)
+            lines, complexity = function_metrics(name, POLICY_PATH)
             self.assertLessEqual(lines, 50)
             self.assertLessEqual(complexity, 10)
+        lines, complexity = function_metrics("adjudication_verdict_contradictions")
+        self.assertLessEqual(lines, 10)
+        self.assertLessEqual(complexity, 3)
         source = EXPORTER_PATH.read_text(encoding="utf-8")
         self.assertEqual(source.count("adjudication_verdict_contradictions("), 2)
-        self.assertLessEqual(len(source.splitlines()), 800)
+        self.assertLessEqual(len(source.splitlines()), 600)
+        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'cp "$REPO_DIR/n8n/bin/adjudication_contradiction_policy.py" '
+            '"$STACK_DIR/bin/adjudication_contradiction_policy.py"',
+            installer,
+        )
 
     def test_absent_factors_short_circuit_without_runner_callbacks(self) -> None:
         for factors in ({}, {"event_status": None}, {"handling": ""}):

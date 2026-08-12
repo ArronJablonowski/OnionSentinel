@@ -947,6 +947,7 @@ cp "$REPO_DIR/n8n/bin/local_ai_runtime_compat.py" "$STACK_DIR/bin/local_ai_runti
 cp "$REPO_DIR/n8n/bin/local_ai_runtime_contract.py" "$STACK_DIR/bin/local_ai_runtime_contract.py"
 cp "$REPO_DIR/n8n/bin/local_ai_analysis_contract.py" "$STACK_DIR/bin/local_ai_analysis_contract.py"
 cp "$REPO_DIR/n8n/bin/run-local-ai-analysis.py" "$STACK_DIR/bin/run-local-ai-analysis.py"
+cp "$REPO_DIR/n8n/bin/adjudication_contradiction_policy.py" "$STACK_DIR/bin/adjudication_contradiction_policy.py"
 cp "$REPO_DIR/n8n/bin/export-adjudicated-analysis-replays.py" "$STACK_DIR/bin/export-adjudicated-analysis-replays.py"
 cp "$REPO_DIR/n8n/bin/bounded_http.py" "$STACK_DIR/bin/bounded_http.py"
 cp "$REPO_DIR/n8n/bin/bounded_process.py" "$STACK_DIR/bin/bounded_process.py"
