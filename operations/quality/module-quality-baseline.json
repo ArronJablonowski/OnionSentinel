@@ -75,10 +75,6 @@
     "onion-sentinel-dashboard/scripts/dashboard_pcap_components.py::render_pcap_evidence_markdown": {
       "max_complexity": 22
     },
-    "onion-sentinel-dashboard/scripts/dashboard_timeline_components.py::alert_seen_timeline_html": {
-      "max_complexity": 45,
-      "max_lines": 171
-    },
     "operations/evaluate-analysis-replays.py::_classification_metrics": {
       "max_complexity": 32
     },
@@ -155,5 +151,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "1e2ba5d0964f45c4abbd1f123d3a664c2ad2806e"
+  "source_release": "a410f6347a0325fd03591dd1ccec622b0b66c3d2"
 }
