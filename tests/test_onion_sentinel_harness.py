@@ -4,10 +4,12 @@ import dataclasses
 import contextlib
 import gc
 import importlib.util
+import inspect
 import json
 import os
 import sqlite3
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -76,6 +78,85 @@ class OnionSentinelHarnessTests(unittest.TestCase):
             encoding="utf-8",
         )
         return HARNESS.HarnessPolicy.from_dict(document)
+
+    def test_harness_policy_compatibility_surface_and_signatures_are_stable(self) -> None:
+        expected_names = {
+            "HARNESS_SCHEMA", "POLICY_SCHEMA", "TRACE_SCHEMA",
+            "LEDGER_MANIFEST_SCHEMA_V1", "LEDGER_MANIFEST_SCHEMA",
+            "SQL_SCHEMA_VERSION", "DEFAULT_POLICY_PATH", "DEFAULT_DB_PATH",
+            "DEFAULT_HARNESS_LOG_PATH", "MAX_POLICY_BYTES",
+            "MAX_EVENT_PAYLOAD_BYTES", "MAX_EVENT_STRING", "MAX_EVENT_ITEMS",
+            "MAX_EVIDENCE_REFS", "MAX_HYPOTHESES",
+            "MAX_DECISION_EVIDENCE_REFS", "IDENTIFIER_RE", "DIGEST_RE",
+            "INVESTIGATION_SKILL_ADVISORY_MODE",
+            "INVESTIGATION_SKILL_UNAVAILABLE_MODE",
+            "MAX_ATTESTED_INVESTIGATION_SKILLS",
+            "INVESTIGATION_SKILL_ATTESTATION_KEYS",
+            "EXTERNAL_AGENT_HARNESS_PROVIDERS", "HarnessError",
+            "HarnessPolicyError", "HarnessIntegrityError", "AgentRole",
+            "TaskKind", "RunStatus", "Stage", "TrustTier",
+            "READ_ONLY_CAPABILITIES", "MUTATING_CAPABILITIES",
+            "SENSITIVE_ACTIVE_CAPABILITIES", "APPROVAL_GATED_CAPABILITIES",
+            "ALL_CAPABILITIES", "QUERY_BACKEND_CAPABILITIES",
+            "DEFAULT_ROLE_CAPABILITIES", "DEFAULT_BUDGETS", "MIN_BUDGETS",
+            "MAX_BUDGETS", "REQUIRED_POLICY_FIELDS",
+            "REQUIRED_MEMORY_FIELDS", "SECRET_KEY_RE",
+            "SECRET_VALUE_PATTERNS", "PolicyDecision", "HarnessPolicy",
+            "external_agent_harness_provider",
+            "should_start_onion_sentinel_harness", "query_backend_capability",
+            "query_backend_is_approval_gated", "utc_now", "canonical_json",
+            "digest_json", "_valid_identifier", "_model_route",
+            "_digest_or_hash", "_nonnegative_int",
+            "policy_decision_is_effective", "load_policy",
+            "task_kind_for_role",
+        }
+        self.assertFalse(expected_names.difference(vars(HARNESS)))
+        expected_signatures = {
+            "external_agent_harness_provider": "(route: 'Any') -> 'str'",
+            "should_start_onion_sentinel_harness": "(*, policy_enabled: 'bool', assigned_route: 'Any', reviewer_route: 'Any') -> 'tuple[bool, str]'",
+            "query_backend_capability": "(backend: 'object') -> 'str'",
+            "query_backend_is_approval_gated": "(backend: 'object') -> 'bool'",
+            "policy_decision_is_effective": "(mode: 'str', decision: 'PolicyDecision') -> 'bool'",
+            "load_policy": "(path: 'Path' = PosixPath('/Users/aj_lobster/n8n-local/config/investigation_harness_policy.json')) -> 'HarnessPolicy'",
+            "task_kind_for_role": "(role: 'str', *, reanalysis_attempt_id: 'str' = '', manual_reanalysis: 'bool' = False) -> 'str'",
+        }
+        observed = {
+            name: str(inspect.signature(getattr(HARNESS, name)))
+            for name in expected_signatures
+        }
+        # The default path is host-derived; normalize only that representation.
+        observed["load_policy"] = observed["load_policy"].replace(
+            str(HARNESS.DEFAULT_POLICY_PATH),
+            "/Users/aj_lobster/n8n-local/config/investigation_harness_policy.json",
+        )
+        self.assertEqual(observed, expected_signatures)
+        self.assertEqual(
+            tuple(field.name for field in dataclasses.fields(HARNESS.PolicyDecision)),
+            ("allowed", "capability", "reason", "requires_approval"),
+        )
+        self.assertEqual(
+            tuple(field.name for field in dataclasses.fields(HARNESS.HarnessPolicy)),
+            (
+                "version", "enabled", "mode", "budgets",
+                "role_capabilities", "approval_required",
+                "memory_require_independent_agreement",
+                "shared_memory_requires_human_approval",
+            ),
+        )
+
+    def test_harness_policy_imports_from_an_isolated_flat_bin(self) -> None:
+        policy_path = ROOT / "n8n" / "bin" / "harness_policy.py"
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / policy_path.name
+            target.write_bytes(policy_path.read_bytes())
+            result = subprocess.run(
+                [sys.executable, "-I", "-B", str(target)],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     @staticmethod
     def prompt_package() -> dict:
