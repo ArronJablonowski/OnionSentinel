@@ -3,12 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 
-@dataclass(frozen=True)
-class CollectionPolicy:
+class CollectionPolicy(NamedTuple):
     schema: str
     apps_columns: str
     brew_columns: str
@@ -16,8 +14,7 @@ class CollectionPolicy:
     error_type: type[RuntimeError]
 
 
-@dataclass(frozen=True)
-class CollectionDependencies:
+class CollectionDependencies(NamedTuple):
     approved: Callable[[dict[str, Any], str], bool]
     query: Callable[..., list[dict[str, str]]]
     paged_rows: Callable[..., list[dict[str, str]]]
