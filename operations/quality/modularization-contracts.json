@@ -3579,6 +3579,30 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/software_inventory_response_selection.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/software_inventory_response_selection.py",
+      "required_symbols": [
+        "select_response_records"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/software_inventory_response_projection.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/software_inventory_response_projection.py",
+      "required_symbols": [
+        "build_success_payload"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/software_inventory_response.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/software_inventory_response.py",
+      "required_symbols": [
+        "build_response"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_software_inventory_service.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_software_inventory_service.py",

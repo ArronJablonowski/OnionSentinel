@@ -110,10 +110,6 @@
     "onion-sentinel-dashboard/software_inventory_query.py::parse_filters": {
       "max_complexity": 22
     },
-    "onion-sentinel-dashboard/software_inventory_response.py::build_response": {
-      "max_complexity": 48,
-      "max_lines": 213
-    },
     "onion-sentinel-dashboard/software_inventory_state.py::_read_bounded_regular_json": {
       "max_complexity": 21
     },

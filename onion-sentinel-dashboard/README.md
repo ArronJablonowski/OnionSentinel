@@ -26,7 +26,9 @@ dependency.
 | `software_inventory_os_correlation.py` | Fail-closed trusted endpoint OS projection across one static asset association. |
 | `software_inventory_assets.py` | Stable compatibility facade for asset labeling and endpoint OS correlation. |
 | `software_inventory_query.py` | Fixed filter contract, freshness classification, public evidence projection, and bounded error payloads. |
-| `software_inventory_response.py` | Bounded filtering, sorting, pagination, summary, coverage, and warning composition. |
+| `software_inventory_response_selection.py` | Time-window filtering, fixed filter application, stable sorting, and bounded pagination. |
+| `software_inventory_response_projection.py` | Public record, summary, platform, coverage, warning, and page projection. |
+| `software_inventory_response.py` | Stable status/load/enrichment response orchestrator. |
 | `software_inventory_state.py` | Owner-controlled snapshot reads, schema validation, provenance enforcement, and normalized state projection. |
 | `ac_hunter_review.py` | Read-only AC Hunter client, in-memory auth refresh, normalization, deterministic triage, and owner-only last-good cache. |
 | `artifact_cache.py` | Thread-safe, single-flight cache for parsed Markdown/JSON artifacts. |

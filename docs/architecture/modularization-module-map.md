@@ -3483,11 +3483,19 @@ association; conflicts, partial inventories, stale validity, and dynamic
 address claims remain unlabeled or uncorrelated. Both owners depend inward on
 the state/query contracts and never import the facade.
 
-`software_inventory_response.py` owns bounded state-to-API composition:
-time-window selection, fixed filtering and sorting, pagination, summaries,
-coverage truthfulness, warnings, and revision projection. The 61-line
-`software_inventory.py` facade re-exports the legacy public and private symbols
-used by the portal and tests while performing no storage or response work.
+`software_inventory_response_selection.py` owns time-window selection, fixed
+filter application, stable sort tie-breakers, and bounded pagination.
+`software_inventory_response_projection.py` owns public-record conversion,
+summary/platform counts, truthful endpoint/network coverage, ordered warnings,
+page metadata, and revision projection. The bounded
+`software_inventory_response.py` orchestrator retains exact query-error and
+state-error status precedence, storage loading, and asset enrichment order.
+Dependencies flow from the orchestrator into selection/projection and then the
+query/state/asset owners; neither inward response owner imports the
+orchestrator. The 61-line `software_inventory.py` facade re-exports the legacy
+public and private symbols used by the portal and tests while performing no
+storage or response work. The installer copies both response owners before the
+orchestrator.
 
 ## Recovery Restore Drill
 

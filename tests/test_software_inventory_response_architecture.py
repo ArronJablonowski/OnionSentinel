@@ -33,6 +33,30 @@ class SoftwareInventoryResponseArchitectureTests(unittest.TestCase):
             "(path: 'Path', query: 'dict[str, list[str]] | None' = None, *, observed_at: 'dt.datetime | None' = None, maximum_bytes: 'int' = 268435456, assets: 'object' = None, asset_inventory_complete: 'bool' = False) -> 'tuple[int, dict[str, object]]'",
         )
 
+    def test_response_dependency_chain_is_inward_and_bounded(self) -> None:
+        orchestrator = (
+            DASHBOARD / "software_inventory_response.py"
+        ).read_text()
+        selection = (
+            DASHBOARD / "software_inventory_response_selection.py"
+        ).read_text()
+        projection = (
+            DASHBOARD / "software_inventory_response_projection.py"
+        ).read_text()
+        self.assertLessEqual(len(orchestrator.splitlines()), 250)
+        self.assertLessEqual(len(selection.splitlines()), 600)
+        self.assertLessEqual(len(projection.splitlines()), 600)
+        self.assertNotIn("software_inventory_response import", selection)
+        self.assertNotIn("software_inventory_response import", projection)
+        self.assertIn(
+            "from software_inventory_response_selection import",
+            orchestrator,
+        )
+        self.assertIn(
+            "from software_inventory_response_projection import",
+            orchestrator,
+        )
+
     def test_query_error_precedes_state_loading_and_uses_default_page(self) -> None:
         naive = dt.datetime(2026, 8, 12, 7, 15, 30)
         expected_observed_at = naive.astimezone().astimezone(dt.timezone.utc)

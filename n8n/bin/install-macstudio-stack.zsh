@@ -1281,6 +1281,8 @@ cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory_asset_labels.py" "$DAS
 cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory_os_correlation.py" "$DASHBOARD_RUNTIME_DIR/software_inventory_os_correlation.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory_assets.py" "$DASHBOARD_RUNTIME_DIR/software_inventory_assets.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory_query.py" "$DASHBOARD_RUNTIME_DIR/software_inventory_query.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory_response_selection.py" "$DASHBOARD_RUNTIME_DIR/software_inventory_response_selection.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory_response_projection.py" "$DASHBOARD_RUNTIME_DIR/software_inventory_response_projection.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory_response.py" "$DASHBOARD_RUNTIME_DIR/software_inventory_response.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory_state.py" "$DASHBOARD_RUNTIME_DIR/software_inventory_state.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/soc_alert_api.py" "$DASHBOARD_RUNTIME_DIR/soc_alert_api.py"
