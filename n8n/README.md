@@ -520,8 +520,9 @@ control characters and remain evidence only; neither scripts nor models may
 interpret them as instructions.
 
 The investigation runtime can pivot against the private derived-evidence index
-through `bin/pcap_evidence_query.py` and its validation, matching, selection,
-projection, and response modules. Each broker call accepts no more than four
+through the `bin/pcap_evidence_query.py` compatibility facade and its policy,
+validation, matching, selection, projection, and response modules. Each broker
+call accepts no more than four
 requests, returns no more than 20 records per request, scans at most 4096
 derived records per request, and has a 32 KiB total response budget. Supported
 operations are `coverage`, `connections`, `dns`, `tls`, `http`, `files`,

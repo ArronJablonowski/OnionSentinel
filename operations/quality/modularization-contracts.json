@@ -1431,6 +1431,85 @@
       ]
     },
     {
+      "path": "n8n/bin/pcap_evidence_query.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_evidence_query.py",
+      "required_symbols": [
+        "PcapEvidenceQueryError",
+        "_normalize_request",
+        "_execute_request",
+        "query_derived_pcap_evidence"
+      ]
+    },
+    {
+      "path": "n8n/bin/pcap_evidence_query_policy.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_evidence_query_policy.py",
+      "required_symbols": [
+        "MAX_QUERY_REQUESTS",
+        "MAX_QUERY_LIMIT",
+        "MAX_QUERY_RESULT_BYTES",
+        "MAX_QUERY_SCAN_RECORDS",
+        "QUERY_CONTRACT",
+        "QUERY_PATHS",
+        "FILTERS_BY_OPERATION",
+        "OUTPUT_FIELDS_BY_OPERATION",
+        "FORBIDDEN_OUTPUT_KEYS"
+      ]
+    },
+    {
+      "path": "n8n/bin/pcap_evidence_query_validation.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_evidence_query_validation.py",
+      "required_symbols": [
+        "text_filter",
+        "integer_filter",
+        "epoch_filter",
+        "normalize_filters"
+      ]
+    },
+    {
+      "path": "n8n/bin/pcap_evidence_query_matching.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_evidence_query_matching.py",
+      "required_symbols": [
+        "field_values",
+        "filter_matches",
+        "matches_indicator"
+      ]
+    },
+    {
+      "path": "n8n/bin/pcap_evidence_query_selection.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_evidence_query_selection.py",
+      "required_symbols": [
+        "nested",
+        "query_candidates"
+      ]
+    },
+    {
+      "path": "n8n/bin/pcap_evidence_query_projection.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_evidence_query_projection.py",
+      "required_symbols": [
+        "forbidden_output_key",
+        "project_coverage",
+        "project_record",
+        "scrub_nested"
+      ]
+    },
+    {
+      "path": "n8n/bin/pcap_evidence_query_response.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_evidence_query_response.py",
+      "required_symbols": [
+        "execute_request",
+        "matching_records",
+        "audit_projection",
+        "compose_payload"
+      ]
+    },
+    {
       "path": "n8n/bin/prompt_incident_evidence_projection.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/prompt_incident_evidence_projection.py",

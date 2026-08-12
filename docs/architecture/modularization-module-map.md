@@ -2611,9 +2611,11 @@ transport authority, and Security Onion and Relay access remain read-only.
 
 ### Derived PCAP evidence query
 
-`pcap_evidence_query.py` retains the stable import surface and declarative
-operation/filter/output allowlists. `pcap_evidence_query_validation.py` owns
-typed scalar, IP, integer, epoch, boolean, and window validation.
+`pcap_evidence_query.py` is the stable import facade and bounded request
+orchestrator. `pcap_evidence_query_policy.py` owns immutable limits, fixed
+derived-JSON paths, operation/filter schemas and aliases, output allowlists,
+forbidden keys, and control-character policy. `pcap_evidence_query_validation.py`
+owns typed scalar, IP, integer, epoch, boolean, and window validation.
 `pcap_evidence_query_matching.py` owns recursive alias lookup and exact typed
 candidate matching, while `pcap_evidence_query_selection.py` owns bounded
 selection from fixed derived-JSON paths.
@@ -2622,7 +2624,7 @@ selection from fixed derived-JSON paths.
 allowlisted nested record projection. `pcap_evidence_query_response.py` owns
 deduplication, deterministic query/result digests, evidence references, audit
 accounting, provenance, and the 32 KiB output boundary. Dependencies flow from
-the policy facade into these pure modules and do not cycle. No module opens a
+the policy owner and facade into these pure modules and do not cycle. No module opens a
 capture, invokes a parser or shell, accepts a caller path, or reaches a network.
 
 `n8n/bin/process-pcap-evidence.py` is a bounded CLI and import-compatibility
@@ -2853,7 +2855,7 @@ required before extracted code is imported in production:
 | `n8n/bin/maintain-investigation-harness.py` and `harness_maintenance*.py` | `$HOME/n8n-local/bin` | copy all maintenance owners before the package-free compatibility facade |
 | `n8n/bin/harness_policy.py` and `harness_policy_{primitives,capabilities,document}.py` | `$HOME/n8n-local/bin` | copy the three policy owners before the stable harness-policy facade |
 | `onion-sentinel-dashboard/application_logs.py` and `application_log_{contract,filesystem,catalog,content}.py` | `$HOME/n8n-local/onion-sentinel-dashboard` | copy the four protected log owners before the stable dashboard log facade |
-| `n8n/bin/pcap_evidence_query*.py` | `$HOME/n8n-local/bin` | copy validation, matching, selection, projection, and response owners before the policy facade |
+| `n8n/bin/pcap_evidence_query*.py` | `$HOME/n8n-local/bin` | copy policy, validation, matching, selection, projection, and response owners before the stable facade |
 | `n8n/bin/incident_evidence_contract.py` and `incident_evidence_*_contract.py` plus shared primitives | `$HOME/n8n-local/bin` | copy validation, scope/digest, search, OSQuery, control, and artifact owners before the stable contract facade |
 | `n8n/bin/evaluate-operational-slos.py` and `operational_slo_*.py` | `$HOME/n8n-local/bin` | copy timestamp, resilience, and aggregate policy owners before validating the stable launchd-facing evaluator |
 | `n8n/bin/collect-dhcp-asset-discovery.py` and `dhcp_asset_*.py` | `$HOME/n8n-local/bin` | copy contract, state, persistence/Relay adapters, and workflows before the stable launchd-facing facade |

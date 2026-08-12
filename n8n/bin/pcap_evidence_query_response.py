@@ -20,8 +20,45 @@ def execute_request(
 ) -> dict[str, Any]:
     operation = request["operation"]
     filters = request["filters"]
-    indicator = request["indicator"]
-    limit = request["limit"]
+    found, matched = matching_records(
+        candidates,
+        operation=operation,
+        filters=filters,
+        indicator=request["indicator"],
+        limit=request["limit"],
+        matches_indicator=matches_indicator,
+        filter_matches=filter_matches,
+        project_record=project_record,
+    )
+    query_digest = digest({"contract": contract, "request": request})
+    return {
+        "query": request,
+        "query_digest": query_digest,
+        "result_digest": digest(found),
+        "evidence_ref": f"derived-pcap-zeek:{query_digest[:20]}",
+        "records": found,
+        "audit": audit_projection(
+            candidates=candidates,
+            filters=filters,
+            found=found,
+            matched=matched,
+            scan_truncated=scan_truncated,
+            source_views=source_views,
+        ),
+    }
+
+
+def matching_records(
+    candidates: list[Any],
+    *,
+    operation: str,
+    filters: dict[str, Any],
+    indicator: str,
+    limit: int,
+    matches_indicator: Callable[[Any, str], bool],
+    filter_matches: Callable[[Any, str, Any], bool],
+    project_record: Callable[[str, Any], Any],
+) -> tuple[list[Any], int]:
     found: list[Any] = []
     seen: set[str] = set()
     matched = 0
@@ -43,24 +80,28 @@ def execute_request(
         matched += 1
         if len(found) < limit:
             found.append(projected)
-    query_digest = digest({"contract": contract, "request": request})
+    return found, matched
+
+
+def audit_projection(
+    *,
+    candidates: list[Any],
+    filters: dict[str, Any],
+    found: list[Any],
+    matched: int,
+    scan_truncated: bool,
+    source_views: list[str],
+) -> dict[str, Any]:
     return {
-        "query": request,
-        "query_digest": query_digest,
-        "result_digest": digest(found),
-        "evidence_ref": f"derived-pcap-zeek:{query_digest[:20]}",
-        "records": found,
-        "audit": {
-            "candidate_records_scanned": len(candidates),
-            "unique_records_matched": matched,
-            "records_returned": len(found),
-            "result_truncated": matched > len(found),
-            "index_scan_truncated": scan_truncated,
-            "derived_views_considered": source_views,
-            "time_filter_requires_timestamped_record": bool(
-                {"start_epoch", "end_epoch"}.intersection(filters)
-            ),
-        },
+        "candidate_records_scanned": len(candidates),
+        "unique_records_matched": matched,
+        "records_returned": len(found),
+        "result_truncated": matched > len(found),
+        "index_scan_truncated": scan_truncated,
+        "derived_views_considered": source_views,
+        "time_filter_requires_timestamped_record": bool(
+            {"start_epoch", "end_epoch"}.intersection(filters)
+        ),
     }
 
 

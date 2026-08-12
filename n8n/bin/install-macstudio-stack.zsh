@@ -961,6 +961,7 @@ cp "$REPO_DIR/n8n/bin/pcap_processor_tshark.py" "$STACK_DIR/bin/pcap_processor_t
 cp "$REPO_DIR/n8n/bin/pcap_processor_workflow.py" "$STACK_DIR/bin/pcap_processor_workflow.py"
 cp "$REPO_DIR/n8n/bin/process-pcap-evidence.py" "$STACK_DIR/bin/process-pcap-evidence.py"
 cp "$REPO_DIR/n8n/bin/pcap_analysis_core.py" "$STACK_DIR/bin/pcap_analysis_core.py"
+cp "$REPO_DIR/n8n/bin/pcap_evidence_query_policy.py" "$STACK_DIR/bin/pcap_evidence_query_policy.py"
 cp "$REPO_DIR/n8n/bin/pcap_evidence_query_validation.py" "$STACK_DIR/bin/pcap_evidence_query_validation.py"
 cp "$REPO_DIR/n8n/bin/pcap_evidence_query_matching.py" "$STACK_DIR/bin/pcap_evidence_query_matching.py"
 cp "$REPO_DIR/n8n/bin/pcap_evidence_query_selection.py" "$STACK_DIR/bin/pcap_evidence_query_selection.py"

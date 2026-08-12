@@ -283,6 +283,7 @@ class ArchitectureHardeningTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         facade_copy = 'cp "$REPO_DIR/n8n/bin/pcap_evidence_query.py"'
         for module in (
+            "pcap_evidence_query_policy.py",
             "pcap_evidence_query_validation.py",
             "pcap_evidence_query_matching.py",
             "pcap_evidence_query_selection.py",
