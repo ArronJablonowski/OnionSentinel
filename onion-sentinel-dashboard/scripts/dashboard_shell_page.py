@@ -390,4 +390,3 @@ def render_dashboard_shell(view: DashboardShellViewModel) -> str:
     for marker, field_name in _SHELL_REPLACEMENTS:
         rendered = rendered.replace(marker, getattr(view, field_name))
     return rendered
-

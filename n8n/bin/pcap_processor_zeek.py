@@ -270,4 +270,3 @@ def run_zeek(pcap_files: list[Path], work_dir: Path) -> dict[str, Any]:
             "weird": query_samples["weird"].records(),
         },
     }
-

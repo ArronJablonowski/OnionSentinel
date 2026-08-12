@@ -547,4 +547,3 @@ def run_tshark(
             "field_sample_tsv": field_sample_tsv[:12000],
         }],
     }
-

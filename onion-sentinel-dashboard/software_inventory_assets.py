@@ -294,5 +294,3 @@ def correlate_asset_operating_systems(
         item["operating_system_association"] = ASSET_OS_ASSOCIATION
         correlated += 1
     return correlated
-
-

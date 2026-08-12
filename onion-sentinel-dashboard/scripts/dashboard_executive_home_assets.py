@@ -68,5 +68,3 @@ def inject_executive_home_assets(text: str) -> str:
     if EXECUTIVE_HOME_JS not in text:
         text = text.replace('</body>', EXECUTIVE_HOME_JS + '</body>', 1)
     return text
-
-

@@ -210,5 +210,3 @@ def _empty_payload(
         "revision": "",
         "error": error,
     }
-
-

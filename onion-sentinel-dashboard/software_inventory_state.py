@@ -493,5 +493,3 @@ def load_state(
         "collection": _sanitize_collection(raw.get("collection"), updated_at),
         "records": sanitized,
     }, revision
-
-

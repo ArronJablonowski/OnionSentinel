@@ -387,4 +387,3 @@ function createPostgresAssetInventoryRepository({pool}) {
 }
 
 module.exports = {createPostgresAssetInventoryRepository};
-

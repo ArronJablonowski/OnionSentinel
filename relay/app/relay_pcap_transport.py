@@ -661,4 +661,3 @@ def streamed_spool_artifact(
         "source_mode": "streamed_chunks",
         "security_onion_staging_bytes": 0,
     }
-

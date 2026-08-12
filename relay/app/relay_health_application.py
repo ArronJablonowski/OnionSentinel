@@ -428,5 +428,3 @@ def main() -> int:
         persist_component_state(state, component, state_path)
         print(json.dumps({"health_status": "failed", "notification": notice}, sort_keys=True))
     return result.returncode or 1
-
-

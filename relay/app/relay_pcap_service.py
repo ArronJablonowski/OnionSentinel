@@ -314,5 +314,3 @@ def _process_pcap_requests_unlocked(config: dict) -> dict:
         "spool": spool_usage(config),
         "security_onion_storage": security_onion_storage,
     }
-
-

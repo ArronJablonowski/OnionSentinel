@@ -549,5 +549,3 @@ def sanitize_capture_protection(summary: dict) -> dict:
     if age is not None:
         protection["age_seconds"] = age
     return protection
-
-

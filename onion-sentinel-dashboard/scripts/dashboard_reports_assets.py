@@ -300,5 +300,3 @@ def inject_reports_assets(text: str) -> str:
     if REPORTS_PAGE_ASSETS not in text:
         text = text.replace('</body>', REPORTS_PAGE_ASSETS + '</body>', 1)
     return text
-
-

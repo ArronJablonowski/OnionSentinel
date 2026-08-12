@@ -296,4 +296,3 @@ def pcap_outcome_from_error(error: object) -> str:
     if any(term in detail for term in ("rsync", "artifact upload", "connection", "ssh", "spool filesystem")):
         return "transport_failed"
     return "failed"
-

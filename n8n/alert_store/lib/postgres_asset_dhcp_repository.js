@@ -553,4 +553,3 @@ function createPostgresAssetDhcpRepository({pool}) {
 }
 
 module.exports = {createPostgresAssetDhcpRepository};
-

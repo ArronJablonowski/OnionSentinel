@@ -421,4 +421,3 @@ def top_values(records: list[dict[str, Any]], *fields: str) -> list[dict[str, An
         {"count": count, **{field: value for field, value in zip(fields, values)}}
         for values, count in counts.most_common(SUMMARY_LIMIT)
     ]
-

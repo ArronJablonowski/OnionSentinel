@@ -370,5 +370,3 @@ def summarize_output(stdout: str, stderr: str) -> str:
             detail += f" http_status={diagnostic['http_status']}"
         details.append(detail)
     return "; ".join(details) or "no_validated_child_summary"
-
-

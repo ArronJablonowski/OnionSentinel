@@ -326,4 +326,3 @@ def build_prompt_contract(request: PromptContractRequest) -> dict:
         },
         "response_schema": _response_schema(request),
     }
-

@@ -580,5 +580,3 @@ def post_json_to_webhook(config: dict, payload_data: dict) -> None:
                 file=sys.stderr,
             )
             time.sleep(sleep_seconds)
-
-

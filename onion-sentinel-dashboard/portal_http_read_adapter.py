@@ -155,5 +155,3 @@ def _do_get(handler: Any, runtime: Any) -> None:
         b"Not found",
         "text/plain; charset=utf-8",
     )
-
-

@@ -527,6 +527,3 @@ def evaluate_database(
             selected_run_id=run_id,
             database_schema=schema_version,
         )
-
-
-
