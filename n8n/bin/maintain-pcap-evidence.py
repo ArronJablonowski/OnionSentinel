@@ -106,37 +106,64 @@ def cleanup_tree(root: Path, retention_days: int, now: dt.datetime, apply: bool)
     }
 
 
-def cleanup_analyzed_artifacts(artifact_dir: Path, analysis_dir: Path, apply: bool) -> dict[str, Any]:
-    """Remove historical raw artifacts only when durable dual-parser evidence exists."""
-    artifact_root = validate_runtime_path(artifact_dir)
-    analysis_root = validate_runtime_path(analysis_dir)
+def _completed_analysis_request_ids(analysis_root: Path):
+    if not analysis_root.exists():
+        return
+    for path in sorted(analysis_root.glob("*-pcap-analysis.json")):
+        try:
+            analysis = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        request = analysis.get("request") if isinstance(analysis, dict) else None
+        request_id = request.get("request_id") if isinstance(request, dict) else None
+        if request_id and analysis_completed(analysis):
+            yield request_id
+
+
+def _request_artifact_match(
+    artifact_root: Path, request_id: object, apply: bool,
+) -> dict[str, Any] | None:
+    target = (artifact_root / str(request_id)).resolve()
+    if target.parent != artifact_root or not target.is_dir():
+        return None
+    files = [item for item in target.rglob("*") if item.is_file()]
+    match = {
+        "request_id": str(request_id),
+        "bytes": sum(item.stat().st_size for item in files),
+        "files": len(files),
+    }
+    if apply:
+        match.update(delete_request_artifacts(artifact_root, request_id))
+    return match
+
+
+def _request_cleanup_projection(
+    artifact_root: Path, request_ids, apply: bool,
+) -> dict[str, Any]:
     matches: list[dict[str, Any]] = []
-    if analysis_root.exists():
-        for path in sorted(analysis_root.glob("*-pcap-analysis.json")):
-            try:
-                analysis = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            request = analysis.get("request") if isinstance(analysis, dict) else None
-            request_id = request.get("request_id") if isinstance(request, dict) else None
-            if not request_id or not analysis_completed(analysis):
-                continue
-            try:
-                target = (artifact_root / str(request_id)).resolve()
-                if target.parent != artifact_root or not target.is_dir():
-                    continue
-                files = [item for item in target.rglob("*") if item.is_file()]
-                match = {"request_id": str(request_id), "bytes": sum(item.stat().st_size for item in files), "files": len(files)}
-                if apply:
-                    match.update(delete_request_artifacts(artifact_root, request_id))
+    for request_id in request_ids:
+        try:
+            match = _request_artifact_match(artifact_root, request_id, apply)
+            if match is not None:
                 matches.append(match)
-            except (OSError, ValueError):
-                continue
+        except (OSError, ValueError):
+            continue
     return {
         "matched_requests": len(matches),
         "matched_bytes": sum(int(item.get("bytes") or 0) for item in matches),
         "requests": matches,
     }
+
+
+def cleanup_analyzed_artifacts(artifact_dir: Path, analysis_dir: Path, apply: bool) -> dict[str, Any]:
+    """Remove historical raw artifacts only when durable dual-parser evidence exists."""
+    artifact_root = validate_runtime_path(artifact_dir)
+    analysis_root = validate_runtime_path(analysis_dir)
+    return _request_cleanup_projection(
+        artifact_root,
+        _completed_analysis_request_ids(analysis_root),
+        apply,
+    )
 
 
 def cleanup_terminal_artifacts(artifact_dir: Path, db_path: Path, apply: bool) -> dict[str, Any]:
@@ -156,24 +183,11 @@ def cleanup_terminal_artifacts(artifact_dir: Path, db_path: Path, apply: bool) -
         ).fetchall()
     finally:
         conn.close()
-    matches: list[dict[str, Any]] = []
-    for (request_id,) in rows:
-        try:
-            target = (artifact_root / str(request_id)).resolve()
-            if target.parent != artifact_root or not target.is_dir():
-                continue
-            files = [item for item in target.rglob("*") if item.is_file()]
-            match = {"request_id": str(request_id), "bytes": sum(item.stat().st_size for item in files), "files": len(files)}
-            if apply:
-                match.update(delete_request_artifacts(artifact_root, request_id))
-            matches.append(match)
-        except (OSError, ValueError):
-            continue
-    return {
-        "matched_requests": len(matches),
-        "matched_bytes": sum(int(item.get("bytes") or 0) for item in matches),
-        "requests": matches,
-    }
+    return _request_cleanup_projection(
+        artifact_root,
+        (request_id for (request_id,) in rows),
+        apply,
+    )
 
 
 def run(args: argparse.Namespace, now: dt.datetime | None = None) -> dict[str, Any]:

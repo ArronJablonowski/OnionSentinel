@@ -16,9 +16,6 @@
     "n8n/bin/investigation_skills_v2.py::validate_manifest": {
       "max_complexity": 40
     },
-    "n8n/bin/maintain-pcap-evidence.py::cleanup_analyzed_artifacts": {
-      "max_complexity": 17
-    },
     "n8n/bin/manage-agent-memory.py::main": {
       "max_lines": 102
     },

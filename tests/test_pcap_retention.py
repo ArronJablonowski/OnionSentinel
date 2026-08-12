@@ -2,6 +2,7 @@
 """Regression checks for PCAP evidence retention cleanup."""
 from __future__ import annotations
 
+import ast
 import datetime as dt
 import importlib.util
 import os
@@ -25,6 +26,58 @@ def load_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+    class Complexity(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.value = 1
+
+        def visit_FunctionDef(self, node) -> None:
+            return
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_If(self, node) -> None:
+            self.value += 1
+            self.generic_visit(node)
+
+        visit_For = visit_If
+        visit_While = visit_If
+
+        def visit_Try(self, node) -> None:
+            self.value += len(node.handlers)
+            self.generic_visit(node)
+
+        def visit_BoolOp(self, node) -> None:
+            self.value += max(0, len(node.values) - 1)
+            self.generic_visit(node)
+
+        def visit_IfExp(self, node) -> None:
+            self.value += 1
+            self.generic_visit(node)
+
+        def visit_ListComp(self, node) -> None:
+            self.value += sum(
+                1 + len(generator.ifs) for generator in node.generators
+            )
+            self.generic_visit(node)
+
+        visit_SetComp = visit_ListComp
+        visit_DictComp = visit_ListComp
+        visit_GeneratorExp = visit_ListComp
+
+    visitor = Complexity()
+    for child in target.body:
+        visitor.visit(child)
+    return target.end_lineno - target.lineno + 1, visitor.value
 
 
 class PcapRetentionTest(unittest.TestCase):
@@ -53,6 +106,19 @@ class PcapRetentionTest(unittest.TestCase):
         timestamp = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=age_days)).timestamp()
         os.utime(path, (timestamp, timestamp))
         return path
+
+    def test_artifact_cleanup_phases_meet_architecture_contract(self) -> None:
+        self.assertLessEqual(len(SCRIPT_PATH.read_text().splitlines()), 250)
+        for name in (
+            "_completed_analysis_request_ids",
+            "_request_artifact_match",
+            "_request_cleanup_projection",
+            "cleanup_analyzed_artifacts",
+            "cleanup_terminal_artifacts",
+        ):
+            lines, complexity = function_metrics(name)
+            self.assertLessEqual(lines, 50)
+            self.assertLessEqual(complexity, 10)
 
     def test_dry_run_reports_stale_files_without_deleting(self) -> None:
         old_pcap = self.write_file(self.artifact_dir / "request" / "capture.pcap", 20)
