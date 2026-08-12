@@ -2753,6 +2753,21 @@ reconciliation, promotion, and approved IP-change transactions.
 DHCP, and append-only audit health projection. `postgres_asset_store.js` is a
 thin compatibility facade over these owners.
 
+### Incident evidence contract
+
+`incident_evidence_validation.py` owns the shared fail-closed exception and
+typed value requirements. `incident_evidence_primitives.py` owns reviewed
+Elasticsearch scopes, OSQuery packs, query digests, endpoints, and
+representative-alert identities. `incident_evidence_search_contract.py`,
+`incident_evidence_osquery_contract.py`, and
+`incident_evidence_control_contract.py` independently validate their bounded
+result domains. `incident_evidence_artifact_contract.py` composes request,
+coverage, semantic-validity, complete/partial, and legacy-v1 policy in the
+original validation order. These owners are pure and do not execute queries or
+read evidence, files, credentials, databases, or processes.
+`incident_evidence_contract.py` remains the stable flat-bin compatibility
+facade for collectors, prompt builders, and analysis workers.
+
 ### Operational SLO evaluator
 
 `operational_slo_policy.py` owns pure aggregate threshold evaluation and stable
@@ -2781,6 +2796,7 @@ required before extracted code is imported in production:
 | `n8n/bin/bounded_process*.py` | `$HOME/n8n-local/bin` | copy the facade plus policy, observation, I/O, termination, and runtime owners as one flat-bin unit |
 | `n8n/bin/maintain-investigation-harness.py` and `harness_maintenance*.py` | `$HOME/n8n-local/bin` | copy all maintenance owners before the package-free compatibility facade |
 | `n8n/bin/pcap_evidence_query*.py` | `$HOME/n8n-local/bin` | copy validation, matching, selection, projection, and response owners before the policy facade |
+| `n8n/bin/incident_evidence_contract.py` and `incident_evidence_*_contract.py` plus shared primitives | `$HOME/n8n-local/bin` | copy validation, scope/digest, search, OSQuery, control, and artifact owners before the stable contract facade |
 | `n8n/bin/evaluate-operational-slos.py` and `operational_slo_*.py` | `$HOME/n8n-local/bin` | copy timestamp, resilience, and aggregate policy owners before validating the stable launchd-facing evaluator |
 | `n8n/onion_sentinel` | `$HOME/n8n-local/onion_sentinel` | staged complete-tree copy and atomic replacement |
 | `onion-sentinel-dashboard/onion_sentinel_server.py` and `onion_sentinel_{release,application,request_routes}.py` | `$HOME/n8n-local/onion-sentinel-dashboard` | stage the three implementation owners before the stable web-service surface |

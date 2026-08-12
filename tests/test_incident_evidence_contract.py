@@ -6,7 +6,10 @@ import copy
 import hashlib
 import importlib.util
 import json
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -1066,12 +1069,52 @@ class IncidentEvidenceContractTests(unittest.TestCase):
         )
 
         self.assertIn("incident_evidence_contract.py", installer)
+        for name in (
+            "incident_evidence_validation.py",
+            "incident_evidence_primitives.py",
+            "incident_evidence_search_contract.py",
+            "incident_evidence_osquery_contract.py",
+            "incident_evidence_control_contract.py",
+            "incident_evidence_artifact_contract.py",
+        ):
+            self.assertIn(
+                f'cp "$REPO_DIR/n8n/bin/{name}" "$STACK_DIR/bin/{name}"',
+                installer,
+            )
         self.assertIn("collect-incident-evidence.py", installer)
         self.assertIn("incident-evidence.example.json", installer)
         self.assertIn('if "timeout_seconds" not in config:', installer)
         self.assertIn('config["timeout_seconds"] = 420', installer)
         self.assertEqual(example["timeout_seconds"], 420)
         self.assertIn('config.get("timeout_seconds", 420)', collector)
+
+    def test_incident_evidence_facade_imports_from_an_isolated_flat_bin(self) -> None:
+        names = (
+            "incident_evidence_validation.py",
+            "incident_evidence_primitives.py",
+            "incident_evidence_search_contract.py",
+            "incident_evidence_osquery_contract.py",
+            "incident_evidence_control_contract.py",
+            "incident_evidence_artifact_contract.py",
+            "incident_evidence_contract.py",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            for name in names:
+                shutil.copy2(BIN_DIR / name, runtime / name)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    str(runtime / "incident_evidence_contract.py"),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_incident_responder_prompt_requires_framework_and_query_audits(self) -> None:
         prompt = (
