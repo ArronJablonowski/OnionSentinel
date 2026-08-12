@@ -181,6 +181,81 @@ def _compact_source(source: object) -> dict[str, Any]:
     return compact
 
 
+def __result_context(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "query_id": result["query_id"],
+        "dialect": result["dialect"],
+        "pack": result["pack"],
+        "purpose": result["purpose"],
+        "aggregation": result["aggregation"],
+        "match_semantics": result["match_semantics"],
+        **(
+            {"anchor_time": result["anchor_time"]}
+            if result.get("anchor_time")
+            else {}
+        ),
+        "window": result["window"],
+        "observables": result["observables"],
+        "observable_provenance": result["observable_provenance"],
+        **(
+            {
+                "event_tuple": result["event_tuple"],
+                "event_tuple_provenance": result["event_tuple_provenance"],
+            }
+            if result.get("event_tuple")
+            else {}
+        ),
+    }
+
+
+def __model_result(
+    result: dict[str, Any],
+    controls_valid: bool,
+) -> tuple[dict[str, Any], dict[str, str] | None]:
+    status = result["status"]
+    gap = None
+    if status != "ok":
+        gap = {
+            "query_id": result["query_id"],
+            "status": status,
+            "error": str(result.get("error") or "")[:1000],
+        }
+    compact_hits = []
+    if controls_valid:
+        compact_hits = [
+            {
+                "id": hit["id"],
+                "index": hit["index"],
+                "source": _compact_source(hit["source"]),
+            }
+            for hit in result.get("hits", [])[:MAX_COMPACT_HITS_PER_QUERY]
+        ]
+    selected_query = (
+        result["oql_equivalent"]
+        if result["dialect"] == "oql"
+        else result["kql_equivalent"]
+    )
+    projection = {
+        **__result_context(result),
+        "status": status,
+        "semantic_valid": result["semantic_valid"],
+        "total_hits": result["total_hits"],
+        "total_hits_relation": result["total_hits_relation"],
+        "returned_hits": result["returned_hits"],
+        "truncated": result["truncated"],
+        "result_coverage": result["result_coverage"],
+        "model_returned_hits": len(compact_hits),
+        "model_projection_truncated": len(result.get("hits", [])) > len(compact_hits),
+        "query": selected_query,
+        "query_digest": result["query_digest"],
+        "result_digest": canonical_digest(result),
+        "execution_backend": result["execution_backend"],
+        "execution_semantics": result["execution_semantics"],
+        "hits": compact_hits,
+    }
+    return projection, gap
+
+
 def _model_evidence(response: dict[str, Any]) -> dict[str, Any]:
     results = []
     gaps = []
@@ -199,67 +274,10 @@ def _model_evidence(response: dict[str, Any]) -> dict[str, Any]:
             ),
         })
     for result in response["results"]:
-        status = result["status"]
-        if status != "ok":
-            gaps.append({
-                "query_id": result["query_id"],
-                "status": status,
-                "error": str(result.get("error") or "")[:1000],
-            })
-        compact_hits = []
-        if controls_valid:
-            compact_hits = [
-                {
-                    "id": hit["id"],
-                    "index": hit["index"],
-                    "source": _compact_source(hit["source"]),
-                }
-                for hit in result.get("hits", [])[:MAX_COMPACT_HITS_PER_QUERY]
-            ]
-        selected_query = (
-            result["oql_equivalent"]
-            if result["dialect"] == "oql"
-            else result["kql_equivalent"]
-        )
-        results.append({
-            "query_id": result["query_id"],
-            "dialect": result["dialect"],
-            "pack": result["pack"],
-            "purpose": result["purpose"],
-            "aggregation": result["aggregation"],
-            "match_semantics": result["match_semantics"],
-            **(
-                {"anchor_time": result["anchor_time"]}
-                if result.get("anchor_time")
-                else {}
-            ),
-            "window": result["window"],
-            "observables": result["observables"],
-            "observable_provenance": result["observable_provenance"],
-            **(
-                {
-                    "event_tuple": result["event_tuple"],
-                    "event_tuple_provenance": result["event_tuple_provenance"],
-                }
-                if result.get("event_tuple")
-                else {}
-            ),
-            "status": status,
-            "semantic_valid": result["semantic_valid"],
-            "total_hits": result["total_hits"],
-            "total_hits_relation": result["total_hits_relation"],
-            "returned_hits": result["returned_hits"],
-            "truncated": result["truncated"],
-            "result_coverage": result["result_coverage"],
-            "model_returned_hits": len(compact_hits),
-            "model_projection_truncated": len(result.get("hits", [])) > len(compact_hits),
-            "query": selected_query,
-            "query_digest": result["query_digest"],
-            "result_digest": canonical_digest(result),
-            "execution_backend": result["execution_backend"],
-            "execution_semantics": result["execution_semantics"],
-            "hits": compact_hits,
-        })
+        projected, gap = __model_result(result, controls_valid)
+        if gap is not None:
+            gaps.append(gap)
+        results.append(projected)
     return {
         "query_contract": INVESTIGATION_QUERY_CONTRACT,
         "batch_id": response["batch_id"],
@@ -272,81 +290,64 @@ def _model_evidence(response: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def __query_audit_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **__result_context(result),
+        "requested_size": result["size"],
+        "execution_backend": result["execution_backend"],
+        "execution_semantics": result["execution_semantics"],
+        "index_scope": result["index_scope"],
+        "query_endpoint": result["query_endpoint"],
+        "query_dsl": result["query_dsl"],
+        "query_digest": result["query_digest"],
+        "result_digest": canonical_digest(result),
+        "execution_digest": result["execution_digest"],
+        "request_item_digest": result["request_item_digest"],
+        "kql_equivalent": result["kql_equivalent"],
+        "kql_digest": result["kql_digest"],
+        "oql_equivalent": result["oql_equivalent"],
+        "oql_digest": result["oql_digest"],
+        "status": result["status"],
+        "semantic_valid": result["semantic_valid"],
+        "total_hits": result["total_hits"],
+        "total_hits_relation": result["total_hits_relation"],
+        "returned_hits": result["returned_hits"],
+        "truncated": result["truncated"],
+        "result_coverage": result["result_coverage"],
+        "duration_ms": result["duration_ms"],
+        "timed_out": result["timed_out"],
+        "took_ms": result["took_ms"],
+        "shards": result["shards"],
+        "error": str(result.get("error") or "")[:1000],
+    }
+
+
 def _query_audit(response: dict[str, Any]) -> list[dict[str, Any]]:
     """Return a bounded, presentation-ready audit without duplicating hits."""
-    audits = []
-    for result in response["results"]:
-        audits.append({
-            "query_id": result["query_id"],
-            "dialect": result["dialect"],
-            "pack": result["pack"],
-            "purpose": result["purpose"],
-            "aggregation": result["aggregation"],
-            "match_semantics": result["match_semantics"],
-            **(
-                {"anchor_time": result["anchor_time"]}
-                if result.get("anchor_time")
-                else {}
-            ),
-            "window": result["window"],
-            "observables": result["observables"],
-            "observable_provenance": result["observable_provenance"],
-            **(
-                {
-                    "event_tuple": result["event_tuple"],
-                    "event_tuple_provenance": result["event_tuple_provenance"],
-                }
-                if result.get("event_tuple")
-                else {}
-            ),
-            "requested_size": result["size"],
-            "execution_backend": result["execution_backend"],
-            "execution_semantics": result["execution_semantics"],
-            "index_scope": result["index_scope"],
-            "query_endpoint": result["query_endpoint"],
-            "query_dsl": result["query_dsl"],
-            "query_digest": result["query_digest"],
-            "result_digest": canonical_digest(result),
-            "execution_digest": result["execution_digest"],
-            "request_item_digest": result["request_item_digest"],
-            "kql_equivalent": result["kql_equivalent"],
-            "kql_digest": result["kql_digest"],
-            "oql_equivalent": result["oql_equivalent"],
-            "oql_digest": result["oql_digest"],
-            "status": result["status"],
-            "semantic_valid": result["semantic_valid"],
-            "total_hits": result["total_hits"],
-            "total_hits_relation": result["total_hits_relation"],
-            "returned_hits": result["returned_hits"],
-            "truncated": result["truncated"],
-            "result_coverage": result["result_coverage"],
-            "duration_ms": result["duration_ms"],
-            "timed_out": result["timed_out"],
-            "took_ms": result["took_ms"],
-            "shards": result["shards"],
-            "error": str(result.get("error") or "")[:1000],
-        })
-    return audits
+    return [__query_audit_result(result) for result in response["results"]]
 
 
-def _transport(
-    request: dict[str, Any],
-    config: dict[str, Any],
-) -> dict[str, Any]:
-    key = Path(os.path.expandvars(os.path.expanduser(str(config["ssh_key"]))))
-    known_hosts = Path(
-        os.path.expandvars(os.path.expanduser(str(config["known_hosts"])))
-    )
+def __transport_limits(config: dict[str, Any]) -> tuple[int, float, int, int]:
     try:
-        connect_timeout = int(config.get("connect_timeout_seconds", 20))
-        timeout = float(config.get("timeout_seconds", 420))
-        max_response = int(config.get("max_response_bytes", MAX_RESPONSE_BYTES))
-        max_stderr = int(config.get("max_stderr_bytes", 256 * 1024))
+        return (
+            int(config.get("connect_timeout_seconds", 20)),
+            float(config.get("timeout_seconds", 420)),
+            int(config.get("max_response_bytes", MAX_RESPONSE_BYTES)),
+            int(config.get("max_stderr_bytes", 256 * 1024)),
+        )
     except (TypeError, ValueError) as exc:
         raise InvestigationPivotClientError(
             "incident evidence transport limits are invalid"
         ) from exc
-    command = [
+
+
+def __transport_command(
+    config: dict[str, Any],
+    key: Path,
+    known_hosts: Path,
+    connect_timeout: int,
+) -> list[str]:
+    return [
         "/usr/bin/ssh",
         "-T",
         "-o",
@@ -363,13 +364,9 @@ def _transport(
         str(key),
         f"{config['ssh_user']}@{config['host']}",
     ]
-    proc = run_bounded_command(
-        command,
-        stdin_text=json.dumps(request, separators=(",", ":"), sort_keys=True),
-        timeout_seconds=timeout,
-        max_stdout_bytes=min(max_response, MAX_RESPONSE_BYTES),
-        max_stderr_bytes=min(max_stderr, 256 * 1024),
-    )
+
+
+def __transport_response(proc: Any) -> dict[str, Any]:
     if proc.returncode != 0:
         raise InvestigationPivotClientError(
             "restricted investigation query transport failed "
@@ -389,15 +386,29 @@ def _transport(
     return response
 
 
-def collect_investigation_pivots(
+def _transport(
+    request: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    key = Path(os.path.expandvars(os.path.expanduser(str(config["ssh_key"]))))
+    known_hosts = Path(
+        os.path.expandvars(os.path.expanduser(str(config["known_hosts"])))
+    )
+    connect_timeout, timeout, max_response, max_stderr = __transport_limits(config)
+    proc = run_bounded_command(
+        __transport_command(config, key, known_hosts, connect_timeout),
+        stdin_text=json.dumps(request, separators=(",", ":"), sort_keys=True),
+        timeout_seconds=timeout,
+        max_stdout_bytes=min(max_response, MAX_RESPONSE_BYTES),
+        max_stderr_bytes=min(max_stderr, 256 * 1024),
+    )
+    return __transport_response(proc)
+
+
+def __authorized_request(
     proposal: object,
     authorization_context: object,
-    *,
-    config_path: Path | str | dict[str, Any] = DEFAULT_CONFIG,
-    out_dir: Path | str = DEFAULT_OUT,
-    persist: bool = True,
 ) -> dict[str, Any]:
-    """Authorize, execute, validate, and optionally persist one pivot batch."""
     request = authorize_investigation_query_request(proposal, authorization_context)
     encoded_request = json.dumps(
         request,
@@ -408,13 +419,26 @@ def collect_investigation_pivots(
         raise InvestigationPivotClientError(
             "authorized investigation query request exceeds the forced-command limit"
         )
+    return request
+
+
+def __validated_response(
+    request: dict[str, Any],
+    config_path: Path | str | dict[str, Any],
+) -> dict[str, Any]:
     config = (
         dict(config_path)
         if isinstance(config_path, dict)
         else load_config(Path(config_path))
     )
     response = _transport(request, config)
-    validated_response = validate_investigation_query_response(response, request)
+    return validate_investigation_query_response(response, request)
+
+
+def __artifact(
+    request: dict[str, Any],
+    validated_response: dict[str, Any],
+) -> dict[str, Any]:
     generated_at = dt.datetime.now(dt.timezone.utc).isoformat(
         timespec="seconds"
     ).replace("+00:00", "Z")
@@ -429,7 +453,7 @@ def collect_investigation_pivots(
         "security_onion_response_digest": canonical_digest(validated_response),
         "query_audit": query_audit,
     }
-    artifact: dict[str, Any] = {
+    return {
         "schema": INVESTIGATION_QUERY_CONTRACT,
         "generated_at": generated_at,
         "case_id": request["authorization"]["case_id"],
@@ -442,14 +466,36 @@ def collect_investigation_pivots(
         "query_audit": query_audit,
         "audit": audit,
     }
+
+
+def __persist_artifact(
+    artifact: dict[str, Any],
+    request: dict[str, Any],
+    out_dir: Path | str,
+) -> None:
+    destination = (
+        Path(out_dir)
+        / request["authorization"]["case_id"]
+        / f"{request['batch_id']}.json"
+    )
+    _atomic_json(destination, artifact)
+    artifact["artifact_path"] = str(destination)
+
+
+def collect_investigation_pivots(
+    proposal: object,
+    authorization_context: object,
+    *,
+    config_path: Path | str | dict[str, Any] = DEFAULT_CONFIG,
+    out_dir: Path | str = DEFAULT_OUT,
+    persist: bool = True,
+) -> dict[str, Any]:
+    """Authorize, execute, validate, and optionally persist one pivot batch."""
+    request = __authorized_request(proposal, authorization_context)
+    validated_response = __validated_response(request, config_path)
+    artifact = __artifact(request, validated_response)
     if persist:
-        destination = (
-            Path(out_dir)
-            / request["authorization"]["case_id"]
-            / f"{request['batch_id']}.json"
-        )
-        _atomic_json(destination, artifact)
-        artifact["artifact_path"] = str(destination)
+        __persist_artifact(artifact, request, out_dir)
     return artifact
 
 

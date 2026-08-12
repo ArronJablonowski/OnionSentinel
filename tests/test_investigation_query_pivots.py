@@ -1486,6 +1486,7 @@ class InvestigationPivotCollectorTests(unittest.TestCase):
                 / f"{authorized_request['batch_id']}.json"
             )
             persisted = json.loads(destination.read_text(encoding="utf-8"))
+            self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
 
         self.assertEqual(
             [call[0] for call in calls],
@@ -1516,6 +1517,67 @@ class InvestigationPivotCollectorTests(unittest.TestCase):
         self.assertEqual(
             artifact["query_audit"],
             artifact["audit"]["query_audit"],
+        )
+
+    def test_collector_transport_command_limits_and_request_bytes_are_stable(self) -> None:
+        request = {"batch_id": "batch-1", "queries": [{"query_id": "query-1"}]}
+        response = {"ok": True, "batch_id": "batch-1"}
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps(response),
+            stderr="",
+        )
+        config = {
+            "host": "relay.invalid",
+            "ssh_user": "forced-user",
+            "ssh_key": "$ARR176_KEY_ROOT/id_ed25519",
+            "known_hosts": "$ARR176_KEY_ROOT/known_hosts",
+            "connect_timeout_seconds": "7",
+            "timeout_seconds": "12.5",
+            "max_response_bytes": self.collector.MAX_RESPONSE_BYTES + 1,
+            "max_stderr_bytes": (256 * 1024) + 1,
+        }
+        with (
+            mock.patch.dict(
+                self.collector.os.environ,
+                {"ARR176_KEY_ROOT": "/private/runtime"},
+                clear=False,
+            ),
+            mock.patch.object(
+                self.collector,
+                "run_bounded_command",
+                return_value=completed,
+            ) as run,
+        ):
+            actual = self.collector._transport(request, config)
+
+        self.assertEqual(actual, response)
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "/usr/bin/ssh", "-T",
+                "-o", "BatchMode=yes",
+                "-o", "IdentitiesOnly=yes",
+                "-o", "ConnectTimeout=7",
+                "-o", "StrictHostKeyChecking=yes",
+                "-o", "UserKnownHostsFile=/private/runtime/known_hosts",
+                "-i", "/private/runtime/id_ed25519",
+                "forced-user@relay.invalid",
+            ],
+        )
+        self.assertEqual(
+            run.call_args.kwargs,
+            {
+                "stdin_text": json.dumps(
+                    request,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                "timeout_seconds": 12.5,
+                "max_stdout_bytes": self.collector.MAX_RESPONSE_BYTES,
+                "max_stderr_bytes": 256 * 1024,
+            },
         )
 
     def test_collector_returns_model_evidence_and_full_query_audit(self) -> None:

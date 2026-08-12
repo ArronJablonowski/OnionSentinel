@@ -2642,6 +2642,17 @@ only after the exact v2 contract is selected. The bundled v1 facade, collector,
 and manifest remain frozen and byte-stable. No module receives credentials or
 transport authority, and Security Onion and Relay access remain read-only.
 
+`collect-investigation-pivots.py` remains the stable installed v2 client.
+Private phases own authorization and the forced-command byte bound, restricted
+SSH settings/command/response handling, controls-gated model projection,
+content-free query-audit projection, validated artifact custody, and optional
+atomic owner-only publication. Shared private result-context projection keeps
+query identity, role semantics, observables, event tuples, and provenance in
+one deterministic order for both model evidence and audit records. The public
+helpers, CLI, request/response digests, evidence withholding, destination
+layout, and V1 bundle remain unchanged; only the fixed read-only broker path
+retains transport authority.
+
 ## PCAP Evidence Processor
 
 ### Derived PCAP evidence query
