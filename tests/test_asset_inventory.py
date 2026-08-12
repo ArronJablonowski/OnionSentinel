@@ -1,5 +1,7 @@
 import importlib.util
+import hashlib
 import ipaddress
+import inspect
 import json
 import tempfile
 import unittest
@@ -51,6 +53,113 @@ class AssetInventoryTests(unittest.TestCase):
                 "assets": assets,
             }
         ) | {"inventory_status": "loaded"}
+
+    @staticmethod
+    def exact_payload():
+        return {
+            "schema": asset_inventory.ASSET_INVENTORY_SCHEMA,
+            "version": 1,
+            "generated_at": "2026-08-12  01:02:03-06:00",
+            "assets": [
+                {
+                    "asset_id": "Asset:One",
+                    "valid_from": "2026-01-01T00:00:00-07:00",
+                    "valid_until": None,
+                    "identifiers": {
+                        "ip_addresses": ["2001:0db8::1", "2001:db8::1"],
+                        "mac_addresses": ["AA-BB-CC-DD-EE-FF"],
+                        "hostnames": ["Host.Example.Invalid."],
+                    },
+                    "role": " workstation ",
+                    "platform": " Test OS ",
+                    "owner_ref": " team-blue ",
+                    "criticality": "HIGH",
+                    "expected_services": [
+                        {"protocol": "TCP", "port": "443", "purpose": " test https "},
+                        {"protocol": "icmp", "purpose": ""},
+                    ],
+                    "expected_behaviors": [" outbound TLS ", "outbound TLS"],
+                    "source_type": " cmdb ",
+                    "source_ref": " synthetic ",
+                    "confidence": "HIGH",
+                    "share_with_hosted_models": False,
+                }
+            ],
+        }
+
+    def test_public_surface_signatures_and_exact_projection_hashes(self):
+        names = sorted(
+            name for name in dir(asset_inventory) if not name.startswith("__")
+        )
+        self.assertEqual(
+            (
+                len(names),
+                hashlib.sha256(
+                    json.dumps(names, separators=(",", ":"), sort_keys=True).encode()
+                ).hexdigest(),
+            ),
+            (46, "60e47eca18677ecf57dd8e8f30476aba7d0c66b83c34debdd914a6d9e079e3ae"),
+        )
+        self.assertEqual(
+            str(inspect.signature(asset_inventory.validate_asset_inventory)),
+            "(payload: 'object') -> 'dict[str, Any]'",
+        )
+        self.assertEqual(
+            str(inspect.signature(asset_inventory.resolve_asset_context)),
+            "(inventory: 'dict[str, Any]', observables: 'Iterable[object]', "
+            "observed_at: 'object', network_events: 'Iterable[object]' = ()) -> "
+            "'dict[str, Any]'",
+        )
+        validated = asset_inventory.validate_asset_inventory(self.exact_payload())
+        self.assertEqual(
+            hashlib.sha256(
+                json.dumps(validated, separators=(",", ":"), sort_keys=True).encode()
+            ).hexdigest(),
+            "adbe8fe3584491b146ebec52f633380c43fbbc18f9e2f8de3c5cbfdcd69734ed",
+        )
+        context = asset_inventory.resolve_asset_context(
+            validated | {"inventory_status": "loaded"},
+            [
+                {"type": "HOSTNAME", "value": "HOST.EXAMPLE.INVALID.", "role": "source"},
+                {"type": "ip", "value": "2001:db8::1", "role": "destination"},
+            ],
+            "2026-08-12  01:02:03-06:00",
+            [{"destination_ip": "2001:db8::1", "destination_port": "443", "protocol": "TCP"}],
+        )
+        self.assertEqual(
+            hashlib.sha256(
+                json.dumps(context, separators=(",", ":"), sort_keys=True).encode()
+            ).hexdigest(),
+            "6191e2881d6708525f2b7e9c1ff2f202c428ba2bdeb5c735ddf08a6f5fa5159d",
+        )
+
+    def test_validation_error_precedence_is_exact(self):
+        cases = (
+            ({"schema": "wrong", "version": 2}, "unsupported asset inventory schema"),
+            (
+                {"schema": asset_inventory.ASSET_INVENTORY_SCHEMA, "version": 2},
+                "unsupported asset inventory version",
+            ),
+            (
+                {"schema": asset_inventory.ASSET_INVENTORY_SCHEMA, "assets": {}},
+                "asset inventory assets must be a list",
+            ),
+        )
+        for payload, expected in cases:
+            with self.subTest(payload=payload), self.assertRaises(ValueError) as caught:
+                asset_inventory.validate_asset_inventory(payload)
+            self.assertEqual(str(caught.exception), expected)
+
+        service = self.exact_payload()
+        service["assets"][0]["expected_services"] = [
+            {"protocol": "invalid", "port": "not-a-port"}
+        ]
+        with self.assertRaises(ValueError) as caught:
+            asset_inventory.validate_asset_inventory(service)
+        self.assertEqual(
+            str(caught.exception),
+            "Asset:One.expected_services[0].protocol is invalid",
+        )
 
     def test_resolves_reused_ip_by_event_time(self):
         inventory = self.inventory(
