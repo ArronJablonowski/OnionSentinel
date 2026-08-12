@@ -99,22 +99,25 @@ def _open_readers(
     ready_paths: dict[str, Path],
     summary: dict[str, Any],
     dependencies: GeoipDependencies,
+    opened_readers: dict[str, Any],
 ) -> dict[str, Any]:
     readers: dict[str, Any] = {}
     for database_type, path in ready_paths.items():
         status = summary["databases"][database_type]
         try:
             reader = reader_module.open_database(str(path))
+            opened_readers[database_type] = reader
             metadata = reader.metadata()
         except Exception as exc:
             status["state"] = "unreadable"
             status["error"] = dependencies.sanitize(exc, 240)
             continue
-        readers[database_type] = reader
-        status["state"] = "ready"
-        status["database_type"] = dependencies.sanitize(
+        sanitized_type = dependencies.sanitize(
             getattr(metadata, "database_type", ""), 120
         )
+        readers[database_type] = reader
+        status["state"] = "ready"
+        status["database_type"] = sanitized_type
     return readers
 
 
@@ -241,9 +244,16 @@ def summarize_geoip(
     if reader_module is None:
         return summary
     readers: dict[str, Any] = {}
+    opened_readers: dict[str, Any] = {}
     try:
-        readers = _open_readers(reader_module, ready, summary, dependencies)
+        readers = _open_readers(
+            reader_module,
+            ready,
+            summary,
+            dependencies,
+            opened_readers,
+        )
         _lookup_candidates(contexts, readers, summary, policy, dependencies)
     finally:
-        _close_readers(readers)
+        _close_readers(opened_readers)
     return _finalize_summary(summary, readers)
