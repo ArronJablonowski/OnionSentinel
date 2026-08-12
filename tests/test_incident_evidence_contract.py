@@ -230,6 +230,135 @@ class IncidentEvidenceContractTests(unittest.TestCase):
 
         self.assertIs(validated, artifact)
 
+    def test_fail_closed_contract_errors_preserve_exact_validation_order(self) -> None:
+        cases = (
+            (
+                "schema",
+                lambda artifact: artifact.__setitem__("schema", "unsupported"),
+                "incident evidence schema is unsupported",
+            ),
+            (
+                "response success",
+                lambda artifact: artifact["security_onion_response"].__setitem__(
+                    "ok", False
+                ),
+                "Security Onion evidence response is not successful",
+            ),
+            (
+                "read-only response",
+                lambda artifact: artifact["security_onion_response"].__setitem__(
+                    "read_only", False
+                ),
+                "Security Onion evidence response is not read-only",
+            ),
+            (
+                "query contract",
+                lambda artifact: artifact["security_onion_response"].__setitem__(
+                    "query_contract", "unsupported"
+                ),
+                "Security Onion query contract is unsupported",
+            ),
+            (
+                "duplicate packs",
+                lambda artifact: artifact["request"].__setitem__(
+                    "packs", ["network_flow", "network_flow"]
+                ),
+                "incident evidence request contains duplicate packs",
+            ),
+            (
+                "observables",
+                lambda artifact: artifact["security_onion_response"].__setitem__(
+                    "observables", {}
+                ),
+                "response observables do not match the request",
+            ),
+            (
+                "request size",
+                lambda artifact: artifact["request"].__setitem__("size", True),
+                "incident evidence request size is invalid",
+            ),
+            (
+                "window index",
+                lambda artifact: artifact["security_onion_response"]["results"][
+                    0
+                ].__setitem__("window_index", True),
+                "query window_index must be an integer",
+            ),
+            (
+                "window identity",
+                lambda artifact: artifact["security_onion_response"]["results"][
+                    0
+                ].__setitem__("window", {}),
+                "query result window does not match the request",
+            ),
+            (
+                "empty KQL",
+                lambda artifact: artifact["security_onion_response"]["results"][
+                    0
+                ].__setitem__("kql_equivalent", ""),
+                "query KQL equivalent must be non-empty",
+            ),
+            (
+                "OSquery target",
+                lambda artifact: artifact["security_onion_response"][
+                    "osquery_results"
+                ][0].__setitem__("target", "endpoint"),
+                "OSquery target is not the Security Onion local host",
+            ),
+            (
+                "OSquery returned rows",
+                lambda artifact: artifact["security_onion_response"][
+                    "osquery_results"
+                ][0].__setitem__("returned_rows", 2),
+                "OSquery returned_rows does not match its row set",
+            ),
+            (
+                "OSquery total rows",
+                lambda artifact: artifact["security_onion_response"][
+                    "osquery_results"
+                ][0].__setitem__("total_rows", -1),
+                "OSquery total_rows is invalid",
+            ),
+            (
+                "OSquery duration",
+                lambda artifact: artifact["security_onion_response"][
+                    "osquery_results"
+                ][0].__setitem__("duration_ms", True),
+                "OSquery duration_ms must be a non-negative integer",
+            ),
+            (
+                "control anchor",
+                lambda artifact: artifact["security_onion_response"][
+                    "controls"
+                ].__setitem__("anchor", None),
+                "query control anchor does not match the request",
+            ),
+            (
+                "semantic reasons",
+                lambda artifact: artifact["security_onion_response"][
+                    "semantic_validity"
+                ].__setitem__("reasons", ["unexpected"]),
+                "semantic validity reasons are inconsistent",
+            ),
+            (
+                "complete flag",
+                lambda artifact: artifact["security_onion_response"].__setitem__(
+                    "complete", False
+                ),
+                "response complete flag does not match query results",
+            ),
+        )
+
+        for label, mutate, expected in cases:
+            with self.subTest(label=label):
+                artifact = evidence_artifact()
+                mutate(artifact)
+                with self.assertRaises(
+                    self.contract.IncidentEvidenceContractError
+                ) as raised:
+                    self.contract.validate_incident_evidence_artifact(artifact)
+                self.assertEqual(str(raised.exception), expected)
+
     def test_prompt_hit_projection_preserves_a_valid_auditable_contract(self) -> None:
         artifact = evidence_artifact()
         result = artifact["security_onion_response"]["results"][0]
