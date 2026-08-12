@@ -17,6 +17,7 @@ if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
 
 import harness_store_foundation as foundation
+import harness_store_schema as schema_owner
 
 
 class HarnessStoreSchemaArchitectureTests(unittest.TestCase):
@@ -70,6 +71,7 @@ class HarnessStoreSchemaArchitectureTests(unittest.TestCase):
                     ("index", "idx_harness_runs_status"),
                 },
             )
+
             run_columns = [
                 str(row["name"])
                 for row in connection.execute(
@@ -97,6 +99,13 @@ class HarnessStoreSchemaArchitectureTests(unittest.TestCase):
                 ).fetchone()[0],
                 str(foundation.SQL_SCHEMA_VERSION),
             )
+
+    def test_schema_owner_does_not_import_foundation(self) -> None:
+        source = inspect.getsource(schema_owner)
+        self.assertNotIn("import harness_store_foundation", source)
+        self.assertNotIn("from harness_store_foundation", source)
+        facade = inspect.getsource(foundation.HarnessStoreFoundation.initialize)
+        self.assertLessEqual(len(facade.splitlines()), 5)
 
     def test_legacy_columns_and_reservations_are_migrated_exactly(self) -> None:
         self.db_path.parent.mkdir(parents=True)

@@ -863,11 +863,14 @@ the public `HarnessRun` name and method surface remain unchanged in the
 217-line compatibility facade.
 
 `n8n/bin/harness_store_foundation.py` owns hardened SQLite connection setup,
-read-only preflight of existing schema versions, versioned schema creation and
-migration, owner-only file permissions, committed-event audit mirroring,
-idempotent hash-chain insertion, mutable-run enforcement, and atomic stage
-updates. `HarnessStore` inherits this foundation so repository transactions and
-the legacy class/API remain unchanged.
+read-only preflight of existing schema versions, owner-only file permissions,
+committed-event audit mirroring, idempotent hash-chain insertion, mutable-run
+enforcement, and atomic stage updates. Its stable `initialize()` method
+delegates to `harness_store_schema.py`, which owns the versioned DDL, additive
+run-column migration, historical reservation backfill, and schema-version
+settlement in exact order. The inward schema owner receives a connection port
+and never imports the foundation. `HarnessStore` inherits the foundation so
+repository transactions and the legacy class/API remain unchanged.
 
 `n8n/bin/harness_store_run_repository.py` owns atomic run creation and collision
 checks, append-only event/stage transitions, and exact evidence/evidence-contract

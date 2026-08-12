@@ -2689,6 +2689,15 @@
       ]
     },
     {
+      "path": "n8n/bin/harness_store_schema.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_store_schema.py",
+      "required_symbols": [
+        "SCHEMA_SQL",
+        "initialize_schema"
+      ]
+    },
+    {
       "path": "n8n/bin/harness_store_hypothesis_persistence.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/harness_store_hypothesis_persistence.py",
