@@ -118,15 +118,10 @@ def selected_group(conn: sqlite3.Connection, alert_id: str) -> tuple[sqlite3.Row
     return selected, grouped or [selected]
 
 
-def representative_alert_anchor(selected: sqlite3.Row | dict) -> dict[str, str] | None:
-    """Recover the collector-owned Elasticsearch index/id from alert intake.
-
-    `export-recent-alerts` constructs these values from hit metadata outside
-    `_source`, so they are stronger anchors than any attacker-controlled packet
-    or message field. Older rows can fall back to the canonical `index:id`
-    alert identifier produced by the same wrapper.
-    """
-    keys = set(selected.keys())
+def __metadata_alert_anchor(
+    selected: sqlite3.Row | dict,
+    keys: set[str],
+) -> tuple[str, str]:
     index_name = ""
     document_id = ""
     if "alert_json" in keys:
@@ -137,15 +132,47 @@ def representative_alert_anchor(selected: sqlite3.Row | dict) -> dict[str, str] 
         if isinstance(payload, dict):
             index_name = str(payload.get("elastic_index") or "").strip()
             document_id = str(payload.get("elastic_id") or "").strip()
-    if not index_name or not document_id:
-        alert_id = str(selected["alert_id"] if "alert_id" in keys else "").strip()
-        candidate_index, separator, candidate_id = alert_id.rpartition(":")
-        if separator:
-            index_name = index_name or candidate_index
-            document_id = document_id or candidate_id
-    if not ALERT_INDEX_RE.fullmatch(index_name) or not SAFE_ELASTIC_ID_RE.fullmatch(document_id):
+    return index_name, document_id
+
+
+def __fallback_alert_anchor(
+    selected: sqlite3.Row | dict,
+    keys: set[str],
+) -> tuple[str, str]:
+    alert_id = str(selected["alert_id"] if "alert_id" in keys else "").strip()
+    candidate_index, separator, candidate_id = alert_id.rpartition(":")
+    if not separator:
+        return "", ""
+    return candidate_index, candidate_id
+
+
+def __validated_alert_anchor(
+    index_name: str,
+    document_id: str,
+) -> dict[str, str] | None:
+    if (
+        not ALERT_INDEX_RE.fullmatch(index_name)
+        or not SAFE_ELASTIC_ID_RE.fullmatch(document_id)
+    ):
         return None
     return {"index": index_name, "id": document_id}
+
+
+def representative_alert_anchor(selected: sqlite3.Row | dict) -> dict[str, str] | None:
+    """Recover the collector-owned Elasticsearch index/id from alert intake.
+
+    `export-recent-alerts` constructs these values from hit metadata outside
+    `_source`, so they are stronger anchors than any attacker-controlled packet
+    or message field. Older rows can fall back to the canonical `index:id`
+    alert identifier produced by the same wrapper.
+    """
+    keys = set(selected.keys())
+    index_name, document_id = __metadata_alert_anchor(selected, keys)
+    if not index_name or not document_id:
+        candidate_index, candidate_id = __fallback_alert_anchor(selected, keys)
+        index_name = index_name or candidate_index
+        document_id = document_id or candidate_id
+    return __validated_alert_anchor(index_name, document_id)
 
 
 def add_unique(target: list[str], value: object, validator) -> None:

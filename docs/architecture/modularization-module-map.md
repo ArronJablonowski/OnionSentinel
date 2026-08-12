@@ -2893,6 +2893,12 @@ read evidence, files, credentials, databases, or processes.
 `incident_evidence_contract.py` remains the stable flat-bin compatibility
 facade for collectors, prompt builders, and analysis workers.
 
+The read-only `collect-incident-evidence.py` entrypoint derives its positive
+Elasticsearch control anchor through private metadata, canonical alert-ID
+fallback, and allowlist-validation phases. Collector-owned hit metadata keeps
+precedence, partial legacy rows retain their exact component-wise fallback, and
+unreviewed indices or unsafe document IDs still fail closed before Relay use.
+
 ### Operational SLO evaluator
 
 `operational_slo_policy.py` owns pure aggregate threshold evaluation and stable
