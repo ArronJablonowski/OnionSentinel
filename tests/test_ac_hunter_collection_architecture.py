@@ -50,7 +50,7 @@ class AcHunterCollectionArchitectureTests(unittest.TestCase):
         values.update(overrides)
         return values
 
-    def test_signature_operation_policy_and_current_debt_are_exact(self) -> None:
+    def test_signature_operation_policy_and_module_boundaries_are_exact(self) -> None:
         self.assertEqual(
             str(inspect.signature(self.collection.normalize_collection)),
             "(raw: 'Mapping[str, object]', *, pulled_at: 'str', "
@@ -80,12 +80,23 @@ class AcHunterCollectionArchitectureTests(unittest.TestCase):
             ],
         )
         baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
-        self.assertEqual(
-            baseline["functions"][
-                "onion-sentinel-dashboard/ac_hunter_collection.py::normalize_collection"
-            ],
-            {"max_complexity": 40, "max_lines": 280},
+        self.assertNotIn(
+            "onion-sentinel-dashboard/ac_hunter_collection.py::normalize_collection",
+            baseline["functions"],
         )
+        modules = [
+            COLLECTION_PATH,
+            DASHBOARD / "ac_hunter_collection_findings.py",
+            DASHBOARD / "ac_hunter_collection_hosts.py",
+            DASHBOARD / "ac_hunter_collection_projection.py",
+        ]
+        self.assertLessEqual(len(COLLECTION_PATH.read_text().splitlines()), 250)
+        for module in modules[1:]:
+            self.assertLessEqual(len(module.read_text().splitlines()), 600)
+            self.assertNotIn("from ac_hunter_collection import", module.read_text())
+        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
+        for module in modules:
+            self.assertIn(f'{module.name}" "$DASHBOARD_RUNTIME_DIR/', installer)
 
     def test_empty_projection_is_exact_and_keeps_behavioral_disclaimer(self) -> None:
         raw: dict[str, object] = {}

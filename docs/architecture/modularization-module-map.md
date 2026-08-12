@@ -2891,7 +2891,11 @@ facade. Configuration and owner-only secret-file policy live in
 `ac_hunter_config.py`; Relay-only transport and short-lived authentication in
 `ac_hunter_transport.py`; response projection in `ac_hunter_normalization.py`;
 benign context and deterministic scoring in `ac_hunter_scoring.py`; collection
-and view-model composition in `ac_hunter_collection.py`; and private cache plus
+compatibility and operation policy in `ac_hunter_collection.py`; finding
+admission and cross-module scoring context in
+`ac_hunter_collection_findings.py`; correlated-host and analyst-note view
+models in `ac_hunter_collection_hosts.py`; stable status/metadata/final response
+composition in `ac_hunter_collection_projection.py`; and private cache plus
 review-service orchestration in `ac_hunter_service.py`.
 
 The dependency graph remains acyclic. Credentials and JWTs remain server-side,
@@ -2899,6 +2903,9 @@ AC Hunter access remains Relay-only, and cache material remains owner-only and
 secret-filtered. Scores prioritize review but never independently establish
 malware or malicious intent. Existing page/API fields, verdict meanings,
 fresh/stale cache behavior, and single-flight refresh semantics remain stable.
+The three collection owners are pure and import inward only; none can call AC
+Hunter, the Relay, a cache, a database, or the compatibility facade. The Mac
+Studio installer copies them beside the facade before dashboard startup.
 
 `n8n/bin/ac_hunter_contract.py` remains the fixed request/response trust
 boundary shared with the Relay. Login field validation and response metadata
