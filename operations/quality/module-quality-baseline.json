@@ -29,10 +29,6 @@
     "n8n/bin/configure-post-commit-env.py::render_env": {
       "max_complexity": 16
     },
-    "n8n/bin/detection_validation_features.py::extract_group_packet_features": {
-      "max_complexity": 43,
-      "max_lines": 266
-    },
     "n8n/bin/detection_validation_result.py::build_detection_validation": {
       "max_complexity": 136,
       "max_lines": 351

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import base64
+import ast
 import importlib
 import inspect
 import json
 import struct
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -16,6 +19,14 @@ ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "n8n" / "bin"
 sys.path.insert(0, str(BIN))
 FEATURES = importlib.import_module("detection_validation_features")
+OWNER_FILES = (
+    "detection_validation_features_state.py",
+    "detection_validation_features_markers.py",
+    "detection_validation_features_observation.py",
+    "detection_validation_features_projection.py",
+    "detection_validation_features_workflow.py",
+    "detection_validation_features.py",
+)
 
 
 def row(packet: bytes, *, linktype: object = 1) -> dict[str, str]:
@@ -203,6 +214,96 @@ class DetectionValidationFeaturesCharacterizationTests(unittest.TestCase):
         self.assertEqual(result["candidate_packets"], FEATURES.MAX_GROUP_PACKETS)
         self.assertEqual(result["packets_parsed"], FEATURES.MAX_GROUP_PACKETS)
         self.assertTrue(result["truncated"])
+
+
+class DetectionValidationFeaturesArchitectureTests(unittest.TestCase):
+    def test_facade_and_owners_obey_size_and_dependency_boundaries(self):
+        expected_imports = {
+            "detection_validation_features_state.py": set(),
+            "detection_validation_features_markers.py": {
+                "detection_validation_packet",
+                "detection_validation_features_state",
+            },
+            "detection_validation_features_observation.py": {
+                "detection_validation_rule",
+                "detection_validation_packet",
+                "detection_validation_features_markers",
+                "detection_validation_features_state",
+            },
+            "detection_validation_features_projection.py": {
+                "detection_validation_packet",
+                "detection_validation_features_markers",
+                "detection_validation_features_state",
+            },
+            "detection_validation_features_workflow.py": {
+                "detection_validation_packet",
+                "detection_validation_features_markers",
+                "detection_validation_features_observation",
+                "detection_validation_features_projection",
+                "detection_validation_features_state",
+            },
+            "detection_validation_features.py": {
+                "detection_validation_rule",
+                "detection_validation_packet",
+                "detection_validation_features_workflow",
+            },
+        }
+        for name in OWNER_FILES:
+            with self.subTest(name=name):
+                source = (BIN / name).read_text(encoding="utf-8")
+                limit = 250 if name == "detection_validation_features.py" else 800
+                self.assertLessEqual(len(source.splitlines()), limit)
+                imports = {
+                    node.module
+                    for node in ast.walk(ast.parse(source))
+                    if isinstance(node, ast.ImportFrom)
+                    and node.module
+                    and node.module.startswith("detection_validation")
+                }
+                self.assertEqual(imports, expected_imports[name])
+
+    def test_feature_facade_imports_from_an_isolated_flat_dependency_unit(self):
+        sources = (
+            "detection_validation_rule_contract.py",
+            "detection_validation_rule_parser.py",
+            "detection_validation_rule_context.py",
+            "detection_validation_rule_icmp.py",
+            "detection_validation_rule.py",
+            "detection_validation_packet_network.py",
+            "detection_validation_packet_markers.py",
+            "detection_validation_packet_content.py",
+            "detection_validation_packet_buffers.py",
+            "detection_validation_packet.py",
+            *OWNER_FILES,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            for name in sources:
+                (target / name).write_bytes((BIN / name).read_bytes())
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-c",
+                    (
+                        "import sys; sys.path.insert(0, sys.argv[1]); "
+                        "import detection_validation_features as f; "
+                        "assert f.extract_group_packet_features([], [])['packets_parsed'] == 0"
+                    ),
+                    directory,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_mac_installer_copies_the_complete_feature_dependency_unit(self):
+        installer = (BIN / "install-macstudio-stack.zsh").read_text(encoding="utf-8")
+        for name in OWNER_FILES:
+            with self.subTest(name=name):
+                self.assertIn(f"n8n/bin/{name}", installer)
 
 
 if __name__ == "__main__":

@@ -270,6 +270,11 @@ class DetectionValidationPolicyArchitectureTests(unittest.TestCase):
             "detection_validation_packet_content.py",
             "detection_validation_packet_buffers.py",
             "detection_validation_packet.py",
+            "detection_validation_features_state.py",
+            "detection_validation_features_markers.py",
+            "detection_validation_features_observation.py",
+            "detection_validation_features_projection.py",
+            "detection_validation_features_workflow.py",
             "detection_validation_features.py",
             *OWNER_FILES,
         )

@@ -2733,8 +2733,15 @@ counters, entropy, and deployed/playbook marker normalization;
 `detection_validation_packet_content.py` owns the supported Suricata content
 modifier, match-window, and ordered relative-cursor semantics; and
 `detection_validation_packet_buffers.py` owns bounded HTTP, DNS, and TLS sticky
-buffer projection. `detection_validation_features.py` owns group evidence
-aggregation. `detection_validation_policy.py` is the stable policy facade;
+buffer projection. `detection_validation_features.py` is the stable feature
+compatibility facade; `detection_validation_features_state.py` owns bounded
+aggregation state, `detection_validation_features_markers.py` owns marker
+decoding, constraint observation, and safe marker metadata,
+`detection_validation_features_observation.py` owns stored-row decoding and
+protocol observation, `detection_validation_features_projection.py` owns the
+raw-payload-free evidence contract, and
+`detection_validation_features_workflow.py` owns bounded group orchestration.
+`detection_validation_policy.py` is the stable policy facade;
 `detection_validation_policy_registry.py` owns bounded versioned-registry
 admission, `detection_validation_policy_resolution.py` owns exact deployed-rule
 resolution, `detection_validation_policy_predicates.py` owns numeric evidence
