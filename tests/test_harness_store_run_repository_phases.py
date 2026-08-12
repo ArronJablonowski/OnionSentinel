@@ -2,6 +2,7 @@
 """Characterize harness run and evidence repository phases."""
 from __future__ import annotations
 
+import ast
 import copy
 import importlib.util
 import inspect
@@ -33,6 +34,41 @@ def load_repository():
 
 
 REPOSITORY = load_repository()
+
+
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse(
+        (BIN / "harness_store_run_repository.py").read_text(encoding="utf-8")
+    )
+    if "." in name:
+        class_name, function_name = name.split(".", 1)
+        owner = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == class_name
+        )
+        candidates = owner.body
+    else:
+        function_name = name
+        candidates = tree.body
+    target = next(
+        node
+        for node in candidates
+        if isinstance(node, ast.FunctionDef) and node.name == function_name
+    )
+    complexity = 1
+    for node in ast.walk(target):
+        if node is target:
+            continue
+        if isinstance(node, (ast.If, ast.For, ast.While, ast.IfExp, ast.Assert)):
+            complexity += 1
+        elif isinstance(node, ast.Try):
+            complexity += len(node.handlers)
+        elif isinstance(node, ast.BoolOp):
+            complexity += max(0, len(node.values) - 1)
+        elif isinstance(node, ast.comprehension):
+            complexity += 1 + len(node.ifs)
+    return target.end_lineno - target.lineno + 1, complexity
 
 
 class TracedRow(dict):
@@ -140,6 +176,34 @@ class HarnessStoreRunRepositoryPhasesTests(unittest.TestCase):
         self.now_patch.start()
         self.addCleanup(self.connect_patch.stop)
         self.addCleanup(self.now_patch.stop)
+
+    def test_changed_run_and_evidence_phases_stay_within_budget(self) -> None:
+        functions = (
+            "_validate_existing_run",
+            "_run_insert_values",
+            "_run_started_payload",
+            "_append_run_started",
+            "_validated_stage",
+            "_require_transitionable_run",
+            "_append_transition_event",
+            "_update_transition_stage",
+            "_evidence_identity",
+            "_validate_evidence_replay",
+            "_evidence_insert_values",
+            "_contract_references",
+            "_contract_trust_tier",
+            "_register_contract_reference",
+            "_append_evidence_catalogue",
+            "HarnessStoreRunRepository.start_run",
+            "HarnessStoreRunRepository.transition",
+            "HarnessStoreRunRepository.register_evidence",
+            "HarnessStoreRunRepository.register_evidence_contract",
+        )
+        for name in functions:
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
 
     def invoke(self, name: str, *args: Any, **kwargs: Any):
         method = getattr(REPOSITORY.HarnessStoreRunRepository, name)
