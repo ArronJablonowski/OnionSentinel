@@ -4,7 +4,10 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import shutil
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -93,6 +96,69 @@ class OperationalSloTests(unittest.TestCase):
             with self.assertRaisesRegex(self.slo.ProbeError, "BoundedHttpError"):
                 self.slo.fetch_json("http://127.0.0.1:8787/metrics", "metrics")
         self.assertEqual(urlopen.call_count, 1)
+
+    def test_installer_deploys_and_validates_operational_slo_policy(self):
+        installer = (
+            ROOT / "n8n/bin/install-macstudio-stack.zsh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'cp "$REPO_DIR/n8n/bin/operational_slo_policy.py" '
+            '"$STACK_DIR/bin/operational_slo_policy.py"',
+            installer,
+        )
+        self.assertIn(
+            'cp "$REPO_DIR/n8n/bin/operational_slo_primitives.py" '
+            '"$STACK_DIR/bin/operational_slo_primitives.py"',
+            installer,
+        )
+        self.assertIn(
+            'cp "$REPO_DIR/n8n/bin/operational_slo_resilience_policy.py" '
+            '"$STACK_DIR/bin/operational_slo_resilience_policy.py"',
+            installer,
+        )
+        self.assertIn(
+            'cp "$REPO_DIR/n8n/bin/operational_slo_queue_policy.py" '
+            '"$STACK_DIR/bin/operational_slo_queue_policy.py"',
+            installer,
+        )
+        self.assertIn(
+            'cp "$REPO_DIR/n8n/bin/operational_slo_state.py" '
+            '"$STACK_DIR/bin/operational_slo_state.py"',
+            installer,
+        )
+        self.assertIn(
+            'bin_dir / "evaluate-operational-slos.py"',
+            installer,
+        )
+
+    def test_flat_bin_evaluator_starts_in_isolated_python(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            for name in (
+                "bounded_http.py",
+                "operational_slo_primitives.py",
+                "operational_slo_queue_policy.py",
+                "operational_slo_resilience_policy.py",
+                "operational_slo_policy.py",
+                "operational_slo_state.py",
+                "evaluate-operational-slos.py",
+            ):
+                shutil.copy2(ROOT / "n8n/bin" / name, runtime / name)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    str(runtime / "evaluate-operational-slos.py"),
+                    "--help",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--stack-dir", result.stdout)
 
     def test_stale_or_regressed_signals_fail(self):
         now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)

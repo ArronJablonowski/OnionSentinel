@@ -215,6 +215,10 @@ load_file(
     "_onion_sentinel_harness_maintenance",
     bin_dir / "maintain-investigation-harness.py",
 )
+load_file(
+    "_onion_sentinel_operational_slos",
+    bin_dir / "evaluate-operational-slos.py",
+)
 
 sys.path.insert(0, str(dashboard_dir))
 import onion_sentinel_server
@@ -749,6 +753,11 @@ cp "$REPO_DIR/n8n/bin/monitor-n8n-stack.zsh" "$STACK_DIR/bin/monitor-n8n-stack.z
 cp "$REPO_DIR/n8n/bin/ensure-onion-sentinel-web.py" "$STACK_DIR/bin/ensure-onion-sentinel-web.py"
 cp "$REPO_DIR/n8n/bin/check-onion-sentinel-readiness.py" "$STACK_DIR/bin/check-onion-sentinel-readiness.py"
 cp "$REPO_DIR/n8n/bin/send-telegram-notification.py" "$STACK_DIR/bin/send-telegram-notification.py"
+cp "$REPO_DIR/n8n/bin/operational_slo_primitives.py" "$STACK_DIR/bin/operational_slo_primitives.py"
+cp "$REPO_DIR/n8n/bin/operational_slo_queue_policy.py" "$STACK_DIR/bin/operational_slo_queue_policy.py"
+cp "$REPO_DIR/n8n/bin/operational_slo_resilience_policy.py" "$STACK_DIR/bin/operational_slo_resilience_policy.py"
+cp "$REPO_DIR/n8n/bin/operational_slo_policy.py" "$STACK_DIR/bin/operational_slo_policy.py"
+cp "$REPO_DIR/n8n/bin/operational_slo_state.py" "$STACK_DIR/bin/operational_slo_state.py"
 cp "$REPO_DIR/n8n/bin/evaluate-operational-slos.py" "$STACK_DIR/bin/evaluate-operational-slos.py"
 cp "$REPO_DIR/n8n/bin/disk_capacity.py" "$STACK_DIR/bin/disk_capacity.py"
 cp "$REPO_DIR/n8n/bin/backup-onion-sentinel-runtime.py" "$STACK_DIR/bin/backup-onion-sentinel-runtime.py"

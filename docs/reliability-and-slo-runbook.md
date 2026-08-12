@@ -314,7 +314,11 @@ and timestamps and are pruned after seven days by default. They are operational
 telemetry, not the source of truth for alert, analyst, or queue state.
 
 The Mac Studio LaunchAgent runs `evaluate-operational-slos.py` through the
-existing stateful stack monitor every five minutes. It fails the monitor when
+existing stateful stack monitor every five minutes. The CLI owns bounded local
+probes, the pure policy modules own timestamp, capacity/recovery, threshold,
+and snapshot projection, and `operational_slo_state.py` owns owner-only
+state/history persistence.
+It fails the monitor when
 the heartbeat is older than 20 minutes, enrichment is older than 15 minutes,
 an active AI claim has made no state progress for 15 minutes, an idle AI worker
 has left pending work undrained with no completion for 30 minutes, a PCAP request is older

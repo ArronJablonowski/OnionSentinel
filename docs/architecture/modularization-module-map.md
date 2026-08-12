@@ -2753,6 +2753,23 @@ reconciliation, promotion, and approved IP-change transactions.
 DHCP, and append-only audit health projection. `postgres_asset_store.js` is a
 thin compatibility facade over these owners.
 
+### Operational SLO evaluator
+
+`operational_slo_policy.py` owns pure aggregate threshold evaluation and stable
+snapshot projection for Software Inventory, heartbeat, and PCAP.
+`operational_slo_queue_policy.py` owns durable analysis-queue and pipeline
+throughput policy. `operational_slo_resilience_policy.py` owns pure disk,
+backup, and harness-maintenance readiness, while
+`operational_slo_primitives.py` owns shared timestamp normalization. These
+modules receive already collected values
+and perform no network, filesystem, database, process, credential, or
+persistence work. `operational_slo_state.py` owns owner-only snapshot, bounded
+history, counter state, and continuous-soak clock persistence.
+`evaluate-operational-slos.py` remains the launchd-facing compatibility CLI and
+owns bounded local HTTP probes, runtime file discovery, and exit/output
+translation. The facade re-exports the historical evaluation, timestamp, and
+state helpers used by operational characterization tests.
+
 ## Deployment Map
 
 The current production installer copies individual files. These additions are
@@ -2764,6 +2781,7 @@ required before extracted code is imported in production:
 | `n8n/bin/bounded_process*.py` | `$HOME/n8n-local/bin` | copy the facade plus policy, observation, I/O, termination, and runtime owners as one flat-bin unit |
 | `n8n/bin/maintain-investigation-harness.py` and `harness_maintenance*.py` | `$HOME/n8n-local/bin` | copy all maintenance owners before the package-free compatibility facade |
 | `n8n/bin/pcap_evidence_query*.py` | `$HOME/n8n-local/bin` | copy validation, matching, selection, projection, and response owners before the policy facade |
+| `n8n/bin/evaluate-operational-slos.py` and `operational_slo_*.py` | `$HOME/n8n-local/bin` | copy timestamp, resilience, and aggregate policy owners before validating the stable launchd-facing evaluator |
 | `n8n/onion_sentinel` | `$HOME/n8n-local/onion_sentinel` | staged complete-tree copy and atomic replacement |
 | `onion-sentinel-dashboard/onion_sentinel_server.py` and `onion_sentinel_{release,application,request_routes}.py` | `$HOME/n8n-local/onion-sentinel-dashboard` | stage the three implementation owners before the stable web-service surface |
 | `onion-sentinel-dashboard/portal` | `$HOME/n8n-local/onion-sentinel-dashboard/portal` | staged complete-tree copy |
