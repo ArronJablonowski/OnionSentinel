@@ -122,10 +122,17 @@ class AdjudicationVerdictContradictionsArchitectureTests(unittest.TestCase):
             ["runner", "outcome", "explicit_factors"],
         )
         self.assertEqual(str(signature.return_annotation), "list[str]")
-        self.assertEqual(
-            function_metrics("adjudication_verdict_contradictions"),
-            (48, 21),
-        )
+        for name in (
+            "_normalized_contradiction_factors",
+            "_append_event_contradictions",
+            "_append_disposition_contradictions",
+            "_append_duplicate_contradictions",
+            "_append_false_positive_contradictions",
+            "adjudication_verdict_contradictions",
+        ):
+            lines, complexity = function_metrics(name)
+            self.assertLessEqual(lines, 50)
+            self.assertLessEqual(complexity, 10)
         source = EXPORTER_PATH.read_text(encoding="utf-8")
         self.assertEqual(source.count("adjudication_verdict_contradictions("), 2)
         self.assertLessEqual(len(source.splitlines()), 800)
