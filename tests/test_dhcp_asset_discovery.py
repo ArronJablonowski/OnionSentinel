@@ -10,7 +10,9 @@ import importlib.util
 import inspect
 import io
 import json
+import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -655,6 +657,42 @@ class DhcpCollectorTests(unittest.TestCase):
         self.assertFalse(result["backfill"]["last_success_at"])
         self.assertIn("incomplete", result["backfill"]["last_error"])
 
+    def test_collector_facade_starts_from_an_isolated_flat_bin(self) -> None:
+        names = (
+            "bounded_process.py",
+            "bounded_process_io.py",
+            "bounded_process_observation.py",
+            "bounded_process_policy.py",
+            "bounded_process_runtime.py",
+            "bounded_process_termination.py",
+            "security_jsonl_log.py",
+            "dhcp_asset_contract.py",
+            "dhcp_asset_state.py",
+            "dhcp_asset_adapters.py",
+            "dhcp_asset_workflow.py",
+            "collect-dhcp-asset-discovery.py",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            for name in names:
+                shutil.copy2(ROOT / "n8n" / "bin" / name, runtime / name)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    str(runtime / "collect-dhcp-asset-discovery.py"),
+                    "--help",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--require-database", result.stdout)
+        self.assertIn("--backfill-days", result.stdout)
+
 
 class SecurityOnionQueryClientTests(unittest.TestCase):
     @classmethod
@@ -916,6 +954,16 @@ class DhcpDiscoveryApiAndPageTests(unittest.TestCase):
         )
         installer = INSTALLER.read_text(encoding="utf-8")
         self.assertIn("collect-dhcp-asset-discovery.py", installer)
+        for name in (
+            "dhcp_asset_contract.py",
+            "dhcp_asset_state.py",
+            "dhcp_asset_adapters.py",
+            "dhcp_asset_workflow.py",
+        ):
+            self.assertIn(
+                f'cp "$REPO_DIR/n8n/bin/{name}" "$STACK_DIR/bin/{name}"',
+                installer,
+            )
         self.assertIn("query-security-onion.py", installer)
         self.assertIn("promote-dhcp-asset.py", installer)
         self.assertIn("com.arron.soc.dhcp-asset-discovery.plist", installer)

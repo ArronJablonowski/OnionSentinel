@@ -1132,6 +1132,69 @@
       ]
     },
     {
+      "path": "n8n/bin/collect-dhcp-asset-discovery.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/collect-dhcp-asset-discovery.py",
+      "required_symbols": [
+        "asset_store_token",
+        "backfill",
+        "collect",
+        "main",
+        "merge_observations",
+        "persist_database_state",
+        "query_complete_window",
+        "query_dhcp",
+        "relay_failure_diagnostic",
+        "validate_response"
+      ]
+    },
+    {
+      "path": "n8n/bin/dhcp_asset_contract.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/dhcp_asset_contract.py",
+      "required_symbols": [
+        "format_timestamp",
+        "observation_identity",
+        "parse_timestamp",
+        "validate_response"
+      ]
+    },
+    {
+      "path": "n8n/bin/dhcp_asset_state.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/dhcp_asset_state.py",
+      "required_symbols": [
+        "atomic_write_json",
+        "bounded_json",
+        "empty_state",
+        "load_config",
+        "load_state",
+        "merge_observations"
+      ]
+    },
+    {
+      "path": "n8n/bin/dhcp_asset_adapters.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/dhcp_asset_adapters.py",
+      "required_symbols": [
+        "asset_store_token",
+        "persist_database_state",
+        "query_dhcp",
+        "relay_failure_diagnostic"
+      ]
+    },
+    {
+      "path": "n8n/bin/dhcp_asset_workflow.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/dhcp_asset_workflow.py",
+      "required_symbols": [
+        "backfill",
+        "collect",
+        "collection_window",
+        "query_complete_window"
+      ]
+    },
+    {
       "path": "n8n/bin/collect-software-inventory.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/collect-software-inventory.py",

@@ -18,15 +18,6 @@
     "n8n/bin/check-onion-sentinel-readiness.py::check_providers": {
       "max_complexity": 22
     },
-    "n8n/bin/collect-dhcp-asset-discovery.py::backfill": {
-      "max_complexity": 16
-    },
-    "n8n/bin/collect-dhcp-asset-discovery.py::merge_observations": {
-      "max_complexity": 27
-    },
-    "n8n/bin/collect-dhcp-asset-discovery.py::validate_response": {
-      "max_complexity": 44
-    },
     "n8n/bin/collect-endpoint-software-inventory.py::collect": {
       "max_complexity": 25,
       "max_lines": 118
@@ -92,10 +83,6 @@
     "n8n/bin/evaluate-investigation-skills-v2.py::evaluate": {
       "max_complexity": 17
     },
-    "n8n/bin/evaluate-operational-slos.py::evaluate": {
-      "max_complexity": 169,
-      "max_lines": 396
-    },
     "n8n/bin/export-adjudicated-analysis-replays.py::adjudication_verdict_contradictions": {
       "max_complexity": 21
     },
@@ -150,21 +137,6 @@
       "max_complexity": 36,
       "max_lines": 171
     },
-    "n8n/bin/incident_evidence_contract.py::_validate_controls": {
-      "max_complexity": 21
-    },
-    "n8n/bin/incident_evidence_contract.py::_validate_osquery_results": {
-      "max_complexity": 59,
-      "max_lines": 172
-    },
-    "n8n/bin/incident_evidence_contract.py::_validate_search_result": {
-      "max_complexity": 55,
-      "max_lines": 166
-    },
-    "n8n/bin/incident_evidence_contract.py::validate_incident_evidence_artifact": {
-      "max_complexity": 54,
-      "max_lines": 140
-    },
     "n8n/bin/investigation_query_authorization.py::authorize_investigation_query_request": {
       "max_complexity": 41,
       "max_lines": 199
@@ -206,8 +178,7 @@
       "max_complexity": 21
     },
     "n8n/bin/live_osquery_client.py::collect_live_osquery": {
-      "max_complexity": 19,
-      "max_lines": 111
+      "max_lines": 103
     },
     "n8n/bin/live_osquery_client.py::load_live_osquery_config": {
       "max_complexity": 61,
@@ -438,5 +409,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "cc9ea8fbc9877e7ad5f95886b83980332eee3dac"
+  "source_release": "1528f6d99b6c0e7cb1fcc9e785b4b0e9b52409ae"
 }

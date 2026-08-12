@@ -2637,6 +2637,28 @@ provenance remain explicit, and ambiguous observations are never promoted to
 installed software. The installer stages all modules beside the facade without
 changing runtime configuration or database/API payload contracts.
 
+## DHCP Asset Discovery Collector
+
+`n8n/bin/collect-dhcp-asset-discovery.py` is the stable 249-line launchd, CLI,
+and dynamic-import facade. `dhcp_asset_contract.py` owns fixed Relay response
+accounting, query-audit and window binding, timestamp normalization, evidence
+identifiers, and passive identity precedence. `dhcp_asset_state.py` owns
+bounded configuration, state validation, observation merge and retention, and
+owner-only atomic cache publication. `dhcp_asset_adapters.py` owns the
+owner-controlled write-token boundary, bounded PostgreSQL API persistence,
+allowlisted Relay diagnostics, and the fixed forced-SSH query transport.
+`dhcp_asset_workflow.py` owns live checkpoint selection, bounded truncation
+splitting, global backfill budgets, and complete/partial state composition.
+
+The facade resolves mutable transport and workflow ports per call so existing
+operator and characterization injection seams remain stable without a lower
+layer importing the entrypoint. PostgreSQL acceptance still precedes local
+cache publication under `--require-database`; a failed candidate never
+replaces last-good observations. Security Onion and Relay access remains fixed,
+bounded, and read-only, while credentials and raw response bodies remain
+outside state and logs. The installer direct-copies all four owners before the
+facade and the modularization contract verifies their runtime symbols.
+
 ## AC Hunter Review
 
 `onion-sentinel-dashboard/ac_hunter_review.py` is a bounded compatibility
@@ -2798,6 +2820,7 @@ required before extracted code is imported in production:
 | `n8n/bin/pcap_evidence_query*.py` | `$HOME/n8n-local/bin` | copy validation, matching, selection, projection, and response owners before the policy facade |
 | `n8n/bin/incident_evidence_contract.py` and `incident_evidence_*_contract.py` plus shared primitives | `$HOME/n8n-local/bin` | copy validation, scope/digest, search, OSQuery, control, and artifact owners before the stable contract facade |
 | `n8n/bin/evaluate-operational-slos.py` and `operational_slo_*.py` | `$HOME/n8n-local/bin` | copy timestamp, resilience, and aggregate policy owners before validating the stable launchd-facing evaluator |
+| `n8n/bin/collect-dhcp-asset-discovery.py` and `dhcp_asset_*.py` | `$HOME/n8n-local/bin` | copy contract, state, persistence/Relay adapters, and workflows before the stable launchd-facing facade |
 | `n8n/onion_sentinel` | `$HOME/n8n-local/onion_sentinel` | staged complete-tree copy and atomic replacement |
 | `onion-sentinel-dashboard/onion_sentinel_server.py` and `onion_sentinel_{release,application,request_routes}.py` | `$HOME/n8n-local/onion-sentinel-dashboard` | stage the three implementation owners before the stable web-service surface |
 | `onion-sentinel-dashboard/portal` | `$HOME/n8n-local/onion-sentinel-dashboard/portal` | staged complete-tree copy |

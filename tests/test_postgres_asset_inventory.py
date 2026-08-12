@@ -251,7 +251,7 @@ class PostgresAssetInventoryTests(unittest.TestCase):
         self.assertIn("--require-database", collector)
         self.assertIn("--require-database", plist)
         self.assertLess(
-            collector.rindex("database_result = persist_database_state("),
+            collector.rindex("database_result = _persist_if_required(args, updated)"),
             collector.index("atomic_write_json(args.state, updated)"),
         )
 
