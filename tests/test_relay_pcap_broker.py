@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import contextlib
+import fcntl
 import hashlib
 import io
 import os
@@ -126,6 +127,36 @@ class RelayPcapBrokerTest(unittest.TestCase):
             "processed": 0,
             "operational_failures": 0,
         })
+        broker_request.assert_not_called()
+
+    def test_broker_lock_prevents_overlapping_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            lock_path = Path(temp_dir) / "pcap-broker.lock"
+            config = {
+                "pcap_broker": {
+                    "enabled": True,
+                    "lock_path": str(lock_path),
+                }
+            }
+            with lock_path.open("w", encoding="utf-8") as lock_handle:
+                fcntl.flock(
+                    lock_handle.fileno(),
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+                with mock.patch.object(self.relay, "broker_request") as broker_request:
+                    result = self.relay.process_pcap_requests(config)
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+        self.assertEqual(
+            result,
+            {
+                "ok": True,
+                "enabled": True,
+                "locked": True,
+                "processed": 0,
+                "operational_failures": 0,
+            },
+        )
         broker_request.assert_not_called()
 
     def test_spool_configuration_cannot_raise_admission_above_seventy_five_percent(self) -> None:
