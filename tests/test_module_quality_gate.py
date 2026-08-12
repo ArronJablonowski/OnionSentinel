@@ -55,6 +55,21 @@ class ModuleQualityGateTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
 
+    def test_repository_baseline_contains_only_current_debt(self) -> None:
+        policy_path = ROOT / "operations/quality/module-quality-policy.json"
+        baseline_path = ROOT / "operations/quality/module-quality-baseline.json"
+        configured = quality.validate_policy(quality.read_object(policy_path))
+        checked_in = quality.validate_baseline(quality.read_object(baseline_path))
+        names = quality.selected_sources(ROOT, configured)
+        metrics = quality.source_metrics(ROOT, names)
+        current = quality.candidate_baseline(
+            metrics,
+            configured,
+            quality.git_release(ROOT),
+        )
+        self.assertEqual(checked_in["files"], current["files"])
+        self.assertEqual(checked_in["functions"], current["functions"])
+
     def test_new_oversized_module_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
