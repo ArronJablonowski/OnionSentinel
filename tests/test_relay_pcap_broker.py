@@ -34,6 +34,21 @@ def load_relay():
 class RelayPcapBrokerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.relay = load_relay()
+        self.lock_directory = tempfile.TemporaryDirectory(
+            prefix="onion-sentinel-relay-pcap-test-"
+        )
+        self.addCleanup(self.lock_directory.cleanup)
+        test_lock_path = str(Path(self.lock_directory.name) / "pcap-broker.lock")
+        process_pcap_requests = self.relay.process_pcap_requests
+
+        def process_with_isolated_lock(config):
+            isolated_config = dict(config)
+            broker = dict(isolated_config.get("pcap_broker") or {})
+            broker.setdefault("lock_path", test_lock_path)
+            isolated_config["pcap_broker"] = broker
+            return process_pcap_requests(isolated_config)
+
+        self.relay.process_pcap_requests = process_with_isolated_lock
         self.healthy_capture_status = {
             "ok": True,
             "status": "storage_status",
