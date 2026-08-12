@@ -36,6 +36,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from ac_hunter_secure_files import read_secure_file_bytes
+
 
 CONFIG_SCHEMA = "onion-sentinel-ac-hunter-client-config-v1"
 CREDENTIALS_SCHEMA = "onion-sentinel-ac-hunter-credentials-v1"
@@ -198,63 +200,13 @@ def _secure_file_bytes(
     allow_empty: bool = False,
 ) -> bytes:
     """Read a same-UID regular file without following symlinks."""
-
-    try:
-        before = path.lstat()
-    except (FileNotFoundError, OSError) as exc:
-        raise AcHunterConfigurationError(
-            f"AC Hunter trust file is unavailable: {path.name}"
-        ) from exc
-    if (
-        stat.S_ISLNK(before.st_mode)
-        or not stat.S_ISREG(before.st_mode)
-        or before.st_uid != os.geteuid()
-        or stat.S_IMODE(before.st_mode) != exact_mode
-        or (not allow_empty and before.st_size <= 0)
-        or before.st_size > maximum_bytes
-    ):
-        raise AcHunterConfigurationError(
-            f"AC Hunter trust file failed owner-only validation: {path.name}"
-        )
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(str(path), flags)
-        try:
-            opened = os.fstat(descriptor)
-            if (
-                opened.st_dev != before.st_dev
-                or opened.st_ino != before.st_ino
-                or opened.st_uid != before.st_uid
-                or opened.st_size != before.st_size
-                or stat.S_IMODE(opened.st_mode) != exact_mode
-                or not stat.S_ISREG(opened.st_mode)
-            ):
-                raise AcHunterConfigurationError(
-                    f"AC Hunter trust file changed while opening: {path.name}"
-                )
-            chunks: List[bytes] = []
-            remaining = maximum_bytes + 1
-            while remaining > 0:
-                chunk = os.read(descriptor, min(64 * 1024, remaining))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            raw = b"".join(chunks)
-        finally:
-            os.close(descriptor)
-    except AcHunterConfigurationError:
-        raise
-    except OSError as exc:
-        raise AcHunterConfigurationError(
-            f"AC Hunter trust file could not be read: {path.name}"
-        ) from exc
-    if len(raw) > maximum_bytes:
-        raise AcHunterConfigurationError(
-            f"AC Hunter trust file exceeds its byte limit: {path.name}"
-        )
-    return raw
+    return read_secure_file_bytes(
+        path,
+        maximum_bytes=maximum_bytes,
+        exact_mode=exact_mode,
+        allow_empty=allow_empty,
+        error_type=AcHunterConfigurationError,
+    )
 
 
 def _private_json(path: Path, maximum_bytes: int) -> Dict[str, Any]:

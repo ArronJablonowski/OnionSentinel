@@ -2887,10 +2887,12 @@ facade and the modularization contract verifies their runtime symbols.
 ## AC Hunter Review
 
 `onion-sentinel-dashboard/ac_hunter_review.py` is a bounded compatibility
-facade. Configuration and owner-only secret-file policy live in
-`ac_hunter_config.py`; Relay-only transport and short-lived authentication in
-`ac_hunter_transport.py`; bounded primitive compatibility and response
-projection in `ac_hunter_normalization.py`; pure finding identity, observable,
+facade. Configuration policy lives in `ac_hunter_config.py`; owner-only,
+no-follow, descriptor-identity-checked bounded trust-file I/O lives in
+`ac_hunter_secure_files.py`; Relay-only transport and short-lived
+authentication in `ac_hunter_transport.py`; bounded primitive compatibility
+and response projection in `ac_hunter_normalization.py`; pure finding identity,
+observable,
 metric, tuple-fallback, and evidence phases in
 `ac_hunter_finding_normalization.py`;
 benign context and the scoring compatibility facade in `ac_hunter_scoring.py`;
@@ -2909,9 +2911,11 @@ AC Hunter access remains Relay-only, and cache material remains owner-only and
 secret-filtered. Scores prioritize review but never independently establish
 malware or malicious intent. Existing page/API fields, verdict meanings,
 fresh/stale cache behavior, and single-flight refresh semantics remain stable.
-The finding-normalization, scoring-policy, cache-validation, and three
-collection owners are pure and import inward only; none can call AC Hunter, the
-Relay, a cache, a database, or a compatibility facade. Cache validation keeps
+The secure-file, finding-normalization, scoring-policy, cache-validation, and
+three collection owners import inward only; none can call AC Hunter, the Relay,
+a cache, a database, or a compatibility facade. The secure-file owner has only
+bounded filesystem authority and no configuration, credential-semantic,
+transport, cache, or service authority. Cache validation keeps
 the exact recursion, cardinality, key, text, scalar, credential-rejection, and
 error-precedence policy without filesystem or service authority. The
 normalization facade preserves the legacy

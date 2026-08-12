@@ -1266,6 +1266,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/portal_review_panel_renderer.py" "$DASHBO
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_json_body.py" "$DASHBOARD_RUNTIME_DIR/portal_json_body.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_request_routes.py" "$DASHBOARD_RUNTIME_DIR/portal_request_routes.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_write_dispatch.py" "$DASHBOARD_RUNTIME_DIR/portal_soc_write_dispatch.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_secure_files.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_secure_files.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_config.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_config.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_transport.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_transport.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_finding_normalization.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_finding_normalization.py"

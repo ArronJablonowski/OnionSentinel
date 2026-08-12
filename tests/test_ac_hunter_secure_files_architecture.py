@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 import stat
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,10 +16,13 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD = ROOT / "onion-sentinel-dashboard"
 CONFIG_PATH = DASHBOARD / "ac_hunter_config.py"
+SECURE_FILES_PATH = DASHBOARD / "ac_hunter_secure_files.py"
 BASELINE = ROOT / "operations/quality/module-quality-baseline.json"
 
 
 def load_config_module():
+    if str(DASHBOARD) not in sys.path:
+        sys.path.insert(0, str(DASHBOARD))
     spec = importlib.util.spec_from_file_location(
         "ac_hunter_secure_files_architecture", CONFIG_PATH
     )
@@ -103,7 +107,7 @@ class AcHunterSecureFilesArchitectureTests(unittest.TestCase):
         else:
             self.assertIsInstance(caught.exception.__cause__, cause)
 
-    def test_signature_current_debt_flags_and_bounded_read_trace_are_exact(
+    def test_signature_module_boundaries_flags_and_bounded_read_trace_are_exact(
         self,
     ) -> None:
         self.assertEqual(
@@ -111,13 +115,32 @@ class AcHunterSecureFilesArchitectureTests(unittest.TestCase):
             "(path: 'Path', *, maximum_bytes: 'int', exact_mode: 'int' = 384, "
             "allow_empty: 'bool' = False) -> 'bytes'",
         )
-        baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
-        self.assertEqual(
-            baseline["functions"][
-                "onion-sentinel-dashboard/ac_hunter_config.py::_secure_file_bytes"
-            ],
-            {"max_complexity": 20},
+        self.assertIs(
+            self.config.stat,
+            stat,
+            "the legacy config wildcard surface must retain the stat module",
         )
+        baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
+        self.assertNotIn(
+            "onion-sentinel-dashboard/ac_hunter_config.py::_secure_file_bytes",
+            baseline["functions"],
+        )
+        self.assertLessEqual(len(SECURE_FILES_PATH.read_text().splitlines()), 600)
+        self.assertNotIn(
+            "from ac_hunter_config import",
+            SECURE_FILES_PATH.read_text(),
+        )
+        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
+        config_copy = (
+            'ac_hunter_config.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_config.py"'
+        )
+        owner_copy = (
+            'ac_hunter_secure_files.py" '
+            '"$DASHBOARD_RUNTIME_DIR/ac_hunter_secure_files.py"'
+        )
+        self.assertIn(config_copy, installer)
+        self.assertIn(owner_copy, installer)
+        self.assertLess(installer.index(owner_copy), installer.index(config_copy))
 
         content = b"x" * 70_000
         path = self.private_file("trust.bin", content)
