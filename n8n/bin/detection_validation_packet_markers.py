@@ -31,30 +31,88 @@ def _entropy(payload: bytes) -> float:
     return -sum((count / length) * math.log2(count / length) for count in counts.values())
 
 
-def _deployed_marker_specs(rule_context: dict[str, Any]) -> list[dict[str, Any]]:
+def _deployed_content_items(rule_context: dict[str, Any]) -> list[Any]:
     parsed_rule = rule_context.get("parsed_rule")
     if not isinstance(parsed_rule, dict):
         return []
     contents = parsed_rule.get("contents")
+    return contents if isinstance(contents, list) else []
+
+
+def _marker_modifiers(item: dict[str, Any]) -> dict[Any, Any]:
+    return (
+        dict(item.get("modifiers") or {})
+        if isinstance(item.get("modifiers"), dict)
+        else {}
+    )
+
+
+def _deployed_marker_spec(
+    item: Any,
+    *,
+    ordinal: int,
+) -> dict[str, Any] | None:
+    if not isinstance(item, dict) or not str(item.get("hex") or ""):
+        return None
+    return {
+        "id": str(item.get("id") or f"deployed-content-{ordinal}")[:100],
+        "hex": str(item.get("hex") or "")[:512],
+        "modifiers": _marker_modifiers(item),
+        "buffer": str(item.get("buffer") or "")[:80],
+        "negated": bool(item.get("negated")),
+        "source": "deployed_rule",
+    }
+
+
+def _deployed_marker_specs(rule_context: dict[str, Any]) -> list[dict[str, Any]]:
     specs: list[dict[str, Any]] = []
-    for item in contents if isinstance(contents, list) else []:
-        if not isinstance(item, dict) or not str(item.get("hex") or ""):
-            continue
-        specs.append(
-            {
-                "id": str(item.get("id") or f"deployed-content-{len(specs) + 1}")[:100],
-                "hex": str(item.get("hex") or "")[:512],
-                "modifiers": (
-                    dict(item.get("modifiers") or {})
-                    if isinstance(item.get("modifiers"), dict)
-                    else {}
-                ),
-                "buffer": str(item.get("buffer") or "")[:80],
-                "negated": bool(item.get("negated")),
-                "source": "deployed_rule",
-            }
-        )
+    for item in _deployed_content_items(rule_context):
+        spec = _deployed_marker_spec(item, ordinal=len(specs) + 1)
+        if spec is not None:
+            specs.append(spec)
     return specs
+
+
+def _playbook_marker_items(playbook: dict[str, Any] | None) -> list[Any]:
+    if not isinstance(playbook, dict):
+        return []
+    values = playbook.get("marker_predicates")
+    return values if isinstance(values, list) else []
+
+
+def _playbook_marker_applies(
+    item: dict[str, Any],
+    rule_context: dict[str, Any],
+) -> bool:
+    applies = (
+        {str(value) for value in item.get("applies_to_sids", [])}
+        if isinstance(item.get("applies_to_sids"), list)
+        else set()
+    )
+    return not applies or str(rule_context.get("sid") or "") in applies
+
+
+def _playbook_marker_spec(
+    item: Any,
+    *,
+    rule_context: dict[str, Any],
+    start: int,
+    accepted_count: int,
+) -> dict[str, Any] | None:
+    if not isinstance(item, dict) or not str(item.get("hex") or ""):
+        return None
+    if not _playbook_marker_applies(item, rule_context):
+        return None
+    return {
+        "id": str(
+            item.get("id") or f"playbook-marker-{start + accepted_count + 1}"
+        )[:100],
+        "hex": str(item.get("hex") or "")[:512],
+        "expected_offset": item.get("expected_offset"),
+        "modifiers": {},
+        "negated": False,
+        "source": "playbook",
+    }
 
 
 def _playbook_marker_specs(
@@ -63,32 +121,16 @@ def _playbook_marker_specs(
     *,
     start: int,
 ) -> list[dict[str, Any]]:
-    if not isinstance(playbook, dict):
-        return []
-    values = playbook.get("marker_predicates")
     specs: list[dict[str, Any]] = []
-    for item in values if isinstance(values, list) else []:
-        if not isinstance(item, dict) or not str(item.get("hex") or ""):
-            continue
-        applies = (
-            {str(value) for value in item.get("applies_to_sids", [])}
-            if isinstance(item.get("applies_to_sids"), list)
-            else set()
+    for item in _playbook_marker_items(playbook):
+        spec = _playbook_marker_spec(
+            item,
+            rule_context=rule_context,
+            start=start,
+            accepted_count=len(specs),
         )
-        if applies and str(rule_context.get("sid") or "") not in applies:
-            continue
-        specs.append(
-            {
-                "id": str(
-                    item.get("id") or f"playbook-marker-{start + len(specs) + 1}"
-                )[:100],
-                "hex": str(item.get("hex") or "")[:512],
-                "expected_offset": item.get("expected_offset"),
-                "modifiers": {},
-                "negated": False,
-                "source": "playbook",
-            }
-        )
+        if spec is not None:
+            specs.append(spec)
     return specs
 
 
