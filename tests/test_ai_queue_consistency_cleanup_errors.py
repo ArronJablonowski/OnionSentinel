@@ -35,11 +35,12 @@ queue_check = load_module()
 
 
 class AiQueueConsistencyCleanupErrorTests(unittest.TestCase):
-    def run_cleanup_failure(
+    def run_cleanup(
         self,
         root: Path,
         *,
         json_mode: bool,
+        unlink_error: OSError | None = OSError(DELETE_ERROR),
     ) -> tuple[int, str, str, Path, Path]:
         database = root / "alerts.sqlite3"
         database.touch()
@@ -98,7 +99,7 @@ class AiQueueConsistencyCleanupErrorTests(unittest.TestCase):
         ), mock.patch.object(
             Path,
             "unlink",
-            side_effect=OSError(DELETE_ERROR),
+            side_effect=unlink_error,
         ), redirect_stdout(stdout), redirect_stderr(stderr):
             return_code = queue_check.main()
         return return_code, stdout.getvalue(), stderr.getvalue(), resolved, orphan
@@ -107,7 +108,7 @@ class AiQueueConsistencyCleanupErrorTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            return_code, stdout, stderr, resolved, orphan = self.run_cleanup_failure(
+            return_code, stdout, stderr, resolved, orphan = self.run_cleanup(
                 Path(tmp),
                 json_mode=False,
             )
@@ -126,7 +127,7 @@ class AiQueueConsistencyCleanupErrorTests(unittest.TestCase):
 
     def test_json_mode_preserves_schema_and_bounds_cleanup_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            return_code, stdout, stderr, resolved, orphan = self.run_cleanup_failure(
+            return_code, stdout, stderr, resolved, orphan = self.run_cleanup(
                 Path(tmp),
                 json_mode=True,
             )
@@ -154,6 +155,24 @@ class AiQueueConsistencyCleanupErrorTests(unittest.TestCase):
                 "deleted_resolved_prompts": 0,
             },
         )
+
+    def test_successful_cleanup_retains_existing_combined_deleted_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            return_code, stdout, stderr, resolved, orphan = self.run_cleanup(
+                Path(tmp),
+                json_mode=True,
+                unlink_error=None,
+            )
+
+        self.assertEqual(return_code, 1)
+        self.assertEqual(stderr, "")
+        result = json.loads(stdout)
+        self.assertEqual(result["stale_prompts"], [])
+        self.assertEqual(
+            result["deleted_resolved_prompts"],
+            [str(resolved), str(orphan)],
+        )
+        self.assertEqual(result["artifacts"]["deleted_resolved_prompts"], 2)
 
 
 if __name__ == "__main__":

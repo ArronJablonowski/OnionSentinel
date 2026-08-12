@@ -22,6 +22,7 @@ DEFAULT_DB = HOME / "n8n-local" / "alert_store_data" / "alerts.sqlite3"
 DEFAULT_PROMPT_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-prompts"
 DEFAULT_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-analysis"
 ALLOWED_FILTER_STATUSES = {"accepted", "acknowledged", "duplicate", "escalated", "suppressed", "unknown"}
+__DELETE_ERROR_MAX_CHARS = 240
 
 
 def parse_args() -> argparse.Namespace:
@@ -162,6 +163,35 @@ def artifact_index(directory: Path, suffix: str, prompt_mode: bool = False) -> t
     return latest, path_ids
 
 
+def __delete_prompt_paths(
+    prompt_paths: list[str],
+    stale_prompts: list[dict[str, Any]],
+    deleted_prompts: list[str],
+) -> None:
+    for prompt_path in prompt_paths:
+        path = Path(prompt_path)
+        try:
+            path.unlink()
+            deleted_prompts.append(prompt_path)
+        except OSError as exc:
+            stale_prompts.append(
+                {
+                    "path": prompt_path,
+                    "delete_error": str(exc)[:__DELETE_ERROR_MAX_CHARS],
+                }
+            )
+
+
+def __print_stale_prompt(item: dict[str, Any]) -> None:
+    if "delete_error" in item:
+        print(
+            f"DELETE_ERROR {item['path']} "
+            f"error={item['delete_error']}"
+        )
+        return
+    print(f"STALE {item['path']} alert_ids={','.join(item['alert_ids'])}")
+
+
 def main() -> int:
     args = parse_args()
     if not args.db.exists():
@@ -201,21 +231,17 @@ def main() -> int:
 
     deleted_prompts: list[str] = []
     if args.delete_resolved_prompts:
-        for prompt_path in resolved_prompts:
-            path = Path(prompt_path)
-            try:
-                path.unlink()
-                deleted_prompts.append(prompt_path)
-            except OSError as exc:
-                stale_prompts.append({"path": prompt_path, "delete_error": str(exc)})
+        __delete_prompt_paths(
+            resolved_prompts,
+            stale_prompts,
+            deleted_prompts,
+        )
     if args.delete_orphan_prompts:
-        for prompt_path in orphan_prompts:
-            path = Path(prompt_path)
-            try:
-                path.unlink()
-                deleted_prompts.append(prompt_path)
-            except OSError as exc:
-                stale_prompts.append({"path": prompt_path, "delete_error": str(exc)})
+        __delete_prompt_paths(
+            orphan_prompts,
+            stale_prompts,
+            deleted_prompts,
+        )
 
     result = {
         "db": state,
@@ -262,7 +288,7 @@ def main() -> int:
         if deleted_prompts:
             print(f"deleted_resolved_prompts: {len(deleted_prompts)}")
         for item in stale_prompts[:20]:
-            print(f"STALE {item['path']} alert_ids={','.join(item['alert_ids'])}")
+            __print_stale_prompt(item)
         for path in orphan_prompts[:20]:
             print(f"ORPHAN {path}")
     return 1 if args.fail_on_issue and any(issues) else 0
