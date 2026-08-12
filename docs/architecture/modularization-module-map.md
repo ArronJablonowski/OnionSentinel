@@ -2620,6 +2620,15 @@ then normalizes those results at the composition boundary.
 the v2 investigation-query wire contract. The governed implementation is split
 into `investigation_query_schema.py`, `investigation_query_normalization.py`,
 `investigation_query_authorization.py`, and `investigation_query_rendering.py`.
+The normalization module is itself a stable facade:
+`investigation_query_normalization_primitives.py` owns exact object/key/ID and
+UTC-window primitives, `investigation_query_observable_normalization.py` owns
+observable admission and pack projection,
+`investigation_query_event_tuple_normalization.py` owns event-tuple admission
+and role semantics, and `investigation_query_authorization_normalization.py`
+owns trusted-context projection, provenance, and tuple authorization. The
+dependency direction is schema to primitives to observables to tuples to
+authorization, and no owner imports the facade.
 The authorization facade retains the three established entrypoints while
 `investigation_query_authorization_proposal.py` owns trusted-context proposal
 authorization, `investigation_query_authorization_manifest.py` owns manifest

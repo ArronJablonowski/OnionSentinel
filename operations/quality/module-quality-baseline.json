@@ -82,9 +82,6 @@
       "max_complexity": 36,
       "max_lines": 171
     },
-    "n8n/bin/investigation_query_normalization.py::_normalize_event_tuple": {
-      "max_complexity": 19
-    },
     "n8n/bin/investigation_skills.py::load_investigation_skills": {
       "max_complexity": 16
     },

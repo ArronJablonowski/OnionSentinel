@@ -2,10 +2,13 @@
 """Characterization and architecture gates for query normalization."""
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import inspect
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -72,6 +75,18 @@ FROZEN_V1_DIGESTS = {
     "investigation_query_contract.py": "29864594edb87030f30d7220ad63c97f477522544958b0fda5b1ba84d6ae6aa7",
     "manifest.json": "b6c4a68b617e1286cbc03928f8796d330e3f83d3cdb0946e145d706d3147d380",
 }
+
+OWNER_MODULES = (
+    "investigation_query_normalization_primitives.py",
+    "investigation_query_observable_normalization.py",
+    "investigation_query_event_tuple_normalization.py",
+    "investigation_query_authorization_normalization.py",
+)
+FLAT_RUNTIME_MODULES = (
+    "investigation_query_schema.py",
+    *OWNER_MODULES,
+    "investigation_query_normalization.py",
+)
 
 
 def authorization_context() -> dict:
@@ -291,6 +306,45 @@ class InvestigationQueryNormalizationCharacterizationTests(unittest.TestCase):
             },
             FROZEN_V1_DIGESTS,
         )
+
+    def test_facade_and_owners_remain_bounded_and_acyclic(self) -> None:
+        facade = BIN / "investigation_query_normalization.py"
+        self.assertLessEqual(len(facade.read_text(encoding="utf-8").splitlines()), 250)
+        for name in OWNER_MODULES:
+            path = BIN / name
+            self.assertLess(len(path.read_text(encoding="utf-8").splitlines()), 800)
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            imported = {
+                node.module
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.module
+            }
+            self.assertNotIn("investigation_query_normalization", imported)
+
+    def test_facade_imports_from_an_isolated_flat_bin(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in FLAT_RUNTIME_MODULES:
+                (root / name).write_bytes((BIN / name).read_bytes())
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-c",
+                    (
+                        "import sys; sys.path.insert(0, sys.argv[1]); "
+                        "import investigation_query_normalization as module; "
+                        "assert callable(module._event_tuple_authorization)"
+                    ),
+                    directory,
+                ],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

@@ -1099,6 +1099,49 @@
       ]
     },
     {
+      "path": "n8n/bin/investigation_query_normalization_primitives.py",
+      "deployment": "versioned-query-runtime",
+      "runtime_path": "$STACK_DIR/bin/investigation_query_normalization_primitives.py",
+      "required_symbols": [
+        "_normalize_window",
+        "_parse_utc",
+        "_require_exact_keys",
+        "_require_mapping"
+      ]
+    },
+    {
+      "path": "n8n/bin/investigation_query_observable_normalization.py",
+      "deployment": "versioned-query-runtime",
+      "runtime_path": "$STACK_DIR/bin/investigation_query_observable_normalization.py",
+      "required_symbols": [
+        "_normalize_observable",
+        "_normalize_observables",
+        "pack_observable_fields",
+        "validate_pack_observables"
+      ]
+    },
+    {
+      "path": "n8n/bin/investigation_query_event_tuple_normalization.py",
+      "deployment": "versioned-query-runtime",
+      "runtime_path": "$STACK_DIR/bin/investigation_query_event_tuple_normalization.py",
+      "required_symbols": [
+        "_normalize_context_event_tuples",
+        "_normalize_event_tuple",
+        "pack_event_tuple_fields",
+        "tuple_match_semantics"
+      ]
+    },
+    {
+      "path": "n8n/bin/investigation_query_authorization_normalization.py",
+      "deployment": "versioned-query-runtime",
+      "runtime_path": "$STACK_DIR/bin/investigation_query_authorization_normalization.py",
+      "required_symbols": [
+        "_event_tuple_authorization",
+        "_normalize_authorization_context",
+        "_observable_authorizations"
+      ]
+    },
+    {
       "path": "n8n/bin/investigation_query_normalization.py",
       "deployment": "versioned-query-runtime",
       "runtime_path": "$STACK_DIR/bin/investigation_query_normalization.py",

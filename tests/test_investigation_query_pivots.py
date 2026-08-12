@@ -362,6 +362,10 @@ class InvestigationQueryContractTests(unittest.TestCase):
             BIN_DIR / name
             for name in (
                 "investigation_query_schema.py",
+                "investigation_query_normalization_primitives.py",
+                "investigation_query_observable_normalization.py",
+                "investigation_query_event_tuple_normalization.py",
+                "investigation_query_authorization_normalization.py",
                 "investigation_query_normalization.py",
                 "investigation_query_authorization_adapter.py",
                 "investigation_query_authorization_manifest.py",
@@ -450,6 +454,10 @@ class InvestigationQueryContractTests(unittest.TestCase):
             BIN_DIR / name
             for name in (
                 "investigation_query_schema.py",
+                "investigation_query_normalization_primitives.py",
+                "investigation_query_observable_normalization.py",
+                "investigation_query_event_tuple_normalization.py",
+                "investigation_query_authorization_normalization.py",
                 "investigation_query_normalization.py",
                 "investigation_query_authorization_adapter.py",
                 "investigation_query_authorization_manifest.py",
