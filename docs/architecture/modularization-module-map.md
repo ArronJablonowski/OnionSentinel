@@ -2898,6 +2898,10 @@ Elasticsearch control anchor through private metadata, canonical alert-ID
 fallback, and allowlist-validation phases. Collector-owned hit metadata keeps
 precedence, partial legacy rows retain their exact component-wise fallback, and
 unreviewed indices or unsafe document IDs still fail closed before Relay use.
+Private time-coverage phases separately collect accepted row timestamps,
+project the exact fallback hour, partition complete four-day coverage, or make
+the bounded middle evidence gap explicit through first-day/latest-three-day
+windows. The Relay request order and public coverage notes remain stable.
 
 ### Operational SLO evaluator
 

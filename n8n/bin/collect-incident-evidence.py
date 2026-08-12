@@ -416,7 +416,7 @@ def observables(grouped: list[sqlite3.Row]) -> dict[str, list[str]]:
     return bounded
 
 
-def evidence_windows(grouped: list[sqlite3.Row]) -> tuple[list[dict[str, str]], str]:
+def __evidence_timestamps(grouped: list[sqlite3.Row]) -> list[dt.datetime]:
     timestamps: list[dt.datetime] = []
     for item in grouped:
         for column in ("first_seen", "last_seen", "timestamp"):
@@ -424,29 +424,68 @@ def evidence_windows(grouped: list[sqlite3.Row]) -> tuple[list[dict[str, str]], 
                 parsed = parse_time(item[column])
                 if parsed:
                     timestamps.append(parsed)
+    return timestamps
+
+
+def __fallback_evidence_window() -> list[dict[str, str]]:
+    now = dt.datetime.now(dt.timezone.utc)
+    return [
+        {
+            "start": iso_utc(now - dt.timedelta(hours=1)),
+            "end": iso_utc(now),
+        }
+    ]
+
+
+def __complete_evidence_windows(
+    start: dt.datetime,
+    end: dt.datetime,
+) -> list[dict[str, str]]:
+    windows: list[dict[str, str]] = []
+    cursor = start
+    while cursor < end and len(windows) < MAX_WINDOWS:
+        boundary = min(cursor + WINDOW_DURATION, end)
+        windows.append({"start": iso_utc(cursor), "end": iso_utc(boundary)})
+        cursor = boundary
+    return windows
+
+
+def __bounded_gap_evidence_windows(
+    start: dt.datetime,
+    end: dt.datetime,
+) -> list[dict[str, str]]:
+    windows = [
+        {
+            "start": iso_utc(start),
+            "end": iso_utc(start + WINDOW_DURATION),
+        }
+    ]
+    tail_start = end - WINDOW_DURATION * (MAX_WINDOWS - 1)
+    for index in range(MAX_WINDOWS - 1):
+        boundary = tail_start + WINDOW_DURATION * index
+        windows.append(
+            {
+                "start": iso_utc(boundary),
+                "end": iso_utc(min(boundary + WINDOW_DURATION, end)),
+            }
+        )
+    return windows
+
+
+def evidence_windows(grouped: list[sqlite3.Row]) -> tuple[list[dict[str, str]], str]:
+    timestamps = __evidence_timestamps(grouped)
     if not timestamps:
-        now = dt.datetime.now(dt.timezone.utc)
-        return [{"start": iso_utc(now - dt.timedelta(hours=1)), "end": iso_utc(now)}], "fallback one-hour window"
+        return __fallback_evidence_window(), "fallback one-hour window"
     start, end = min(timestamps) - WINDOW_PADDING, max(timestamps) + WINDOW_PADDING
     if end <= start:
         end = start + dt.timedelta(minutes=10)
-    windows: list[dict[str, str]] = []
     coverage = end - start
     if coverage <= WINDOW_DURATION * MAX_WINDOWS:
-        cursor = start
-        while cursor < end and len(windows) < MAX_WINDOWS:
-            boundary = min(cursor + WINDOW_DURATION, end)
-            windows.append({"start": iso_utc(cursor), "end": iso_utc(boundary)})
-            cursor = boundary
-        note = "complete alert firing window"
-    else:
-        windows.append({"start": iso_utc(start), "end": iso_utc(start + WINDOW_DURATION)})
-        tail_start = end - WINDOW_DURATION * (MAX_WINDOWS - 1)
-        for index in range(MAX_WINDOWS - 1):
-            boundary = tail_start + WINDOW_DURATION * index
-            windows.append({"start": iso_utc(boundary), "end": iso_utc(min(boundary + WINDOW_DURATION, end))})
-        note = "bounded first-day and latest-three-day coverage; middle interval is an explicit evidence gap"
-    return windows, note
+        return __complete_evidence_windows(start, end), "complete alert firing window"
+    return (
+        __bounded_gap_evidence_windows(start, end),
+        "bounded first-day and latest-three-day coverage; middle interval is an explicit evidence gap",
+    )
 
 
 def load_config(path: Path) -> dict:
