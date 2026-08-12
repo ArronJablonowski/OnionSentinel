@@ -2731,6 +2731,11 @@ validation are isolated in private helpers while the operation allowlist,
 encoded request bytes, validation precedence, bounds, errors, and public
 contract surface remain exact.
 
+Agent-memory promotion keeps per-record add/replay/reinforcement accounting in
+a private accumulator. The bounded promotion owner retains exact expiration,
+operator-confirmed precedence, reinforcement recency, truncation, provenance,
+and post-commit persistence semantics without widening its public facade.
+
 ## Alert Store
 
 Current owner: `n8n/alert_store/alert_store.js` (12,586 lines). The runtime

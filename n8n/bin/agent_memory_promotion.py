@@ -256,6 +256,23 @@ def quarantine_bpfdoor_code_zero_memory(
     return result
 
 
+def __accumulate_record(
+    by_id: dict[str, dict[str, Any]],
+    record: dict[str, Any],
+) -> str:
+    record_id = str(record["id"])
+    if record_id not in by_id:
+        by_id[record_id] = record
+        return "added"
+    existing = by_id[record_id]
+    if str(existing.get("source_analysis_id") or "") == str(
+        record.get("source_analysis_id") or ""
+    ):
+        return "replayed"
+    by_id[record_id] = _merge_record(existing, record)
+    return "reinforced"
+
+
 def _ordered_records(
     existing_records: list[dict[str, Any]],
     incoming: list[dict[str, Any]],
@@ -263,27 +280,11 @@ def _ordered_records(
     now: dt.datetime,
     record_limit: int,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    active = [
-        record
-        for record in existing_records
-        if not _record_is_expired(record, now)
-    ]
+    active = [record for record in existing_records if not _record_is_expired(record, now)]
     by_id = {str(record.get("id")): record for record in active}
-    added = reinforced = replayed = 0
+    counts = {"added": 0, "reinforced": 0, "replayed": 0}
     for record in incoming:
-        record_id = str(record["id"])
-        if record_id not in by_id:
-            by_id[record_id] = record
-            added += 1
-            continue
-        existing = by_id[record_id]
-        if str(existing.get("source_analysis_id") or "") == str(
-            record.get("source_analysis_id") or ""
-        ):
-            replayed += 1
-        else:
-            by_id[record_id] = _merge_record(existing, record)
-            reinforced += 1
+        counts[__accumulate_record(by_id, record)] += 1
     records = list(by_id.values())
     records.sort(
         key=lambda item: (
@@ -294,9 +295,7 @@ def _ordered_records(
     )
     records = records[:record_limit]
     return records, {
-        "added": added,
-        "reinforced": reinforced,
-        "replayed": replayed,
+        **counts,
         "expired_removed": max(0, len(existing_records) - len(active)),
         "retained": len(records),
     }
