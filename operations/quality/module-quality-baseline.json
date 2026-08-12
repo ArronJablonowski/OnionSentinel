@@ -14,9 +14,6 @@
     "n8n/bin/export-adjudicated-analysis-replays.py::adjudication_verdict_contradictions": {
       "max_complexity": 21
     },
-    "n8n/bin/export-adjudicated-analysis-replays.py::replay_case": {
-      "max_complexity": 28
-    },
     "n8n/bin/investigation_skills.py::load_investigation_skills": {
       "max_complexity": 16
     },
@@ -147,5 +144,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "7bf189c305e943c5e0183551a893fc85f5c7f1b5"
+  "source_release": "996f713c6b2b25dfa2bd95d52dd58c9e08ca6c78"
 }
