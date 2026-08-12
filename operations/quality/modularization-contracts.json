@@ -808,6 +808,82 @@
       ]
     },
     {
+      "path": "operations/benchmark-ollama-cybersecurity.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/benchmark-ollama-cybersecurity.py",
+      "required_symbols": [
+        "BENCHMARK_CASES",
+        "BenchmarkCase",
+        "benchmark_cases",
+        "benchmark_model",
+        "main",
+        "run_batch",
+        "run_query_batch"
+      ]
+    },
+    {
+      "path": "operations/benchmark_ollama_decision_cases.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/benchmark_ollama_decision_cases.py",
+      "required_symbols": [
+        "BENCHMARK_CASES",
+        "BenchmarkCase",
+        "_case",
+        "benchmark_cases"
+      ]
+    },
+    {
+      "path": "operations/benchmark_ollama_discovery.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/benchmark_ollama_discovery.py",
+      "required_symbols": [
+        "bounded_json_request",
+        "installed_models"
+      ]
+    },
+    {
+      "path": "operations/benchmark_ollama_execution.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/benchmark_ollama_execution.py",
+      "required_symbols": [
+        "batch_prompt",
+        "extract_json",
+        "query_batch_prompt",
+        "run_decision_batch",
+        "run_query_batch"
+      ]
+    },
+    {
+      "path": "operations/benchmark_ollama_query_cases.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/benchmark_ollama_query_cases.py",
+      "required_symbols": [
+        "QUERY_BENCHMARK_CASES",
+        "QueryBenchmarkCase",
+        "query_benchmark_cases"
+      ]
+    },
+    {
+      "path": "operations/benchmark_ollama_scoring.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/benchmark_ollama_scoring.py",
+      "required_symbols": [
+        "query_validation",
+        "score_decisions",
+        "score_queries"
+      ]
+    },
+    {
+      "path": "operations/benchmark_ollama_reporting.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/benchmark_ollama_reporting.py",
+      "required_symbols": [
+        "benchmark_model",
+        "ns_to_seconds",
+        "write_markdown"
+      ]
+    },
+    {
       "path": "n8n/bin/local_ai_runtime_contract.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/local_ai_runtime_contract.py",

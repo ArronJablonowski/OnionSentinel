@@ -110,7 +110,9 @@ TEST-NET fixtures on a loopback server.
 fixed matrix of synthetic SOC triage, evidence-provenance, PCAP interpretation,
 correlation, incident response, threat hunting, and SIEM safety decisions.
 The tool never reads the live alert database, report corpus, or credentials.
-The executable retains the synthetic decision fixture catalog and stable CLI.
+The executable retains the stable CLI and imports the exact compatibility
+objects from `benchmark_ollama_decision_cases.py`, which owns the immutable
+synthetic decision fixture catalog and its frozen value type.
 Exact installed-model discovery and bounded POST transport live in
 `benchmark_ollama_discovery.py`; deterministic prompt/retry execution lives in
 `benchmark_ollama_execution.py`; generated-query fixtures live in

@@ -41,9 +41,11 @@ def normalized_answer(value: Any) -> str:
     return text[:1] if text[:1] in {"A", "B", "C", "D"} else text
 
 
-def _decision_detail(case: Any, matches: list[dict[str, Any]]) -> dict[str, Any]:
-    item = matches[0] if matches else {}
-    cited_raw = item.get("evidence") if isinstance(item, dict) else []
+def _decision_evidence_checks(
+    case: Any,
+    item: dict[str, Any],
+) -> tuple[set[str], bool, bool]:
+    cited_raw = item.get("evidence")
     cited = {
         str(value).strip() for value in cited_raw
     } if isinstance(cited_raw, list) else set()
@@ -51,12 +53,24 @@ def _decision_detail(case: Any, matches: list[dict[str, Any]]) -> dict[str, Any]
         evidence_id in cited for evidence_id in case.required_evidence
     )
     allowed_evidence = {line.split(None, 1)[0] for line in case.evidence}
-    evidence_scope_ok = bool(cited) and cited.issubset(allowed_evidence)
-    answer_ok = (
-        normalized_answer(item.get("answer")) == case.expected_answer
-        if item else False
-    )
-    rationale_ok = bool(str(item.get("rationale") or "").strip()) if item else False
+    return cited, required_ok, bool(cited) and cited.issubset(allowed_evidence)
+
+
+def _decision_answer_checks(
+    case: Any,
+    item: dict[str, Any],
+) -> tuple[str, bool, bool]:
+    if not item:
+        return "", False, False
+    actual_answer = normalized_answer(item.get("answer"))
+    rationale_ok = bool(str(item.get("rationale") or "").strip())
+    return actual_answer, actual_answer == case.expected_answer, rationale_ok
+
+
+def _decision_detail(case: Any, matches: list[dict[str, Any]]) -> dict[str, Any]:
+    item = matches[0] if matches else {}
+    cited, required_ok, evidence_scope_ok = _decision_evidence_checks(case, item)
+    actual_answer, answer_ok, rationale_ok = _decision_answer_checks(case, item)
     points = (
         (2 if answer_ok else 0)
         + int(required_ok)
@@ -75,7 +89,7 @@ def _decision_detail(case: Any, matches: list[dict[str, Any]]) -> dict[str, Any]
         "rationale_ok": rationale_ok,
         "unique_result_ok": len(matches) == 1,
         "expected_answer": case.expected_answer,
-        "actual_answer": normalized_answer(item.get("answer")) if item else "",
+        "actual_answer": actual_answer,
         "cited_evidence": sorted(cited),
     }
 

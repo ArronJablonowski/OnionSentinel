@@ -14,6 +14,70 @@ def ns_to_seconds(value: Any) -> float:
         return 0.0
 
 
+def _collect_decision_batches(
+    model: str,
+    cases: Sequence[Any],
+    args: Any,
+    repetition: int,
+    run_decisions: Callable[..., dict[str, Any]],
+    score_decisions: Callable[..., dict[str, Any]],
+) -> list[dict[str, Any]]:
+    batches: list[dict[str, Any]] = []
+    for category in sorted({case.category for case in cases}):
+        category_cases = [case for case in cases if case.category == category]
+        print(
+            f"  {model}: {category} repetition "
+            f"{repetition}/{args.repetitions}",
+            flush=True,
+        )
+        run = run_decisions(
+            args.ollama_url,
+            model,
+            category_cases,
+            repetition,
+            args.timeout,
+            args.retries,
+            args.temperature,
+        )
+        batches.append({
+            "category": category,
+            "repetition": repetition,
+            "run": run,
+            "score": score_decisions(category_cases, run),
+        })
+    return batches
+
+
+def _collect_query_batch(
+    model: str,
+    query_cases: Sequence[Any],
+    args: Any,
+    repetition: int,
+    run_queries: Callable[..., dict[str, Any]],
+    score_queries: Callable[..., dict[str, Any]],
+) -> dict[str, Any]:
+    print(
+        f"  {model}: query_generation repetition "
+        f"{repetition}/{args.repetitions}",
+        flush=True,
+    )
+    run = run_queries(
+        args.ollama_url,
+        model,
+        query_cases,
+        repetition,
+        args.timeout,
+        args.retries,
+        args.temperature,
+    )
+    return {
+        "category": "query_generation",
+        "repetition": repetition,
+        "run": run,
+        "score": score_queries(query_cases, run),
+    }
+
+
 def _collect_batches(
     model: str,
     cases: Sequence[Any],
@@ -25,50 +89,23 @@ def _collect_batches(
     score_queries: Callable[..., dict[str, Any]],
 ) -> list[dict[str, Any]]:
     batches: list[dict[str, Any]] = []
-    categories = sorted({case.category for case in cases})
     for repetition in range(1, args.repetitions + 1):
-        for category in categories:
-            category_cases = [case for case in cases if case.category == category]
-            print(
-                f"  {model}: {category} repetition "
-                f"{repetition}/{args.repetitions}",
-                flush=True,
-            )
-            run = run_decisions(
-                args.ollama_url,
-                model,
-                category_cases,
-                repetition,
-                args.timeout,
-                args.retries,
-                args.temperature,
-            )
-            batches.append({
-                "category": category,
-                "repetition": repetition,
-                "run": run,
-                "score": score_decisions(category_cases, run),
-            })
-        print(
-            f"  {model}: query_generation repetition "
-            f"{repetition}/{args.repetitions}",
-            flush=True,
-        )
-        query_run = run_queries(
-            args.ollama_url,
+        batches.extend(_collect_decision_batches(
+            model,
+            cases,
+            args,
+            repetition,
+            run_decisions,
+            score_decisions,
+        ))
+        batches.append(_collect_query_batch(
             model,
             query_cases,
+            args,
             repetition,
-            args.timeout,
-            args.retries,
-            args.temperature,
-        )
-        batches.append({
-            "category": "query_generation",
-            "repetition": repetition,
-            "run": query_run,
-            "score": score_queries(query_cases, query_run),
-        })
+            run_queries,
+            score_queries,
+        ))
     return batches
 
 
@@ -149,15 +186,11 @@ def benchmark_model(
     }
 
 
-def write_markdown(path: Path, payload: dict[str, Any]) -> None:
-    models = sorted(
-        payload["models"],
-        key=lambda item: (-item["percent"], item["wall_seconds_total"]),
-    )
-    categories = sorted({
-        key for item in models for key in item["category_scores"]
-    })
-    lines = [
+def _markdown_header(
+    payload: dict[str, Any],
+    categories: Sequence[str],
+) -> list[str]:
+    return [
         "# Onion Sentinel Local Model Benchmark",
         "",
         f"Generated: {payload['generated_at']}",
@@ -173,21 +206,24 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
         "| :--- | ---: | " + " | ".join("---:" for _ in categories)
         + " | ---: | ---: |",
     ]
-    for item in models:
-        category_values = [
-            f"{item['category_scores'][category]['percent']:.1f}%"
-            for category in categories
-        ]
-        lines.append(
-            "| " + " | ".join([
-                item["model"],
-                f"{item['percent']:.1f}%",
-                *category_values,
-                f"{item['wall_seconds_total']:.1f}s",
-                str(item["generation_tokens_per_second"] or "n/a"),
-            ]) + " |"
-        )
-    lines.extend([
+
+
+def _markdown_model_row(item: dict[str, Any], categories: Sequence[str]) -> str:
+    category_values = [
+        f"{item['category_scores'][category]['percent']:.1f}%"
+        for category in categories
+    ]
+    return "| " + " | ".join([
+        item["model"],
+        f"{item['percent']:.1f}%",
+        *category_values,
+        f"{item['wall_seconds_total']:.1f}s",
+        str(item["generation_tokens_per_second"] or "n/a"),
+    ]) + " |"
+
+
+def _markdown_notes() -> list[str]:
+    return [
         "",
         (
             "Decision scoring: answer 2 points; required evidence 1; "
@@ -202,5 +238,18 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
             "No live alert data is read."
         ),
         "",
-    ])
+    ]
+
+
+def write_markdown(path: Path, payload: dict[str, Any]) -> None:
+    models = sorted(
+        payload["models"],
+        key=lambda item: (-item["percent"], item["wall_seconds_total"]),
+    )
+    categories = sorted({
+        key for item in models for key in item["category_scores"]
+    })
+    lines = _markdown_header(payload, categories)
+    lines.extend(_markdown_model_row(item, categories) for item in models)
+    lines.extend(_markdown_notes())
     path.write_text("\n".join(lines), encoding="utf-8")

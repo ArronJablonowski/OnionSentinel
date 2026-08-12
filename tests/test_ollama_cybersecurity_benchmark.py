@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import importlib.util
+import argparse
 import dataclasses
 import hashlib
 import io
+import importlib.util
 import inspect
 import json
 import sys
@@ -20,6 +21,7 @@ SPEC = importlib.util.spec_from_file_location("ollama_cybersecurity_benchmark", 
 BENCHMARK = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = BENCHMARK
 SPEC.loader.exec_module(BENCHMARK)
+import benchmark_ollama_decision_cases as DECISION_CASES
 
 
 class OllamaCybersecurityBenchmarkTests(unittest.TestCase):
@@ -93,6 +95,12 @@ class OllamaCybersecurityBenchmarkTests(unittest.TestCase):
             hashlib.sha256(model_bytes).hexdigest(),
             "09b2284115f91eb94034fdab1c55069ab8be8d045dec4e39cbd78b2b5f83488b",
         )
+
+    def test_decision_fixture_owner_exports_the_exact_facade_objects(self) -> None:
+        self.assertIs(BENCHMARK.BenchmarkCase, DECISION_CASES.BenchmarkCase)
+        self.assertIs(BENCHMARK._case, DECISION_CASES._case)
+        self.assertIs(BENCHMARK.BENCHMARK_CASES, DECISION_CASES.BENCHMARK_CASES)
+        self.assertIs(BENCHMARK.benchmark_cases, DECISION_CASES.benchmark_cases)
 
     def test_combined_benchmark_corpus_is_exactly_42_cases(self) -> None:
         decision_ids = [case.case_id for case in BENCHMARK.benchmark_cases()]
@@ -183,6 +191,37 @@ class OllamaCybersecurityBenchmarkTests(unittest.TestCase):
         self.assertFalse(request_payload["think"])
         sleep.assert_called_once_with(1.0)
 
+    def test_run_batch_exhaustion_preserves_failure_contract(self) -> None:
+        with (
+            mock.patch.object(
+                BENCHMARK,
+                "_bounded_json_request",
+                side_effect=TimeoutError("bounded fixture timeout"),
+            ) as request,
+            mock.patch.object(BENCHMARK.time, "sleep") as sleep,
+            mock.patch.object(BENCHMARK.time, "monotonic", side_effect=[1.0, 2.0]),
+        ):
+            result = BENCHMARK.run_batch(
+                "http://127.0.0.1:11434/",
+                "model:exact-tag",
+                list(BENCHMARK.benchmark_cases()[:1]),
+                repetition=1,
+                timeout=17,
+                retries=1,
+                temperature=0.0,
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "ok": False,
+                "attempt": 2,
+                "error": "TimeoutError: bounded fixture timeout",
+            },
+        )
+        self.assertEqual(request.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+
     def test_main_filters_models_in_requested_order_and_persists_each_result(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir) / "benchmark.json"
@@ -214,6 +253,50 @@ class OllamaCybersecurityBenchmarkTests(unittest.TestCase):
             self.assertEqual(persisted["skipped_models"], ["missing"])
             self.assertEqual([item["model"] for item in persisted["models"]], ["model-b", "model-a"])
             self.assertIn("Skipping unavailable model(s): missing", stderr.getvalue())
+
+    def test_benchmark_model_preserves_batch_order_and_aggregation(self) -> None:
+        args = argparse.Namespace(
+            ollama_url="http://127.0.0.1:11434",
+            repetitions=2,
+            timeout=17,
+            retries=1,
+            temperature=0.0,
+        )
+        successful_run = {
+            "ok": True,
+            "wall_seconds": 1.0,
+            "ollama_metrics": {"eval_count": 10, "eval_duration": 1_000_000_000},
+        }
+
+        def score(cases, _run):
+            return {"points": len(cases) * 5, "possible": len(cases) * 5}
+
+        with (
+            mock.patch.object(BENCHMARK, "run_batch", return_value=successful_run),
+            mock.patch.object(BENCHMARK, "score_batch", side_effect=score),
+            mock.patch.object(BENCHMARK, "run_query_batch", return_value=successful_run),
+            mock.patch.object(BENCHMARK, "score_query_batch", side_effect=score),
+            mock.patch.object(sys, "stdout", new_callable=io.StringIO),
+        ):
+            result = BENCHMARK.benchmark_model(
+                "model:exact-tag",
+                BENCHMARK.benchmark_cases(),
+                BENCHMARK.query_benchmark_cases(),
+                args,
+            )
+
+        expected_order = [
+            "correlation_cti", "ir_hunting", "network_pcap", "provenance",
+            "siem_safety", "triage", "query_generation",
+        ] * 2
+        self.assertEqual([batch["category"] for batch in result["batches"]], expected_order)
+        self.assertEqual([batch["repetition"] for batch in result["batches"]], [1] * 7 + [2] * 7)
+        self.assertEqual(result["percent"], 100.0)
+        self.assertEqual(result["total_batches"], 14)
+        self.assertEqual(result["successful_batches"], 14)
+        self.assertEqual(result["wall_seconds_total"], 14.0)
+        self.assertEqual(result["wall_seconds_median"], 1.0)
+        self.assertEqual(result["generation_tokens_per_second"], 10.0)
 
     def test_matrix_has_six_balanced_domains_and_unique_ids(self) -> None:
         cases = BENCHMARK.benchmark_cases()
@@ -406,6 +489,10 @@ class OllamaCybersecurityBenchmarkTests(unittest.TestCase):
             BENCHMARK.write_markdown(output, payload)
             rendered = output.read_text(encoding="utf-8")
         self.assertLess(rendered.index("higher"), rendered.index("lower"))
+        self.assertEqual(
+            hashlib.sha256(rendered.encode("utf-8")).hexdigest(),
+            "665a14da26b1ac5fd1c2052b8389ff3006a40f0300f1f7b157637fe3e1063c89",
+        )
 
 
 if __name__ == "__main__":

@@ -51,6 +51,50 @@ def query_batch_prompt(cases: Sequence[Any], repetition: int) -> str:
     return json.dumps(payload, indent=2, sort_keys=False)
 
 
+def _chat_payload(
+    model: str,
+    prompt: str,
+    system_prompt: str,
+    temperature: float,
+    num_predict: int,
+) -> dict[str, Any]:
+    return {
+        "model": model,
+        "stream": False,
+        "think": False,
+        "format": "json",
+        "keep_alive": "10m",
+        "options": {"temperature": temperature, "num_predict": num_predict},
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+    }
+
+
+def _successful_chat_result(
+    response: dict[str, Any],
+    attempt: int,
+    wall_seconds: float,
+) -> dict[str, Any]:
+    content = str(((response.get("message") or {}).get("content")) or "")
+    parsed, parse_mode = extract_json(content)
+    return {
+        "ok": True,
+        "attempt": attempt + 1,
+        "wall_seconds": wall_seconds,
+        "parse_mode": parse_mode,
+        "response": parsed,
+        "ollama_metrics": {
+            key: response.get(key)
+            for key in (
+                "total_duration", "load_duration", "prompt_eval_count",
+                "prompt_eval_duration", "eval_count", "eval_duration",
+            )
+        },
+    }
+
+
 def _run_chat(
     *,
     ollama_url: str,
@@ -65,18 +109,13 @@ def _run_chat(
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
-    request_payload = {
-        "model": model,
-        "stream": False,
-        "think": False,
-        "format": "json",
-        "keep_alive": "10m",
-        "options": {"temperature": temperature, "num_predict": num_predict},
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
-        ],
-    }
+    request_payload = _chat_payload(
+        model,
+        prompt,
+        system_prompt,
+        temperature,
+        num_predict,
+    )
     error: Exception | None = None
     for attempt in range(retries + 1):
         started = monotonic()
@@ -87,22 +126,7 @@ def _run_chat(
                 timeout,
             )
             wall_seconds = monotonic() - started
-            content = str(((response.get("message") or {}).get("content")) or "")
-            parsed, parse_mode = extract_json(content)
-            return {
-                "ok": True,
-                "attempt": attempt + 1,
-                "wall_seconds": wall_seconds,
-                "parse_mode": parse_mode,
-                "response": parsed,
-                "ollama_metrics": {
-                    key: response.get(key)
-                    for key in (
-                        "total_duration", "load_duration", "prompt_eval_count",
-                        "prompt_eval_duration", "eval_count", "eval_duration",
-                    )
-                },
-            }
+            return _successful_chat_result(response, attempt, wall_seconds)
         except (
             OSError,
             TimeoutError,

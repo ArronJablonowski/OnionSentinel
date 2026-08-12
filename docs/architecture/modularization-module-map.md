@@ -3305,11 +3305,11 @@ copies all three implementation modules before the wrapper.
 ## Local Ollama Benchmark
 
 `benchmark-ollama-cybersecurity.py` is the repository-only executable and
-compatibility surface. It owns CLI validation, the immutable synthetic decision
-fixture catalog, exact default model ordering, incremental artifact persistence,
-and exit behavior. At 733 lines it is below the hard review threshold; most of
-its volume is inspectable TEST-NET/example-domain fixture data rather than
-runtime control flow.
+compatibility surface. It owns CLI validation, exact default model ordering,
+incremental artifact persistence, and exit behavior. At 292 lines it is a
+bounded composition root. `benchmark_ollama_decision_cases.py` owns the frozen
+decision-case value type, constructor, and exact 36-case immutable synthetic
+catalog; the executable re-exports those same objects without a wrapper or copy.
 
 `benchmark_ollama_discovery.py` owns size-bounded Ollama JSON transport and exact
 installed-model discovery. `benchmark_ollama_execution.py` owns deterministic
@@ -3317,7 +3317,8 @@ decision/query prompts, retry timing, chat request limits, and response parsing.
 The executable injects its transport and clock/sleep seams so existing tests and
 callers can still patch the historical flat symbols.
 
-`benchmark_ollama_query_cases.py` owns the immutable generated-query catalog.
+`benchmark_ollama_query_cases.py` owns the immutable six-case generated-query
+catalog. Together the fixture owners define the exact 42-case benchmark.
 `benchmark_ollama_scoring.py` owns deterministic evidence, syntax, read-only,
 scope, and bound validation. `benchmark_ollama_reporting.py` owns per-category
 aggregation, performance metrics, and Markdown rendering. These are leaf
