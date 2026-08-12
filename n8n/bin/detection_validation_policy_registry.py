@@ -90,13 +90,32 @@ def _validate_predicate(
         raise ValueError(f"{identifier}.{collection_name} field is unsupported")
     if str(predicate.get("operator") or "equals") not in {"equals", "contains"}:
         raise ValueError(f"{identifier}.{collection_name} operator is unsupported")
-    applies_to_sids = predicate.get("applies_to_sids", [])
+    _validate_applies_to_sids(
+        identifier,
+        collection_name,
+        predicate.get("applies_to_sids", []),
+    )
+    _validate_expected(identifier, collection_name, predicate)
+
+
+def _validate_applies_to_sids(
+    identifier: str,
+    collection_name: str,
+    applies_to_sids: Any,
+) -> None:
     if not isinstance(applies_to_sids, list) or any(
         not re.fullmatch(r"\d{1,20}", str(value)) for value in applies_to_sids
     ):
         raise ValueError(
             f"{identifier}.{collection_name} applies_to_sids is invalid"
         )
+
+
+def _validate_expected(
+    identifier: str,
+    collection_name: str,
+    predicate: dict[str, Any],
+) -> None:
     expected = predicate.get("expected", predicate.get("value"))
     expected_values = expected if isinstance(expected, list) else [expected]
     if not expected_values:
@@ -121,6 +140,16 @@ def _validate_predicates(identifier: str, playbook: dict[str, Any]) -> None:
 def _validate_marker(identifier: str, marker: Any) -> None:
     if not isinstance(marker, dict):
         raise ValueError(f"{identifier}.marker_predicates entries must be objects")
+    _validate_marker_hex(identifier, marker)
+    _validate_marker_offset(identifier, marker)
+    _validate_applies_to_sids(
+        identifier,
+        "marker_predicates",
+        marker.get("applies_to_sids", []),
+    )
+
+
+def _validate_marker_hex(identifier: str, marker: dict[str, Any]) -> None:
     marker_hex = str(marker.get("hex") or "")
     if (
         not marker_hex
@@ -129,6 +158,9 @@ def _validate_marker(identifier: str, marker: Any) -> None:
         or not re.fullmatch(r"[0-9A-Fa-f]+", marker_hex)
     ):
         raise ValueError(f"{identifier}.marker_predicates hex is invalid")
+
+
+def _validate_marker_offset(identifier: str, marker: dict[str, Any]) -> None:
     expected_offset = marker.get("expected_offset")
     if expected_offset is not None and (
         not isinstance(expected_offset, int)
@@ -136,13 +168,6 @@ def _validate_marker(identifier: str, marker: Any) -> None:
         or expected_offset > MAX_PACKET_BYTES
     ):
         raise ValueError(f"{identifier}.marker_predicates expected_offset is invalid")
-    applies_to_sids = marker.get("applies_to_sids", [])
-    if not isinstance(applies_to_sids, list) or any(
-        not re.fullmatch(r"\d{1,20}", str(value)) for value in applies_to_sids
-    ):
-        raise ValueError(
-            f"{identifier}.marker_predicates applies_to_sids is invalid"
-        )
 
 
 def _validate_markers(identifier: str, playbook: dict[str, Any]) -> None:

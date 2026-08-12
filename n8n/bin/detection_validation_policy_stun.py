@@ -61,17 +61,35 @@ def _exact_xbits_operation(state_operation: dict[str, Any]) -> bool:
     )
 
 
+def _validated_message_evidence(
+    candidate_packets: int,
+    stun: dict[str, Any],
+    message_types: dict[str, int],
+    expected: str,
+    packet_features: dict[str, Any],
+) -> bool:
+    if candidate_packets <= 0:
+        return False
+    if int(stun.get("packets_parsed") or 0) != candidate_packets:
+        return False
+    if message_types.get(expected) != candidate_packets:
+        return False
+    if int(packet_features.get("parse_errors") or 0):
+        return False
+    return packet_features.get("truncated") is not True
+
+
 def _infer_stun_response_xbits_state(
     rule_context: dict[str, Any],
     packet_features: dict[str, Any],
     state_operation: dict[str, Any],
 ) -> bool:
     """Infer only the deployed STUN-response xbit from exact validated alert packets."""
-    if (
-        not _exact_response_rule(rule_context)
-        or _identity_conflicts(rule_context)
-        or not _exact_xbits_operation(state_operation)
-    ):
+    if not _exact_response_rule(rule_context):
+        return False
+    if _identity_conflicts(rule_context):
+        return False
+    if not _exact_xbits_operation(state_operation):
         return False
     candidate_packets = int(packet_features.get("candidate_packets") or 0)
     content_packets = int(packet_features.get("content_packets_parsed") or 0)
@@ -79,14 +97,18 @@ def _infer_stun_response_xbits_state(
     if context is None:
         return False
     stun, message_types = context
-    return bool(
-        candidate_packets > 0
-        and candidate_packets == content_packets
-        and int(stun.get("packets_parsed") or 0) == candidate_packets
-        and message_types.get("binding_success_response") == candidate_packets
-        and not int(packet_features.get("parse_errors") or 0)
-        and packet_features.get("truncated") is not True
-        and packet_features.get("source")
+    if candidate_packets != content_packets:
+        return False
+    if not _validated_message_evidence(
+        candidate_packets,
+        stun,
+        message_types,
+        "binding_success_response",
+        packet_features,
+    ):
+        return False
+    return (
+        packet_features.get("source")
         == "stored-security-onion-alert-packet-copies"
     )
 
@@ -106,10 +128,10 @@ def _validated_stun_rule_semantics(
     if context is None:
         return False
     stun, message_types = context
-    return bool(
-        candidate_packets > 0
-        and int(stun.get("packets_parsed") or 0) == candidate_packets
-        and message_types.get(expected) == candidate_packets
-        and not int(packet_features.get("parse_errors") or 0)
-        and packet_features.get("truncated") is not True
+    return _validated_message_evidence(
+        candidate_packets,
+        stun,
+        message_types,
+        expected,
+        packet_features,
     )

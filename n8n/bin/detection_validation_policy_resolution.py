@@ -13,6 +13,22 @@ def _text_constraint_matches(expected: str, actual: str) -> bool:
     return not expected or expected == actual
 
 
+def _identity_conflicted(rule_context: dict[str, Any]) -> bool:
+    conflicts = rule_context.get("identity_conflicts")
+    return isinstance(conflicts, dict) and any(
+        conflicts.get(key) for key in ("sid", "revision")
+    )
+
+
+def _rule_hash(rule_context: dict[str, Any]) -> str:
+    parsed_rule = rule_context.get("parsed_rule")
+    return (
+        str(parsed_rule.get("rule_sha256") or "")
+        if isinstance(parsed_rule, dict)
+        else ""
+    )
+
+
 def _playbook_matches(
     playbook: dict[str, Any],
     *,
@@ -52,17 +68,9 @@ def resolve_detection_playbook(
     sid = str(rule_context.get("sid") or "")
     revision = rule_context.get("revision")
     ruleset = str(rule_context.get("ruleset") or "").strip().casefold()
-    conflicts = rule_context.get("identity_conflicts")
-    if isinstance(conflicts, dict) and any(
-        conflicts.get(key) for key in ("sid", "revision")
-    ):
+    if _identity_conflicted(rule_context):
         return None
-    parsed_rule = rule_context.get("parsed_rule")
-    rule_sha256 = (
-        str(parsed_rule.get("rule_sha256") or "")
-        if isinstance(parsed_rule, dict)
-        else ""
-    )
+    rule_sha256 = _rule_hash(rule_context)
     playbooks = registry.get("playbooks")
     for playbook in playbooks if isinstance(playbooks, list) else []:
         if isinstance(playbook, dict) and _playbook_matches(
