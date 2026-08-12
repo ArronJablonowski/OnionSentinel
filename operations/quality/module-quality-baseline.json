@@ -33,22 +33,6 @@
       "max_complexity": 43,
       "max_lines": 266
     },
-    "n8n/bin/detection_validation_packet.py::_bounded_application_buffers": {
-      "max_complexity": 41,
-      "max_lines": 102
-    },
-    "n8n/bin/detection_validation_packet.py::_content_match_positions": {
-      "max_complexity": 37
-    },
-    "n8n/bin/detection_validation_packet.py::_network_packet_envelope": {
-      "max_complexity": 18
-    },
-    "n8n/bin/detection_validation_packet.py::_ordered_deployed_content_constraints": {
-      "max_complexity": 21
-    },
-    "n8n/bin/detection_validation_packet.py::marker_specs": {
-      "max_complexity": 28
-    },
     "n8n/bin/detection_validation_policy.py::_evaluate_numeric_predicate": {
       "max_complexity": 18
     },

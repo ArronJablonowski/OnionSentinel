@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
 import inspect
 import json
 import struct
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -15,6 +18,13 @@ ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "n8n" / "bin"
 sys.path.insert(0, str(BIN))
 PACKET = importlib.import_module("detection_validation_packet")
+OWNER_FILES = (
+    "detection_validation_packet_network.py",
+    "detection_validation_packet_markers.py",
+    "detection_validation_packet_content.py",
+    "detection_validation_packet_buffers.py",
+    "detection_validation_packet.py",
+)
 
 
 def stun_ipv4_packet(*, ethernet: bool = True, vlan: bool = False) -> bytes:
@@ -211,6 +221,68 @@ class DetectionValidationPacketCharacterizationTests(unittest.TestCase):
             ),
             {},
         )
+
+
+class DetectionValidationPacketArchitectureTests(unittest.TestCase):
+    def test_facade_and_owners_obey_size_and_dependency_boundaries(self):
+        expected_imports = {
+            "detection_validation_packet_network.py": {"detection_validation_rule"},
+            "detection_validation_packet_markers.py": {"detection_validation_rule"},
+            "detection_validation_packet_content.py": {"detection_validation_rule"},
+            "detection_validation_packet_buffers.py": {"detection_validation_rule"},
+            "detection_validation_packet.py": {
+                "detection_validation_rule",
+                "detection_validation_packet_network",
+                "detection_validation_packet_markers",
+                "detection_validation_packet_content",
+                "detection_validation_packet_buffers",
+            },
+        }
+        for name in OWNER_FILES:
+            with self.subTest(name=name):
+                source = (BIN / name).read_text(encoding="utf-8")
+                limit = 250 if name == "detection_validation_packet.py" else 800
+                self.assertLessEqual(len(source.splitlines()), limit)
+                imports = {
+                    node.module
+                    for node in ast.walk(ast.parse(source))
+                    if isinstance(node, ast.ImportFrom)
+                    and node.module
+                    and node.module.startswith("detection_validation")
+                }
+                self.assertEqual(imports, expected_imports[name])
+
+    def test_packet_facade_imports_from_an_isolated_flat_dependency_unit(self):
+        sources = ("detection_validation_rule.py", *OWNER_FILES)
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            for name in sources:
+                (target / name).write_bytes((BIN / name).read_bytes())
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-c",
+                    (
+                        "import sys; sys.path.insert(0, sys.argv[1]); "
+                        "import detection_validation_packet as p; "
+                        "assert p._content_match_positions(b'abc', b'b', "
+                        "{'source':'deployed_rule','buffer':'pkt_data','modifiers':{}}) == [1]"
+                    ),
+                    directory,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_mac_installer_copies_the_complete_packet_dependency_unit(self):
+        installer = (BIN / "install-macstudio-stack.zsh").read_text(encoding="utf-8")
+        for name in OWNER_FILES:
+            with self.subTest(name=name):
+                self.assertIn(f"n8n/bin/{name}", installer)
 
 
 if __name__ == "__main__":

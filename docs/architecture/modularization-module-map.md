@@ -2720,8 +2720,14 @@ claims retain tool, timestamp, direction, coverage, and cleanup provenance.
 
 `n8n/bin/detection_validation.py` is a bounded import-compatibility facade.
 `detection_validation_rule.py` owns deployed-rule and alert metadata parsing;
-`detection_validation_packet.py` owns bounded packet primitives and deployed
-content constraints; `detection_validation_features.py` owns group evidence
+`detection_validation_packet.py` is the stable packet compatibility facade;
+`detection_validation_packet_network.py` owns bounded Ethernet/VLAN/IP/UDP and
+STUN metadata decoding; `detection_validation_packet_markers.py` owns bounded
+counters, entropy, and deployed/playbook marker normalization;
+`detection_validation_packet_content.py` owns the supported Suricata content
+modifier, match-window, and ordered relative-cursor semantics; and
+`detection_validation_packet_buffers.py` owns bounded HTTP, DNS, and TLS sticky
+buffer projection. `detection_validation_features.py` owns group evidence
 aggregation; `detection_validation_policy.py` owns versioned playbooks and
 deterministic predicate policy; and `detection_validation_result.py` owns the
 conclusion-safe public result projection.
@@ -2730,7 +2736,10 @@ The dependency chain is acyclic and never points back to the facade. A rule
 match remains an evidence fact rather than an independent malicious verdict.
 Unsupported fields, missing coverage, negative evidence, rule identity drift,
 and confidence limiters remain explicit and fail closed. The installer stages
-the complete module set beside every runtime consumer.
+the complete flat module set beside every runtime consumer. Packet bytes and
+decoded application payloads remain confined to the bounded feature pipeline;
+only counts, offsets, protocol semantics, and allowlisted buffer predicates
+cross into deterministic result projection.
 
 ## Software Inventory Collector
 
