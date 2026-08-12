@@ -1,4 +1,5 @@
 import datetime as dt
+import gc
 import importlib.util
 import json
 import os
@@ -6,6 +7,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+import warnings
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,6 +44,20 @@ class HarnessObservabilityTests(unittest.TestCase):
             connection.execute("INSERT INTO harness_model_calls VALUES ('codex-cli','gpt-test','native','failed',60000)")
             connection.execute("INSERT INTO harness_tool_calls VALUES ('elastic','events.read','ok',0)")
         return path
+
+    def test_database_fixture_closes_its_connection(self):
+        gc.collect()
+        with tempfile.TemporaryDirectory() as directory:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", ResourceWarning)
+                self.make_database(Path(directory))
+                gc.collect()
+        unclosed = [
+            warning
+            for warning in caught
+            if "unclosed database" in str(warning.message)
+        ]
+        self.assertEqual(unclosed, [])
 
     def test_report_is_aggregate_and_marks_unavailable_usage(self):
         with tempfile.TemporaryDirectory() as directory:

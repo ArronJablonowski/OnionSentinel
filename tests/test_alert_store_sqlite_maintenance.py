@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import os
 from pathlib import Path
 import shlex
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +87,19 @@ class AlertStoreSqliteMaintenancePermissionsTests(unittest.TestCase):
     def create_valid_database(self) -> None:
         with sqlite3.connect(self.database) as connection:
             connection.executescript(SCHEMA)
+
+    def test_database_fixture_closes_its_connection(self) -> None:
+        gc.collect()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            self.create_valid_database()
+            gc.collect()
+        unclosed = [
+            warning
+            for warning in caught
+            if "unclosed database" in str(warning.message)
+        ]
+        self.assertEqual(unclosed, [])
 
     def assert_owner_only_regular_files(self, directory: Path) -> None:
         for child in directory.iterdir():

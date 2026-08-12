@@ -1,3 +1,4 @@
+import gc
 import importlib.util
 import json
 import os
@@ -5,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+import warnings
 from unittest import mock
 
 
@@ -42,6 +44,20 @@ class ReadinessTests(unittest.TestCase):
             with sqlite3.connect(stack / "alert_store_data" / name) as connection:
                 connection.execute("CREATE TABLE metadata (value TEXT)")
         return stack
+
+    def test_stack_fixture_closes_database_connections(self):
+        gc.collect()
+        with tempfile.TemporaryDirectory() as directory:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", ResourceWarning)
+                self.make_stack(Path(directory))
+                gc.collect()
+        unclosed = [
+            warning
+            for warning in caught
+            if "unclosed database" in str(warning.message)
+        ]
+        self.assertEqual(unclosed, [])
 
     def test_snapshot_is_bounded_secret_safe_and_read_only(self):
         with tempfile.TemporaryDirectory() as directory:
