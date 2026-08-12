@@ -1227,6 +1227,39 @@
       ]
     },
     {
+      "path": "n8n/bin/detection_validation_rule_contract.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation_rule_contract.py",
+      "required_symbols": [
+        "MAX_PACKET_BYTES",
+        "PLAYBOOK_SCHEMA"
+      ]
+    },
+    {
+      "path": "n8n/bin/detection_validation_rule_parser.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation_rule_parser.py",
+      "required_symbols": [
+        "parse_suricata_rule"
+      ]
+    },
+    {
+      "path": "n8n/bin/detection_validation_rule_context.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation_rule_context.py",
+      "required_symbols": [
+        "extract_rule_context"
+      ]
+    },
+    {
+      "path": "n8n/bin/detection_validation_rule_icmp.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation_rule_icmp.py",
+      "required_symbols": [
+        "_icmp_from_packet"
+      ]
+    },
+    {
       "path": "n8n/bin/detection_validation_rule.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/detection_validation_rule.py",

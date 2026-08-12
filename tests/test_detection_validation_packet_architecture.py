@@ -253,7 +253,14 @@ class DetectionValidationPacketArchitectureTests(unittest.TestCase):
                 self.assertEqual(imports, expected_imports[name])
 
     def test_packet_facade_imports_from_an_isolated_flat_dependency_unit(self):
-        sources = ("detection_validation_rule.py", *OWNER_FILES)
+        sources = (
+            "detection_validation_rule_contract.py",
+            "detection_validation_rule_parser.py",
+            "detection_validation_rule_context.py",
+            "detection_validation_rule_icmp.py",
+            "detection_validation_rule.py",
+            *OWNER_FILES,
+        )
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory)
             for name in sources:

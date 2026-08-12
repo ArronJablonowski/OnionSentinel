@@ -260,6 +260,10 @@ class DetectionValidationPolicyArchitectureTests(unittest.TestCase):
 
     def test_policy_facade_imports_from_an_isolated_flat_dependency_unit(self):
         sources = (
+            "detection_validation_rule_contract.py",
+            "detection_validation_rule_parser.py",
+            "detection_validation_rule_context.py",
+            "detection_validation_rule_icmp.py",
             "detection_validation_rule.py",
             "detection_validation_packet_network.py",
             "detection_validation_packet_markers.py",

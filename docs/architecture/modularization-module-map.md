@@ -2719,7 +2719,13 @@ claims retain tool, timestamp, direction, coverage, and cleanup provenance.
 ## Detection Validation
 
 `n8n/bin/detection_validation.py` is a bounded import-compatibility facade.
-`detection_validation_rule.py` owns deployed-rule and alert metadata parsing;
+`detection_validation_rule.py` is the stable rule compatibility facade;
+`detection_validation_rule_contract.py` owns shared bounds, constants, and
+bounded JSON/row primitives; `detection_validation_rule_parser.py` owns
+Suricata option, content, modifier, state-operation, and predicate parsing;
+`detection_validation_rule_context.py` owns exact alert/deployed-rule identity
+projection and conflict evidence; `detection_validation_rule_icmp.py` owns
+bounded Ethernet, VLAN, IPv4, IPv6, and ICMP metadata decoding;
 `detection_validation_packet.py` is the stable packet compatibility facade;
 `detection_validation_packet_network.py` owns bounded Ethernet/VLAN/IP/UDP and
 STUN metadata decoding; `detection_validation_packet_markers.py` owns bounded
