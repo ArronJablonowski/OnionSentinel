@@ -127,6 +127,118 @@ def _audit_log_fields(event: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _event_payload(payload: Mapping[str, Any]) -> tuple[str, str]:
+    payload_value = bounded_metadata(payload)
+    payload_json = canonical_json(payload_value)
+    payload_sha256 = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    return payload_json, payload_sha256
+
+
+def _existing_event(
+    connection: sqlite3.Connection,
+    *,
+    run_id: str,
+    idempotency_key: str,
+    event_type: str,
+    stage: str,
+    payload_sha256: str,
+) -> dict[str, Any] | None:
+    existing = connection.execute(
+        """
+        SELECT * FROM harness_events
+        WHERE run_id = ? AND idempotency_key = ?
+        """,
+        (run_id, idempotency_key),
+    ).fetchone()
+    if existing is None:
+        return None
+    if (
+        existing["event_type"] != event_type
+        or existing["stage"] != stage
+        or existing["payload_sha256"] != payload_sha256
+    ):
+        raise HarnessIntegrityError(
+            "idempotency key was reused with different event content"
+        )
+    return dict(existing)
+
+
+def _event_chain_head(
+    connection: sqlite3.Connection,
+    run_id: str,
+) -> tuple[int, str]:
+    previous = connection.execute(
+        """
+        SELECT sequence, event_sha256
+        FROM harness_events
+        WHERE run_id = ?
+        ORDER BY sequence DESC
+        LIMIT 1
+        """,
+        (run_id,),
+    ).fetchone()
+    sequence = int(previous["sequence"]) + 1 if previous else 1
+    previous_hash = str(previous["event_sha256"]) if previous else "0" * 64
+    return sequence, previous_hash
+
+
+def _event_identity(
+    *,
+    run_id: str,
+    sequence: int,
+    idempotency_key: str,
+    event_type: str,
+    stage: str,
+    created_at: str | None,
+    payload_sha256: str,
+    previous_hash: str,
+) -> tuple[dict[str, Any], str, str]:
+    body = {
+        "run_id": run_id,
+        "sequence": sequence,
+        "idempotency_key": idempotency_key,
+        "event_type": event_type,
+        "stage": stage,
+        "created_at": created_at or utc_now(),
+        "payload_sha256": payload_sha256,
+        "previous_event_sha256": previous_hash,
+    }
+    event_sha256 = digest_json(body)
+    return body, event_sha256, f"evt-{event_sha256[:32]}"
+
+
+def _insert_event(
+    connection: sqlite3.Connection,
+    *,
+    body: Mapping[str, Any],
+    event_id: str,
+    payload_json: str,
+    event_sha256: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO harness_events(
+            run_id, sequence, event_id, idempotency_key, event_type,
+            stage, created_at, payload_json, payload_sha256,
+            previous_event_sha256, event_sha256
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            body["run_id"],
+            body["sequence"],
+            event_id,
+            body["idempotency_key"],
+            body["event_type"],
+            body["stage"],
+            body["created_at"],
+            payload_json,
+            body["payload_sha256"],
+            body["previous_event_sha256"],
+            event_sha256,
+        ),
+    )
+
+
 @contextlib.contextmanager
 def _connect(path: Path) -> Iterable[sqlite3.Connection]:
     if path.is_symlink():
@@ -228,72 +340,34 @@ class HarnessStoreFoundation:
         idempotency_key: str,
         created_at: str | None = None,
     ) -> dict[str, Any]:
-        payload_value = bounded_metadata(payload)
-        payload_json = canonical_json(payload_value)
-        payload_sha256 = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
-        existing = connection.execute(
-            """
-            SELECT * FROM harness_events
-            WHERE run_id = ? AND idempotency_key = ?
-            """,
-            (run_id, idempotency_key),
-        ).fetchone()
+        payload_json, payload_sha256 = _event_payload(payload)
+        existing = _existing_event(
+            connection,
+            run_id=run_id,
+            idempotency_key=idempotency_key,
+            event_type=event_type,
+            stage=stage,
+            payload_sha256=payload_sha256,
+        )
         if existing is not None:
-            if (
-                existing["event_type"] != event_type
-                or existing["stage"] != stage
-                or existing["payload_sha256"] != payload_sha256
-            ):
-                raise HarnessIntegrityError(
-                    "idempotency key was reused with different event content"
-                )
-            return dict(existing)
-        previous = connection.execute(
-            """
-            SELECT sequence, event_sha256
-            FROM harness_events
-            WHERE run_id = ?
-            ORDER BY sequence DESC
-            LIMIT 1
-            """,
-            (run_id,),
-        ).fetchone()
-        sequence = int(previous["sequence"]) + 1 if previous else 1
-        previous_hash = str(previous["event_sha256"]) if previous else "0" * 64
-        created_at = created_at or utc_now()
-        body = {
-            "run_id": run_id,
-            "sequence": sequence,
-            "idempotency_key": idempotency_key,
-            "event_type": event_type,
-            "stage": stage,
-            "created_at": created_at,
-            "payload_sha256": payload_sha256,
-            "previous_event_sha256": previous_hash,
-        }
-        event_sha256 = digest_json(body)
-        event_id = f"evt-{event_sha256[:32]}"
-        connection.execute(
-            """
-            INSERT INTO harness_events(
-                run_id, sequence, event_id, idempotency_key, event_type,
-                stage, created_at, payload_json, payload_sha256,
-                previous_event_sha256, event_sha256
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                run_id,
-                sequence,
-                event_id,
-                idempotency_key,
-                event_type,
-                stage,
-                created_at,
-                payload_json,
-                payload_sha256,
-                previous_hash,
-                event_sha256,
-            ),
+            return existing
+        sequence, previous_hash = _event_chain_head(connection, run_id)
+        body, event_sha256, event_id = _event_identity(
+            run_id=run_id,
+            sequence=sequence,
+            idempotency_key=idempotency_key,
+            event_type=event_type,
+            stage=stage,
+            created_at=created_at,
+            payload_sha256=payload_sha256,
+            previous_hash=previous_hash,
+        )
+        _insert_event(
+            connection,
+            body=body,
+            event_id=event_id,
+            payload_json=payload_json,
+            event_sha256=event_sha256,
         )
         return {
             **body,

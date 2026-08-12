@@ -21,15 +21,20 @@ def function_metrics(name: str) -> tuple[int, int]:
     tree = ast.parse(
         (BIN / "harness_store_foundation.py").read_text(encoding="utf-8")
     )
-    class_name, function_name = name.split(".", 1)
-    owner = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == class_name
-    )
+    if "." in name:
+        class_name, function_name = name.split(".", 1)
+        owner = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == class_name
+        )
+        candidates = owner.body
+    else:
+        function_name = name
+        candidates = tree.body
     target = next(
         node
-        for node in owner.body
+        for node in candidates
         if isinstance(node, ast.FunctionDef) and node.name == function_name
     )
     complexity = 1
@@ -168,7 +173,7 @@ class HarnessStoreEventChainProjectionTests(unittest.TestCase):
             )
         return result, trace
 
-    def test_static_signature_and_current_debt_are_exact(self) -> None:
+    def test_static_signature_and_changed_functions_are_within_budget(self) -> None:
         self.assertEqual(
             str(
                 inspect.signature(
@@ -177,10 +182,18 @@ class HarnessStoreEventChainProjectionTests(unittest.TestCase):
             ),
             "(connection: 'sqlite3.Connection', *, run_id: 'str', event_type: 'str', stage: 'str', payload: 'Mapping[str, Any]', idempotency_key: 'str', created_at: 'str | None' = None) -> 'dict[str, Any]'",
         )
-        self.assertEqual(
-            function_metrics("HarnessStoreFoundation._append_event_tx"),
-            (83, 8),
-        )
+        for name in (
+            "_event_payload",
+            "_existing_event",
+            "_event_chain_head",
+            "_event_identity",
+            "_insert_event",
+            "HarnessStoreFoundation._append_event_tx",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
 
     def test_new_event_preserves_payload_chain_insert_and_result_projection(self) -> None:
         trace = []
