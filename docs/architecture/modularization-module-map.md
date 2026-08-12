@@ -2887,7 +2887,8 @@ facade and the modularization contract verifies their runtime symbols.
 ## AC Hunter Review
 
 `onion-sentinel-dashboard/ac_hunter_review.py` is a bounded compatibility
-facade. Configuration policy lives in `ac_hunter_config.py`; owner-only,
+facade. Configuration policy and pure numeric/ISO timestamp admission live in
+`ac_hunter_config.py`; owner-only,
 no-follow, descriptor-identity-checked bounded trust-file I/O lives in
 `ac_hunter_secure_files.py`; deterministic schema, fixed-route, path,
 distinctness, and numeric-bound admission lives in

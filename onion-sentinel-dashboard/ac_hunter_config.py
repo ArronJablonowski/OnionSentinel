@@ -123,14 +123,18 @@ def _utc_iso(epoch: Optional[float] = None) -> str:
     )
 
 
+def _admit_numeric_timestamp(value: object) -> Optional[float]:
+    number = float(value)
+    if number > 10_000_000_000:
+        number /= 1000.0
+    return number if 0 < number < 100_000_000_000 else None
+
+
 def _parse_timestamp(value: object) -> Optional[float]:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        number = float(value)
-        if number > 10_000_000_000:
-            number /= 1000.0
-        return number if 0 < number < 100_000_000_000 else None
+        return _admit_numeric_timestamp(value)
     text = str(value or "").strip()
     if not text or len(text) > 80:
         return None

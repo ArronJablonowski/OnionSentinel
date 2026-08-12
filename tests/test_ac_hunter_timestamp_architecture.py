@@ -70,7 +70,10 @@ class AcHunterTimestampArchitectureTests(unittest.TestCase):
         signature = inspect.signature(self.config._parse_timestamp)
         self.assertEqual(list(signature.parameters), ["value"])
         self.assertEqual(str(signature.return_annotation), "Optional[float]")
-        self.assertEqual(function_metrics("_parse_timestamp"), (20, 11))
+        for name in ("_admit_numeric_timestamp", "_parse_timestamp"):
+            lines, complexity = function_metrics(name)
+            self.assertLessEqual(lines, 50)
+            self.assertLessEqual(complexity, 10)
         self.assertIs(self.scoring._parse_timestamp, self.config._parse_timestamp)
         self.assertIs(self.service._parse_timestamp, self.config._parse_timestamp)
         self.assertLessEqual(len(CONFIG_PATH.read_text().splitlines()), 600)
