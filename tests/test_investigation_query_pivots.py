@@ -347,6 +347,10 @@ class InvestigationQueryContractTests(unittest.TestCase):
             "_path_values", "_observable_matches",
             "_event_tuple_value_matches", "_validate_hit_source",
             "_validate_pivot_result", "_validate_control",
+            "_index_matches_scope", "_normalize_event_tuple",
+            "_normalize_observable", "_parse_utc", "_require_exact_keys",
+            "_require_mapping", "_event_tuple_query_fields",
+            "_expected_execution_digest",
         }
         self.assertFalse(expected_names.difference(vars(QUERY_RESPONSE)))
         self.assertEqual(
@@ -392,6 +396,9 @@ class InvestigationQueryContractTests(unittest.TestCase):
                 "investigation_query_normalization.py",
                 "investigation_query_authorization.py",
                 "investigation_query_rendering.py",
+                "investigation_query_response_control.py",
+                "investigation_query_response_result.py",
+                "investigation_query_response_source.py",
                 "investigation_query_response.py",
             )
         ]

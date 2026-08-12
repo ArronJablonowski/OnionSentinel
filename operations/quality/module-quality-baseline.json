@@ -144,20 +144,6 @@
     "n8n/bin/investigation_query_normalization.py::_normalize_event_tuple": {
       "max_complexity": 19
     },
-    "n8n/bin/investigation_query_response.py::_validate_control": {
-      "max_complexity": 64,
-      "max_lines": 228
-    },
-    "n8n/bin/investigation_query_response.py::_validate_hit_source": {
-      "max_complexity": 21
-    },
-    "n8n/bin/investigation_query_response.py::_validate_pivot_result": {
-      "max_complexity": 61,
-      "max_lines": 138
-    },
-    "n8n/bin/investigation_query_response.py::validate_investigation_query_response": {
-      "max_complexity": 20
-    },
     "n8n/bin/investigation_skills.py::load_investigation_skills": {
       "max_complexity": 16
     },
@@ -405,5 +391,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "4750e34b2be48183963f413767e1a0544d9db18e"
+  "source_release": "d5860e2708063e198e58b38d58a6d9c7f2edc39f"
 }

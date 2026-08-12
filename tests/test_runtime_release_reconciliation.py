@@ -183,7 +183,10 @@ class RuntimeReleaseReconciliationTests(unittest.TestCase):
         report = self._reconcile()
         self.assertTrue(report["ok"])
         self.assertEqual(report["investigation_query_contract"], "v2")
-        self.assertEqual(report["counts"]["match"], 10)
+        self.assertEqual(
+            report["counts"]["match"],
+            5 + len(reconciliation.V2_QUERY_DEPENDENCIES),
+        )
 
     def test_unrecognized_contract_fails_without_claiming_a_version(self) -> None:
         self._runtime_write("bin/investigation_query_contract.py", "corrupt\n")

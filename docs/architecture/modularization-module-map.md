@@ -2578,9 +2578,16 @@ then normalizes those results at the composition boundary.
 `n8n/bin/investigation_query_contract.py` is a bounded compatibility facade for
 the v2 investigation-query wire contract. The governed implementation is split
 into `investigation_query_schema.py`, `investigation_query_normalization.py`,
-`investigation_query_authorization.py`, `investigation_query_rendering.py`, and
-`investigation_query_response.py`. Dependencies flow in that order and remain
-acyclic; authorization and response validation continue to fail closed.
+`investigation_query_authorization.py`, and `investigation_query_rendering.py`.
+`investigation_query_response.py` is the stable response-validation facade;
+`investigation_query_response_source.py` owns ECS projection, time-window,
+dataset, observable, and event-tuple binding;
+`investigation_query_response_result.py` owns coverage and per-query execution
+validation; and
+`investigation_query_response_control.py` owns positive/negative control
+authentication. Response owners depend only on the earlier contract layers and
+the source owner, while the facade composes them, so the graph remains acyclic
+and authorization and response validation continue to fail closed.
 
 The versioned runtime installer atomically installs the complete v2 module tree
 only after the exact v2 contract is selected. The bundled v1 facade, collector,

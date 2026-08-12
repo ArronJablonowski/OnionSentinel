@@ -1054,6 +1054,33 @@
       ]
     },
     {
+      "path": "n8n/bin/investigation_query_response_source.py",
+      "deployment": "versioned-query-runtime",
+      "runtime_path": "$STACK_DIR/bin/investigation_query_response_source.py",
+      "required_symbols": [
+        "_leaf_items",
+        "_path_values",
+        "_validate_hit_source"
+      ]
+    },
+    {
+      "path": "n8n/bin/investigation_query_response_result.py",
+      "deployment": "versioned-query-runtime",
+      "runtime_path": "$STACK_DIR/bin/investigation_query_response_result.py",
+      "required_symbols": [
+        "_validate_pivot_result",
+        "result_coverage"
+      ]
+    },
+    {
+      "path": "n8n/bin/investigation_query_response_control.py",
+      "deployment": "versioned-query-runtime",
+      "runtime_path": "$STACK_DIR/bin/investigation_query_response_control.py",
+      "required_symbols": [
+        "_validate_control"
+      ]
+    },
+    {
       "path": "n8n/bin/investigation_query_response.py",
       "deployment": "versioned-query-runtime",
       "runtime_path": "$STACK_DIR/bin/investigation_query_response.py",

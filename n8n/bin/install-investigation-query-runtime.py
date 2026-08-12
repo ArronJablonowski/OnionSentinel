@@ -31,6 +31,9 @@ V2_QUERY_DEPENDENCIES = (
     "investigation_query_normalization.py",
     "investigation_query_authorization.py",
     "investigation_query_rendering.py",
+    "investigation_query_response_source.py",
+    "investigation_query_response_result.py",
+    "investigation_query_response_control.py",
     "investigation_query_response.py",
 )
 HARDENED_BUILDER = "build-ai-investigation-prompt.py"
