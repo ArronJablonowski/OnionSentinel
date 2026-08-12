@@ -2285,6 +2285,9 @@ Every builder layer is below 600 lines and is installed beside the entrypoint.
 The publication owner keeps ordered static-page dispatch in bounded internal
 helpers; double-private helper names are excluded from the composed runtime so
 the historical flat namespace and late-bound override surface remain exact.
+The report-core owner likewise keeps ordered AI-summary title policy in an
+immutable double-private table, preserving exact match precedence and fallback
+bytes without adding compatibility-surface names.
 
 | Boundary | Responsibilities |
 | --- | --- |

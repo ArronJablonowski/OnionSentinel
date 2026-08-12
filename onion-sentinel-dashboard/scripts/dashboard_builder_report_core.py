@@ -343,23 +343,45 @@ def compact_minute_timestamp(value: str) -> str:
         return text
     date, minute, offset = match.groups()
     return f'{date}  {minute}{offset or ""}'
-
+__AI_SUMMARY_TITLE_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ('cins active threat', 'poor reputation'),
+        'IP reputation hit observed in threat intelligence feeds. '
+        'Review related SSH or external connection activity.',
+    ),
+    (
+        ('ssh scan outbound',),
+        'Outbound SSH scanning activity detected. Multiple destination '
+        'attempts may indicate reconnaissance or misconfiguration.',
+    ),
+    (
+        ('potential ssh scan',),
+        'SSH scanning behavior identified. Review source host, destination '
+        'spread, and authentication telemetry.',
+    ),
+    (
+        ('telegram api certificate',),
+        'Telegram API certificate observed in traffic. Validate expected '
+        'application use and possible exfiltration channel.',
+    ),
+    (
+        ('curl user-agent', 'dotted quad'),
+        'Direct-IP curl-style traffic observed. Review process context and '
+        'destination reputation.',
+    ),
+    (
+        ('abused hosting domain', 'azurewebsites'),
+        'Potential abused hosting infrastructure observed. Review DNS/TLS '
+        'context and related endpoint activity.',
+    ),
+)
 
 
 def ai_summary_for(report: AlertReport) -> str:
     title = report.title.lower()
-    if 'cins active threat' in title or 'poor reputation' in title:
-        return 'IP reputation hit observed in threat intelligence feeds. Review related SSH or external connection activity.'
-    if 'ssh scan outbound' in title:
-        return 'Outbound SSH scanning activity detected. Multiple destination attempts may indicate reconnaissance or misconfiguration.'
-    if 'potential ssh scan' in title:
-        return 'SSH scanning behavior identified. Review source host, destination spread, and authentication telemetry.'
-    if 'telegram api certificate' in title:
-        return 'Telegram API certificate observed in traffic. Validate expected application use and possible exfiltration channel.'
-    if 'curl user-agent' in title or 'dotted quad' in title:
-        return 'Direct-IP curl-style traffic observed. Review process context and destination reputation.'
-    if 'abused hosting domain' in title or 'azurewebsites' in title:
-        return 'Potential abused hosting infrastructure observed. Review DNS/TLS context and related endpoint activity.'
+    for title_fragments, message in __AI_SUMMARY_TITLE_RULES:
+        if any(fragment in title for fragment in title_fragments):
+            return message
     return report.summary[:170] + ('…' if len(report.summary) > 170 else '')
 
 
