@@ -54,6 +54,7 @@ from investigation_query_contract import (  # noqa: E402
     validate_investigation_query_response,
 )
 import investigation_query_response as QUERY_RESPONSE  # noqa: E402
+import investigation_query_authorization as QUERY_AUTHORIZATION  # noqa: E402
 
 
 def load_source_module(name: str, path: Path):
@@ -332,6 +333,58 @@ def valid_response(request: dict) -> dict:
 
 
 class InvestigationQueryContractTests(unittest.TestCase):
+    def test_authorization_compatibility_surface_and_signatures_are_stable(self) -> None:
+        names = sorted(
+            name for name in vars(QUERY_AUTHORIZATION)
+            if not name.startswith("__")
+        )
+        self.assertEqual(len(names), 67)
+        self.assertEqual(
+            hashlib.sha256("\n".join(names).encode("utf-8")).hexdigest(),
+            "18d9e072355674eaab2750d2b1cd1ff7b8de8fa987cc27198bd197d82d727bf0",
+        )
+        self.assertIsNone(getattr(QUERY_AUTHORIZATION, "__all__", None))
+        expected_signatures = {
+            "authorize_investigation_query_request": "(proposal: 'object', authorization_context: 'object') -> 'dict[str, Any]'",
+            "validate_investigation_query_request": "(payload: 'object', *, authorization_context: 'object | None' = None, allowed_observables: 'object | None' = None, allowed_windows: 'object | None' = None) -> 'dict[str, Any]'",
+            "validate_authorized_investigation_query_request": "(payload: 'object') -> 'dict[str, Any]'",
+        }
+        self.assertEqual(
+            {
+                name: str(inspect.signature(getattr(QUERY_AUTHORIZATION, name)))
+                for name in expected_signatures
+            },
+            expected_signatures,
+        )
+
+    def test_authorization_imports_from_an_isolated_flat_bin(self) -> None:
+        sources = [
+            BIN_DIR / name
+            for name in (
+                "investigation_query_schema.py",
+                "investigation_query_normalization.py",
+                "investigation_query_authorization.py",
+            )
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            for source in sources:
+                (Path(directory) / source.name).write_bytes(source.read_bytes())
+            result = subprocess.run(
+                [
+                    sys.executable, "-I", "-B", "-c",
+                    (
+                        "import sys; sys.path.insert(0, sys.argv[1]); "
+                        "import investigation_query_authorization"
+                    ),
+                    directory,
+                ],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_response_compatibility_surface_and_signatures_are_stable(self) -> None:
         expected_names = {
             "ALLOWED_AGGREGATIONS", "ALLOWED_DIALECTS", "ALLOWED_PURPOSES",
