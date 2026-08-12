@@ -38,31 +38,106 @@ def load_history(path: Path) -> tuple[list[dict[str, object]], int]:
     return samples, malformed
 
 
-def summarize(samples: list[dict[str, object]], *, required_hours: int = 48) -> dict[str, object]:
-    if not samples:
-        return {"status": "failed", "qualified": False, "reason": "no valid SLO samples", "sample_count": 0}
-    healthy_since = parse_timestamp(dict(samples[-1].get("soak") or {}).get("healthy_since"))
-    if healthy_since is None:
-        return {"status": "failed", "qualified": False, "reason": "current healthy soak clock is not running", "sample_count": len(samples)}
-    window = [item for item in samples if parse_timestamp(item["generated_at"]) >= healthy_since]
+def _current_healthy_since(samples: list[dict[str, object]]) -> dt.datetime | None:
+    soak = dict(samples[-1].get("soak") or {})
+    return parse_timestamp(soak.get("healthy_since"))
+
+
+def _soak_window(
+    samples: list[dict[str, object]],
+    healthy_since: dt.datetime,
+) -> tuple[list[dict[str, object]], list[dt.datetime]]:
+    window = [
+        item
+        for item in samples
+        if parse_timestamp(item["generated_at"]) >= healthy_since
+    ]
     timestamps = [parse_timestamp(item["generated_at"]) for item in window]
-    first, last = timestamps[0], timestamps[-1]
-    elapsed_seconds = max(0, int((last - healthy_since).total_seconds()))
+    return window, timestamps
+
+
+def _window_metrics(
+    window: list[dict[str, object]],
+    timestamps: list[dt.datetime],
+    healthy_since: dt.datetime,
+) -> tuple[int, int, float, int]:
+    elapsed_seconds = max(0, int((timestamps[-1] - healthy_since).total_seconds()))
     expected_samples = max(1, int(elapsed_seconds / 300) + 1)
     coverage = min(1.0, len(window) / expected_samples)
-    gaps = [int((right - left).total_seconds()) for left, right in zip(timestamps, timestamps[1:])]
-    max_gap = max(gaps, default=0)
+    gaps = [
+        int((right - left).total_seconds())
+        for left, right in zip(timestamps, timestamps[1:])
+    ]
+    return elapsed_seconds, expected_samples, coverage, max(gaps, default=0)
+
+
+def _window_failures(
+    window: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[str]]:
     failed = [item for item in window if not item.get("ok")]
-    failure_reasons = sorted({str(reason) for item in failed for reason in (item.get("failures") or [])})
-    signal_names = sorted({str(key) for item in window for key in dict(item.get("signals") or {})})
+    reasons = sorted(
+        {
+            str(reason)
+            for item in failed
+            for reason in (item.get("failures") or [])
+        }
+    )
+    return failed, reasons
+
+
+def _signal_maxima(window: list[dict[str, object]]) -> dict[str, float | int | None]:
+    names = sorted(
+        {str(key) for item in window for key in dict(item.get("signals") or {})}
+    )
     maxima: dict[str, float | int | None] = {}
-    for name in signal_names:
+    for name in names:
         values = [dict(item.get("signals") or {}).get(name) for item in window]
         numbers = [value for value in values if isinstance(value, (int, float))]
         maxima[name] = max(numbers) if numbers else None
+    return maxima
+
+
+def _qualification_status(
+    *,
+    elapsed_seconds: int,
+    required_seconds: int,
+    failed: list[dict[str, object]],
+    coverage: float,
+    max_gap: int,
+) -> tuple[bool, str]:
+    qualified = (
+        elapsed_seconds >= required_seconds
+        and not failed
+        and coverage >= 0.90
+        and max_gap <= 12 * 60
+    )
+    status = "passed" if qualified else (
+        "in_progress" if elapsed_seconds < required_seconds and not failed else "failed"
+    )
+    return qualified, status
+
+
+def summarize(samples: list[dict[str, object]], *, required_hours: int = 48) -> dict[str, object]:
+    if not samples:
+        return {"status": "failed", "qualified": False, "reason": "no valid SLO samples", "sample_count": 0}
+    healthy_since = _current_healthy_since(samples)
+    if healthy_since is None:
+        return {"status": "failed", "qualified": False, "reason": "current healthy soak clock is not running", "sample_count": len(samples)}
+    window, timestamps = _soak_window(samples, healthy_since)
+    first, last = timestamps[0], timestamps[-1]
+    elapsed_seconds, expected_samples, coverage, max_gap = _window_metrics(
+        window, timestamps, healthy_since
+    )
+    failed, failure_reasons = _window_failures(window)
+    maxima = _signal_maxima(window)
     required_seconds = required_hours * 60 * 60
-    qualified = elapsed_seconds >= required_seconds and not failed and coverage >= 0.90 and max_gap <= 12 * 60
-    status = "passed" if qualified else ("in_progress" if elapsed_seconds < required_seconds and not failed else "failed")
+    qualified, status = _qualification_status(
+        elapsed_seconds=elapsed_seconds,
+        required_seconds=required_seconds,
+        failed=failed,
+        coverage=coverage,
+        max_gap=max_gap,
+    )
     return {
         "status": status,
         "qualified": qualified,

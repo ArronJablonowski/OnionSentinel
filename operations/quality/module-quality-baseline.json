@@ -30,9 +30,6 @@
       "max_complexity": 17,
       "max_lines": 114
     },
-    "n8n/bin/report-production-soak.py::summarize": {
-      "max_complexity": 28
-    },
     "n8n/bin/verify-agent-memory.py::verify_setup": {
       "max_complexity": 20
     },

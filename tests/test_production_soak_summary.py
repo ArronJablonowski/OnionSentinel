@@ -1,12 +1,15 @@
+import ast
 import copy
 import datetime as dt
 import importlib.util
+import json
 from pathlib import Path
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "n8n/bin/report-production-soak.py"
+BASELINE = ROOT / "operations/quality/module-quality-baseline.json"
 
 
 def load_module():
@@ -14,6 +17,58 @@ def load_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+    class Complexity(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.value = 1
+
+        def visit_FunctionDef(self, node) -> None:
+            return
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_If(self, node) -> None:
+            self.value += 1
+            self.generic_visit(node)
+
+        visit_For = visit_If
+        visit_While = visit_If
+
+        def visit_Try(self, node) -> None:
+            self.value += len(node.handlers)
+            self.generic_visit(node)
+
+        def visit_BoolOp(self, node) -> None:
+            self.value += max(0, len(node.values) - 1)
+            self.generic_visit(node)
+
+        def visit_IfExp(self, node) -> None:
+            self.value += 1
+            self.generic_visit(node)
+
+        def visit_ListComp(self, node) -> None:
+            self.value += sum(
+                1 + len(generator.ifs) for generator in node.generators
+            )
+            self.generic_visit(node)
+
+        visit_SetComp = visit_ListComp
+        visit_DictComp = visit_ListComp
+        visit_GeneratorExp = visit_ListComp
+
+    visitor = Complexity()
+    for child in target.body:
+        visitor.visit(child)
+    return target.end_lineno - target.lineno + 1, visitor.value
 
 
 class ProductionSoakSummaryCharacterizationTests(unittest.TestCase):
@@ -65,6 +120,26 @@ class ProductionSoakSummaryCharacterizationTests(unittest.TestCase):
                 "reason": "current healthy soak clock is not running",
                 "sample_count": 2,
             },
+        )
+
+    def test_summary_phases_meet_architecture_contract(self):
+        self.assertLessEqual(len(SCRIPT.read_text().splitlines()), 250)
+        for name in (
+            "_current_healthy_since",
+            "_soak_window",
+            "_window_metrics",
+            "_window_failures",
+            "_signal_maxima",
+            "_qualification_status",
+            "summarize",
+        ):
+            lines, complexity = function_metrics(name)
+            self.assertLessEqual(lines, 50)
+            self.assertLessEqual(complexity, 10)
+        baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
+        self.assertNotIn(
+            "n8n/bin/report-production-soak.py::summarize",
+            baseline["functions"],
         )
 
     def test_window_metrics_failures_maxima_and_field_order_are_exact(self):
