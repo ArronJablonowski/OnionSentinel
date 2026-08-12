@@ -48,32 +48,44 @@ class _ProcessContainment:
             self.owned_capability.close()  # type: ignore[attr-defined]
 
 
-def _validated_inherited_capability() -> tuple[int, str] | None:
-    """Return the ambient bounded-run capability only when its FD proves it."""
+def __capability_token_is_valid(token: str) -> bool:
+    return len(token) == 64 and all(
+        character in "0123456789abcdef" for character in token
+    )
 
-    raw_fd = os.environ.get(_CONTAINMENT_FD_ENV, "")
-    token = os.environ.get(_CONTAINMENT_TOKEN_ENV, "")
-    if len(token) != 64 or any(
-        character not in "0123456789abcdef" for character in token
-    ):
-        return None
-    try:
-        descriptor = int(raw_fd)
-    except (TypeError, ValueError):
-        return None
-    if descriptor < 3:
-        return None
+
+def __capability_descriptor_proves_token(
+    descriptor: int,
+    token: str,
+) -> bool:
     try:
         metadata = os.fstat(descriptor)
         expected = _CONTAINMENT_PREFIX + token.encode("ascii")
         actual = os.pread(descriptor, len(expected) + 1, 0)
     except (OSError, ValueError):
-        return None
-    if (
+        return False
+    return not (
         not stat.S_ISREG(metadata.st_mode)
         or metadata.st_uid != os.getuid()
         or stat.S_IMODE(metadata.st_mode) & 0o077
         or actual != expected
+    )
+
+
+def _validated_inherited_capability() -> tuple[int, str] | None:
+    """Return the ambient bounded-run capability only when its FD proves it."""
+
+    raw_fd = os.environ.get(_CONTAINMENT_FD_ENV, "")
+    token = os.environ.get(_CONTAINMENT_TOKEN_ENV, "")
+    if not __capability_token_is_valid(token):
+        return None
+    try:
+        descriptor = int(raw_fd)
+    except (TypeError, ValueError):
+        return None
+    if descriptor < 3 or not __capability_descriptor_proves_token(
+        descriptor,
+        token,
     ):
         return None
     return descriptor, token

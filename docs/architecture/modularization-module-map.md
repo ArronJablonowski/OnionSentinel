@@ -496,6 +496,11 @@ C locale, pipe capture, and isolated session in a private launcher. Snapshot
 timeout/byte ceilings, parsing, errors, cleanup, and process identity semantics
 remain in the bounded observation boundary.
 
+The policy owner validates inherited containment in two private fail-closed
+steps: exact lowercase-hex token syntax, then an owner-only regular descriptor
+whose complete payload matches the private prefix and token. The compatibility
+surface and nested process-group ownership decision remain unchanged.
+
 ## Scheduler and Harness
 
 ### `auto-run-ai-analysis.py`
