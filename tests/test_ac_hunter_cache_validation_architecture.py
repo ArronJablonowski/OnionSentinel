@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD = ROOT / "onion-sentinel-dashboard"
 SERVICE_PATH = DASHBOARD / "ac_hunter_service.py"
+CACHE_VALIDATION_PATH = DASHBOARD / "ac_hunter_cache_validation.py"
 BASELINE = ROOT / "operations/quality/module-quality-baseline.json"
 
 
@@ -65,18 +66,34 @@ class AcHunterCacheValidationArchitectureTests(unittest.TestCase):
             }
         return {"status": "ok", "result": result}
 
-    def test_signature_and_current_quality_debt_are_exact(self) -> None:
+    def test_signature_and_module_boundaries_are_exact(self) -> None:
         self.assertEqual(
             str(inspect.signature(self.service._validate_cache_tree)),
             "(value: 'object', depth: 'int' = 0) -> 'None'",
         )
         baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
-        self.assertEqual(
-            baseline["functions"][
-                "onion-sentinel-dashboard/ac_hunter_service.py::_validate_cache_tree"
-            ],
-            {"max_complexity": 18},
+        self.assertNotIn(
+            "onion-sentinel-dashboard/ac_hunter_service.py::_validate_cache_tree",
+            baseline["functions"],
         )
+        self.assertLessEqual(
+            len(CACHE_VALIDATION_PATH.read_text().splitlines()), 600
+        )
+        self.assertNotIn(
+            "from ac_hunter_service import",
+            CACHE_VALIDATION_PATH.read_text(),
+        )
+        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
+        service_copy = (
+            'ac_hunter_service.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_service.py"'
+        )
+        owner_copy = (
+            'ac_hunter_cache_validation.py" '
+            '"$DASHBOARD_RUNTIME_DIR/ac_hunter_cache_validation.py"'
+        )
+        self.assertIn(service_copy, installer)
+        self.assertIn(owner_copy, installer)
+        self.assertLess(installer.index(owner_copy), installer.index(service_copy))
 
     def test_exact_bounds_scalar_policy_and_error_precedence_are_stable(self) -> None:
         cases = [

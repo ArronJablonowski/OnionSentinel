@@ -1276,6 +1276,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_collection_findings.py" "$DASHB
 cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_collection_hosts.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_collection_hosts.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_collection_projection.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_collection_projection.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_collection.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_collection.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_cache_validation.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_cache_validation.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_service.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_service.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_review.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_review.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/cti_program.py" "$DASHBOARD_RUNTIME_DIR/cti_program.py"

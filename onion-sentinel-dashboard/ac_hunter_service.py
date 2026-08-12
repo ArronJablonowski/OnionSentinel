@@ -12,6 +12,9 @@ from ac_hunter_transport import *  # noqa: F401,F403
 from ac_hunter_normalization import *  # noqa: F401,F403
 from ac_hunter_scoring import *  # noqa: F401,F403
 from ac_hunter_collection import *  # noqa: F401,F403
+from ac_hunter_cache_validation import validate_cache_tree
+
+
 def collect(client: AcHunterApiClient, clock: Callable[[], float]) -> Dict[str, Any]:
     raw: Dict[str, object] = {}
     statuses: Dict[str, Dict[str, object]] = {}
@@ -61,33 +64,7 @@ def collect_from_relay(
 
 
 def _validate_cache_tree(value: object, depth: int = 0) -> None:
-    if depth > 12:
-        raise AcHunterConfigurationError("AC Hunter cache nesting is invalid")
-    if isinstance(value, dict):
-        if len(value) > 1000:
-            raise AcHunterConfigurationError("AC Hunter cache object is too large")
-        for key, item in value.items():
-            if not isinstance(key, str) or len(key) > 128:
-                raise AcHunterConfigurationError("AC Hunter cache key is invalid")
-            if key.lower() in FORBIDDEN_CACHE_KEYS:
-                raise AcHunterConfigurationError(
-                    "AC Hunter cache contains authentication material"
-                )
-            _validate_cache_tree(item, depth + 1)
-    elif isinstance(value, list):
-        if len(value) > 5000:
-            raise AcHunterConfigurationError("AC Hunter cache list is too large")
-        for item in value:
-            _validate_cache_tree(item, depth + 1)
-    elif isinstance(value, str):
-        if len(value) > 8192 or any(
-            ord(character) < 9
-            or 13 < ord(character) < 32
-            for character in value
-        ):
-            raise AcHunterConfigurationError("AC Hunter cache text is invalid")
-    elif value is not None and not isinstance(value, (bool, int, float)):
-        raise AcHunterConfigurationError("AC Hunter cache value is invalid")
+    validate_cache_tree(value, depth)
 
 
 def validate_cache(payload: object) -> Dict[str, Any]:

@@ -2900,16 +2900,21 @@ admission and cross-module scoring context in
 `ac_hunter_collection_findings.py`; correlated-host and analyst-note view
 models in `ac_hunter_collection_hosts.py`; stable status/metadata/final response
 composition in `ac_hunter_collection_projection.py`; and private cache plus
-review-service orchestration in `ac_hunter_service.py`.
+review-service orchestration in `ac_hunter_service.py`. Pure bounded cache-tree
+validation lives in `ac_hunter_cache_validation.py` behind the service's stable
+private compatibility wrapper.
 
 The dependency graph remains acyclic. Credentials and JWTs remain server-side,
 AC Hunter access remains Relay-only, and cache material remains owner-only and
 secret-filtered. Scores prioritize review but never independently establish
 malware or malicious intent. Existing page/API fields, verdict meanings,
 fresh/stale cache behavior, and single-flight refresh semantics remain stable.
-The finding-normalization, scoring-policy, and three collection owners are pure
-and import inward only; none can call AC Hunter, the Relay, a cache, a database,
-or a compatibility facade. The normalization facade preserves the legacy
+The finding-normalization, scoring-policy, cache-validation, and three
+collection owners are pure and import inward only; none can call AC Hunter, the
+Relay, a cache, a database, or a compatibility facade. Cache validation keeps
+the exact recursion, cardinality, key, text, scalar, credential-rejection, and
+error-precedence policy without filesystem or service authority. The
+normalization facade preserves the legacy
 `_normalize_finding` signature, alias precedence, output ordering, provenance,
 and fresh-result semantics. The scoring facade preserves the legacy
 `_score_finding` signature, in-place four-field result mutation, reason
