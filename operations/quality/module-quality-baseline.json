@@ -1,9 +1,6 @@
 {
   "files": {},
   "functions": {
-    "n8n/bin/configure-post-commit-env.py::render_env": {
-      "max_complexity": 16
-    },
     "n8n/bin/evaluate-investigation-skills-v2.py::evaluate": {
       "max_complexity": 17
     },

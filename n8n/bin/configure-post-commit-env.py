@@ -38,23 +38,32 @@ def read_token() -> str:
     return token
 
 
-def render_env(existing: str, updates: dict[str, str]) -> str:
+def _literal_newline_block(line: str, updates: dict[str, str]) -> bool:
+    if "\\n" not in line:
+        return False
+    fragments = [fragment for fragment in line.split("\\n") if fragment]
+    fragment_keys = {
+        fragment.split("=", 1)[0].strip()
+        for fragment in fragments
+        if "=" in fragment
+    }
+    if fragment_keys and fragment_keys.issubset(updates):
+        # Repair an older deployment bug that appended a whole block with
+        # literal backslash-n separators. Fresh values replace every
+        # secret-bearing fragment without echoing it.
+        return True
+    raise SystemExit("environment file contains an unsupported literal \\\\n sequence")
+
+
+def _existing_env_lines(
+    existing: str,
+    updates: dict[str, str],
+) -> tuple[list[str], set[str]]:
     output: list[str] = []
     written: set[str] = set()
     for line in existing.splitlines():
-        if "\\n" in line:
-            fragments = [fragment for fragment in line.split("\\n") if fragment]
-            fragment_keys = {
-                fragment.split("=", 1)[0].strip()
-                for fragment in fragments
-                if "=" in fragment
-            }
-            if fragment_keys and fragment_keys.issubset(updates):
-                # Repair an older deployment bug that appended a whole block
-                # with literal backslash-n separators. The fresh values below
-                # replace every secret-bearing fragment without echoing it.
-                continue
-            raise SystemExit("environment file contains an unsupported literal \\\\n sequence")
+        if _literal_newline_block(line, updates):
+            continue
         key = line.split("=", 1)[0].strip() if "=" in line else ""
         if key in updates:
             if key not in written:
@@ -62,11 +71,24 @@ def render_env(existing: str, updates: dict[str, str]) -> str:
                 written.add(key)
             continue
         output.append(line)
+    return output, written
+
+
+def _append_missing_settings(
+    output: list[str],
+    written: set[str],
+    updates: dict[str, str],
+) -> None:
     if output and output[-1] != "":
         output.append("")
     for key, value in updates.items():
         if key not in written:
             output.append(f"{key}={value}")
+
+
+def render_env(existing: str, updates: dict[str, str]) -> str:
+    output, written = _existing_env_lines(existing, updates)
+    _append_missing_settings(output, written, updates)
     return "\n".join(output).rstrip("\n") + "\n"
 
 
