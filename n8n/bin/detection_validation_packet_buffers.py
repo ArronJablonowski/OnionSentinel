@@ -77,11 +77,8 @@ def _configured_tls_name(
     ).strip().rstrip(".")
 
 
-def _inferred_tls_name(
-    decoded: str,
-    marker_values: list[tuple[dict[str, Any], bytes]] | None,
-) -> str:
-    candidates = {
+def _candidate_tls_names(decoded: str) -> set[str]:
+    return {
         value.rstrip(".").lower()
         for value in re.findall(
             r"(?i)(?<![A-Za-z0-9-])"
@@ -91,12 +88,23 @@ def _inferred_tls_name(
         )
         if len(value) <= 253
     }
-    tls_markers = {
+
+
+def _tls_marker_names(
+    marker_values: list[tuple[dict[str, Any], bytes]] | None,
+) -> set[str]:
+    return {
         marker.decode("latin-1", "ignore").lower().lstrip(".")
         for spec, marker in marker_values or []
         if str(spec.get("buffer") or "").strip().lower() == "tls.sni"
     }
-    matching = {
+
+
+def _matching_tls_names(
+    candidates: set[str],
+    tls_markers: set[str],
+) -> set[str]:
+    return {
         candidate
         for candidate in candidates
         if any(
@@ -105,6 +113,15 @@ def _inferred_tls_name(
             if marker
         )
     }
+
+
+def _inferred_tls_name(
+    decoded: str,
+    marker_values: list[tuple[dict[str, Any], bytes]] | None,
+) -> str:
+    candidates = _candidate_tls_names(decoded)
+    tls_markers = _tls_marker_names(marker_values)
+    matching = _matching_tls_names(candidates, tls_markers)
     return next(iter(matching)) if len(matching) == 1 else ""
 
 
