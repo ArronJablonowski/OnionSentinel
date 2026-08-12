@@ -18,6 +18,7 @@ if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
 
 import harness_store_trace_repository as trace_repository
+import harness_store_trace_verification as trace_verification
 from harness_contracts import JobEnvelope, ledger_manifest
 from harness_policy import (
     LEDGER_MANIFEST_SCHEMA_V1,
@@ -184,6 +185,18 @@ class HarnessTraceVerificationArchitectureTests(unittest.TestCase):
             },
         )
         self.assertRegex(verification["head_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_verification_owner_is_inward_and_facade_is_bounded(self) -> None:
+        source = inspect.getsource(trace_verification)
+        self.assertNotIn("import harness_store_trace_repository", source)
+        self.assertNotIn("from harness_store_trace_repository", source)
+        self.assertNotIn("import harness_store_foundation", source)
+        self.assertNotIn("from harness_store_foundation", source)
+        self.assertIn("hmac.compare_digest", source)
+        facade = inspect.getsource(
+            trace_repository.HarnessStoreTraceRepository.verify_chain
+        )
+        self.assertLessEqual(len(facade.splitlines()), 8)
 
     def test_event_chain_error_projection_and_order_are_exact(self) -> None:
         run_id = "event-errors-run"

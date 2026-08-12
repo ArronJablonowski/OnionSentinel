@@ -1,20 +1,15 @@
 """Terminal state, snapshot, chain verification, and trace export repository."""
 from __future__ import annotations
 
-import hmac
-import hashlib
 import json
 from typing import Any, Mapping
 
 from harness_contracts import (
-    SUPPORTED_LEDGER_MANIFEST_SCHEMAS,
     bounded_metadata,
-    hypothesis_manifest_digest,
     ledger_manifest,
 )
 from harness_policy import (
     HARNESS_SCHEMA,
-    LEDGER_MANIFEST_SCHEMA_V1,
     TRACE_SCHEMA,
     HarnessIntegrityError,
     HarnessPolicyError,
@@ -25,6 +20,7 @@ from harness_policy import (
     utc_now,
 )
 from harness_store_foundation import _connect
+from harness_store_trace_verification import verify_trace_chain
 
 
 class HarnessStoreTraceRepository:
@@ -144,176 +140,11 @@ class HarnessStoreTraceRepository:
             }
 
     def verify_chain(self, run_id: str) -> dict[str, Any]:
-        with _connect(self.path) as connection:
-            run = connection.execute(
-                "SELECT status FROM harness_runs WHERE run_id = ?",
-                (run_id,),
-            ).fetchone()
-            if run is None:
-                raise HarnessIntegrityError("unknown harness run")
-            rows = connection.execute(
-                """
-                SELECT * FROM harness_events
-                WHERE run_id = ?
-                ORDER BY sequence
-                """,
-                (run_id,),
-            ).fetchall()
-            actual_ledger_manifests = {
-                schema: ledger_manifest(
-                    connection,
-                    run_id,
-                    schema=schema,
-                )
-                for schema in SUPPORTED_LEDGER_MANIFEST_SCHEMAS
-            }
-            hypothesis_rows = connection.execute(
-                """
-                SELECT hypothesis_id, statement_digest, status,
-                       supporting_refs_json, contradicting_refs_json,
-                       next_discriminator, revision
-                FROM harness_hypotheses
-                WHERE run_id = ?
-                ORDER BY hypothesis_id
-                """,
-                (run_id,),
-            ).fetchall()
-        previous = "0" * 64
-        errors: list[str] = []
-        expected_sequence = 1
-        for row in rows:
-            payload_hash = hashlib.sha256(
-                str(row["payload_json"]).encode("utf-8")
-            ).hexdigest()
-            body = {
-                "run_id": run_id,
-                "sequence": int(row["sequence"]),
-                "idempotency_key": row["idempotency_key"],
-                "event_type": row["event_type"],
-                "stage": row["stage"],
-                "created_at": row["created_at"],
-                "payload_sha256": row["payload_sha256"],
-                "previous_event_sha256": row["previous_event_sha256"],
-            }
-            expected_hash = digest_json(body)
-            if int(row["sequence"]) != expected_sequence:
-                errors.append(f"sequence gap at {row['sequence']}")
-            if row["payload_sha256"] != payload_hash:
-                errors.append(f"payload digest mismatch at {row['sequence']}")
-            if row["previous_event_sha256"] != previous:
-                errors.append(f"previous hash mismatch at {row['sequence']}")
-            if row["event_sha256"] != expected_hash:
-                errors.append(f"event hash mismatch at {row['sequence']}")
-            if row["event_id"] != f"evt-{expected_hash[:32]}":
-                errors.append(f"event id mismatch at {row['sequence']}")
-            previous = str(row["event_sha256"])
-            expected_sequence += 1
-        latest_hypothesis_event = next(
-            (
-                row
-                for row in reversed(rows)
-                if row["event_type"] == "hypotheses.updated"
-            ),
-            None,
+        return verify_trace_chain(
+            self.path,
+            run_id,
+            connection_factory=_connect,
         )
-        if latest_hypothesis_event is not None:
-            try:
-                payload = json.loads(latest_hypothesis_event["payload_json"])
-            except (TypeError, json.JSONDecodeError):
-                payload = {}
-            expected_manifest = str(payload.get("manifest_digest") or "")
-            actual_manifest = hypothesis_manifest_digest(hypothesis_rows)
-            if not expected_manifest:
-                errors.append("latest hypothesis event has no manifest digest")
-            elif expected_manifest != actual_manifest:
-                errors.append("hypothesis ledger manifest mismatch")
-        ledger_manifest_bound = False
-        ledger_manifest_schema = ""
-        started_event = next(
-            (
-                row
-                for row in rows
-                if row["event_type"] == "run.started"
-            ),
-            None,
-        )
-        try:
-            started_payload = (
-                json.loads(started_event["payload_json"])
-                if started_event is not None
-                else {}
-            )
-        except (TypeError, json.JSONDecodeError):
-            started_payload = {}
-        legacy_manifest_eligible = (
-            started_event is not None
-            and isinstance(started_payload, dict)
-            and "assigned_reviewer_route" not in started_payload
-        )
-        if run["status"] in {
-            RunStatus.SUCCEEDED.value,
-            RunStatus.FAILED.value,
-            RunStatus.CANCELLED.value,
-        }:
-            terminal_event = next(
-                (
-                    row
-                    for row in reversed(rows)
-                    if row["event_type"] == f"run.{run['status']}"
-                ),
-                None,
-            )
-            if terminal_event is None:
-                errors.append("terminal run has no matching terminal event")
-            else:
-                try:
-                    terminal_payload = json.loads(
-                        terminal_event["payload_json"]
-                    )
-                except (TypeError, json.JSONDecodeError):
-                    terminal_payload = {}
-                expected_ledger_manifest = terminal_payload.get(
-                    "ledger_manifest"
-                )
-                if not isinstance(expected_ledger_manifest, dict):
-                    errors.append(
-                        "terminal ledger manifest is missing or malformed"
-                    )
-                else:
-                    ledger_manifest_schema = str(
-                        expected_ledger_manifest.get("schema") or ""
-                    )
-                    actual_ledger_manifest = actual_ledger_manifests.get(
-                        ledger_manifest_schema
-                    )
-                    if (
-                        ledger_manifest_schema
-                        == LEDGER_MANIFEST_SCHEMA_V1
-                        and not legacy_manifest_eligible
-                    ):
-                        errors.append(
-                            "terminal ledger manifest schema downgrade"
-                        )
-                    elif actual_ledger_manifest is None:
-                        errors.append(
-                            "unsupported terminal ledger manifest schema"
-                        )
-                    else:
-                        ledger_manifest_bound = True
-                if ledger_manifest_bound:
-                    if digest_json(expected_ledger_manifest) != digest_json(
-                        actual_ledger_manifest
-                    ):
-                        errors.append("terminal ledger manifest mismatch")
-        return {
-            "run_id": run_id,
-            "valid": not errors and bool(rows),
-            "event_count": len(rows),
-            "head_sha256": previous if rows else "",
-            "ledger_manifest_bound": ledger_manifest_bound,
-            "ledger_manifest_schema": ledger_manifest_schema,
-            "errors": errors,
-        }
 
     def export_trace(self, run_id: str) -> dict[str, Any]:
         with _connect(self.path) as connection:

@@ -2714,6 +2714,14 @@
       ]
     },
     {
+      "path": "n8n/bin/harness_store_trace_verification.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_store_trace_verification.py",
+      "required_symbols": [
+        "verify_trace_chain"
+      ]
+    },
+    {
       "path": "n8n/bin/harness_query_contract.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/harness_query_contract.py",

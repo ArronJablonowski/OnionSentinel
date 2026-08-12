@@ -897,10 +897,14 @@ read-only/query coverage, input/output digests, and commit-before-audit stage
 updates retain their existing transaction and idempotency behavior.
 
 `n8n/bin/harness_store_trace_repository.py` owns terminal settlement, bounded
-snapshots, full event/hash/ledger verification, and public trace export. It
-preserves terminal immutability, ledger-manifest version compatibility,
-hypothesis-manifest and payload digests, event-chain continuity, constant-time
-digest comparisons, and verification-before-export behavior.
+snapshots, and public trace export. Its stable `verify_chain()` method delegates
+to `harness_store_trace_verification.py`, which owns read-only state loading,
+event/hash continuity, hypothesis-manifest binding, terminal-ledger version
+compatibility, and the exact public integrity projection. The inward owner
+receives the connection factory as a port and never imports the repository or
+foundation. Terminal immutability, error order, legacy-manifest eligibility,
+constant-time digest comparisons, and verification-before-export behavior are
+preserved.
 
 `n8n/bin/harness_run_foundation.py` owns durable run identity and counters,
 elapsed-time enforcement, prompt-evidence cataloguing, role/capability tool
