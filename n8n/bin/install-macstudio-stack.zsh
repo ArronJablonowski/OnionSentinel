@@ -1032,6 +1032,7 @@ cp "$REPO_DIR/n8n/bin/pcap_evidence_query_selection.py" "$STACK_DIR/bin/pcap_evi
 cp "$REPO_DIR/n8n/bin/pcap_evidence_query_projection.py" "$STACK_DIR/bin/pcap_evidence_query_projection.py"
 cp "$REPO_DIR/n8n/bin/pcap_evidence_query_response.py" "$STACK_DIR/bin/pcap_evidence_query_response.py"
 cp "$REPO_DIR/n8n/bin/pcap_evidence_query.py" "$STACK_DIR/bin/pcap_evidence_query.py"
+cp "$REPO_DIR/n8n/bin/pcap_tool_stream_runtime.py" "$STACK_DIR/bin/pcap_tool_stream_runtime.py"
 cp "$REPO_DIR/n8n/bin/pcap_tool_runtime.py" "$STACK_DIR/bin/pcap_tool_runtime.py"
 cp "$REPO_DIR/n8n/bin/onion-sentinel-pcap-intake.py" "$STACK_DIR/bin/onion-sentinel-pcap-intake.py"
 cp "$REPO_DIR/n8n/bin/onion-sentinel-alert-intake.py" "$STACK_DIR/bin/onion-sentinel-alert-intake.py"

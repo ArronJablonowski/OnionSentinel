@@ -115,93 +115,36 @@ def stream_isolated_lines(
     max_line_bytes: int = PARSER_MAX_LINE_BYTES,
 ) -> dict[str, Any]:
     """Stream parser stdout through ``on_line`` without retaining the capture."""
-    process = subprocess.Popen(
-        isolated_command(command),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=str(cwd) if cwd is not None else None,
-        env=parser_environment(),
-        preexec_fn=parser_resource_limits,
-        start_new_session=True,
+    workflow = __import__("pcap_tool_stream_runtime")
+    return workflow.stream_isolated_lines(
+        command,
+        on_line,
+        cwd=cwd,
+        policy=workflow.StreamPolicy(
+            timeout_seconds,
+            max_stderr_bytes,
+            max_stream_bytes,
+            max_line_bytes,
+            PARSER_CPU_SECONDS,
+            PARSER_MEMORY_BYTES,
+            PARSER_FILE_BYTES,
+        ),
+        dependencies=workflow.StreamDependencies(
+            isolated_command,
+            parser_environment,
+            parser_resource_limits,
+            subprocess.Popen,
+            subprocess.DEVNULL,
+            subprocess.PIPE,
+            selectors.DefaultSelector,
+            selectors.EVENT_READ,
+            os.read,
+            os.killpg,
+            signal.SIGKILL,
+            time.monotonic,
+            shutil.which,
+            sys_platform_is_macos,
+            BoundedProcessError,
+            subprocess.TimeoutExpired,
+        ),
     )
-    assert process.stdout is not None and process.stderr is not None
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
-    pending = bytearray()
-    stderr = bytearray()
-    stream_bytes = 0
-    line_count = 0
-    deadline = time.monotonic() + timeout_seconds
-    try:
-        while selector.get_map():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise BoundedProcessError(f"command timed out after {timeout_seconds:g} seconds")
-            events = selector.select(timeout=min(0.25, remaining))
-            if not events and process.poll() is not None:
-                events = [(key, selectors.EVENT_READ) for key in selector.get_map().values()]
-            for key, _ in events:
-                stream = key.fileobj
-                try:
-                    chunk = os.read(stream.fileno(), 64 * 1024)
-                except BlockingIOError:
-                    continue
-                if not chunk:
-                    selector.unregister(stream)
-                    continue
-                if key.data == "stderr":
-                    if len(stderr) + len(chunk) > max_stderr_bytes:
-                        raise BoundedProcessError(f"command stderr exceeded the {max_stderr_bytes}-byte limit")
-                    stderr.extend(chunk)
-                    continue
-                stream_bytes += len(chunk)
-                if stream_bytes > max_stream_bytes:
-                    raise BoundedProcessError(f"command stream exceeded the {max_stream_bytes}-byte limit")
-                pending.extend(chunk)
-                while True:
-                    newline = pending.find(b"\n")
-                    if newline < 0:
-                        if len(pending) > max_line_bytes:
-                            raise BoundedProcessError(f"command line exceeded the {max_line_bytes}-byte limit")
-                        break
-                    raw_line = bytes(pending[:newline])
-                    del pending[: newline + 1]
-                    if len(raw_line) > max_line_bytes:
-                        raise BoundedProcessError(f"command line exceeded the {max_line_bytes}-byte limit")
-                    on_line(raw_line.decode("utf-8", errors="replace"))
-                    line_count += 1
-        if pending:
-            on_line(bytes(pending).decode("utf-8", errors="replace"))
-            line_count += 1
-        return_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
-    except BaseException:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            process.kill()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-        raise
-    finally:
-        selector.close()
-        process.stdout.close()
-        process.stderr.close()
-    return {
-        "ok": return_code == 0,
-        "returncode": return_code,
-        "stderr": bytes(stderr).decode("utf-8", errors="replace"),
-        "command": list(command),
-        "line_count": line_count,
-        "stream_bytes": stream_bytes,
-        "isolation": {
-            "network_disabled": bool(shutil.which("sandbox-exec") and sys_platform_is_macos()),
-            "stripped_environment": True,
-            "cpu_seconds": PARSER_CPU_SECONDS,
-            "memory_bytes": PARSER_MEMORY_BYTES,
-            "file_bytes": PARSER_FILE_BYTES,
-        },
-    }

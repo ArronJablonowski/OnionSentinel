@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import copy
 import importlib.util
 import subprocess
@@ -12,6 +13,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "n8n/bin"
+FACADE = BIN / "pcap_tool_runtime.py"
+WORKFLOW = BIN / "pcap_tool_stream_runtime.py"
 if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
 
@@ -25,6 +28,58 @@ def load_runtime():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def function_metrics(path: Path, name: str) -> tuple[int, int]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+    class Complexity(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.value = 1
+
+        def visit_FunctionDef(self, node) -> None:
+            return
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_If(self, node) -> None:
+            self.value += 1
+            self.generic_visit(node)
+
+        visit_For = visit_If
+        visit_While = visit_If
+
+        def visit_Try(self, node) -> None:
+            self.value += len(node.handlers)
+            self.generic_visit(node)
+
+        def visit_BoolOp(self, node) -> None:
+            self.value += max(0, len(node.values) - 1)
+            self.generic_visit(node)
+
+        def visit_IfExp(self, node) -> None:
+            self.value += 1
+            self.generic_visit(node)
+
+        def visit_ListComp(self, node) -> None:
+            self.value += sum(
+                1 + len(generator.ifs) for generator in node.generators
+            )
+            self.generic_visit(node)
+
+        visit_SetComp = visit_ListComp
+        visit_DictComp = visit_ListComp
+        visit_GeneratorExp = visit_ListComp
+
+    visitor = Complexity()
+    for child in target.body:
+        visitor.visit(child)
+    return target.end_lineno - target.lineno + 1, visitor.value
 
 
 class FakeStream:
@@ -231,6 +286,41 @@ class PcapToolStreamRuntimeArchitectureTests(unittest.TestCase):
             "command_after": command,
         })
         return outcome
+
+    def test_facade_workflow_and_installer_meet_architecture_contract(self) -> None:
+        lines, complexity = function_metrics(FACADE, "stream_isolated_lines")
+        self.assertLessEqual(lines, 50)
+        self.assertLessEqual(complexity, 5)
+        for name in (
+            "_start_process",
+            "_selector_for",
+            "_selected_events",
+            "_emit_line",
+            "_consume_stdout",
+            "_consume_stderr",
+            "_read_event",
+            "_stream_until_eof",
+            "_terminate",
+            "_close_streams",
+            "_result",
+            "stream_isolated_lines",
+        ):
+            lines, complexity = function_metrics(WORKFLOW, name)
+            self.assertLessEqual(lines, 50)
+            self.assertLessEqual(complexity, 10)
+        self.assertLessEqual(len(WORKFLOW.read_text().splitlines()), 600)
+        installer = (BIN / "install-macstudio-stack.zsh").read_text()
+        workflow_copy = (
+            'cp "$REPO_DIR/n8n/bin/pcap_tool_stream_runtime.py" '
+            '"$STACK_DIR/bin/pcap_tool_stream_runtime.py"'
+        )
+        facade_copy = (
+            'cp "$REPO_DIR/n8n/bin/pcap_tool_runtime.py" '
+            '"$STACK_DIR/bin/pcap_tool_runtime.py"'
+        )
+        self.assertEqual(installer.count(workflow_copy), 1)
+        self.assertEqual(installer.count(facade_copy), 1)
+        self.assertLess(installer.index(workflow_copy), installer.index(facade_copy))
 
     def test_success_preserves_exact_wiring_framing_and_result(self) -> None:
         outcome = self.execute(
