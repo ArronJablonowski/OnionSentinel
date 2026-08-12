@@ -2,6 +2,7 @@
 """Characterize fail-closed investigation control-hit validation."""
 from __future__ import annotations
 
+import ast
 import copy
 import sys
 import unittest
@@ -10,6 +11,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BIN_DIR = REPO_ROOT / "n8n" / "bin"
+SCRIPT = BIN_DIR / "investigation_query_response_control.py"
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
@@ -20,6 +22,52 @@ ANCHOR = {
     "id": "anchor-1",
     "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
 }
+
+
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+    class Complexity(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.value = 1
+
+        def visit_FunctionDef(self, node) -> None:
+            return
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_If(self, node) -> None:
+            self.value += 1
+            self.generic_visit(node)
+
+        visit_For = visit_If
+        visit_While = visit_If
+
+        def visit_Try(self, node) -> None:
+            self.value += len(node.handlers)
+            self.generic_visit(node)
+
+        def visit_BoolOp(self, node) -> None:
+            self.value += max(0, len(node.values) - 1)
+            self.generic_visit(node)
+
+        def visit_IfExp(self, node) -> None:
+            self.value += 1
+            self.generic_visit(node)
+
+        def visit_comprehension(self, node) -> None:
+            self.value += 1 + len(node.ifs)
+            self.generic_visit(node)
+
+    complexity = Complexity()
+    for statement in target.body:
+        complexity.visit(statement)
+    return target.end_lineno - target.lineno + 1, complexity.value
 
 
 def control_hit(
@@ -73,6 +121,24 @@ def control_result(*, positive: bool, hits: list[dict], passed: bool) -> dict:
 
 
 class InvestigationQueryControlHitCharacterizationTests(unittest.TestCase):
+    def test_changed_owner_architecture_is_bounded(self) -> None:
+        names = (
+            "_validated_control_hit_item",
+            "_validated_control_hit_source",
+            "_validate_control_hit_values",
+            "_validate_control_hit",
+            "_negative_control_logical_pass",
+            "_exact_anchor_hits",
+            "_positive_control_logical_pass",
+            "_control_logical_pass",
+        )
+        for name in names:
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
+        self.assertLessEqual(len(SCRIPT.read_text().splitlines()), 600)
+
     def test_exact_positive_anchor_and_empty_negative_filter_pass(self) -> None:
         positive = control_result(
             positive=True,

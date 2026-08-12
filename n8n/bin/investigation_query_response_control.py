@@ -232,9 +232,9 @@ def _validate_control_shards(
     )
 
 
-def _validate_control_hit(
+def _validated_control_hit_item(
     hit: object, expected_scope: list[str], control_name: str
-) -> None:
+) -> dict[str, Any]:
     item = _require_mapping(hit, f"investigation {control_name} control hit")
     _require_exact_keys(
         item,
@@ -250,6 +250,12 @@ def _validate_control_hit(
         raise InvestigationQueryContractError(
             f"investigation {control_name} control hit escaped its index scope"
         )
+    return item
+
+
+def _validated_control_hit_source(
+    item: dict[str, Any], control_name: str
+) -> dict[str, Any]:
     source = _require_mapping(
         item["source"], f"investigation {control_name} control hit source"
     )
@@ -260,6 +266,12 @@ def _validate_control_hit(
         raise InvestigationQueryContractError(
             f"investigation {control_name} control hit projection is invalid"
         )
+    return source
+
+
+def _validate_control_hit_values(
+    source: dict[str, Any], control_name: str
+) -> None:
     timestamp_values = _path_values(source, "@timestamp")
     datasets = [str(value) for value in _path_values(source, "event.dataset")]
     if len(timestamp_values) != 1 or len(datasets) != 1:
@@ -275,6 +287,55 @@ def _validate_control_hit(
         )
 
 
+def _validate_control_hit(
+    hit: object, expected_scope: list[str], control_name: str
+) -> None:
+    item = _validated_control_hit_item(hit, expected_scope, control_name)
+    source = _validated_control_hit_source(item, control_name)
+    _validate_control_hit_values(source, control_name)
+
+
+def _negative_control_logical_pass(
+    result: dict[str, Any],
+    hits: list[object],
+    relation: str,
+    status: str,
+) -> bool:
+    return (
+        status == "ok"
+        and relation == "eq"
+        and not hits
+        and result["total_hits"] == 0
+        and result["returned_hits"] == 0
+    )
+
+
+def _exact_anchor_hits(
+    hits: list[object], anchor: dict[str, str]
+) -> list[dict[str, Any]]:
+    return [
+        hit for hit in hits
+        if isinstance(hit, dict)
+        and hit.get("id") == anchor["id"]
+        and hit.get("index") == anchor["index"]
+    ]
+
+
+def _positive_control_logical_pass(
+    result: dict[str, Any],
+    exact: list[dict[str, Any]],
+    relation: str,
+    status: str,
+) -> bool:
+    return (
+        status == "ok"
+        and relation == "eq"
+        and len(exact) == 1
+        and result["total_hits"] == 1
+        and result["returned_hits"] == 1
+    )
+
+
 def _control_logical_pass(
     result: dict[str, Any],
     hits: list[object],
@@ -284,25 +345,11 @@ def _control_logical_pass(
     positive: bool,
 ) -> bool:
     if not positive:
-        return (
-            status == "ok"
-            and relation == "eq"
-            and not hits
-            and result["total_hits"] == 0
-            and result["returned_hits"] == 0
+        return _negative_control_logical_pass(
+            result, hits, relation, status
         )
-    exact = [
-        hit for hit in hits
-        if isinstance(hit, dict)
-        and hit.get("id") == anchor["id"]
-        and hit.get("index") == anchor["index"]
-    ]
-    return (
-        status == "ok"
-        and relation == "eq"
-        and len(exact) == 1
-        and result["total_hits"] == 1
-        and result["returned_hits"] == 1
+    return _positive_control_logical_pass(
+        result, _exact_anchor_hits(hits, anchor), relation, status
     )
 
 
