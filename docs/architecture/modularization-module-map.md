@@ -2906,6 +2906,10 @@ Observable extraction keeps reviewed ECS paths as declarative private policy.
 Private phases preserve stable alert-store endpoint priority, source-document
 order, address classification, sensor-host exclusions, supplemental context,
 and the ordered per-kind/global budget before any Relay query is authorized.
+Collection orchestration is split into private read-only row selection,
+request composition, bounded Relay transport, and artifact projection phases.
+The public `main` remains the CLI coordinator and preserves validation before
+atomic owner-only publication, exact filename projection, output, and exits.
 
 ### Operational SLO evaluator
 

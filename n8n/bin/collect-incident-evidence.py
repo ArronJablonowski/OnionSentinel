@@ -40,12 +40,7 @@ MAX_CONFIG_BYTES = 64 * 1024
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_OBSERVABLES = 16
 MAX_TOTAL_OBSERVABLES = 24
-MAX_OBSERVABLES_BY_KIND = {
-    "ips": 8,
-    "domains": 8,
-    "hosts": 4,
-    "users": 4,
-}
+MAX_OBSERVABLES_BY_KIND = {"ips": 8, "domains": 8, "hosts": 4, "users": 4}
 MAX_WINDOWS = 4
 WINDOW_DURATION = dt.timedelta(hours=24)
 WINDOW_PADDING = dt.timedelta(minutes=5)
@@ -59,22 +54,16 @@ ALERT_INDEX_RE = re.compile(
     r")$"
 )
 __PRIMARY_IP_PATHS = ("source.ip", "destination.ip", "client.ip", "server.ip")
-__PRIMARY_ADDRESS_PATHS = (
-    "source.address", "destination.address", "client.address", "server.address"
-)
+__PRIMARY_ADDRESS_PATHS = ("source.address", "destination.address", "client.address", "server.address")
 __SUPPLEMENTAL_IP_PATHS = ("dns.resolved_ip", "related.ip")
 __DOMAIN_PATHS = (
-    "dns.question.name", "dns.query.name", "url.domain", "tls.server.name",
-    "ssl.server_name", "http.virtual_host", "quic.server_name", "source.domain",
-    "destination.domain", "client.domain", "server.domain",
+    "dns.question.name", "dns.query.name", "url.domain", "tls.server.name", "ssl.server_name", "http.virtual_host", "quic.server_name", "source.domain", "destination.domain", "client.domain", "server.domain",
 )
 __HOST_PATHS = (
-    "host.hostname", "host.name", "host.id", "agent.id", "agent.name",
-    "related.hosts",
+    "host.hostname", "host.name", "host.id", "agent.id", "agent.name", "related.hosts",
 )
 __USER_PATHS = (
-    "user.name", "source.user.name", "destination.user.name",
-    "client.user.name", "user.id", "related.user",
+    "user.name", "source.user.name", "destination.user.name", "client.user.name", "user.id", "related.user",
 )
 __OBSERVABLE_KINDS = ("ips", "domains", "hosts", "users")
 
@@ -520,34 +509,33 @@ def atomic_json(path: Path, payload: dict) -> None:
     os.replace(temporary, path)
 
 
-def main() -> int:
-    args = parse_args()
-    config = load_config(args.config)
+def __selected_rows(args: argparse.Namespace) -> tuple[sqlite3.Row, list[sqlite3.Row]]:
     conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
-        selected, grouped = selected_group(conn, args.alert_id)
+        return selected_group(conn, args.alert_id)
     finally:
         conn.close()
+
+
+def __evidence_request(
+    args: argparse.Namespace, selected: sqlite3.Row, grouped: list[sqlite3.Row],
+) -> tuple[dict, str]:
     exact_observables = observables(grouped)
     if not any(exact_observables.values()):
         raise RuntimeError("no validated exact observables were available for restricted evidence queries")
     windows, coverage_note = evidence_windows(grouped)
-    anchor = representative_alert_anchor(selected)
-    request = {
-        "packs": [
-            "alert_context",
-            "network_flow",
-            "dns_activity",
-            "osquery_history",
-            "cross_sensor_timeline",
-        ],
+    return {
+        "packs": ["alert_context", "network_flow", "dns_activity", "osquery_history", "cross_sensor_timeline"],
         "osquery_packs": list(OSQUERY_PACKS),
         "windows": windows,
         "observables": exact_observables,
         "size": args.size,
-        "anchor": anchor,
-    }
+        "anchor": representative_alert_anchor(selected),
+    }, coverage_note
+
+
+def __restricted_response(config: dict, request: dict) -> dict:
     key = Path(os.path.expandvars(os.path.expanduser(str(config["ssh_key"]))))
     known_hosts = Path(os.path.expandvars(os.path.expanduser(str(config["known_hosts"]))))
     command = [
@@ -568,8 +556,15 @@ def main() -> int:
     response = json.loads(proc.stdout)
     if not isinstance(response, dict) or not response.get("ok"):
         raise RuntimeError("restricted incident evidence response failed its protocol contract")
+    return response
+
+
+def __incident_artifact(
+    args: argparse.Namespace, selected: sqlite3.Row, grouped: list[sqlite3.Row],
+    request: dict, coverage_note: str, response: dict,
+) -> tuple[dict, str]:
     group_id = str(selected["stable_group_id"] or "") if "stable_group_id" in selected.keys() else ""
-    artifact = {
+    return {
         "schema": INCIDENT_EVIDENCE_CONTRACT,
         "generated_at": dt.datetime.now().astimezone().replace(microsecond=0).isoformat().replace("T", "  "),
         "alert_id": args.alert_id,
@@ -578,7 +573,16 @@ def main() -> int:
         "coverage_note": coverage_note,
         "request": request,
         "security_onion_response": response,
-    }
+    }, group_id
+
+
+def main() -> int:
+    args = parse_args()
+    config = load_config(args.config)
+    selected, grouped = __selected_rows(args)
+    request, coverage_note = __evidence_request(args, selected, grouped)
+    response = __restricted_response(config, request)
+    artifact, group_id = __incident_artifact(args, selected, grouped, request, coverage_note, response)
     validate_incident_evidence_artifact(artifact)
     filename = f"{(group_id or args.alert_id).replace('/', '-')[:96]}-incident-evidence.json"
     destination = args.out_dir / filename
