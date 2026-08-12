@@ -159,6 +159,37 @@ class RelayPcapBrokerTest(unittest.TestCase):
         )
         broker_request.assert_not_called()
 
+    def test_broker_fixture_is_isolated_across_processes(self) -> None:
+        command = [
+            sys.executable,
+            "-m",
+            "unittest",
+            (
+                "tests.test_relay_pcap_broker.RelayPcapBrokerTest."
+                "test_claimed_request_is_exported_and_completed"
+            ),
+        ]
+        processes = [
+            subprocess.Popen(
+                command,
+                cwd=REPO_ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for _ in range(4)
+        ]
+        try:
+            results = [process.communicate(timeout=30) for process in processes]
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+
+        for process, (_stdout, stderr) in zip(processes, results):
+            self.assertEqual(process.returncode, 0, stderr)
+
     def test_spool_configuration_cannot_raise_admission_above_seventy_five_percent(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             usage = type("Usage", (), {"total": 1000, "used": 760, "free": 240})()
