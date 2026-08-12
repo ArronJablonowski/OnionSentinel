@@ -2889,7 +2889,10 @@ facade and the modularization contract verifies their runtime symbols.
 `onion-sentinel-dashboard/ac_hunter_review.py` is a bounded compatibility
 facade. Configuration and owner-only secret-file policy live in
 `ac_hunter_config.py`; Relay-only transport and short-lived authentication in
-`ac_hunter_transport.py`; response projection in `ac_hunter_normalization.py`;
+`ac_hunter_transport.py`; bounded primitive compatibility and response
+projection in `ac_hunter_normalization.py`; pure finding identity, observable,
+metric, tuple-fallback, and evidence phases in
+`ac_hunter_finding_normalization.py`;
 benign context and the scoring compatibility facade in `ac_hunter_scoring.py`;
 pure deterministic scoring phases in `ac_hunter_scoring_policy.py`; collection
 compatibility and operation policy in `ac_hunter_collection.py`; finding
@@ -2904,12 +2907,15 @@ AC Hunter access remains Relay-only, and cache material remains owner-only and
 secret-filtered. Scores prioritize review but never independently establish
 malware or malicious intent. Existing page/API fields, verdict meanings,
 fresh/stale cache behavior, and single-flight refresh semantics remain stable.
-The scoring-policy and three collection owners are pure and import inward only;
-none can call AC Hunter, the Relay, a cache, a database, or a compatibility
-facade. The scoring facade preserves the legacy `_score_finding` signature,
-in-place four-field result mutation, reason ordering, thresholds, watch
-precedence, and benign-context behavior. The Mac Studio installer copies the
-inward owners beside their facades before dashboard startup.
+The finding-normalization, scoring-policy, and three collection owners are pure
+and import inward only; none can call AC Hunter, the Relay, a cache, a database,
+or a compatibility facade. The normalization facade preserves the legacy
+`_normalize_finding` signature, alias precedence, output ordering, provenance,
+and fresh-result semantics. The scoring facade preserves the legacy
+`_score_finding` signature, in-place four-field result mutation, reason
+ordering, thresholds, watch precedence, and benign-context behavior. The Mac
+Studio installer copies the inward owners beside their facades before dashboard
+startup.
 
 `n8n/bin/ac_hunter_contract.py` remains the fixed request/response trust
 boundary shared with the Relay. Login field validation and response metadata

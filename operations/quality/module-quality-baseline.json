@@ -78,10 +78,6 @@
     "onion-sentinel-dashboard/ac_hunter_config.py::load_config": {
       "max_lines": 108
     },
-    "onion-sentinel-dashboard/ac_hunter_normalization.py::_normalize_finding": {
-      "max_complexity": 26,
-      "max_lines": 182
-    },
     "onion-sentinel-dashboard/ac_hunter_service.py::_validate_cache_tree": {
       "max_complexity": 18
     },

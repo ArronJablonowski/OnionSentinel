@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD = ROOT / "onion-sentinel-dashboard"
 NORMALIZATION_PATH = DASHBOARD / "ac_hunter_normalization.py"
+FINDING_NORMALIZATION_PATH = DASHBOARD / "ac_hunter_finding_normalization.py"
 BASELINE = ROOT / "operations/quality/module-quality-baseline.json"
 
 
@@ -72,18 +73,36 @@ class AcHunterNormalizationArchitectureTests(unittest.TestCase):
         )
         return result
 
-    def test_signature_and_current_quality_debt_are_exact(self) -> None:
+    def test_signature_quality_debt_and_module_boundaries_are_exact(self) -> None:
         self.assertEqual(
             str(inspect.signature(self.normalization._normalize_finding)),
             "(module: 'str', row: 'Mapping[str, Any]') -> 'Dict[str, Any]'",
         )
         baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
-        self.assertEqual(
-            baseline["functions"][
-                "onion-sentinel-dashboard/ac_hunter_normalization.py::_normalize_finding"
-            ],
-            {"max_complexity": 26, "max_lines": 182},
+        self.assertNotIn(
+            "onion-sentinel-dashboard/ac_hunter_normalization.py::_normalize_finding",
+            baseline["functions"],
         )
+        self.assertLessEqual(len(NORMALIZATION_PATH.read_text().splitlines()), 250)
+        self.assertLessEqual(
+            len(FINDING_NORMALIZATION_PATH.read_text().splitlines()), 600
+        )
+        self.assertNotIn(
+            "from ac_hunter_normalization import",
+            FINDING_NORMALIZATION_PATH.read_text(),
+        )
+        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
+        facade_copy = (
+            'ac_hunter_normalization.py" '
+            '"$DASHBOARD_RUNTIME_DIR/ac_hunter_normalization.py"'
+        )
+        owner_copy = (
+            'ac_hunter_finding_normalization.py" '
+            '"$DASHBOARD_RUNTIME_DIR/ac_hunter_finding_normalization.py"'
+        )
+        self.assertIn(facade_copy, installer)
+        self.assertIn(owner_copy, installer)
+        self.assertLess(installer.index(owner_copy), installer.index(facade_copy))
 
     def test_empty_modules_preserve_exact_defaults_and_stable_ids(self) -> None:
         outputs = [

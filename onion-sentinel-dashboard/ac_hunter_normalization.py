@@ -3,6 +3,12 @@ from __future__ import annotations
 
 from ac_hunter_config import *  # noqa: F401,F403
 from ac_hunter_config import _safe_text  # noqa: F401
+from ac_hunter_finding_normalization import (
+    FindingNormalizationPrimitives,
+    normalize_finding,
+)
+
+
 def _first(mapping: object, names: Sequence[str]) -> object:
     if not isinstance(mapping, dict):
         return None
@@ -152,188 +158,21 @@ def _finding_id(module: str, values: Mapping[str, object]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:20]
 
 
+_FINDING_NORMALIZATION_PRIMITIVES = FindingNormalizationPrimitives(
+    first=_first,
+    safe_text=_safe_text,
+    ip=_ip,
+    is_internal=_is_internal,
+    string_list=_string_list,
+    number=_number,
+    integer_value=_integer_value,
+    duration_seconds=_duration_seconds,
+    finding_id=_finding_id,
+)
+
+
 def _normalize_finding(module: str, row: Mapping[str, Any]) -> Dict[str, Any]:
-    source = _ip(
-        _first(
-            row,
-            (
-                "source_ip",
-                "src_ip",
-                "src",
-                "source",
-                "orig_h",
-                "id.orig_h",
-                "source.address",
-                "client_ip",
-            ),
-        )
-    )
-    destination = _ip(
-        _first(
-            row,
-            (
-                "destination_ip",
-                "dst_ip",
-                "dst",
-                "destination",
-                "resp_h",
-                "id.resp_h",
-                "destination.address",
-                "server_ip",
-                "host",
-            ),
-        )
-    )
-    fqdn = _safe_text(
-        _first(
-            row,
-            (
-                "fqdn",
-                "domain",
-                "dst_fqdn",
-                "destination_fqdn",
-                "server_name",
-                "sni",
-                "hostname",
-                "ptr",
-                "reverse_dns",
-                "queried_fqdn",
-            ),
-        ),
-        512,
-    )
-    if not fqdn:
-        queried = _string_list(_first(row, ("queried_fqdns",)))
-        fqdn = queried[0] if queried else ""
-    responding_ips = [
-        item for item in (_ip(value) for value in _string_list(
-            _first(row, ("responding_ips", "resolved_ips", "dst_ips", "answers"))
-        )) if item
-    ]
-    if module == "blacklist":
-        host = _ip(_first(row, ("host", "ip", "address")))
-        if host:
-            if _is_internal(host):
-                source = source or host
-            else:
-                destination = destination or host
-    if module == "dns_anomalies" and not source:
-        query_rows = _first(row, ("queries", "directs", "clients"))
-        if isinstance(query_rows, list):
-            for query in query_rows:
-                candidate = _ip(_first(query, ("ip", "source_ip", "src")))
-                if candidate:
-                    source = candidate
-                    break
-    score = _number(
-        _first(row, ("score", "beacon_score", "risk_score", "c2_score")),
-        0.0,
-    )
-    count = _integer_value(
-        _first(
-            row,
-            (
-                "count",
-                "connection_count",
-                "connections",
-                "conn_count",
-                "seen",
-                "queries",
-                "query_count",
-                "subdomains",
-                "visited",
-            ),
-        )
-    )
-    duration = _duration_seconds(
-        _first(
-            row,
-            (
-                "duration",
-                "duration_seconds",
-                "length",
-                "connection_duration",
-            ),
-        )
-    )
-    port_value = _first(
-        row,
-        (
-            "port",
-            "destination_port",
-            "dst_port",
-            "resp_p",
-            "id.resp_p",
-            "service_port",
-        ),
-    )
-    port = _integer_value(port_value)
-    if not 0 < port <= 65535:
-        port = 0
-    protocol = _safe_text(
-        _first(row, ("protocol", "proto", "service", "transport")), 64
-    ).upper()
-    tuples = _first(row, ("tuples",))
-    if isinstance(tuples, list) and tuples:
-        if not count:
-            count = len(tuples)
-        first_tuple = tuples[0]
-        if isinstance(first_tuple, dict):
-            if not port:
-                tuple_port = _integer_value(
-                    _first(
-                        first_tuple,
-                        ("port", "destination_port", "dst_port", "resp_p"),
-                    )
-                )
-                if 0 < tuple_port <= 65535:
-                    port = tuple_port
-            if not protocol:
-                protocol = _safe_text(
-                    _first(first_tuple, ("protocol", "proto", "transport")), 64
-                ).upper()
-    timing_mode = _safe_text(
-        _first(row, ("timing_mode", "ts_mode", "time_mode", "mode")), 128
-    )
-    data_size_mode = _safe_text(
-        _first(row, ("data_size_mode", "ds_mode", "size_mode")), 128
-    )
-    evidence = {
-        "timing_mode": timing_mode,
-        "data_size_mode": data_size_mode,
-        "bytes": _integer_value(
-            _first(row, ("bytes", "total_bytes", "byte_count"))
-        ),
-        "network": _safe_text(
-            _first(row, ("network_name", "src_network_name")), 256
-        ),
-        "destination_network": _safe_text(
-            _first(row, ("dst_network_name", "destination_network_name")), 256
-        ),
-        "ptr": _safe_text(
-            _first(row, ("ptr", "reverse_dns", "destination_ptr")), 512
-        ),
-        "open": bool(_first(row, ("open", "is_open")) is True),
-    }
-    evidence = {key: value for key, value in evidence.items() if value not in ("", 0, False)}
-    finding: Dict[str, Any] = {
-        "source_ip": source,
-        "destination_ip": destination,
-        "fqdn": fqdn,
-        "module": module,
-        "score": round(max(0.0, score), 6),
-        "count": count,
-        "duration": round(duration, 3),
-        "duration_seconds": round(duration, 3),
-        "port": port,
-        "protocol": protocol,
-        "timing_mode": timing_mode,
-        "data_size_mode": data_size_mode,
-        "responding_ips": responding_ips,
-        "evidence": evidence,
-    }
-    finding["id"] = _finding_id(module, finding)
-    return finding
+    return normalize_finding(module, row, _FINDING_NORMALIZATION_PRIMITIVES)
 
 
 KNOWN_BENIGN_DOMAINS = (
