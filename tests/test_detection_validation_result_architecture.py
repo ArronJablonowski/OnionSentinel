@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
 import inspect
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -13,6 +16,14 @@ ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "n8n" / "bin"
 sys.path.insert(0, str(BIN))
 RESULT = importlib.import_module("detection_validation_result")
+OWNER_FILES = (
+    "detection_validation_result_predicates.py",
+    "detection_validation_result_content.py",
+    "detection_validation_result_decision.py",
+    "detection_validation_result_projection.py",
+    "detection_validation_result_workflow.py",
+    "detection_validation_result.py",
+)
 
 
 def rule_context(*, conflicts: bool = False) -> dict[str, object]:
@@ -229,6 +240,122 @@ class DetectionValidationResultCharacterizationTests(unittest.TestCase):
             mismatched["interpretation"],
             "The observed packets violate one or more required threat-behavior predicates.",
         )
+
+    def test_legacy_policy_override_remains_effective(self):
+        original = RESULT._evaluate_numeric_predicate
+        calls = []
+
+        def replacement(item, features, *, source):
+            calls.append((item["id"], features, source))
+            return {
+                "id": item["id"],
+                "field": item["field"],
+                "operator": item["operator"],
+                "expected": [],
+                "observed": [],
+                "status": "unknown",
+                "required": True,
+                "source": source,
+                "reason": "replacement",
+            }
+
+        try:
+            RESULT._evaluate_numeric_predicate = replacement
+            features = packet_features()
+            RESULT.build_detection_validation(rule_context(), features)
+        finally:
+            RESULT._evaluate_numeric_predicate = original
+        self.assertEqual(calls, [("type", features, "deployed_rule")])
+
+
+class DetectionValidationResultArchitectureTests(unittest.TestCase):
+    def test_facade_and_owners_obey_size_and_dependency_boundaries(self):
+        expected_imports = {
+            "detection_validation_result_predicates.py": set(),
+            "detection_validation_result_content.py": set(),
+            "detection_validation_result_decision.py": set(),
+            "detection_validation_result_projection.py": {"detection_validation_rule"},
+            "detection_validation_result_workflow.py": {
+                "detection_validation_result_content",
+                "detection_validation_result_decision",
+                "detection_validation_result_predicates",
+                "detection_validation_result_projection",
+            },
+            "detection_validation_result.py": {
+                "detection_validation_rule",
+                "detection_validation_packet",
+                "detection_validation_features",
+                "detection_validation_policy",
+                "detection_validation_result_workflow",
+            },
+        }
+        for name in OWNER_FILES:
+            with self.subTest(name=name):
+                source = (BIN / name).read_text(encoding="utf-8")
+                limit = 250 if name == "detection_validation_result.py" else 800
+                self.assertLessEqual(len(source.splitlines()), limit)
+                imports = {
+                    node.module
+                    for node in ast.walk(ast.parse(source))
+                    if isinstance(node, ast.ImportFrom)
+                    and node.module
+                    and node.module.startswith("detection_validation")
+                }
+                self.assertEqual(imports, expected_imports[name])
+
+    def test_result_facade_imports_from_an_isolated_flat_dependency_unit(self):
+        sources = (
+            "detection_validation_rule_contract.py",
+            "detection_validation_rule_parser.py",
+            "detection_validation_rule_context.py",
+            "detection_validation_rule_icmp.py",
+            "detection_validation_rule.py",
+            "detection_validation_packet_network.py",
+            "detection_validation_packet_markers.py",
+            "detection_validation_packet_content.py",
+            "detection_validation_packet_buffers.py",
+            "detection_validation_packet.py",
+            "detection_validation_features_state.py",
+            "detection_validation_features_markers.py",
+            "detection_validation_features_observation.py",
+            "detection_validation_features_projection.py",
+            "detection_validation_features_workflow.py",
+            "detection_validation_features.py",
+            "detection_validation_policy_registry.py",
+            "detection_validation_policy_resolution.py",
+            "detection_validation_policy_predicates.py",
+            "detection_validation_policy_stun.py",
+            "detection_validation_policy.py",
+            *OWNER_FILES,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            for name in sources:
+                (target / name).write_bytes((BIN / name).read_bytes())
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-c",
+                    (
+                        "import sys; sys.path.insert(0, sys.argv[1]); "
+                        "import detection_validation_result as r; "
+                        "assert r.build_detection_validation({}, {})['rule_intent_match'] == 'unknown'"
+                    ),
+                    directory,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_mac_installer_copies_the_complete_result_dependency_unit(self):
+        installer = (BIN / "install-macstudio-stack.zsh").read_text(encoding="utf-8")
+        for name in OWNER_FILES:
+            with self.subTest(name=name):
+                self.assertIn(f"n8n/bin/{name}", installer)
 
 
 if __name__ == "__main__":

@@ -2746,8 +2746,14 @@ raw-payload-free evidence contract, and
 admission, `detection_validation_policy_resolution.py` owns exact deployed-rule
 resolution, `detection_validation_policy_predicates.py` owns numeric evidence
 projection, and `detection_validation_policy_stun.py` owns the fail-closed STUN
-rule and xbit inference policy. `detection_validation_result.py` owns the
-conclusion-safe public result projection.
+rule and xbit inference policy. `detection_validation_result.py` is the stable
+result compatibility facade; `detection_validation_result_predicates.py` owns
+numeric, state, and unsupported predicate projection;
+`detection_validation_result_content.py` owns deployed and playbook marker
+results; `detection_validation_result_decision.py` owns fail-closed intent and
+rule-drift decisions; `detection_validation_result_projection.py` owns the
+conclusion-safe public schema; and `detection_validation_result_workflow.py`
+owns their deterministic ordering and orchestration.
 
 The dependency chain is acyclic and never points back to the facade. A rule
 match remains an evidence fact rather than an independent malicious verdict.

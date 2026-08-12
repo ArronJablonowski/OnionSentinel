@@ -29,10 +29,6 @@
     "n8n/bin/configure-post-commit-env.py::render_env": {
       "max_complexity": 16
     },
-    "n8n/bin/detection_validation_result.py::build_detection_validation": {
-      "max_complexity": 136,
-      "max_lines": 351
-    },
     "n8n/bin/evaluate-investigation-skills-v2.py::evaluate": {
       "max_complexity": 17
     },

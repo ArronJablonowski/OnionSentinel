@@ -1370,6 +1370,52 @@
       ]
     },
     {
+      "path": "n8n/bin/detection_validation_result_predicates.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation_result_predicates.py",
+      "required_symbols": [
+        "append_deployed_predicates",
+        "append_playbook_numeric_predicates",
+        "append_unsupported_predicates"
+      ]
+    },
+    {
+      "path": "n8n/bin/detection_validation_result_content.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation_result_content.py",
+      "required_symbols": [
+        "append_deployed_content_predicates",
+        "append_playbook_marker_predicates",
+        "marker_lookup"
+      ]
+    },
+    {
+      "path": "n8n/bin/detection_validation_result_decision.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation_result_decision.py",
+      "required_symbols": [
+        "decide_intent_match",
+        "has_identity_conflict",
+        "missing_installed_constraints"
+      ]
+    },
+    {
+      "path": "n8n/bin/detection_validation_result_projection.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation_result_projection.py",
+      "required_symbols": [
+        "project_detection_validation"
+      ]
+    },
+    {
+      "path": "n8n/bin/detection_validation_result_workflow.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/detection_validation_result_workflow.py",
+      "required_symbols": [
+        "build_detection_validation"
+      ]
+    },
+    {
       "path": "n8n/bin/detection_validation_result.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/detection_validation_result.py",
