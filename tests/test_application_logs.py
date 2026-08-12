@@ -153,12 +153,22 @@ class ApplicationLogTests(unittest.TestCase):
         )
 
     def test_application_logs_starts_from_an_isolated_dashboard_directory(self) -> None:
-        source = DASHBOARD_DIR / "application_logs.py"
+        sources = [
+            DASHBOARD_DIR / name
+            for name in (
+                "application_logs.py",
+                "application_log_catalog.py",
+                "application_log_content.py",
+                "application_log_contract.py",
+                "application_log_filesystem.py",
+            )
+        ]
         with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / source.name
-            target.write_bytes(source.read_bytes())
+            for source in sources:
+                target = Path(directory) / source.name
+                target.write_bytes(source.read_bytes())
             result = subprocess.run(
-                [sys.executable, "-I", "-B", str(target)],
+                [sys.executable, "-I", "-B", str(Path(directory) / "application_logs.py")],
                 text=True,
                 capture_output=True,
                 timeout=10,
@@ -597,11 +607,19 @@ class ApplicationLogPageContractTests(unittest.TestCase):
         installer = (
             ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
         ).read_text(encoding="utf-8")
-        self.assertIn(
-            'cp "$REPO_DIR/onion-sentinel-dashboard/application_logs.py" '
-            '"$DASHBOARD_RUNTIME_DIR/application_logs.py"',
-            installer,
-        )
+        for name in (
+            "application_log_contract.py",
+            "application_log_filesystem.py",
+            "application_log_catalog.py",
+            "application_log_content.py",
+            "application_logs.py",
+        ):
+            with self.subTest(name=name):
+                self.assertIn(
+                    f'cp "$REPO_DIR/onion-sentinel-dashboard/{name}" '
+                    f'"$DASHBOARD_RUNTIME_DIR/{name}"',
+                    installer,
+                )
         transitional = (DASHBOARD_DIR / "report_portal.py").read_text(
             encoding="utf-8"
         )

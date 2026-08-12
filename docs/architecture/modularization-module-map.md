@@ -2319,8 +2319,17 @@ JavaScript braces as a general-purpose format language.
 The first page-specific checkpoint is
 `onion-sentinel-dashboard/scripts/dashboard_logs_page.py`. It owns the Logs
 page markup, responsive styles, and bounded lazy-viewer client behavior. The
-builder re-exports `logs_page_section` for compatibility; server-side log
-catalog and redaction policy remain in `application_logs.py`.
+builder re-exports `logs_page_section` for compatibility. The ARR-146 backend
+checkpoint retains `application_logs.py` as a 73-line stable facade.
+`application_log_contract.py` owns the immutable 45-entry catalog, limits,
+allowlist regexes, error, and `LogSpec`; `application_log_filesystem.py` owns
+UID/mode validation, descriptor-relative no-follow opens, member metadata, and
+the allowlisted owner-only rotation-policy read; `application_log_catalog.py`
+owns bounded fixed/family enumeration and catalog projection; and
+`application_log_content.py` owns member resolution, credential/private-key
+redaction, valid-UTF-8 byte bounding, bounded reads, and content projection.
+The unit does not read arbitrary paths or gain write, network, credential, or
+external-system authority.
 
 `onion-sentinel-dashboard/scripts/dashboard_software_inventory_page.py` owns
 the Software Inventory page markup, evidence-language guardrails, responsive
@@ -2823,6 +2832,7 @@ required before extracted code is imported in production:
 | `n8n/bin/bounded_process*.py` | `$HOME/n8n-local/bin` | copy the facade plus policy, observation, I/O, termination, and runtime owners as one flat-bin unit |
 | `n8n/bin/maintain-investigation-harness.py` and `harness_maintenance*.py` | `$HOME/n8n-local/bin` | copy all maintenance owners before the package-free compatibility facade |
 | `n8n/bin/harness_policy.py` and `harness_policy_{primitives,capabilities,document}.py` | `$HOME/n8n-local/bin` | copy the three policy owners before the stable harness-policy facade |
+| `onion-sentinel-dashboard/application_logs.py` and `application_log_{contract,filesystem,catalog,content}.py` | `$HOME/n8n-local/onion-sentinel-dashboard` | copy the four protected log owners before the stable dashboard log facade |
 | `n8n/bin/pcap_evidence_query*.py` | `$HOME/n8n-local/bin` | copy validation, matching, selection, projection, and response owners before the policy facade |
 | `n8n/bin/incident_evidence_contract.py` and `incident_evidence_*_contract.py` plus shared primitives | `$HOME/n8n-local/bin` | copy validation, scope/digest, search, OSQuery, control, and artifact owners before the stable contract facade |
 | `n8n/bin/evaluate-operational-slos.py` and `operational_slo_*.py` | `$HOME/n8n-local/bin` | copy timestamp, resilience, and aggregate policy owners before validating the stable launchd-facing evaluator |

@@ -2104,6 +2104,65 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/application_logs.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/application_logs.py",
+      "required_symbols": [
+        "ApplicationLogError",
+        "LogSpec",
+        "catalog_response",
+        "content_response",
+        "is_application_log_id"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/application_log_contract.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/application_log_contract.py",
+      "required_symbols": [
+        "ApplicationLogError",
+        "LogSpec",
+        "LOG_SPECS",
+        "LOG_SPECS_BY_ID",
+        "is_application_log_id"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/application_log_filesystem.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/application_log_filesystem.py",
+      "required_symbols": [
+        "_alert_store_policy",
+        "_member_metadata",
+        "_open_regular",
+        "_root_descriptor",
+        "_roots"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/application_log_catalog.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/application_log_catalog.py",
+      "required_symbols": [
+        "_family_members",
+        "_fixed_members",
+        "_spec_catalog_item",
+        "catalog_response"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/application_log_content.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/application_log_content.py",
+      "required_symbols": [
+        "_bounded_tail",
+        "_redact",
+        "_resolve_member",
+        "_utf8_tail",
+        "content_response"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/report_portal.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/report_portal.py",
