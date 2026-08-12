@@ -723,6 +723,9 @@ verification, logical in-memory restore, and transient-sidecar refusal as
 separate fail-closed phases. Every connection is explicitly closed; no bundle
 is publishable unless all phases preserve the same required tables and row
 count with clean quick-check and foreign-key results.
+Bundle orchestration separately owns capacity admission, optional harness and
+shadow snapshots, owner-only file hashing, manifest composition, and the final
+atomic rename; any phase failure removes only the unpublished staging tree.
 
 Qualify a bundle with a full isolated restore rather than relying only on dump
 creation checks:

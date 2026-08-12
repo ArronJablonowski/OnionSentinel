@@ -296,7 +296,10 @@ def archive_runtime_secrets(stack_dir: Path, destination: Path) -> list[str]:
     return included
 
 
-def create_bundle(stack_dir: Path, backup_root: Path, docker: str) -> Path:
+def __require_bundle_capacity(
+    stack_dir: Path,
+    backup_root: Path,
+) -> tuple[Path, Path]:
     sqlite_source = stack_dir / "alert_store_data/alerts.sqlite3"
     harness_source = (
         stack_dir / "alert_store_data/investigation-harness.sqlite3"
@@ -320,6 +323,105 @@ def create_bundle(stack_dir: Path, backup_root: Path, docker: str) -> Path:
         estimated_bytes,
         label="runtime recovery backup",
     )
+    return sqlite_source, harness_source
+
+
+def __backup_optional_harness(
+    harness_source: Path,
+    staging: Path,
+) -> dict[str, object]:
+    if not harness_source.exists():
+        return {"present": False}
+    harness_result = backup_sqlite_database(
+        harness_source,
+        staging / "investigation-harness.sqlite3",
+        required_tables=(
+            "harness_metadata",
+            "harness_runs",
+            "harness_events",
+            "harness_evidence",
+            "harness_hypotheses",
+            "harness_decisions",
+            "harness_model_calls",
+            "harness_tool_calls",
+            "harness_budget_reservations",
+        ),
+        count_table="harness_runs",
+    )
+    return {"present": True, **harness_result}
+
+
+def __dump_optional_alert_store_postgres(
+    stack_dir: Path,
+    staging: Path,
+    docker: str,
+) -> dict[str, object]:
+    if not env_flag(
+        stack_dir / ".env",
+        "ALERT_STORE_POSTGRES_SHADOW_ENABLED",
+    ):
+        return {"present": False}
+    container = "onion-sentinel-alert-store-postgres"
+    postgres_dump_container(
+        docker,
+        staging / "alert-store-postgres.dump",
+        container,
+    )
+    return {"present": True, "container": container}
+
+
+def __bundle_file_inventory(
+    staging: Path,
+) -> dict[str, dict[str, object]]:
+    files: dict[str, dict[str, object]] = {}
+    for path in sorted(staging.iterdir()):
+        if path.is_file():
+            os.chmod(path, 0o600)
+            files[path.name] = {
+                "bytes": path.stat().st_size,
+                "sha256": sha256_file(path),
+            }
+    return files
+
+
+def __bundle_manifest(
+    *,
+    alert_sqlite: dict[str, object],
+    harness_sqlite: dict[str, object],
+    alert_store_postgres: dict[str, object],
+    included: list[str],
+    files: dict[str, dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "created_at": dt.datetime.now()
+        .astimezone()
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("T", "  "),
+        "alert_rows": int(alert_sqlite["rows"]),
+        "harness_runs": (
+            int(harness_sqlite["rows"])
+            if harness_sqlite["present"]
+            else 0
+        ),
+        "sqlite": {
+            "alerts": {"present": True, **alert_sqlite},
+            "investigation_harness": harness_sqlite,
+        },
+        "postgres": {
+            "n8n": {"present": True, "container": "n8n-postgres"},
+            "alert_store_shadow": alert_store_postgres,
+        },
+        "runtime_paths": included,
+        "files": files,
+    }
+
+
+def create_bundle(stack_dir: Path, backup_root: Path, docker: str) -> Path:
+    sqlite_source, harness_source = __require_bundle_capacity(
+        stack_dir,
+        backup_root,
+    )
     stamp = dt.datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
     staging = backup_root / f".staging-{stamp}"
     final = backup_root / stamp
@@ -331,66 +433,28 @@ def create_bundle(stack_dir: Path, backup_root: Path, docker: str) -> Path:
             required_tables=("alerts", "alert_group_summary"),
             count_table="alerts",
         )
-        harness_sqlite: dict[str, object] = {"present": False}
-        if harness_source.exists():
-            harness_result = backup_sqlite_database(
-                harness_source,
-                staging / "investigation-harness.sqlite3",
-                required_tables=(
-                    "harness_metadata",
-                    "harness_runs",
-                    "harness_events",
-                    "harness_evidence",
-                    "harness_hypotheses",
-                    "harness_decisions",
-                    "harness_model_calls",
-                    "harness_tool_calls",
-                    "harness_budget_reservations",
-                ),
-                count_table="harness_runs",
-            )
-            harness_sqlite = {"present": True, **harness_result}
+        harness_sqlite = __backup_optional_harness(
+            harness_source,
+            staging,
+        )
         postgres_dump(docker, staging / "n8n-postgres.dump")
-        alert_store_postgres: dict[str, object] = {"present": False}
-        if env_flag(
-            stack_dir / ".env",
-            "ALERT_STORE_POSTGRES_SHADOW_ENABLED",
-        ):
-            postgres_dump_container(
-                docker,
-                staging / "alert-store-postgres.dump",
-                "onion-sentinel-alert-store-postgres",
-            )
-            alert_store_postgres = {
-                "present": True,
-                "container": "onion-sentinel-alert-store-postgres",
-            }
+        alert_store_postgres = __dump_optional_alert_store_postgres(
+            stack_dir,
+            staging,
+            docker,
+        )
         included = archive_runtime_secrets(stack_dir, staging / "runtime-secrets.tar.gz")
-        files = {}
-        for path in sorted(staging.iterdir()):
-            if path.is_file():
-                os.chmod(path, 0o600)
-                files[path.name] = {"bytes": path.stat().st_size, "sha256": sha256_file(path)}
-        manifest = {
-            "created_at": dt.datetime.now().astimezone().replace(microsecond=0).isoformat().replace("T", "  "),
-            "alert_rows": int(alert_sqlite["rows"]),
-            "harness_runs": (
-                int(harness_sqlite["rows"])
-                if harness_sqlite["present"]
-                else 0
-            ),
-            "sqlite": {
-                "alerts": {"present": True, **alert_sqlite},
-                "investigation_harness": harness_sqlite,
-            },
-            "postgres": {
-                "n8n": {"present": True, "container": "n8n-postgres"},
-                "alert_store_shadow": alert_store_postgres,
-            },
-            "runtime_paths": included,
-            "files": files,
-        }
-        (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        files = __bundle_file_inventory(staging)
+        manifest = __bundle_manifest(
+            alert_sqlite=alert_sqlite,
+            harness_sqlite=harness_sqlite,
+            alert_store_postgres=alert_store_postgres,
+            included=included,
+            files=files,
+        )
+        (staging / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        )
         os.chmod(staging / "manifest.json", 0o600)
         staging.rename(final)
         return final
