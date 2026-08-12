@@ -2687,6 +2687,16 @@ provenance remain explicit, and ambiguous observations are never promoted to
 installed software. The installer stages all modules beside the facade without
 changing runtime configuration or database/API payload contracts.
 
+## Asset Inventory Contract
+
+`n8n/bin/asset_inventory.py` is the bounded operator-owned validation and
+resolution contract. Private phases own expected-service validation, temporal
+asset projection, active identifier lookup, conflict/match accounting, and
+bounded expected-service correlation. Its public surface, normalization and
+error precedence, time-scoped identity rules, output ordering, and truncation
+accounting remain exact. Registered services and behaviors remain context only
+and never prove authorization, identity, benignness, or maliciousness.
+
 ## DHCP Asset Discovery Collector
 
 `n8n/bin/collect-dhcp-asset-discovery.py` is the stable 249-line launchd, CLI,

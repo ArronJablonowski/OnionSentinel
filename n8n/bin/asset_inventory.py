@@ -41,13 +41,11 @@ CRITICALITY_VALUES = {"low", "medium", "high", "critical", "unknown"}
 PROTOCOL_VALUES = {"tcp", "udp", "icmp", "icmpv6", "any"}
 OBSERVABLE_TYPES = {"ip", "mac", "hostname"}
 
-
 def _bounded_string(value: object, *, field: str, maximum: int = 300) -> str:
     text = str(value or "").strip()
     if len(text) > maximum:
         raise ValueError(f"{field} exceeds {maximum} characters")
     return text
-
 
 def _timestamp(value: object, *, field: str, required: bool = False) -> dt.datetime | None:
     text = str(value or "").strip()
@@ -66,12 +64,10 @@ def _timestamp(value: object, *, field: str, required: bool = False) -> dt.datet
         raise ValueError(f"{field} must include a UTC offset")
     return parsed.astimezone(dt.timezone.utc)
 
-
 def _timestamp_text(value: dt.datetime | None) -> str | None:
     if value is None:
         return None
     return value.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
-
 
 def _normalize_ip(value: object) -> str:
     try:
@@ -79,20 +75,17 @@ def _normalize_ip(value: object) -> str:
     except ValueError as error:
         raise ValueError(f"invalid IP address: {value}") from error
 
-
 def _normalize_mac(value: object) -> str:
     text = str(value or "").strip()
     if not MAC_RE.fullmatch(text):
         raise ValueError(f"invalid MAC address: {value}")
     return text.replace("-", ":").lower()
 
-
 def _normalize_hostname(value: object) -> str:
     text = str(value or "").strip().rstrip(".").lower()
     if not HOSTNAME_RE.fullmatch(text):
         raise ValueError(f"invalid hostname: {value}")
     return text
-
 
 def normalize_observable(observable_type: str, value: object) -> str:
     if observable_type == "ip":
@@ -102,7 +95,6 @@ def normalize_observable(observable_type: str, value: object) -> str:
     if observable_type == "hostname":
         return _normalize_hostname(value)
     raise ValueError(f"unsupported observable type: {observable_type}")
-
 
 def _identifier_list(raw: object, *, observable_type: str, field: str) -> list[str]:
     if raw is None:
@@ -118,7 +110,6 @@ def _identifier_list(raw: object, *, observable_type: str, field: str) -> list[s
             normalized.append(item)
     return normalized
 
-
 def _string_list(raw: object, *, field: str) -> list[str]:
     if raw is None:
         return []
@@ -133,6 +124,41 @@ def _string_list(raw: object, *, field: str) -> list[str]:
             result.append(item)
     return result
 
+def __expected_service(
+    item: object,
+    *,
+    asset_id: str,
+    index: int,
+) -> dict[str, Any]:
+    field = f"{asset_id}.expected_services[{index}]"
+    if not isinstance(item, dict):
+        raise ValueError(f"{field} must be an object")
+    protocol = str(item.get("protocol") or "").strip().lower()
+    if protocol not in PROTOCOL_VALUES:
+        raise ValueError(f"{field}.protocol is invalid")
+    port = __expected_service_port(item, field, protocol)
+    return {
+        "protocol": protocol,
+        "port": port,
+        "purpose": _bounded_string(
+            item.get("purpose"), field=f"{field}.purpose", maximum=300
+        ),
+    }
+
+def __expected_service_port(
+    item: dict[str, Any], field: str, protocol: str
+) -> int | None:
+    try:
+        port = int(item.get("port")) if item.get("port") is not None else None
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{field}.port is invalid") from error
+    if protocol in {"tcp", "udp", "any"} and (
+        port is None or port < 0 or port > 65535
+    ):
+        raise ValueError(f"{field}.port must be 0..65535")
+    if protocol not in {"tcp", "udp", "any"} and port is not None:
+        raise ValueError(f"{field}.port must be omitted for ICMP")
+    return port
 
 def _expected_services(raw: object, *, asset_id: str) -> list[dict[str, Any]]:
     if raw is None:
@@ -141,35 +167,96 @@ def _expected_services(raw: object, *, asset_id: str) -> list[dict[str, Any]]:
         raise ValueError(f"{asset_id}.expected_services must be a list")
     if len(raw) > MAX_EXPECTATIONS:
         raise ValueError(f"{asset_id}.expected_services exceeds {MAX_EXPECTATIONS} entries")
-    services = []
-    for index, item in enumerate(raw):
-        if not isinstance(item, dict):
-            raise ValueError(f"{asset_id}.expected_services[{index}] must be an object")
-        protocol = str(item.get("protocol") or "").strip().lower()
-        if protocol not in PROTOCOL_VALUES:
-            raise ValueError(f"{asset_id}.expected_services[{index}].protocol is invalid")
-        try:
-            port = int(item.get("port")) if item.get("port") is not None else None
-        except (TypeError, ValueError) as error:
-            raise ValueError(f"{asset_id}.expected_services[{index}].port is invalid") from error
-        if protocol in {"tcp", "udp", "any"}:
-            if port is None or port < 0 or port > 65535:
-                raise ValueError(f"{asset_id}.expected_services[{index}].port must be 0..65535")
-        elif port is not None:
-            raise ValueError(f"{asset_id}.expected_services[{index}].port must be omitted for ICMP")
-        services.append(
-            {
-                "protocol": protocol,
-                "port": port,
-                "purpose": _bounded_string(
-                    item.get("purpose"),
-                    field=f"{asset_id}.expected_services[{index}].purpose",
-                    maximum=300,
-                ),
-            }
-        )
-    return services
+    return [
+        __expected_service(item, asset_id=asset_id, index=index)
+        for index, item in enumerate(raw)
+    ]
 
+def __asset_window(
+    item: dict[str, Any],
+    asset_id: str,
+    records: list[tuple[dt.datetime, dt.datetime | None]],
+) -> tuple[dt.datetime, dt.datetime | None]:
+    valid_from = _timestamp(
+        item.get("valid_from"), field=f"{asset_id}.valid_from", required=True
+    )
+    valid_until = _timestamp(item.get("valid_until"), field=f"{asset_id}.valid_until")
+    if valid_until is not None and valid_from is not None and valid_until <= valid_from:
+        raise ValueError(f"{asset_id}.valid_until must be after valid_from")
+    assert valid_from is not None
+    current_end = valid_until or dt.datetime.max.replace(tzinfo=dt.timezone.utc)
+    for previous_from, previous_until in records:
+        previous_end = previous_until or dt.datetime.max.replace(tzinfo=dt.timezone.utc)
+        if valid_from < previous_end and previous_from < current_end:
+            raise ValueError(f"{asset_id} has overlapping validity intervals")
+    records.append((valid_from, valid_until))
+    return valid_from, valid_until
+
+def __asset_identifiers(item: dict[str, Any], asset_id: str) -> dict[str, list[str]]:
+    identifiers = item.get("identifiers")
+    if not isinstance(identifiers, dict):
+        raise ValueError(f"{asset_id}.identifiers must be an object")
+    normalized = {
+        "ip": _identifier_list(
+            identifiers.get("ip_addresses"), observable_type="ip",
+            field=f"{asset_id}.identifiers.ip_addresses",
+        ),
+        "mac": _identifier_list(
+            identifiers.get("mac_addresses"), observable_type="mac",
+            field=f"{asset_id}.identifiers.mac_addresses",
+        ),
+        "hostname": _identifier_list(
+            identifiers.get("hostnames"), observable_type="hostname",
+            field=f"{asset_id}.identifiers.hostnames",
+        ),
+    }
+    if not any(normalized.values()):
+        raise ValueError(f"{asset_id} must register at least one identifier")
+    return normalized
+
+def __validated_asset(
+    item: object,
+    index: int,
+    records_by_asset_id: dict[str, list[tuple[dt.datetime, dt.datetime | None]]],
+) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        raise ValueError(f"assets[{index}] must be an object")
+    asset_id = _bounded_string(
+        item.get("asset_id"), field=f"assets[{index}].asset_id", maximum=128
+    )
+    if not ASSET_ID_RE.fullmatch(asset_id):
+        raise ValueError(f"assets[{index}].asset_id is invalid")
+    valid_from, valid_until = __asset_window(
+        item, asset_id, records_by_asset_id.setdefault(asset_id, [])
+    )
+    identifiers = __asset_identifiers(item, asset_id)
+    confidence = str(item.get("confidence") or "medium").strip().lower()
+    if confidence not in CONFIDENCE_VALUES:
+        raise ValueError(f"{asset_id}.confidence is invalid")
+    criticality = str(item.get("criticality") or "unknown").strip().lower()
+    if criticality not in CRITICALITY_VALUES:
+        raise ValueError(f"{asset_id}.criticality is invalid")
+    share_with_hosted = item.get("share_with_hosted_models", False)
+    if not isinstance(share_with_hosted, bool):
+        raise ValueError(f"{asset_id}.share_with_hosted_models must be boolean")
+    return {
+        "asset_id": asset_id,
+        "valid_from": _timestamp_text(valid_from),
+        "valid_until": _timestamp_text(valid_until),
+        "identifiers": identifiers,
+        "role": _bounded_string(item.get("role"), field=f"{asset_id}.role"),
+        "platform": _bounded_string(item.get("platform"), field=f"{asset_id}.platform"),
+        "owner_ref": _bounded_string(item.get("owner_ref"), field=f"{asset_id}.owner_ref"),
+        "criticality": criticality,
+        "expected_services": _expected_services(item.get("expected_services"), asset_id=asset_id),
+        "expected_behaviors": _string_list(
+            item.get("expected_behaviors"), field=f"{asset_id}.expected_behaviors"
+        ),
+        "source_type": _bounded_string(item.get("source_type"), field=f"{asset_id}.source_type"),
+        "source_ref": _bounded_string(item.get("source_ref"), field=f"{asset_id}.source_ref"),
+        "confidence": confidence,
+        "share_with_hosted_models": share_with_hosted,
+    }
 
 def validate_asset_inventory(payload: object) -> dict[str, Any]:
     if not isinstance(payload, dict) or payload.get("schema") != ASSET_INVENTORY_SCHEMA:
@@ -181,84 +268,17 @@ def validate_asset_inventory(payload: object) -> dict[str, Any]:
         raise ValueError("asset inventory assets must be a list")
     if len(raw_assets) > MAX_ASSETS:
         raise ValueError(f"asset inventory exceeds {MAX_ASSETS} records")
-    assets = []
     records_by_asset_id: dict[str, list[tuple[dt.datetime, dt.datetime | None]]] = {}
-    for index, item in enumerate(raw_assets):
-        if not isinstance(item, dict):
-            raise ValueError(f"assets[{index}] must be an object")
-        asset_id = _bounded_string(item.get("asset_id"), field=f"assets[{index}].asset_id", maximum=128)
-        if not ASSET_ID_RE.fullmatch(asset_id):
-            raise ValueError(f"assets[{index}].asset_id is invalid")
-        valid_from = _timestamp(item.get("valid_from"), field=f"{asset_id}.valid_from", required=True)
-        valid_until = _timestamp(item.get("valid_until"), field=f"{asset_id}.valid_until")
-        if valid_until is not None and valid_from is not None and valid_until <= valid_from:
-            raise ValueError(f"{asset_id}.valid_until must be after valid_from")
-        assert valid_from is not None
-        for previous_from, previous_until in records_by_asset_id.setdefault(asset_id, []):
-            previous_end = previous_until or dt.datetime.max.replace(tzinfo=dt.timezone.utc)
-            current_end = valid_until or dt.datetime.max.replace(tzinfo=dt.timezone.utc)
-            if valid_from < previous_end and previous_from < current_end:
-                raise ValueError(f"{asset_id} has overlapping validity intervals")
-        records_by_asset_id[asset_id].append((valid_from, valid_until))
-        identifiers = item.get("identifiers")
-        if not isinstance(identifiers, dict):
-            raise ValueError(f"{asset_id}.identifiers must be an object")
-        normalized_identifiers = {
-            "ip": _identifier_list(
-                identifiers.get("ip_addresses"),
-                observable_type="ip",
-                field=f"{asset_id}.identifiers.ip_addresses",
-            ),
-            "mac": _identifier_list(
-                identifiers.get("mac_addresses"),
-                observable_type="mac",
-                field=f"{asset_id}.identifiers.mac_addresses",
-            ),
-            "hostname": _identifier_list(
-                identifiers.get("hostnames"),
-                observable_type="hostname",
-                field=f"{asset_id}.identifiers.hostnames",
-            ),
-        }
-        if not any(normalized_identifiers.values()):
-            raise ValueError(f"{asset_id} must register at least one identifier")
-        confidence = str(item.get("confidence") or "medium").strip().lower()
-        if confidence not in CONFIDENCE_VALUES:
-            raise ValueError(f"{asset_id}.confidence is invalid")
-        criticality = str(item.get("criticality") or "unknown").strip().lower()
-        if criticality not in CRITICALITY_VALUES:
-            raise ValueError(f"{asset_id}.criticality is invalid")
-        share_with_hosted = item.get("share_with_hosted_models", False)
-        if not isinstance(share_with_hosted, bool):
-            raise ValueError(f"{asset_id}.share_with_hosted_models must be boolean")
-        assets.append(
-            {
-                "asset_id": asset_id,
-                "valid_from": _timestamp_text(valid_from),
-                "valid_until": _timestamp_text(valid_until),
-                "identifiers": normalized_identifiers,
-                "role": _bounded_string(item.get("role"), field=f"{asset_id}.role"),
-                "platform": _bounded_string(item.get("platform"), field=f"{asset_id}.platform"),
-                "owner_ref": _bounded_string(item.get("owner_ref"), field=f"{asset_id}.owner_ref"),
-                "criticality": criticality,
-                "expected_services": _expected_services(item.get("expected_services"), asset_id=asset_id),
-                "expected_behaviors": _string_list(
-                    item.get("expected_behaviors"),
-                    field=f"{asset_id}.expected_behaviors",
-                ),
-                "source_type": _bounded_string(item.get("source_type"), field=f"{asset_id}.source_type"),
-                "source_ref": _bounded_string(item.get("source_ref"), field=f"{asset_id}.source_ref"),
-                "confidence": confidence,
-                "share_with_hosted_models": share_with_hosted,
-            }
-        )
+    assets = [
+        __validated_asset(item, index, records_by_asset_id)
+        for index, item in enumerate(raw_assets)
+    ]
     return {
         "schema": ASSET_INVENTORY_SCHEMA,
         "version": payload.get("version", 1),
         "generated_at": _bounded_string(payload.get("generated_at"), field="generated_at", maximum=80),
         "assets": assets,
     }
-
 
 def load_asset_inventory(path: Path) -> dict[str, Any]:
     try:
@@ -281,12 +301,10 @@ def load_asset_inventory(path: Path) -> dict[str, Any]:
     validated["inventory_status"] = "loaded"
     return validated
 
-
 def _record_active(asset: dict[str, Any], observed_at: dt.datetime) -> bool:
     valid_from = _timestamp(asset.get("valid_from"), field="valid_from", required=True)
     valid_until = _timestamp(asset.get("valid_until"), field="valid_until")
     return bool(valid_from and valid_from <= observed_at and (valid_until is None or observed_at < valid_until))
-
 
 def _normalized_observables(observables: Iterable[object]) -> list[dict[str, str]]:
     normalized = []
@@ -309,7 +327,6 @@ def _normalized_observables(observables: Iterable[object]) -> list[dict[str, str
         if len(normalized) >= MAX_NORMALIZED_OBSERVABLES:
             break
     return normalized
-
 
 def _normalized_network_events(
     network_events: Iterable[object],
@@ -341,6 +358,158 @@ def _normalized_network_events(
         )
     return normalized, truncated
 
+def __invalid_event_context(
+    inventory: dict[str, Any],
+    observables: Iterable[object],
+    observed_at: object,
+    error: ValueError,
+) -> dict[str, Any]:
+    return {
+        "inventory_status": inventory.get("inventory_status", "loaded"),
+        "resolution_status": "event_time_invalid",
+        "observed_at": str(observed_at or ""),
+        "matched_assets": [],
+        "conflicts": [],
+        "unmatched_observables": _normalized_observables(observables),
+        "errors": [str(error)],
+        "usage_guidance": "No asset association was made because the event timestamp was invalid.",
+    }
+
+def __active_asset_lookup(
+    inventory: dict[str, Any],
+    event_time: dt.datetime,
+    relevant_keys: set[tuple[str, str]],
+) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    lookup: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    raw_assets = inventory.get("assets")
+    assets = raw_assets if isinstance(raw_assets, list) else []
+    for asset in assets:
+        if not isinstance(asset, dict) or not _record_active(asset, event_time):
+            continue
+        raw_identifiers = asset.get("identifiers")
+        identifiers = raw_identifiers if isinstance(raw_identifiers, dict) else {}
+        for observable_type in OBSERVABLE_TYPES:
+            raw_values = identifiers.get(observable_type)
+            values = raw_values if isinstance(raw_values, list) else []
+            for value in values:
+                key = (observable_type, str(value))
+                if key in relevant_keys:
+                    lookup.setdefault(key, []).append(asset)
+    return lookup
+
+def __record_conflict(
+    conflicts: list[dict[str, Any]],
+    observable: dict[str, str],
+    matching_assets: list[dict[str, Any]],
+) -> bool:
+    if len(matching_assets) <= 1:
+        return False
+    if len(conflicts) >= MAX_CONFLICTS:
+        return True
+    active_asset_ids = sorted(
+        {
+            str(asset.get("asset_id") or "")
+            for asset in matching_assets
+            if str(asset.get("asset_id") or "")
+        }
+    )
+    conflicts.append(
+        {
+            "observable": observable,
+            "active_asset_ids": active_asset_ids[:MAX_CONFLICT_ASSET_IDS],
+            "active_asset_count": len(active_asset_ids),
+            "active_asset_ids_truncated": len(active_asset_ids) > MAX_CONFLICT_ASSET_IDS,
+            "reason": "multiple asset records claim the same identifier at the event time",
+        }
+    )
+    return False
+
+def __record_asset_match(
+    matches_by_asset: dict[str, dict[str, Any]],
+    omitted_matched_assets: set[str],
+    asset: dict[str, Any],
+    observable: dict[str, str],
+) -> None:
+    asset_id = str(asset["asset_id"])
+    if asset_id not in matches_by_asset and len(matches_by_asset) >= MAX_MATCHED_ASSETS:
+        omitted_matched_assets.add(asset_id)
+        return
+    current = matches_by_asset.setdefault(
+        asset_id,
+        {key: value for key, value in asset.items() if key != "identifiers"}
+        | {"matched_observables": []},
+    )
+    if len(current["matched_observables"]) < MAX_MATCHED_OBSERVABLES_PER_ASSET:
+        current["matched_observables"].append(observable)
+
+def __resolved_observable_matches(
+    normalized: list[dict[str, str]],
+    lookup: dict[tuple[str, str], list[dict[str, Any]]],
+) -> tuple[
+    dict[str, dict[str, Any]], list[dict[str, str]], list[dict[str, Any]], set[str], int
+]:
+    matches_by_asset: dict[str, dict[str, Any]] = {}
+    unmatched: list[dict[str, str]] = []
+    conflicts: list[dict[str, Any]] = []
+    omitted_matched_assets: set[str] = set()
+    omitted_conflicts = 0
+    for observable in normalized:
+        matching_assets = lookup.get((observable["type"], observable["value"]), [])
+        if not matching_assets:
+            unmatched.append(observable)
+            continue
+        omitted_conflicts += int(
+            __record_conflict(conflicts, observable, matching_assets)
+        )
+        for asset in matching_assets:
+            __record_asset_match(
+                matches_by_asset, omitted_matched_assets, asset, observable
+            )
+    return (
+        matches_by_asset, unmatched, conflicts,
+        omitted_matched_assets, omitted_conflicts,
+    )
+
+def __service_matches_event(
+    service: object,
+    destination_port: int,
+    protocol: str,
+) -> bool:
+    if not isinstance(service, dict):
+        return False
+    registered_port = service.get("port")
+    if registered_port is None or int(registered_port) != destination_port:
+        return False
+    return str(service.get("protocol") or "") in {"any", protocol}
+
+def __expectation_matches(
+    normalized_events: list[dict[str, Any]],
+    lookup: dict[tuple[str, str], list[dict[str, Any]]],
+) -> tuple[list[dict[str, Any]], bool]:
+    matches: list[dict[str, Any]] = []
+    for event in normalized_events:
+        destination_ip = event["destination_ip"]
+        destination_port = event["destination_port"]
+        protocol = event["protocol"]
+        for asset in lookup.get(("ip", destination_ip), []):
+            raw_services = asset.get("expected_services")
+            services = raw_services if isinstance(raw_services, list) else []
+            for service in services:
+                if not __service_matches_event(service, destination_port, protocol):
+                    continue
+                if len(matches) >= MAX_EXPECTATION_MATCHES:
+                    return matches, True
+                matches.append(
+                    {
+                        "asset_id": asset.get("asset_id"),
+                        "destination_ip": destination_ip,
+                        "destination_port": destination_port,
+                        "protocol": protocol,
+                        "registered_purpose": service.get("purpose"),
+                        "interpretation": "registered expected service; this does not prove the activity was authorized or benign",
+                    }
+                )
+    return matches, False
 
 def resolve_asset_context(
     inventory: dict[str, Any],
@@ -351,16 +520,8 @@ def resolve_asset_context(
     try:
         event_time = _timestamp(observed_at, field="observed_at", required=True)
     except ValueError as error:
-        return {
-            "inventory_status": inventory.get("inventory_status", "loaded"),
-            "resolution_status": "event_time_invalid",
-            "observed_at": str(observed_at or ""),
-            "matched_assets": [],
-            "conflicts": [],
-            "unmatched_observables": _normalized_observables(observables),
-            "errors": [str(error)],
-            "usage_guidance": "No asset association was made because the event timestamp was invalid.",
-        }
+        return __invalid_event_context(inventory, observables, observed_at, error)
+    assert event_time is not None
     normalized = _normalized_observables(observables)
     normalized_events, network_events_truncated = _normalized_network_events(network_events)
     relevant_keys = {
@@ -371,98 +532,14 @@ def resolve_asset_context(
         ("ip", event["destination_ip"])
         for event in normalized_events
     )
-    lookup: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for asset in inventory.get("assets", []) if isinstance(inventory.get("assets"), list) else []:
-        if not isinstance(asset, dict) or event_time is None or not _record_active(asset, event_time):
-            continue
-        identifiers = asset.get("identifiers") if isinstance(asset.get("identifiers"), dict) else {}
-        for observable_type in OBSERVABLE_TYPES:
-            for value in identifiers.get(observable_type, []) if isinstance(identifiers.get(observable_type), list) else []:
-                key = (observable_type, str(value))
-                if key in relevant_keys:
-                    lookup.setdefault(key, []).append(asset)
-
-    matches_by_asset: dict[str, dict[str, Any]] = {}
-    unmatched = []
-    conflicts = []
-    omitted_matched_assets: set[str] = set()
-    omitted_conflicts = 0
-    for observable in normalized:
-        matching_assets = lookup.get((observable["type"], observable["value"]), [])
-        if not matching_assets:
-            unmatched.append(observable)
-            continue
-        if len(matching_assets) > 1:
-            if len(conflicts) < MAX_CONFLICTS:
-                active_asset_ids = sorted(
-                    {
-                        str(asset.get("asset_id") or "")
-                        for asset in matching_assets
-                        if str(asset.get("asset_id") or "")
-                    }
-                )
-                conflicts.append(
-                    {
-                        "observable": observable,
-                        "active_asset_ids": active_asset_ids[:MAX_CONFLICT_ASSET_IDS],
-                        "active_asset_count": len(active_asset_ids),
-                        "active_asset_ids_truncated": len(active_asset_ids) > MAX_CONFLICT_ASSET_IDS,
-                        "reason": "multiple asset records claim the same identifier at the event time",
-                    }
-                )
-            else:
-                omitted_conflicts += 1
-        for asset in matching_assets:
-            asset_id = str(asset["asset_id"])
-            if asset_id not in matches_by_asset and len(matches_by_asset) >= MAX_MATCHED_ASSETS:
-                omitted_matched_assets.add(asset_id)
-                continue
-            current = matches_by_asset.setdefault(
-                asset_id,
-                {
-                    key: value
-                    for key, value in asset.items()
-                    if key not in {"identifiers"}
-                }
-                | {"matched_observables": []},
-            )
-            if len(current["matched_observables"]) < MAX_MATCHED_OBSERVABLES_PER_ASSET:
-                current["matched_observables"].append(observable)
-
-    expectation_matches = []
-    expectation_matches_truncated = False
-    for raw_event in normalized_events:
-        destination_ip = raw_event["destination_ip"]
-        destination_port = raw_event["destination_port"]
-        protocol = raw_event["protocol"]
-        for asset in lookup.get(("ip", destination_ip), []):
-            for service in asset.get("expected_services", []) if isinstance(asset.get("expected_services"), list) else []:
-                if not isinstance(service, dict):
-                    continue
-                service_protocol = str(service.get("protocol") or "")
-                registered_port = service.get("port")
-                if registered_port is None or int(registered_port) != destination_port:
-                    continue
-                if service_protocol not in {"any", protocol}:
-                    continue
-                if len(expectation_matches) >= MAX_EXPECTATION_MATCHES:
-                    expectation_matches_truncated = True
-                    break
-                expectation_matches.append(
-                    {
-                        "asset_id": asset.get("asset_id"),
-                        "destination_ip": destination_ip,
-                        "destination_port": destination_port,
-                        "protocol": protocol,
-                        "registered_purpose": service.get("purpose"),
-                        "interpretation": "registered expected service; this does not prove the activity was authorized or benign",
-                    }
-                )
-            if expectation_matches_truncated:
-                break
-        if expectation_matches_truncated:
-            break
-
+    lookup = __active_asset_lookup(inventory, event_time, relevant_keys)
+    (
+        matches_by_asset, unmatched, conflicts,
+        omitted_matched_assets, omitted_conflicts,
+    ) = __resolved_observable_matches(normalized, lookup)
+    expectation_matches, expectation_matches_truncated = __expectation_matches(
+        normalized_events, lookup
+    )
     return {
         "inventory_status": inventory.get("inventory_status", "loaded"),
         "resolution_status": "resolved",
@@ -484,7 +561,6 @@ def resolve_asset_context(
             "registered expectations as context only. They do not prove identity, authorization, benignness, or maliciousness."
         ),
     }
-
 
 def main(argv: list[str] | None = None) -> int:
     """Validate one inventory without printing its potentially sensitive facts."""
