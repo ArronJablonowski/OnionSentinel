@@ -90,6 +90,16 @@ class SoftwareInventoryStateCollectionArchitectureTests(unittest.TestCase):
             ),
             800,
         )
+        for symbol in (
+            "_source_status_counts",
+            "_source_status_metadata",
+            "_sanitize_source_status",
+            "_collection_window",
+            "_collection_projection",
+            "_collection_osquery_ready",
+            "_collection_times",
+        ):
+            self.assertTrue(callable(getattr(inventory_state, symbol)))
         self.assertEqual(inventory_state._sanitize_source_statuses(None), {})
         self.assert_state_error(
             inventory_state._sanitize_source_statuses,

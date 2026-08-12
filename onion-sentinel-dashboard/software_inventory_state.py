@@ -178,6 +178,80 @@ def _read_bounded_regular_json(path: Path, maximum_bytes: int) -> tuple[dict, st
     return payload, hashlib.sha256(raw).hexdigest()
 
 
+def _source_status_counts(
+    item: dict[str, object], source: str, status: dict[str, object]
+) -> None:
+    if "complete" in item:
+        if not isinstance(item.get("complete"), bool):
+            raise InventoryStateError(
+                f"collection.source_statuses.{source}.complete must be boolean"
+            )
+        status["complete"] = item["complete"]
+    for key in ("records", "returned", "pages"):
+        if key not in item:
+            continue
+        value = item.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise InventoryStateError(
+                f"collection.source_statuses.{source}.{key} must be an integer"
+            )
+        status[key] = max(0, min(value, MAX_RECORDS))
+
+
+def _source_status_metadata(
+    item: dict[str, object], source: str, status: dict[str, object]
+) -> None:
+    freshness = _safe_text(
+        item.get("freshness"),
+        f"source_statuses.{source}.freshness",
+        maximum=16,
+    )
+    if freshness:
+        if freshness not in {"unknown", "empty", "fresh", "stale", "expired"}:
+            raise InventoryStateError(
+                f"collection.source_statuses.{source}.freshness is invalid"
+            )
+        status["freshness"] = freshness
+    latest = item.get("latest_observation_at")
+    if latest:
+        status["latest_observation_at"] = _utc_iso(
+            _parse_timestamp(
+                latest,
+                f"source_statuses.{source}.latest_observation_at",
+            )
+        )
+    error = _safe_text(
+        item.get("error"),
+        f"source_statuses.{source}.error",
+        maximum=300,
+    )
+    if error:
+        status["error"] = error
+
+
+def _sanitize_source_status(item: object, source: str) -> dict[str, object]:
+    if isinstance(item, str):
+        return {
+            "status": _safe_text(
+                item, f"source_statuses.{source}.status", maximum=32
+            )
+        }
+    if not isinstance(item, dict):
+        raise InventoryStateError(
+            f"collection.source_statuses.{source} must be an object"
+        )
+    status = {
+        "status": _safe_text(
+            item.get("status"),
+            f"source_statuses.{source}.status",
+            maximum=32,
+        )
+    }
+    _source_status_counts(item, source, status)
+    _source_status_metadata(item, source, status)
+    return status
+
+
 def _sanitize_source_statuses(raw: object) -> dict[str, dict[str, object]]:
     if raw is None:
         return {}
@@ -186,83 +260,14 @@ def _sanitize_source_statuses(raw: object) -> dict[str, dict[str, object]]:
     result: dict[str, dict[str, object]] = {}
     for source in SOURCES:
         item = raw.get(source)
-        if item is None:
-            continue
-        if isinstance(item, str):
-            result[source] = {
-                "status": _safe_text(
-                    item, f"source_statuses.{source}.status", maximum=32
-                )
-            }
-            continue
-        if not isinstance(item, dict):
-            raise InventoryStateError(
-                f"collection.source_statuses.{source} must be an object"
-            )
-        status = {
-            "status": _safe_text(
-                item.get("status"),
-                f"source_statuses.{source}.status",
-                maximum=32,
-            )
-        }
-        if "complete" in item:
-            if not isinstance(item.get("complete"), bool):
-                raise InventoryStateError(
-                    f"collection.source_statuses.{source}.complete must be boolean"
-                )
-            status["complete"] = item["complete"]
-        for key in ("records", "returned", "pages"):
-            if key not in item:
-                continue
-            value = item.get(key)
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise InventoryStateError(
-                    f"collection.source_statuses.{source}.{key} must be an integer"
-                )
-            status[key] = max(0, min(value, MAX_RECORDS))
-        freshness = _safe_text(
-            item.get("freshness"),
-            f"source_statuses.{source}.freshness",
-            maximum=16,
-        )
-        if freshness:
-            if freshness not in {
-                "unknown",
-                "empty",
-                "fresh",
-                "stale",
-                "expired",
-            }:
-                raise InventoryStateError(
-                    f"collection.source_statuses.{source}.freshness is invalid"
-                )
-            status["freshness"] = freshness
-        latest = item.get("latest_observation_at")
-        if latest:
-            status["latest_observation_at"] = _utc_iso(
-                _parse_timestamp(
-                    latest,
-                    f"source_statuses.{source}.latest_observation_at",
-                )
-            )
-        error = _safe_text(
-            item.get("error"),
-            f"source_statuses.{source}.error",
-            maximum=300,
-        )
-        if error:
-            status["error"] = error
-        result[source] = status
+        if item is not None:
+            result[source] = _sanitize_source_status(item, source)
     return result
 
 
-def _sanitize_collection(raw: object, updated_at: str) -> dict[str, object]:
-    if not isinstance(raw, dict):
-        raise InventoryStateError("collection must be an object")
-    status = _safe_text(raw.get("status"), "collection.status", maximum=32)
-    if not isinstance(raw.get("complete"), bool):
-        raise InventoryStateError("collection.complete must be boolean")
+def _collection_window(
+    raw: dict[str, object],
+) -> tuple[dt.datetime, dt.datetime]:
     raw_window = raw.get("window")
     if not isinstance(raw_window, dict) or set(raw_window) != {"start", "end"}:
         raise InventoryStateError(
@@ -279,7 +284,16 @@ def _sanitize_collection(raw: object, updated_at: str) -> dict[str, object]:
         or window_end - window_start > dt.timedelta(days=31)
     ):
         raise InventoryStateError("collection.window is out of bounds")
-    result: dict[str, object] = {
+    return window_start, window_end
+
+
+def _collection_projection(
+    raw: dict[str, object],
+    status: str,
+    window_start: dt.datetime,
+    window_end: dt.datetime,
+) -> dict[str, object]:
+    return {
         "status": status or "unknown",
         "complete": raw["complete"],
         "window": {
@@ -295,21 +309,44 @@ def _sanitize_collection(raw: object, updated_at: str) -> dict[str, object]:
             raw.get("source_statuses")
         ),
     }
-    if "osquery_ready" in raw:
-        osquery_ready = raw.get("osquery_ready")
-        if (
-            isinstance(osquery_ready, bool)
-            or not isinstance(osquery_ready, int)
-            or osquery_ready < 0
-            or osquery_ready > MAX_RECORDS
-        ):
-            raise InventoryStateError("collection.osquery_ready is invalid")
-        result["osquery_ready"] = osquery_ready
+
+
+def _collection_osquery_ready(
+    raw: dict[str, object], result: dict[str, object]
+) -> None:
+    if "osquery_ready" not in raw:
+        return
+    osquery_ready = raw.get("osquery_ready")
+    if (
+        isinstance(osquery_ready, bool)
+        or not isinstance(osquery_ready, int)
+        or osquery_ready < 0
+        or osquery_ready > MAX_RECORDS
+    ):
+        raise InventoryStateError("collection.osquery_ready is invalid")
+    result["osquery_ready"] = osquery_ready
+
+
+def _collection_times(
+    raw: dict[str, object], result: dict[str, object], updated_at: str
+) -> None:
     for key in ("last_attempt_at", "last_success_at"):
         if raw.get(key):
             result[key] = _utc_iso(_parse_timestamp(raw.get(key), key))
     if not result["last_success_at"] and result["complete"]:
         result["last_success_at"] = updated_at
+
+
+def _sanitize_collection(raw: object, updated_at: str) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        raise InventoryStateError("collection must be an object")
+    status = _safe_text(raw.get("status"), "collection.status", maximum=32)
+    if not isinstance(raw.get("complete"), bool):
+        raise InventoryStateError("collection.complete must be boolean")
+    window_start, window_end = _collection_window(raw)
+    result = _collection_projection(raw, status, window_start, window_end)
+    _collection_osquery_ready(raw, result)
+    _collection_times(raw, result, updated_at)
     return result
 
 
