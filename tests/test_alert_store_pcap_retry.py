@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import socket
@@ -15,6 +16,7 @@ import urllib.error
 import urllib.request
 from contextlib import closing
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +50,28 @@ def request_json(url: str, method: str = "GET", payload: dict | None = None) -> 
             return response.status, json.loads(response.read())
     except urllib.error.HTTPError as error:
         return error.code, json.loads(error.read())
+
+
+class RequestJsonOwnershipTest(unittest.TestCase):
+    def test_http_error_response_is_closed_after_read(self) -> None:
+        error = urllib.error.HTTPError(
+            "http://127.0.0.1:9/pcap/retry",
+            409,
+            "Conflict",
+            {},
+            io.BytesIO(b'{"error":"synthetic"}'),
+        )
+        with mock.patch.object(
+            urllib.request,
+            "urlopen",
+            side_effect=error,
+        ):
+            self.assertEqual(
+                request_json("http://127.0.0.1:9/pcap/retry"),
+                (409, {"error": "synthetic"}),
+            )
+
+        self.assertIsNone(error.fp)
 
 
 class AlertStorePcapRetryTest(unittest.TestCase):
