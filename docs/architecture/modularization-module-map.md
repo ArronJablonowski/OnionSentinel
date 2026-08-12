@@ -2908,10 +2908,11 @@ compatibility and operation policy in `ac_hunter_collection.py`; finding
 admission and cross-module scoring context in
 `ac_hunter_collection_findings.py`; correlated-host and analyst-note view
 models in `ac_hunter_collection_hosts.py`; stable status/metadata/final response
-composition in `ac_hunter_collection_projection.py`; and private cache plus
-review-service orchestration in `ac_hunter_service.py`. Pure bounded cache-tree
-validation lives in `ac_hunter_cache_validation.py` behind the service's stable
-private compatibility wrapper.
+composition in `ac_hunter_collection_projection.py`; and private cache, fresh
+cache admission and refresh limiting, collection persistence with stale/error
+fallback, plus review-service orchestration in `ac_hunter_service.py`. Pure
+bounded cache-tree validation lives in `ac_hunter_cache_validation.py` behind
+the service's stable private compatibility wrapper.
 
 The dependency graph remains acyclic. Credentials and JWTs remain server-side,
 AC Hunter access remains Relay-only, and cache material remains owner-only and

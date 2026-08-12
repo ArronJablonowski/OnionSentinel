@@ -241,6 +241,64 @@ class AcHunterReviewService:
             return copy.deepcopy(value)
         return None
 
+    def _fresh_cached_response(
+        self,
+        cached: Optional[Dict[str, Any]],
+        *,
+        now: float,
+        ttl: int,
+        force_refresh: bool,
+    ) -> Optional[Tuple[int, Dict[str, Any]]]:
+        if (
+            cached is not None
+            and _cache_age(cached, now) <= ttl
+            and (
+                not force_refresh
+                or _cache_age(cached, now)
+                < MIN_FORCE_REFRESH_INTERVAL_SECONDS
+            )
+        ):
+            view = _cache_view(cached, now=now, ttl=ttl, stale=False)
+            if force_refresh:
+                view["cache"]["refresh_limited"] = True
+                view["cache"]["refresh_available_in_seconds"] = max(
+                    0,
+                    MIN_FORCE_REFRESH_INTERVAL_SECONDS
+                    - int(_cache_age(cached, now)),
+                )
+            return 200, view
+        return None
+
+    def _refresh_response(
+        self,
+        cached: Optional[Dict[str, Any]],
+        *,
+        ttl: int,
+    ) -> Tuple[int, Dict[str, Any]]:
+        try:
+            fresh = self.collector(self.client, self.clock)
+            fresh = validate_cache(fresh)
+            atomic_write_cache(Path(self.config["cache_file"]), fresh)
+            self._memory_cache = fresh
+            return 200, _cache_view(
+                fresh, now=self.clock(), ttl=ttl, stale=False
+            )
+        except Exception as exc:
+            safe = (
+                _safe_error(exc)
+                if isinstance(exc, AcHunterError)
+                else "AC Hunter normalized collection failed"
+            )
+            if cached is not None:
+                return 200, _cache_view(
+                    cached,
+                    now=self.clock(),
+                    ttl=ttl,
+                    stale=True,
+                    error=safe,
+                )
+            return 503, _error_payload(safe, stale=False)
+
     def response(self, force_refresh: bool = False) -> Tuple[int, Dict[str, Any]]:
         with self._lock:
             if self.config.get("enabled") is not True:
@@ -257,49 +315,15 @@ class AcHunterReviewService:
                 cached = self._cached()
             except AcHunterError:
                 cached = None
-            if (
-                cached is not None
-                and _cache_age(cached, now) <= ttl
-                and (
-                    not force_refresh
-                    or _cache_age(cached, now)
-                    < MIN_FORCE_REFRESH_INTERVAL_SECONDS
-                )
-            ):
-                view = _cache_view(
-                    cached, now=now, ttl=ttl, stale=False
-                )
-                if force_refresh:
-                    view["cache"]["refresh_limited"] = True
-                    view["cache"]["refresh_available_in_seconds"] = max(
-                        0,
-                        MIN_FORCE_REFRESH_INTERVAL_SECONDS
-                        - int(_cache_age(cached, now)),
-                    )
-                return 200, view
-            try:
-                fresh = self.collector(self.client, self.clock)
-                fresh = validate_cache(fresh)
-                atomic_write_cache(Path(self.config["cache_file"]), fresh)
-                self._memory_cache = fresh
-                return 200, _cache_view(
-                    fresh, now=self.clock(), ttl=ttl, stale=False
-                )
-            except Exception as exc:
-                safe = (
-                    _safe_error(exc)
-                    if isinstance(exc, AcHunterError)
-                    else "AC Hunter normalized collection failed"
-                )
-                if cached is not None:
-                    return 200, _cache_view(
-                        cached,
-                        now=self.clock(),
-                        ttl=ttl,
-                        stale=True,
-                        error=safe,
-                    )
-                return 503, _error_payload(safe, stale=False)
+            cached_response = self._fresh_cached_response(
+                cached,
+                now=now,
+                ttl=ttl,
+                force_refresh=force_refresh,
+            )
+            if cached_response is not None:
+                return cached_response
+            return self._refresh_response(cached, ttl=ttl)
 
 
 def _error_payload(error: str, *, stale: bool) -> Dict[str, Any]:

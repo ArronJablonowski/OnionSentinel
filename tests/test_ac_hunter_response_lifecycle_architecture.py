@@ -105,9 +105,16 @@ class AcHunterResponseLifecycleArchitectureTests(unittest.TestCase):
         self.assertEqual(list(signature.parameters), ["self", "force_refresh"])
         self.assertEqual(signature.parameters["force_refresh"].default, False)
         self.assertEqual(str(signature.return_annotation), "Tuple[int, Dict[str, Any]]")
-        self.assertEqual(
-            function_metrics("AcHunterReviewService", "response"), (59, 12)
-        )
+        for name in (
+            "_fresh_cached_response",
+            "_refresh_response",
+            "response",
+        ):
+            lines, complexity = function_metrics(
+                "AcHunterReviewService", name
+            )
+            self.assertLessEqual(lines, 50)
+            self.assertLessEqual(complexity, 10)
         facade = importlib.import_module("ac_hunter_review")
         self.assertTrue(
             issubclass(
@@ -387,6 +394,25 @@ class AcHunterResponseLifecycleArchitectureTests(unittest.TestCase):
         self.assertIsNone(raised.exception.__cause__)
         self.assertEqual(trace[0], ["lock", "enter"])
         self.assertEqual(trace[-1], ["lock", "exit", "TypeError"])
+
+    def test_nan_cache_age_is_not_admitted_as_fresh(self) -> None:
+        trace = []
+        service = self.service(trace)
+        cached = {"cached": True}
+        service._cached = lambda: cached
+        calls = []
+
+        def collector(_client, _clock):
+            calls.append("refresh")
+            raise RuntimeError("refresh attempted")
+
+        service.collector = collector
+        with mock.patch.object(
+            self.service_module, "_cache_age", return_value=float("nan")
+        ):
+            with self.assertRaisesRegex(ValueError, "NaN"):
+                service.response(force_refresh=True)
+        self.assertEqual(calls, ["refresh"])
 
 
 if __name__ == "__main__":
