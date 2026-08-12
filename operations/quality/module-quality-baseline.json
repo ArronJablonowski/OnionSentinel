@@ -133,14 +133,6 @@
       "max_complexity": 36,
       "max_lines": 171
     },
-    "n8n/bin/investigation_query_authorization.py::authorize_investigation_query_request": {
-      "max_complexity": 41,
-      "max_lines": 199
-    },
-    "n8n/bin/investigation_query_authorization.py::validate_authorized_investigation_query_request": {
-      "max_complexity": 84,
-      "max_lines": 334
-    },
     "n8n/bin/investigation_query_normalization.py::_normalize_event_tuple": {
       "max_complexity": 19
     },
@@ -391,5 +383,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "d5860e2708063e198e58b38d58a6d9c7f2edc39f"
+  "source_release": "1e2ba5d0964f45c4abbd1f123d3a664c2ad2806e"
 }

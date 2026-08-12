@@ -363,6 +363,10 @@ class InvestigationQueryContractTests(unittest.TestCase):
             for name in (
                 "investigation_query_schema.py",
                 "investigation_query_normalization.py",
+                "investigation_query_authorization_adapter.py",
+                "investigation_query_authorization_manifest.py",
+                "investigation_query_authorization_proposal.py",
+                "investigation_query_authorization_request.py",
                 "investigation_query_authorization.py",
             )
         ]
@@ -447,6 +451,10 @@ class InvestigationQueryContractTests(unittest.TestCase):
             for name in (
                 "investigation_query_schema.py",
                 "investigation_query_normalization.py",
+                "investigation_query_authorization_adapter.py",
+                "investigation_query_authorization_manifest.py",
+                "investigation_query_authorization_proposal.py",
+                "investigation_query_authorization_request.py",
                 "investigation_query_authorization.py",
                 "investigation_query_rendering.py",
                 "investigation_query_response_control.py",

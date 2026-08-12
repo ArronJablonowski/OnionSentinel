@@ -2579,6 +2579,13 @@ then normalizes those results at the composition boundary.
 the v2 investigation-query wire contract. The governed implementation is split
 into `investigation_query_schema.py`, `investigation_query_normalization.py`,
 `investigation_query_authorization.py`, and `investigation_query_rendering.py`.
+The authorization facade retains the three established entrypoints while
+`investigation_query_authorization_proposal.py` owns trusted-context proposal
+authorization, `investigation_query_authorization_manifest.py` owns manifest
+shape/context/observable normalization,
+`investigation_query_authorization_request.py` owns authorized-query
+reauthentication and batch accounting, and
+`investigation_query_authorization_adapter.py` owns the legacy public adapter.
 `investigation_query_response.py` is the stable response-validation facade;
 `investigation_query_response_source.py` owns ECS projection, time-window,
 dataset, observable, and event-tuple binding;

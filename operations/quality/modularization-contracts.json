@@ -1034,6 +1034,40 @@
       ]
     },
     {
+      "path": "n8n/bin/investigation_query_authorization_proposal.py",
+      "deployment": "versioned-query-runtime",
+      "runtime_path": "$STACK_DIR/bin/investigation_query_authorization_proposal.py",
+      "required_symbols": [
+        "authorize_investigation_query_request"
+      ]
+    },
+    {
+      "path": "n8n/bin/investigation_query_authorization_manifest.py",
+      "deployment": "versioned-query-runtime",
+      "runtime_path": "$STACK_DIR/bin/investigation_query_authorization_manifest.py",
+      "required_symbols": [
+        "_authorization_context",
+        "_authorization_observables",
+        "_authorized_request_root"
+      ]
+    },
+    {
+      "path": "n8n/bin/investigation_query_authorization_request.py",
+      "deployment": "versioned-query-runtime",
+      "runtime_path": "$STACK_DIR/bin/investigation_query_authorization_request.py",
+      "required_symbols": [
+        "validate_authorized_investigation_query_request"
+      ]
+    },
+    {
+      "path": "n8n/bin/investigation_query_authorization_adapter.py",
+      "deployment": "versioned-query-runtime",
+      "runtime_path": "$STACK_DIR/bin/investigation_query_authorization_adapter.py",
+      "required_symbols": [
+        "validate_investigation_query_request"
+      ]
+    },
+    {
       "path": "n8n/bin/investigation_query_authorization.py",
       "deployment": "versioned-query-runtime",
       "runtime_path": "$STACK_DIR/bin/investigation_query_authorization.py",

@@ -43,6 +43,10 @@ VERSIONED_QUERY_FILES = (
 V2_QUERY_DEPENDENCIES = (
     "investigation_query_schema.py",
     "investigation_query_normalization.py",
+    "investigation_query_authorization_proposal.py",
+    "investigation_query_authorization_manifest.py",
+    "investigation_query_authorization_request.py",
+    "investigation_query_authorization_adapter.py",
     "investigation_query_authorization.py",
     "investigation_query_rendering.py",
     "investigation_query_response_source.py",
