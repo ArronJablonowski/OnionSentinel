@@ -22,10 +22,6 @@
     "n8n/bin/manage-agent-memory.py::main": {
       "max_lines": 102
     },
-    "n8n/bin/pcap_processor_contract.py::maxmind_geoip_summary": {
-      "max_complexity": 31,
-      "max_lines": 129
-    },
     "n8n/bin/pcap_processor_workflow.py::build_markdown": {
       "max_complexity": 18,
       "max_lines": 124
@@ -137,5 +133,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "aa313b71c16498d4fcf20a2a047ce5b7e1f4621c"
+  "source_release": "c498a55d674c5a8d088dc80fbca29010cfa909fd"
 }
