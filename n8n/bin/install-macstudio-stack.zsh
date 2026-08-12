@@ -900,6 +900,8 @@ cp "$REPO_DIR/n8n/bin/harness_run_execution.py" "$STACK_DIR/bin/harness_run_exec
 cp "$REPO_DIR/n8n/bin/harness_run_model_preflight.py" "$STACK_DIR/bin/harness_run_model_preflight.py"
 cp "$REPO_DIR/n8n/bin/harness_run_foundation.py" "$STACK_DIR/bin/harness_run_foundation.py"
 cp "$REPO_DIR/n8n/bin/harness_store_foundation.py" "$STACK_DIR/bin/harness_store_foundation.py"
+cp "$REPO_DIR/n8n/bin/harness_store_hypothesis_persistence.py" "$STACK_DIR/bin/harness_store_hypothesis_persistence.py"
+cp "$REPO_DIR/n8n/bin/harness_store_decision_persistence.py" "$STACK_DIR/bin/harness_store_decision_persistence.py"
 cp "$REPO_DIR/n8n/bin/harness_store_decision_repository.py" "$STACK_DIR/bin/harness_store_decision_repository.py"
 cp "$REPO_DIR/n8n/bin/harness_store_execution_repository.py" "$STACK_DIR/bin/harness_store_execution_repository.py"
 cp "$REPO_DIR/n8n/bin/harness_store_run_repository.py" "$STACK_DIR/bin/harness_store_run_repository.py"

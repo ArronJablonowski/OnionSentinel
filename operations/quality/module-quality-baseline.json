@@ -42,13 +42,6 @@
     "n8n/bin/export-adjudicated-analysis-replays.py::replay_case": {
       "max_complexity": 28
     },
-    "n8n/bin/harness_store_decision_repository.py::HarnessStoreDecisionRepository.record_decision": {
-      "max_lines": 125
-    },
-    "n8n/bin/harness_store_decision_repository.py::HarnessStoreDecisionRepository.record_hypotheses": {
-      "max_complexity": 25,
-      "max_lines": 173
-    },
     "n8n/bin/harness_store_foundation.py::HarnessStoreFoundation.initialize": {
       "max_lines": 237
     },

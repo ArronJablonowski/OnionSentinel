@@ -2681,6 +2681,30 @@
       ]
     },
     {
+      "path": "n8n/bin/harness_store_decision_repository.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_store_decision_repository.py",
+      "required_symbols": [
+        "HarnessStoreDecisionRepository"
+      ]
+    },
+    {
+      "path": "n8n/bin/harness_store_hypothesis_persistence.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_store_hypothesis_persistence.py",
+      "required_symbols": [
+        "record_hypotheses"
+      ]
+    },
+    {
+      "path": "n8n/bin/harness_store_decision_persistence.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_store_decision_persistence.py",
+      "required_symbols": [
+        "record_decision"
+      ]
+    },
+    {
       "path": "n8n/bin/harness_query_contract.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/harness_query_contract.py",

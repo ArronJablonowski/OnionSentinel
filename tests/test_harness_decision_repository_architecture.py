@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 import sqlite3
@@ -15,6 +16,8 @@ if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
 
 import onion_sentinel_harness as harness
+import harness_store_decision_persistence as decision_owner
+import harness_store_hypothesis_persistence as hypothesis_owner
 
 
 class AuditObservingStore(harness.HarnessStore):
@@ -23,7 +26,7 @@ class AuditObservingStore(harness.HarnessStore):
         super().__init__(path)
 
     def _audit_event(self, event):
-        with sqlite3.connect(self.path) as connection:
+        with contextlib.closing(sqlite3.connect(self.path)) as connection:
             decision_count = connection.execute(
                 "SELECT COUNT(*) FROM harness_decisions"
             ).fetchone()[0]
@@ -94,6 +97,21 @@ class HarnessDecisionRepositoryArchitectureTests(unittest.TestCase):
         self.assertEqual(
             str(inspect.signature(repository.record_decision)),
             "(self, run_id: 'str', *, decision_id: 'str', decision_type: 'str', response: 'Mapping[str, Any]', stage: 'str' = 'evidence-synthesis') -> 'None'",
+        )
+
+    def test_inward_owners_do_not_import_facade(self) -> None:
+        for owner in (decision_owner, hypothesis_owner):
+            source = inspect.getsource(owner)
+            self.assertNotIn("import harness_store_decision_repository", source)
+            self.assertNotIn("from harness_store_decision_repository", source)
+        repository = harness.HarnessStoreDecisionRepository
+        self.assertLessEqual(
+            len(inspect.getsource(repository.record_hypotheses).splitlines()),
+            20,
+        )
+        self.assertLessEqual(
+            len(inspect.getsource(repository.record_decision).splitlines()),
+            25,
         )
 
     def test_hypothesis_normalization_provenance_and_revision_guards(self) -> None:

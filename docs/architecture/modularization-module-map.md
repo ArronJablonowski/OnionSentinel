@@ -875,11 +875,17 @@ registration. It composes with the store foundation as a mixin; all writes retai
 `BEGIN IMMEDIATE`, mutable-run checks, idempotency keys, commit-before-audit
 ordering, and the original snapshot return contract.
 
-`n8n/bin/harness_store_decision_repository.py` owns evidence-bound hypothesis
-revision and decision ledger writes. It preserves backward-only revision
-rejection, same-revision collision detection, citation requirements for
-supported/contradicted hypotheses, bounded decision projection, canonical
-response/rationale digests, and commit-before-audit ordering.
+`n8n/bin/harness_store_decision_repository.py` is the stable facade for
+evidence-bound hypothesis and decision ledger writes.
+`harness_store_hypothesis_persistence.py` owns reference filtering,
+citation-safe status normalization, revision admission, atomic upsert, manifest
+events, and commit-before-audit settlement.
+`harness_store_decision_persistence.py` owns bounded response/rationale
+projection, immutable decision admission, atomic ledger/event persistence, and
+commit-before-audit settlement. Both inward owners receive the repository and
+connection factory as ports and never import the facade. Backward revision
+rejection, same-revision/content collisions, canonical digests, transaction
+ownership, and public signatures remain unchanged.
 
 `n8n/bin/harness_store_execution_repository.py` owns atomic pre-execution
 budget reservations plus immutable model-call and tool-call ledgers. Reservation
