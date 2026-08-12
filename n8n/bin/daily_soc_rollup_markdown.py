@@ -126,9 +126,7 @@ def _summary_tables(data: Mapping[str, object]) -> list[str]:
     ]
 
 
-def _detection_tables(data: Mapping[str, object]) -> list[str]:
-    grouped = data["grouped"]
-    urgent = data["urgent"]
+def _grouped_detection_table(grouped: object) -> list[str]:
     return [
         "## Top Grouped Detections",
         "",
@@ -159,6 +157,11 @@ def _detection_tables(data: Mapping[str, object]) -> list[str]:
                 for row in grouped
             ),
         ),
+    ]
+
+
+def _urgent_alert_table(urgent: object) -> list[str]:
+    return [
         "## Urgent Alert Queue",
         "",
         table(
@@ -193,10 +196,7 @@ def _detection_tables(data: Mapping[str, object]) -> list[str]:
     ]
 
 
-def _activity_tables(data: Mapping[str, object]) -> list[str]:
-    suppressed = data["suppressed"]
-    new_pairs = data["new_pairs"]
-    notifications = data["notifications"]
+def _suppression_table(suppressed: object) -> list[str]:
     return [
         "## Suppression Activity",
         "",
@@ -225,6 +225,11 @@ def _activity_tables(data: Mapping[str, object]) -> list[str]:
                 for row in suppressed
             ),
         ),
+    ]
+
+
+def _new_pair_table(new_pairs: object) -> list[str]:
+    return [
         "## New Source Destination Pairs",
         "",
         table(
@@ -248,6 +253,11 @@ def _activity_tables(data: Mapping[str, object]) -> list[str]:
                 for row in new_pairs
             ),
         ),
+    ]
+
+
+def _notification_table(notifications: object) -> list[str]:
+    return [
         "## Telegram Notifications",
         "",
         table(
@@ -311,7 +321,10 @@ def render_rollup(
     )
     lines.extend(_executive_summary(data["summary"]))
     lines.extend(_summary_tables(data))
-    lines.extend(_detection_tables(data))
-    lines.extend(_activity_tables(data))
+    lines.extend(_grouped_detection_table(data["grouped"]))
+    lines.extend(_urgent_alert_table(data["urgent"]))
+    lines.extend(_suppression_table(data["suppressed"]))
+    lines.extend(_new_pair_table(data["new_pairs"]))
+    lines.extend(_notification_table(data["notifications"]))
     lines.extend(_analyst_tail())
     return "\n".join(lines)
