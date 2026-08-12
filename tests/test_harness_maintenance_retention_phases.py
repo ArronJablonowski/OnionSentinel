@@ -2,6 +2,7 @@
 """Characterize bounded harness retention selection and maintenance phases."""
 from __future__ import annotations
 
+import ast
 import copy
 import datetime as dt
 import importlib.util
@@ -34,6 +35,30 @@ def load_retention():
 
 
 RETENTION = load_retention()
+
+
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse(
+        (BIN / "harness_maintenance_retention.py").read_text(encoding="utf-8")
+    )
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    complexity = 1
+    for node in ast.walk(target):
+        if node is target:
+            continue
+        if isinstance(node, (ast.If, ast.For, ast.While, ast.IfExp, ast.Assert)):
+            complexity += 1
+        elif isinstance(node, ast.Try):
+            complexity += len(node.handlers)
+        elif isinstance(node, ast.BoolOp):
+            complexity += max(0, len(node.values) - 1)
+        elif isinstance(node, ast.comprehension):
+            complexity += 1 + len(node.ifs)
+    return target.end_lineno - target.lineno + 1, complexity
 
 
 class TracedRow(dict):
@@ -86,6 +111,24 @@ class HarnessMaintenanceRetentionPhasesCharacterizationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.now = dt.datetime(2026, 8, 12, 12, 0, tzinfo=dt.timezone.utc)
         self.db_path = Path("/synthetic/harness.sqlite3")
+
+    def test_changed_retention_phases_stay_within_architecture_budget(self) -> None:
+        functions = (
+            "_add_prunable_rows",
+            "_terminal_run_count",
+            "_expired_run_rows",
+            "_oldest_terminal_rows",
+            "select_prunable_runs",
+            "_maintenance_pass",
+            "_follow_up_required",
+            "_maintenance_result",
+            "maintain_database",
+        )
+        for name in functions:
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
 
     def test_public_signatures_are_stable(self) -> None:
         self.assertEqual(

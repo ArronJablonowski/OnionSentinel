@@ -16,35 +16,34 @@ from harness_maintenance_contract import (
 from harness_maintenance_integrity import database_snapshot
 
 
-def select_prunable_runs(
-    connection: sqlite3.Connection,
-    *,
-    now: dt.datetime,
-    retention_days: int,
-    max_terminal_runs: int,
-    min_terminal_runs: int,
+def _add_prunable_rows(
+    rows: list[sqlite3.Row],
+    selected: list[str],
+    selected_set: set[str],
     max_delete_runs: int,
-    live_page_bytes: int,
-    max_live_bytes: int,
-) -> tuple[list[str], dict[str, int | bool]]:
-    cutoff = timestamp_text(now - dt.timedelta(days=retention_days))
-    terminal_count = int(
+) -> None:
+    for row in rows:
+        run_id = str(row["run_id"])
+        if run_id not in selected_set and len(selected) < max_delete_runs:
+            selected.append(run_id)
+            selected_set.add(run_id)
+
+
+def _terminal_run_count(connection: sqlite3.Connection) -> int:
+    return int(
         connection.execute(
             "SELECT COUNT(*) FROM harness_runs WHERE status IN (?, ?, ?)",
             TERMINAL_STATUSES,
         ).fetchone()[0]
     )
-    selected: list[str] = []
-    selected_set: set[str] = set()
 
-    def add(rows: list[sqlite3.Row]) -> None:
-        for row in rows:
-            run_id = str(row["run_id"])
-            if run_id not in selected_set and len(selected) < max_delete_runs:
-                selected.append(run_id)
-                selected_set.add(run_id)
 
-    expired = connection.execute(
+def _expired_run_rows(
+    connection: sqlite3.Connection,
+    cutoff: str,
+    max_delete_runs: int,
+) -> list[sqlite3.Row]:
+    return connection.execute(
         """
         SELECT run_id FROM harness_runs
         WHERE status IN (?, ?, ?)
@@ -57,22 +56,53 @@ def select_prunable_runs(
         """,
         (*TERMINAL_STATUSES, cutoff, max_delete_runs),
     ).fetchall()
-    add(expired)
+
+
+def _oldest_terminal_rows(
+    connection: sqlite3.Connection,
+    limit: int,
+) -> list[sqlite3.Row]:
+    return connection.execute(
+        """
+        SELECT run_id FROM harness_runs
+        WHERE status IN (?, ?, ?)
+        ORDER BY datetime(
+            replace(COALESCE(completed_at, updated_at), '  ', 'T')
+        ), run_id
+        LIMIT ?
+        """,
+        (*TERMINAL_STATUSES, limit),
+    ).fetchall()
+
+
+def select_prunable_runs(
+    connection: sqlite3.Connection,
+    *,
+    now: dt.datetime,
+    retention_days: int,
+    max_terminal_runs: int,
+    min_terminal_runs: int,
+    max_delete_runs: int,
+    live_page_bytes: int,
+    max_live_bytes: int,
+) -> tuple[list[str], dict[str, int | bool]]:
+    cutoff = timestamp_text(now - dt.timedelta(days=retention_days))
+    terminal_count = _terminal_run_count(connection)
+    selected: list[str] = []
+    selected_set: set[str] = set()
+    expired = _expired_run_rows(connection, cutoff, max_delete_runs)
+    _add_prunable_rows(expired, selected, selected_set, max_delete_runs)
 
     overflow = max(0, terminal_count - max_terminal_runs)
     if overflow and len(selected) < max_delete_runs:
-        add(
-            connection.execute(
-                """
-                SELECT run_id FROM harness_runs
-                WHERE status IN (?, ?, ?)
-                ORDER BY datetime(
-                    replace(COALESCE(completed_at, updated_at), '  ', 'T')
-                ), run_id
-                LIMIT ?
-                """,
-                (*TERMINAL_STATUSES, min(overflow, max_delete_runs)),
-            ).fetchall()
+        _add_prunable_rows(
+            _oldest_terminal_rows(
+                connection,
+                min(overflow, max_delete_runs),
+            ),
+            selected,
+            selected_set,
+            max_delete_runs,
         )
 
     over_live_budget = live_page_bytes > max_live_bytes
@@ -81,18 +111,11 @@ def select_prunable_runs(
             max(0, terminal_count - min_terminal_runs),
             max_delete_runs,
         )
-        add(
-            connection.execute(
-                """
-                SELECT run_id FROM harness_runs
-                WHERE status IN (?, ?, ?)
-                ORDER BY datetime(
-                    replace(COALESCE(completed_at, updated_at), '  ', 'T')
-                ), run_id
-                LIMIT ?
-                """,
-                (*TERMINAL_STATUSES, pressure_limit),
-            ).fetchall()
+        _add_prunable_rows(
+            _oldest_terminal_rows(connection, pressure_limit),
+            selected,
+            selected_set,
+            max_delete_runs,
         )
 
     return selected, {
@@ -103,7 +126,8 @@ def select_prunable_runs(
     }
 
 
-def maintain_database(
+def _maintenance_pass(
+    connection: sqlite3.Connection,
     db_path: Path,
     *,
     now: dt.datetime,
@@ -115,49 +139,75 @@ def maintain_database(
     incremental_vacuum_pages: int,
     apply: bool,
     backup: dict[str, Any] | None,
-) -> dict[str, Any]:
-    absent = _validate_database_path(db_path)
-    if absent:
-        return absent
-    connection = _connect(db_path, apply=apply)
-    try:
-        connection.execute("PRAGMA busy_timeout = 10000")
-        connection.execute("PRAGMA foreign_keys = ON")
-        if not apply:
-            connection.execute("PRAGMA query_only = ON")
-        before = database_snapshot(connection, db_path)
-        selected, candidates = select_prunable_runs(
-            connection,
-            now=now,
-            retention_days=retention_days,
-            max_terminal_runs=max_terminal_runs,
-            min_terminal_runs=min_terminal_runs,
-            max_delete_runs=max_delete_runs,
-            live_page_bytes=int(before["live_page_bytes"]),
-            max_live_bytes=max_live_bytes,
-        )
-        selected = _limit_to_backup(selected, candidates, apply, backup)
-        deleted, checkpoint, vacuumed_pages_limit = _apply_maintenance(
-            connection,
-            selected=selected,
-            apply=apply,
-            before=before,
-            incremental_vacuum_pages=incremental_vacuum_pages,
-        )
-        after = database_snapshot(connection, db_path)
-    except sqlite3.Error as exc:
-        raise MaintenanceError(
-            f"harness SQLite maintenance failed: {exc}"
-        ) from None
-    finally:
-        connection.close()
+) -> tuple[dict[str, Any], list[str], dict[str, int | bool], int, dict[str, int | bool], int, dict[str, Any]]:
+    connection.execute("PRAGMA busy_timeout = 10000")
+    connection.execute("PRAGMA foreign_keys = ON")
+    if not apply:
+        connection.execute("PRAGMA query_only = ON")
+    before = database_snapshot(connection, db_path)
+    selected, candidates = select_prunable_runs(
+        connection,
+        now=now,
+        retention_days=retention_days,
+        max_terminal_runs=max_terminal_runs,
+        min_terminal_runs=min_terminal_runs,
+        max_delete_runs=max_delete_runs,
+        live_page_bytes=int(before["live_page_bytes"]),
+        max_live_bytes=max_live_bytes,
+    )
+    selected = _limit_to_backup(selected, candidates, apply, backup)
+    deleted, checkpoint, vacuumed_pages_limit = _apply_maintenance(
+        connection,
+        selected=selected,
+        apply=apply,
+        before=before,
+        incremental_vacuum_pages=incremental_vacuum_pages,
+    )
+    after = database_snapshot(connection, db_path)
+    return (
+        before, selected, candidates, deleted, checkpoint,
+        vacuumed_pages_limit, after,
+    )
 
-    follow_up = (
+
+def _follow_up_required(
+    after: dict[str, Any],
+    candidates: dict[str, int | bool],
+    checkpoint: dict[str, int | bool],
+    *,
+    max_terminal_runs: int,
+    max_live_bytes: int,
+    max_delete_runs: int,
+) -> bool:
+    return (
         int(after["run_counts"]["terminal"]) > max_terminal_runs
         or int(after["live_page_bytes"]) > max_live_bytes
         or int(after["allocated_disk_bytes"]) > max_live_bytes
         or candidates["selected"] >= max_delete_runs
         or int(checkpoint["busy"]) > 0
+    )
+
+
+def _maintenance_result(
+    phase: tuple[dict[str, Any], list[str], dict[str, int | bool], int, dict[str, int | bool], int, dict[str, Any]],
+    *,
+    retention_days: int,
+    max_terminal_runs: int,
+    min_terminal_runs: int,
+    max_delete_runs: int,
+    max_live_bytes: int,
+    incremental_vacuum_pages: int,
+    apply: bool,
+    backup: dict[str, Any] | None,
+) -> dict[str, Any]:
+    before, selected, candidates, deleted, checkpoint, vacuumed, after = phase
+    follow_up = _follow_up_required(
+        after,
+        candidates,
+        checkpoint,
+        max_terminal_runs=max_terminal_runs,
+        max_live_bytes=max_live_bytes,
+        max_delete_runs=max_delete_runs,
     )
     return {
         "status": "follow-up-required" if follow_up else "ok",
@@ -180,11 +230,62 @@ def maintain_database(
         "_candidate_run_ids": tuple(selected),
         "deleted_runs": deleted,
         "checkpoint": checkpoint,
-        "incremental_vacuum_page_limit_applied": vacuumed_pages_limit,
+        "incremental_vacuum_page_limit_applied": vacuumed,
         "before": before,
         "after": after,
         "follow_up_required": follow_up,
     }
+
+
+def maintain_database(
+    db_path: Path,
+    *,
+    now: dt.datetime,
+    retention_days: int,
+    max_terminal_runs: int,
+    min_terminal_runs: int,
+    max_delete_runs: int,
+    max_live_bytes: int,
+    incremental_vacuum_pages: int,
+    apply: bool,
+    backup: dict[str, Any] | None,
+) -> dict[str, Any]:
+    absent = _validate_database_path(db_path)
+    if absent:
+        return absent
+    connection = _connect(db_path, apply=apply)
+    try:
+        phase = _maintenance_pass(
+            connection,
+            db_path,
+            now=now,
+            retention_days=retention_days,
+            max_terminal_runs=max_terminal_runs,
+            min_terminal_runs=min_terminal_runs,
+            max_delete_runs=max_delete_runs,
+            max_live_bytes=max_live_bytes,
+            incremental_vacuum_pages=incremental_vacuum_pages,
+            apply=apply,
+            backup=backup,
+        )
+    except sqlite3.Error as exc:
+        raise MaintenanceError(
+            f"harness SQLite maintenance failed: {exc}"
+        ) from None
+    finally:
+        connection.close()
+
+    return _maintenance_result(
+        phase,
+        retention_days=retention_days,
+        max_terminal_runs=max_terminal_runs,
+        min_terminal_runs=min_terminal_runs,
+        max_delete_runs=max_delete_runs,
+        max_live_bytes=max_live_bytes,
+        incremental_vacuum_pages=incremental_vacuum_pages,
+        apply=apply,
+        backup=backup,
+    )
 
 
 def _validate_database_path(db_path: Path) -> dict[str, Any] | None:
