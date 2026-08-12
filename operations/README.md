@@ -26,6 +26,40 @@ allowance. Review the baseline diff before commit. Do not use the baseline to
 approve new debt; exceptions require the architecture review described in
 `../docs/architecture/modularization-adr.md`.
 
+## Release Content Reconciliation
+
+`reconcile-macstudio-release.py` compares the exact application payload from a
+Git commit with the running Mac Studio filesystem using SHA-256. The guarded
+installer is the explicit mapping source of truth. Direct file copies, the
+alert-store module trees, the complete `onion_sentinel` package, dashboard
+assets, and the selected investigation-query compatibility bundle are covered.
+
+Run it after readiness succeeds, using the release reported by `/healthz`:
+
+```bash
+release_id="$(git rev-parse --verify HEAD^{commit})"
+python3 operations/reconcile-macstudio-release.py \
+  --repo-root "$(pwd)" \
+  --stack-dir "$HOME/n8n-local" \
+  --source-revision "$release_id" \
+  --expected-release-id "$release_id" \
+  --summary-only
+```
+
+The command is read-only. It obtains the live release identifier from the
+loopback health endpoint and reads only allowlisted application paths. It does
+not enumerate or open `.env`, runtime configuration, prompts, model settings,
+databases, logs, evidence, transcripts, caches, agent memory, or host LaunchAgent
+files. Symlinks and non-regular runtime paths fail closed. A successful summary
+records the exact source/live release, match counts, selected query contract,
+and deterministic manifest digest without copying runtime content into Git.
+
+Before deployment, run the normal test, module-quality, dependency, and secret
+gates and record the rollback tag or commit. After deployment, require both
+readiness and this byte-exact reconciliation. For rollback, install the recorded
+commit through `install-macstudio-stack.zsh`, then rerun reconciliation with that
+commit as both `--source-revision` and `--expected-release-id`.
+
 ## Verify Stack
 
 ```bash
