@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import fcntl
-import hashlib
 import json
 import os
 import re
@@ -29,6 +28,12 @@ from live_osquery_client import (
     scheduled_inventory_approved,
 )
 from live_osquery_contract import LiveOsqueryContractError, MAX_ROWS
+from endpoint_inventory_collection import (
+    CollectionDependencies,
+    CollectionPolicy,
+    collect_inventory,
+    record as project_inventory_record,
+)
 from security_jsonl_log import SecurityJsonlLogger
 
 
@@ -205,154 +210,40 @@ def _record(
     observed_at: str,
     previous: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    asset_ref = hashlib.sha256(("host\0" + hostname).encode("utf-8")).hexdigest()[:24]
-    identity = "\0".join(
-        ("osquery_apps", asset_ref, product, version, category, path)
+    return project_inventory_record(
+        hostname=hostname,
+        product=product,
+        version=version,
+        category=category,
+        path=path,
+        os_type=os_type,
+        os_version=os_version,
+        observed_at=observed_at,
+        previous=previous,
     )
-    evidence_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
-    prior = previous.get(evidence_id) or {}
-    first_seen = str(prior.get("first_seen") or observed_at)
-    observations = min(int(prior.get("observation_count") or 0) + 1, 1_000_000_000)
-    return {
-        "evidence_id": evidence_id,
-        "source": "osquery_apps",
-        "source_dataset": "osquery.live.software_inventory",
-        "tier": "installed",
-        "confidence": "high",
-        "asset_ref_type": "host",
-        "asset_ref": asset_ref,
-        "platform": "darwin",
-        "operating_system_type": os_type,
-        "operating_system_version": os_version,
-        "operating_system_source": "osquery.live:os_version",
-        "operating_system_confidence": "high",
-        "product": product,
-        "version": version,
-        "category": category,
-        "first_seen": first_seen,
-        "last_seen": observed_at,
-        "observation_count": observations,
-    }
 
 
 def collect(config: dict[str, Any], previous_cache: dict[str, Any] | None = None) -> dict[str, Any]:
-    aliases = list(
-        (config.get("scheduled_inventory_approval") or {}).get("target_aliases") or []
-    )
-    if not aliases:
-        raise EndpointInventoryError("no scheduled inventory endpoint alias is approved")
-    if any(not scheduled_inventory_approved(config, alias) for alias in aliases):
-        raise EndpointInventoryError("scheduled inventory approval is incomplete")
-    prior_records = {
-        str(item.get("evidence_id") or ""): item
-        for item in (previous_cache or {}).get("records", [])
-        if isinstance(item, dict)
-    }
-    now = timestamp(utc_now())
-    records: list[dict[str, Any]] = []
-    targets: list[dict[str, Any]] = []
-    case_id = "scheduled-endpoint-software-" + now[:10].replace("-", "")
-    for alias in aliases:
-        identity = _query(
-            config,
-            alias,
-            "SELECT hostname FROM system_info LIMIT 1;",
-            "Bind scheduled software inventory to the endpoint hostname",
-            case_id,
-        )
-        os_rows = _query(
-            config,
-            alias,
-            "SELECT name,version,build,platform,arch FROM os_version LIMIT 1;",
-            "Record the endpoint operating system version",
-            case_id,
-        )
-        if len(identity) != 1 or len(os_rows) != 1:
-            raise EndpointInventoryError("endpoint identity or operating system is ambiguous")
-        hostname = _safe_cell(identity[0].get("hostname"), 255).lower().rstrip(".")
-        if not hostname or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,254}", hostname):
-            raise EndpointInventoryError("endpoint returned an invalid hostname")
-        os_row = os_rows[0]
-        os_name = _safe_cell(os_row.get("name") or os_row.get("platform"), 160)
-        version = _safe_cell(os_row.get("version"), 160)
-        build = _safe_cell(os_row.get("build"), 160)
-        full_os_version = f"{os_name} {version}".strip()
-        if build:
-            full_os_version = f"{full_os_version} (build {build})".strip()
-        app_rows = _paged_rows(config, alias, "apps", APPS_COLUMNS, case_id)
-        brew_rows = _paged_rows(
-            config, alias, "homebrew_packages", BREW_COLUMNS, case_id
-        )
-        before = len(records)
-        for row in app_rows:
-            product = _safe_cell(
-                row.get("name") or row.get("bundle_name") or row.get("bundle_identifier"),
-                4096,
-            )
-            if not product:
-                continue
-            app_version = _safe_cell(
-                row.get("bundle_short_version") or row.get("bundle_version"), 1024
-            )
-            path = _safe_cell(row.get("path"), MAX_CURSOR_CHARS)
-            records.append(
-                _record(
-                    hostname=hostname,
-                    product=product,
-                    version=app_version,
-                    category="application",
-                    path=path,
-                    os_type=os_name,
-                    os_version=full_os_version,
-                    observed_at=now,
-                    previous=prior_records,
-                )
-            )
-        for row in brew_rows:
-            product = _safe_cell(row.get("name"), 4096)
-            if not product:
-                continue
-            path = _safe_cell(row.get("path"), MAX_CURSOR_CHARS)
-            records.append(
-                _record(
-                    hostname=hostname,
-                    product=product,
-                    version=_safe_cell(row.get("version"), 1024),
-                    category="package:homebrew",
-                    path=path,
-                    os_type=os_name,
-                    os_version=full_os_version,
-                    observed_at=now,
-                    previous=prior_records,
-                )
-            )
-        targets.append(
-            {
-                "asset_ref": hashlib.sha256(
-                    ("host\0" + hostname).encode("utf-8")
-                ).hexdigest()[:24],
-                "status": "ok",
-                "records": len(records) - before,
-                "observed_at": now,
-            }
-        )
-    unique: dict[str, dict[str, Any]] = {}
-    for item in records:
-        unique[item["evidence_id"]] = item
-    normalized = sorted(
-        unique.values(),
-        key=lambda item: (
-            item["asset_ref"], item["product"].casefold(), item["version"].casefold()
+    return collect_inventory(
+        config,
+        previous_cache,
+        dependencies=CollectionDependencies(
+            approved=scheduled_inventory_approved,
+            query=_query,
+            paged_rows=_paged_rows,
+            safe_cell=_safe_cell,
+            record=_record,
+            utc_now=utc_now,
+            timestamp=timestamp,
+        ),
+        policy=CollectionPolicy(
+            schema=SCHEMA,
+            apps_columns=APPS_COLUMNS,
+            brew_columns=BREW_COLUMNS,
+            max_cursor_chars=MAX_CURSOR_CHARS,
+            error_type=EndpointInventoryError,
         ),
     )
-    return {
-        "schema": SCHEMA,
-        "version": 1,
-        "updated_at": now,
-        "complete": True,
-        "targets": targets,
-        "records": normalized,
-    }
 
 
 def load_cache(path: Path) -> dict[str, Any] | None:

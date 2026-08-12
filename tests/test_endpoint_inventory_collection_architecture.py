@@ -14,6 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "n8n/bin/collect-endpoint-software-inventory.py"
+COLLECTION = ROOT / "n8n/bin/endpoint_inventory_collection.py"
 BIN = ROOT / "n8n/bin"
 if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
@@ -30,8 +31,8 @@ def load_collector():
     return module
 
 
-def function_metrics(name: str) -> tuple[int, int]:
-    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+def function_metrics(name: str, path: Path = SCRIPT) -> tuple[int, int]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     target = next(
         node
         for node in tree.body
@@ -98,12 +99,39 @@ class EndpointInventoryCollectionArchitectureTests(unittest.TestCase):
             },
         }
 
-    def test_signature_and_current_quality_debt_are_exact(self) -> None:
+    def test_signature_and_quality_boundaries_are_exact(self) -> None:
         signature = inspect.signature(self.collector.collect)
         self.assertEqual(list(signature.parameters), ["config", "previous_cache"])
         self.assertIsNone(signature.parameters["previous_cache"].default)
         self.assertEqual(str(signature.return_annotation), "dict[str, Any]")
-        self.assertEqual(function_metrics("collect"), (118, 25))
+        lines, complexity = function_metrics("collect")
+        self.assertLessEqual(lines, 35)
+        self.assertLessEqual(complexity, 5)
+        for name in (
+            "record",
+            "_approved_aliases",
+            "_prior_record_index",
+            "_identity_rows",
+            "_target_identity",
+            "_operating_system",
+            "_project_application",
+            "_project_homebrew",
+            "_target_rows",
+            "_target_records",
+            "_target_receipt",
+            "_normalized_records",
+            "collect_inventory",
+        ):
+            lines, complexity = function_metrics(name, COLLECTION)
+            self.assertLessEqual(lines, 50)
+            self.assertLessEqual(complexity, 10)
+        self.assertLessEqual(len(COLLECTION.read_text().splitlines()), 600)
+        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
+        self.assertIn(
+            'cp "$REPO_DIR/n8n/bin/endpoint_inventory_collection.py" '
+            '"$STACK_DIR/bin/endpoint_inventory_collection.py"',
+            installer,
+        )
 
     def test_query_projection_deduplication_order_and_inputs_are_exact(self) -> None:
         config = self.config()
