@@ -35,20 +35,33 @@ def _leaf_items(value: object, prefix: str = "") -> list[tuple[str, object]]:
     return leaves
 
 
+def _expanded_path_value(value: object) -> list[object]:
+    return value if isinstance(value, list) else [value]
+
+
+def _item_path_values(item: object, part: str) -> list[object]:
+    if isinstance(item, dict) and part in item:
+        return _expanded_path_value(item[part])
+    if not isinstance(item, list):
+        return []
+    values: list[object] = []
+    for child in item:
+        if isinstance(child, dict) and part in child:
+            values.extend(_expanded_path_value(child[part]))
+    return values
+
+
+def _next_path_values(current: list[object], part: str) -> list[object]:
+    following: list[object] = []
+    for item in current:
+        following.extend(_item_path_values(item, part))
+    return following
+
+
 def _path_values(source: dict[str, Any], path: str) -> list[object]:
     current: list[object] = [source]
     for part in path.split("."):
-        following: list[object] = []
-        for item in current:
-            if isinstance(item, dict) and part in item:
-                value = item[part]
-                following.extend(value if isinstance(value, list) else [value])
-            elif isinstance(item, list):
-                for child in item:
-                    if isinstance(child, dict) and part in child:
-                        value = child[part]
-                        following.extend(value if isinstance(value, list) else [value])
-        current = following
+        current = _next_path_values(current, part)
     return [item for item in current if not isinstance(item, (dict, list))]
 
 
