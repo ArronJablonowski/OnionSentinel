@@ -128,26 +128,8 @@ def _read_private_config(path: Path) -> bytes:
             "Relay evidence transport config is invalid"
         ) from exc
     try:
-        metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != os.getuid()
-            or stat.S_IMODE(metadata.st_mode) & 0o077
-            or metadata.st_size < 2
-            or metadata.st_size > MAX_INCIDENT_EVIDENCE_CONFIG_BYTES
-        ):
-            raise ControlledEvaluationIsolationError(
-                "Relay evidence transport config exceeds its byte contract"
-            )
-        chunks: list[bytes] = []
-        remaining = MAX_INCIDENT_EVIDENCE_CONFIG_BYTES + 1
-        while remaining > 0:
-            chunk = os.read(descriptor, remaining)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        payload = b"".join(chunks)
+        metadata = _private_config_metadata(descriptor)
+        payload = _read_bounded_descriptor(descriptor)
     finally:
         os.close(descriptor)
     if len(payload) != metadata.st_size:
@@ -157,13 +139,34 @@ def _read_private_config(path: Path) -> bytes:
     return payload
 
 
-def validate_controlled_incident_evidence_route(
-    config_path: Path,
-    runtime_root: Path,
-    *,
-    expected_home: Path | None = None,
-) -> dict[str, Any]:
-    """Validate the one exact, bounded, read-only Relay transport route."""
+def _private_config_metadata(descriptor: int) -> os.stat_result:
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+        or metadata.st_size < 2
+        or metadata.st_size > MAX_INCIDENT_EVIDENCE_CONFIG_BYTES
+    ):
+        raise ControlledEvaluationIsolationError(
+            "Relay evidence transport config exceeds its byte contract"
+        )
+    return metadata
+
+
+def _read_bounded_descriptor(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = MAX_INCIDENT_EVIDENCE_CONFIG_BYTES + 1
+    while remaining > 0:
+        chunk = os.read(descriptor, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _controlled_config_path(config_path: Path, runtime_root: Path) -> Path:
     config = _owner_private_existing_path(
         config_path,
         label="Relay evidence transport config",
@@ -176,6 +179,10 @@ def validate_controlled_incident_evidence_route(
             "Relay evidence transport config must stay inside the "
             "evaluation runtime"
         ) from exc
+    return config
+
+
+def _controlled_route_document(config: Path) -> dict[str, Any]:
     try:
         document = json.loads(_read_private_config(config).decode("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -189,6 +196,10 @@ def validate_controlled_incident_evidence_route(
             "Relay evidence transport config must contain only the exact "
             "read-only route fields"
         )
+    return document
+
+
+def _validate_exact_route(document: dict[str, Any]) -> None:
     expected_route = {
         "investigation_query_contract": INCIDENT_EVIDENCE_CONTRACT,
         "host": INCIDENT_EVIDENCE_HOST,
@@ -199,6 +210,22 @@ def validate_controlled_incident_evidence_route(
             "Relay evidence transport config does not select the exact "
             "read-only route"
         )
+
+
+def _approved_ssh_key_path(home: Path) -> Path:
+    try:
+        return home.resolve(strict=True) / ".ssh" / INCIDENT_EVIDENCE_KEY_BASENAME
+    except (OSError, ValueError) as exc:
+        raise ControlledEvaluationIsolationError(
+            "Relay evidence SSH key home is not canonical"
+        ) from exc
+
+
+def _validate_route_paths(
+    document: dict[str, Any],
+    runtime_root: Path,
+    expected_home: Path | None,
+) -> None:
     key_path = _canonical_private_route_file(
         document.get("ssh_key"),
         label="SSH key",
@@ -208,31 +235,21 @@ def validate_controlled_incident_evidence_route(
         label="known-hosts file",
     )
     home = Path.home() if expected_home is None else Path(expected_home)
-    try:
-        approved_key_path = (
-            home.resolve(strict=True)
-            / ".ssh"
-            / INCIDENT_EVIDENCE_KEY_BASENAME
-        )
-    except (OSError, ValueError) as exc:
-        raise ControlledEvaluationIsolationError(
-            "Relay evidence SSH key home is not canonical"
-        ) from exc
-    if key_path != approved_key_path:
+    if key_path != _approved_ssh_key_path(home):
         raise ControlledEvaluationIsolationError(
             "Relay evidence SSH key path is not approved"
         )
-    approved_known_hosts_path = (
+    if known_hosts_path != (
         runtime_root / INCIDENT_EVIDENCE_KNOWN_HOSTS_BASENAME
-    )
-    if known_hosts_path != approved_known_hosts_path:
+    ):
         raise ControlledEvaluationIsolationError(
             "Relay evidence known-hosts path is not approved"
         )
+
+
+def _validate_route_limits(document: dict[str, Any]) -> None:
     limits = {
-        "connect_timeout_seconds": (
-            MAX_INCIDENT_EVIDENCE_CONNECT_TIMEOUT_SECONDS
-        ),
+        "connect_timeout_seconds": MAX_INCIDENT_EVIDENCE_CONNECT_TIMEOUT_SECONDS,
         "timeout_seconds": MAX_INCIDENT_EVIDENCE_TIMEOUT_SECONDS,
         "max_response_bytes": MAX_INCIDENT_EVIDENCE_RESPONSE_BYTES,
         "max_stderr_bytes": MAX_INCIDENT_EVIDENCE_STDERR_BYTES,
@@ -243,4 +260,18 @@ def validate_controlled_incident_evidence_route(
             raise ControlledEvaluationIsolationError(
                 f"Relay evidence {field} exceeds its bounded transport limit"
             )
+
+
+def validate_controlled_incident_evidence_route(
+    config_path: Path,
+    runtime_root: Path,
+    *,
+    expected_home: Path | None = None,
+) -> dict[str, Any]:
+    """Validate the one exact, bounded, read-only Relay transport route."""
+    config = _controlled_config_path(config_path, runtime_root)
+    document = _controlled_route_document(config)
+    _validate_exact_route(document)
+    _validate_route_paths(document, runtime_root, expected_home)
+    _validate_route_limits(document)
     return document

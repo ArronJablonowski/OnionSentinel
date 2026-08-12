@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -24,6 +25,54 @@ def load_module():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+    class Complexity(ast.NodeVisitor):
+        def __init__(self):
+            self.value = 1
+
+        def visit_FunctionDef(self, node):
+            return
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_If(self, node):
+            self.value += 1
+            self.generic_visit(node)
+
+        visit_For = visit_If
+        visit_While = visit_If
+
+        def visit_Try(self, node):
+            self.value += len(node.handlers)
+            self.generic_visit(node)
+
+        def visit_BoolOp(self, node):
+            self.value += max(0, len(node.values) - 1)
+            self.generic_visit(node)
+
+        def visit_IfExp(self, node):
+            self.value += 1
+            self.generic_visit(node)
+
+        def visit_GeneratorExp(self, node):
+            self.value += sum(
+                1 + len(generator.ifs) for generator in node.generators
+            )
+            self.generic_visit(node)
+
+    visitor = Complexity()
+    for child in target.body:
+        visitor.visit(child)
+    return target.end_lineno - target.lineno + 1, visitor.value
 
 
 class ControlledEvaluationIsolationAdmissionTests(unittest.TestCase):
@@ -66,6 +115,25 @@ class ControlledEvaluationIsolationAdmissionTests(unittest.TestCase):
         }
         values.update(changes)
         return SimpleNamespace(**values)
+
+    def test_changed_functions_remain_inside_quality_boundaries(self):
+        for name in (
+            "_read_private_config",
+            "_private_config_metadata",
+            "_read_bounded_descriptor",
+            "_controlled_config_path",
+            "_controlled_route_document",
+            "_validate_exact_route",
+            "_approved_ssh_key_path",
+            "_validate_route_paths",
+            "_validate_route_limits",
+            "validate_controlled_incident_evidence_route",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
+        self.assertLessEqual(len(SCRIPT.read_text().splitlines()), 600)
 
     def test_private_config_read_preserves_descriptor_contract_and_chunks(self):
         payload = b'{"synthetic":true}\n'
