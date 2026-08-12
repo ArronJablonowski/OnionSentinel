@@ -313,9 +313,9 @@ def _sanitize_collection(raw: object, updated_at: str) -> dict[str, object]:
     return result
 
 
-def _sanitize_record(raw: object) -> dict[str, object]:
-    if not isinstance(raw, dict):
-        raise InventoryStateError("records must contain objects")
+def _record_identity(
+    raw: dict[str, object],
+) -> tuple[str, str, str, str]:
     evidence_id = _safe_text(
         raw.get("evidence_id"), "evidence_id", maximum=24, required=True
     ).lower()
@@ -333,6 +333,29 @@ def _sanitize_record(raw: object) -> dict[str, object]:
     ).lower()
     if tier != expected_tier or confidence != expected_confidence:
         raise InventoryStateError("record provenance does not match its source")
+    return evidence_id, source, tier, confidence
+
+
+def _canonical_passive_asset_ref(asset_ref: str) -> None:
+    if AGENT_UUID_RE.fullmatch(asset_ref):
+        raise InventoryStateError("raw endpoint identifiers are not public")
+    try:
+        address = ipaddress.ip_address(asset_ref)
+    except ValueError as exc:
+        raise InventoryStateError(
+            "passive asset_ref must be an IP address"
+        ) from exc
+    if str(address) != asset_ref or not any(
+        address in network for network in LAN_NETWORKS
+    ):
+        raise InventoryStateError(
+            "passive asset_ref is not a canonical LAN IP"
+        )
+
+
+def _record_asset_reference(
+    raw: dict[str, object], source: str
+) -> tuple[str, str]:
     asset_ref_type = _safe_text(
         raw.get("asset_ref_type"),
         "asset_ref_type",
@@ -353,17 +376,13 @@ def _sanitize_record(raw: object) -> dict[str, object]:
                 "OSQuery asset references must be pseudonymous identifiers"
             )
     else:
-        if AGENT_UUID_RE.fullmatch(asset_ref):
-            raise InventoryStateError("raw endpoint identifiers are not public")
-        try:
-            address = ipaddress.ip_address(asset_ref)
-        except ValueError as exc:
-            raise InventoryStateError("passive asset_ref must be an IP address") from exc
-        if str(address) != asset_ref or not any(
-            address in network for network in LAN_NETWORKS
-        ):
-            raise InventoryStateError("passive asset_ref is not a canonical LAN IP")
+        _canonical_passive_asset_ref(asset_ref)
+    return asset_ref_type, asset_ref
 
+
+def _record_observation(
+    raw: dict[str, object],
+) -> tuple[dt.datetime, dt.datetime, int]:
     first_seen = _parse_timestamp(raw.get("first_seen"), "first_seen")
     last_seen = _parse_timestamp(raw.get("last_seen"), "last_seen")
     if first_seen > last_seen:
@@ -376,7 +395,12 @@ def _sanitize_record(raw: object) -> dict[str, object]:
         or observation_count > 2_147_483_647
     ):
         raise InventoryStateError("observation_count is invalid")
+    return first_seen, last_seen, observation_count
 
+
+def _record_dataset_version(
+    raw: dict[str, object], source: str
+) -> tuple[str, str]:
     source_dataset = _safe_text(
         raw.get("source_dataset"),
         "source_dataset",
@@ -388,6 +412,36 @@ def _sanitize_record(raw: object) -> dict[str, object]:
     version = _safe_text(raw.get("version"), "version", maximum=1024)
     if source == "http_user_agent" and version:
         raise InventoryStateError("HTTP User-Agent evidence cannot invent a version")
+    return source_dataset, version
+
+
+def _validate_endpoint_operating_system(
+    os_present: bool,
+    source: str,
+    confidence: str,
+) -> None:
+    if os_present and (
+        source not in ENDPOINT_OS_SOURCES or confidence != "high"
+    ):
+        raise InventoryStateError(
+            "endpoint operating-system provenance is invalid"
+        )
+    if not os_present and (source or confidence):
+        raise InventoryStateError(
+            "empty endpoint operating-system evidence claims provenance"
+        )
+
+
+def _validate_passive_operating_system(values: tuple[str, ...]) -> None:
+    if any(values):
+        raise InventoryStateError(
+            "passive software evidence cannot assert an exact operating system"
+        )
+
+
+def _record_operating_system(
+    raw: dict[str, object], source: str
+) -> tuple[str, str, str, str]:
     operating_system_type = _safe_text(
         raw.get("operating_system_type"),
         "operating_system_type",
@@ -414,30 +468,41 @@ def _sanitize_record(raw: object) -> dict[str, object]:
             "operating_system_confidence is unsupported"
         )
     if source == "osquery_apps":
-        if os_present and (
-            operating_system_source not in ENDPOINT_OS_SOURCES
-            or operating_system_confidence != "high"
-        ):
-            raise InventoryStateError(
-                "endpoint operating-system provenance is invalid"
-            )
-        if not os_present and (
-            operating_system_source or operating_system_confidence
-        ):
-            raise InventoryStateError(
-                "empty endpoint operating-system evidence claims provenance"
-            )
-    elif any(
-        (
-            operating_system_type,
-            operating_system_version,
+        _validate_endpoint_operating_system(
+            os_present,
             operating_system_source,
             operating_system_confidence,
         )
-    ):
-        raise InventoryStateError(
-            "passive software evidence cannot assert an exact operating system"
+    else:
+        _validate_passive_operating_system(
+            (
+                operating_system_type,
+                operating_system_version,
+                operating_system_source,
+                operating_system_confidence,
+            )
         )
+    return (
+        operating_system_type,
+        operating_system_version,
+        operating_system_source,
+        operating_system_confidence,
+    )
+
+
+def _sanitize_record(raw: object) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        raise InventoryStateError("records must contain objects")
+    evidence_id, source, tier, confidence = _record_identity(raw)
+    asset_ref_type, asset_ref = _record_asset_reference(raw, source)
+    first_seen, last_seen, observation_count = _record_observation(raw)
+    source_dataset, version = _record_dataset_version(raw, source)
+    (
+        operating_system_type,
+        operating_system_version,
+        operating_system_source,
+        operating_system_confidence,
+    ) = _record_operating_system(raw, source)
     return {
         "evidence_id": evidence_id,
         "source": source,

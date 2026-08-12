@@ -48,6 +48,14 @@ class SoftwareInventoryStateRecordArchitectureTests(unittest.TestCase):
             ),
             800,
         )
+        for symbol in (
+            "_record_identity",
+            "_record_asset_reference",
+            "_record_observation",
+            "_record_dataset_version",
+            "_record_operating_system",
+        ):
+            self.assertTrue(callable(getattr(inventory_state, symbol)))
         raw = self.valid()
         before = copy.deepcopy(raw)
         result = inventory_state._sanitize_record(raw)

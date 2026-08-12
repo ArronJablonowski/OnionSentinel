@@ -113,10 +113,6 @@
     "onion-sentinel-dashboard/software_inventory_state.py::_sanitize_collection": {
       "max_complexity": 17
     },
-    "onion-sentinel-dashboard/software_inventory_state.py::_sanitize_record": {
-      "max_complexity": 34,
-      "max_lines": 153
-    },
     "onion-sentinel-dashboard/software_inventory_state.py::_sanitize_source_statuses": {
       "max_complexity": 17
     },
