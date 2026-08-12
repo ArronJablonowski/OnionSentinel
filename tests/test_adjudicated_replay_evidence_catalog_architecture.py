@@ -107,9 +107,19 @@ class AdjudicatedReplayEvidenceCatalogArchitectureTests(unittest.TestCase):
         )
         self.assertEqual(list(signature.parameters), ["prompt_package"])
         self.assertEqual(str(signature.return_annotation), "list[str]")
-        self.assertEqual(
-            function_metrics("evidence_reference_catalog"), (106, 42)
-        )
+        for name in (
+            "_add_evidence_reference",
+            "_add_alert_group_references",
+            "_add_enrichment_pcap_references",
+            "_add_validation_asset_references",
+            "_add_prior_related_references",
+            "_add_correlation_references",
+            "_add_incident_references",
+            "evidence_reference_catalog",
+        ):
+            lines, complexity = function_metrics(name)
+            self.assertLessEqual(lines, 50)
+            self.assertLessEqual(complexity, 10)
         source = EXPORTER_PATH.read_text(encoding="utf-8")
         self.assertEqual(source.count("evidence_reference_catalog(prompt_package)"), 1)
         self.assertLessEqual(len(source.splitlines()), 800)

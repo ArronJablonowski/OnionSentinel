@@ -208,43 +208,48 @@ def adjudication_verdict_contradictions(
     return contradictions
 
 
-def evidence_reference_catalog(prompt_package: dict[str, Any]) -> list[str]:
-    """Build a bounded catalog of citeable references from supplied evidence."""
-    references: set[str] = set()
+def _add_evidence_reference(
+    references: set[str], *parts: object,
+) -> None:
+    cleaned = [
+        " ".join(("" if part is None else str(part)).strip().split())
+        for part in parts
+    ]
+    if not cleaned or any(not part for part in cleaned):
+        return
+    value = ":".join(cleaned)[:MAX_EVIDENCE_REF_LENGTH]
+    if value:
+        references.add(value)
 
-    def add(*parts: object) -> None:
-        cleaned = [
-            " ".join(("" if part is None else str(part)).strip().split())
-            for part in parts
-        ]
-        if not cleaned or any(not part for part in cleaned):
-            return
-        value = ":".join(cleaned)[:MAX_EVIDENCE_REF_LENGTH]
-        if value:
-            references.add(value)
 
-    for key in EVIDENCE_SECTION_KEYS:
-        if key in prompt_package and prompt_package[key] is not None:
-            add(key)
-
+def _add_alert_group_references(
+    prompt_package: dict[str, Any], references: set[str],
+) -> None:
     alert = prompt_package.get("alert")
     if isinstance(alert, dict):
-        add("alert", alert.get("alert_id"))
+        _add_evidence_reference(references, "alert", alert.get("alert_id"))
 
     grouped = prompt_package.get("grouped_alert_context")
     if isinstance(grouped, dict):
         timeline = grouped.get("timeline")
         for item in timeline if isinstance(timeline, list) else []:
             if isinstance(item, dict):
-                add("grouped_alert_context", item.get("alert_id"))
+                _add_evidence_reference(
+                    references, "grouped_alert_context", item.get("alert_id")
+                )
 
+
+def _add_enrichment_pcap_references(
+    prompt_package: dict[str, Any], references: set[str],
+) -> None:
     enrichment = prompt_package.get("public_enrichment")
     if isinstance(enrichment, dict):
         records = enrichment.get("records")
         for item in records if isinstance(records, list) else []:
             if not isinstance(item, dict):
                 continue
-            add(
+            _add_evidence_reference(
+                references,
                 "public_enrichment",
                 item.get("source"),
                 item.get("indicator_type"),
@@ -256,41 +261,79 @@ def evidence_reference_catalog(prompt_package: dict[str, Any]) -> list[str]:
         parsed = pcap.get("parsed_evidence")
         for item in parsed if isinstance(parsed, list) else []:
             if isinstance(item, dict):
-                add("pcap_evidence", item.get("request_id"))
+                _add_evidence_reference(
+                    references, "pcap_evidence", item.get("request_id")
+                )
 
+
+def _add_validation_asset_references(
+    prompt_package: dict[str, Any], references: set[str],
+) -> None:
     validation = prompt_package.get("detection_validation")
     if isinstance(validation, dict):
         rule = validation.get("rule")
         if isinstance(rule, dict):
-            add("detection_validation", rule.get("sid"), rule.get("revision"))
+            _add_evidence_reference(
+                references,
+                "detection_validation",
+                rule.get("sid"),
+                rule.get("revision"),
+            )
         playbook = validation.get("playbook")
         if isinstance(playbook, dict):
-            add("detection_validation", "playbook", playbook.get("id"))
+            _add_evidence_reference(
+                references,
+                "detection_validation",
+                "playbook",
+                playbook.get("id"),
+            )
 
     assets = prompt_package.get("asset_context")
     if isinstance(assets, dict):
         matched = assets.get("matched_assets")
         for item in matched if isinstance(matched, list) else []:
             if isinstance(item, dict):
-                add("asset_context", item.get("asset_id"))
+                _add_evidence_reference(
+                    references, "asset_context", item.get("asset_id")
+                )
 
+
+def _add_prior_related_references(
+    prompt_package: dict[str, Any], references: set[str],
+) -> None:
     prior = prompt_package.get("prior_analyses")
     for item in prior if isinstance(prior, list) else []:
         if isinstance(item, dict):
-            add("prior_analyses", item.get("analysis_id"))
+            _add_evidence_reference(
+                references, "prior_analyses", item.get("analysis_id")
+            )
 
     related = prompt_package.get("related_alerts")
     for item in related if isinstance(related, list) else []:
         if isinstance(item, dict):
-            add("related_alerts", item.get("alert_id"))
+            _add_evidence_reference(
+                references, "related_alerts", item.get("alert_id")
+            )
 
+
+def _add_correlation_references(
+    prompt_package: dict[str, Any], references: set[str],
+) -> None:
     correlations = prompt_package.get("correlated_alert_context")
     if isinstance(correlations, dict):
         candidates = correlations.get("candidates")
         for item in candidates if isinstance(candidates, list) else []:
             if isinstance(item, dict):
-                add("correlated_alert_context", item.get("group_id"))
+                _add_evidence_reference(
+                    references,
+                    "correlated_alert_context",
+                    item.get("group_id"),
+                )
 
+
+def _add_incident_references(
+    prompt_package: dict[str, Any], references: set[str],
+) -> None:
     incident = prompt_package.get("incident_response_evidence")
     if isinstance(incident, dict):
         response = incident.get("security_onion_response")
@@ -299,7 +342,8 @@ def evidence_reference_catalog(prompt_package: dict[str, Any]) -> list[str]:
             for item in results if isinstance(results, list) else []:
                 if not isinstance(item, dict):
                     continue
-                add(
+                _add_evidence_reference(
+                    references,
                     "incident_response_evidence",
                     item.get("pack"),
                     item.get("window_index"),
@@ -307,12 +351,26 @@ def evidence_reference_catalog(prompt_package: dict[str, Any]) -> list[str]:
             osquery_results = response.get("osquery_results")
             for item in osquery_results if isinstance(osquery_results, list) else []:
                 if isinstance(item, dict):
-                    add(
+                    _add_evidence_reference(
+                        references,
                         "incident_response_evidence",
                         "osquery",
                         item.get("pack"),
                     )
 
+
+def evidence_reference_catalog(prompt_package: dict[str, Any]) -> list[str]:
+    """Build a bounded catalog of citeable references from supplied evidence."""
+    references: set[str] = set()
+    for key in EVIDENCE_SECTION_KEYS:
+        if key in prompt_package and prompt_package[key] is not None:
+            _add_evidence_reference(references, key)
+    _add_alert_group_references(prompt_package, references)
+    _add_enrichment_pcap_references(prompt_package, references)
+    _add_validation_asset_references(prompt_package, references)
+    _add_prior_related_references(prompt_package, references)
+    _add_correlation_references(prompt_package, references)
+    _add_incident_references(prompt_package, references)
     return sorted(references)[:MAX_EVIDENCE_REFS]
 
 
