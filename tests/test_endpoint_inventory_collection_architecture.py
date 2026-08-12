@@ -133,6 +133,18 @@ class EndpointInventoryCollectionArchitectureTests(unittest.TestCase):
             installer,
         )
 
+    def test_pagination_and_cli_phases_meet_quality_boundaries(self) -> None:
+        for name in (
+            "_admitted_page_cursor",
+            "_append_inventory_page",
+            "_paged_rows",
+            "_parse_args",
+            "main",
+        ):
+            lines, complexity = function_metrics(name)
+            self.assertLessEqual(lines, 50)
+            self.assertLessEqual(complexity, 10)
+
     def test_query_projection_deduplication_order_and_inputs_are_exact(self) -> None:
         config = self.config()
         previous = {

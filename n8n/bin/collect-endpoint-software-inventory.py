@@ -166,6 +166,31 @@ def _page_query(table: str, columns: str, cursor: str) -> str:
     )
 
 
+def _admitted_page_cursor(
+    page: list[dict[str, str]],
+    cursor: str,
+    seen: set[str],
+) -> str:
+    paths = [_safe_cell(item.get("path"), MAX_CURSOR_CHARS) for item in page]
+    if not paths or any(not path for path in paths):
+        raise EndpointInventoryError("endpoint inventory row omitted its path")
+    next_cursor = max(paths)
+    if next_cursor <= cursor or next_cursor in seen:
+        raise EndpointInventoryError("endpoint inventory pagination did not advance")
+    seen.add(next_cursor)
+    return next_cursor
+
+
+def _append_inventory_page(
+    rows: list[dict[str, str]],
+    page: list[dict[str, str]],
+) -> bool:
+    rows.extend(page)
+    if len(rows) > MAX_RECORDS:
+        raise EndpointInventoryError("endpoint inventory exceeded its record limit")
+    return len(page) < MAX_ROWS
+
+
 def _paged_rows(
     config: dict[str, Any], alias: str, table: str, columns: str, case_id: str
 ) -> list[dict[str, str]]:
@@ -182,17 +207,8 @@ def _paged_rows(
         )
         if not page:
             return rows
-        paths = [_safe_cell(item.get("path"), MAX_CURSOR_CHARS) for item in page]
-        if not paths or any(not path for path in paths):
-            raise EndpointInventoryError("endpoint inventory row omitted its path")
-        next_cursor = max(paths)
-        if next_cursor <= cursor or next_cursor in seen:
-            raise EndpointInventoryError("endpoint inventory pagination did not advance")
-        seen.add(next_cursor)
-        rows.extend(page)
-        if len(rows) > MAX_RECORDS:
-            raise EndpointInventoryError("endpoint inventory exceeded its record limit")
-        if len(page) < MAX_ROWS:
+        next_cursor = _admitted_page_cursor(page, cursor, seen)
+        if _append_inventory_page(rows, page):
             return rows
         cursor = next_cursor
     raise EndpointInventoryError("endpoint inventory exceeded its page limit")
@@ -394,7 +410,7 @@ def open_collector_lock(path: Path) -> int:
         raise
 
 
-def main() -> int:
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_FILE)
     parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
@@ -413,7 +429,11 @@ def main() -> int:
         ),
         default=DEFAULT_RETRY_DELAY_SECONDS,
     )
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = _parse_args()
     logger = SecurityJsonlLogger(args.log, service="endpoint-software-inventory")
     lock_path = args.cache.with_suffix(args.cache.suffix + ".lock")
     descriptor: int | None = None
