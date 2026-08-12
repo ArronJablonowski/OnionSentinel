@@ -1621,6 +1621,47 @@
       ]
     },
     {
+      "path": "n8n/bin/pcap_processor_storage_requests.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_processor_storage_requests.py",
+      "required_symbols": [
+        "pending_requests",
+        "request_from_row",
+        "signature_context_for_request",
+        "table_columns"
+      ]
+    },
+    {
+      "path": "n8n/bin/pcap_processor_storage_scope.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_processor_storage_scope.py",
+      "required_symbols": [
+        "icmp_evidence_scope",
+        "icmp_scope_match",
+        "timestamp_epoch"
+      ]
+    },
+    {
+      "path": "n8n/bin/pcap_processor_storage_artifacts.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_processor_storage_artifacts.py",
+      "required_symbols": [
+        "candidate_artifact_paths",
+        "fetch_remote_artifact",
+        "materialize_pcap_files",
+        "safe_extract_tar"
+      ]
+    },
+    {
+      "path": "n8n/bin/pcap_processor_storage_records.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/pcap_processor_storage_records.py",
+      "required_symbols": [
+        "scan_json_lines",
+        "top_values"
+      ]
+    },
+    {
       "path": "n8n/bin/pcap_processor_storage.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/pcap_processor_storage.py",

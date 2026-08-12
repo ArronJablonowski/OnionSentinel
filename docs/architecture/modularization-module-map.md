@@ -2704,10 +2704,16 @@ capture, invokes a parser or shell, accepts a caller path, or reaches a network.
 
 `n8n/bin/process-pcap-evidence.py` is a bounded CLI and import-compatibility
 facade. Configuration and shared bounded utilities live in
-`pcap_processor_contract.py`; database and artifact admission in
-`pcap_processor_storage.py`; payload-free Zeek projection and aggregation in
+`pcap_processor_contract.py`; payload-free Zeek projection and aggregation in
 `pcap_processor_zeek.py`; and report persistence, cleanup, and orchestration in
-`pcap_processor_workflow.py`. `pcap_processor_tshark.py` is the stable TShark
+`pcap_processor_workflow.py`. `pcap_processor_storage.py` is the stable storage
+compatibility facade. Read-only request selection and exact alert/playbook
+resolution live in `pcap_processor_storage_requests.py`; endpoint/time ICMP
+attribution in `pcap_processor_storage_scope.py`; path-confined remote transfer,
+archive validation, and materialization in
+`pcap_processor_storage_artifacts.py`; and bounded JSONL sampling and summary
+ordering in `pcap_processor_storage_records.py`. `pcap_processor_tshark.py` is
+the stable TShark
 compatibility facade. Its immutable field and command schema lives in
 `pcap_processor_tshark_contract.py`; bounded mutable counters and reservoirs in
 `pcap_processor_tshark_state.py`; per-line protocol, ICMP, and marker
@@ -2724,6 +2730,10 @@ claims retain tool, timestamp, direction, coverage, and cleanup provenance.
 The TShark owners receive subprocess, parsing, GeoIP, sanitization, and limit
 capabilities explicitly from the facade; they do not import the facade, open
 captures themselves, retain raw payloads, or acquire network authority.
+The storage owners likewise receive database, parser, process, capacity,
+digest, filesystem, and limit capabilities explicitly. Only the artifact owner
+may compose the already-authorized bounded SSH command, and no owner imports
+the facade, opens a live database by default, or broadens path authority.
 
 ## Detection Validation
 

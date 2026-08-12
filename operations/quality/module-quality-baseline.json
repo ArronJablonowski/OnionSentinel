@@ -117,15 +117,6 @@
       "max_complexity": 31,
       "max_lines": 129
     },
-    "n8n/bin/pcap_processor_storage.py::fetch_remote_artifact": {
-      "max_complexity": 20
-    },
-    "n8n/bin/pcap_processor_storage.py::materialize_pcap_files": {
-      "max_complexity": 19
-    },
-    "n8n/bin/pcap_processor_storage.py::signature_context_for_request": {
-      "max_lines": 114
-    },
     "n8n/bin/pcap_processor_workflow.py::build_markdown": {
       "max_complexity": 18,
       "max_lines": 124

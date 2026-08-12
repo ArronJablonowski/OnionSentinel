@@ -6,8 +6,10 @@ import hashlib
 import inspect
 import io
 import json
+import ast
 import sqlite3
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -22,6 +24,14 @@ ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "n8n" / "bin"
 sys.path.insert(0, str(BIN))
 import pcap_processor_storage as STORAGE  # noqa: E402
+
+OWNER_FILES = (
+    "pcap_processor_storage_requests.py",
+    "pcap_processor_storage_scope.py",
+    "pcap_processor_storage_artifacts.py",
+    "pcap_processor_storage_records.py",
+    "pcap_processor_storage.py",
+)
 
 
 class PcapProcessorStorageCharacterizationTests(unittest.TestCase):
@@ -311,6 +321,71 @@ class PcapProcessorStorageCharacterizationTests(unittest.TestCase):
                 {"count": 1, "kind": "tls", "value": "b"},
             ],
         )
+
+
+class PcapProcessorStorageArchitectureTests(unittest.TestCase):
+    def test_facade_and_owners_obey_size_and_dependency_boundaries(self):
+        expected_imports = {
+            "pcap_processor_storage_requests.py": set(),
+            "pcap_processor_storage_scope.py": set(),
+            "pcap_processor_storage_artifacts.py": set(),
+            "pcap_processor_storage_records.py": set(),
+            "pcap_processor_storage.py": {
+                "pcap_processor_contract",
+                "pcap_processor_storage_requests",
+                "pcap_processor_storage_scope",
+                "pcap_processor_storage_artifacts",
+                "pcap_processor_storage_records",
+            },
+        }
+        for name in OWNER_FILES:
+            with self.subTest(name=name):
+                source = (BIN / name).read_text(encoding="utf-8")
+                limit = 250 if name == "pcap_processor_storage.py" else 800
+                self.assertLessEqual(len(source.splitlines()), limit)
+                imports = {
+                    node.module
+                    for node in ast.walk(ast.parse(source))
+                    if isinstance(node, ast.ImportFrom)
+                    and node.module
+                    and node.module.startswith("pcap_processor")
+                }
+                self.assertEqual(imports, expected_imports[name])
+
+    def test_storage_owners_import_from_an_isolated_flat_dependency_unit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            for name in OWNER_FILES[:-1]:
+                (target / name).write_bytes((BIN / name).read_bytes())
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-c",
+                    (
+                        "import sys; sys.path.insert(0, sys.argv[1]); "
+                        "import pcap_processor_storage_requests as r; "
+                        "import pcap_processor_storage_scope as s; "
+                        "import pcap_processor_storage_artifacts as a; "
+                        "import pcap_processor_storage_records as j; "
+                        "assert all(callable(x) for x in "
+                        "(r.pending_requests, s.icmp_scope_match, "
+                        "a.materialize_pcap_files, j.scan_json_lines))"
+                    ),
+                    directory,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_mac_installer_copies_the_complete_storage_dependency_unit(self):
+        installer = (BIN / "install-macstudio-stack.zsh").read_text(encoding="utf-8")
+        for name in OWNER_FILES:
+            with self.subTest(name=name):
+                self.assertIn(f"n8n/bin/{name}", installer)
 
 
 if __name__ == "__main__":
