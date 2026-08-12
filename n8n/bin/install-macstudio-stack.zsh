@@ -1019,6 +1019,7 @@ cp "$REPO_DIR/n8n/bin/pcap_processor_tshark_parser.py" "$STACK_DIR/bin/pcap_proc
 cp "$REPO_DIR/n8n/bin/pcap_processor_tshark_projection.py" "$STACK_DIR/bin/pcap_processor_tshark_projection.py"
 cp "$REPO_DIR/n8n/bin/pcap_processor_tshark_workflow.py" "$STACK_DIR/bin/pcap_processor_tshark_workflow.py"
 cp "$REPO_DIR/n8n/bin/pcap_processor_tshark.py" "$STACK_DIR/bin/pcap_processor_tshark.py"
+cp "$REPO_DIR/n8n/bin/pcap_markdown_renderer.py" "$STACK_DIR/bin/pcap_markdown_renderer.py"
 cp "$REPO_DIR/n8n/bin/pcap_processor_workflow.py" "$STACK_DIR/bin/pcap_processor_workflow.py"
 cp "$REPO_DIR/n8n/bin/process-pcap-evidence.py" "$STACK_DIR/bin/process-pcap-evidence.py"
 cp "$REPO_DIR/n8n/bin/pcap_analysis_core.py" "$STACK_DIR/bin/pcap_analysis_core.py"

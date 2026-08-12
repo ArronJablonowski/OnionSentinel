@@ -13,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "n8n/bin/pcap_processor_workflow.py"
+RENDERER = ROOT / "n8n/bin/pcap_markdown_renderer.py"
 BIN = ROOT / "n8n/bin"
 if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
@@ -29,8 +30,8 @@ def load_workflow():
     return module
 
 
-def function_metrics(name: str) -> tuple[int, int]:
-    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+def function_metrics(name: str, path: Path = SCRIPT) -> tuple[int, int]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     target = next(
         node
         for node in tree.body
@@ -163,10 +164,35 @@ class PcapMarkdownRenderingArchitectureTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.workflow = load_workflow()
 
-    def test_facade_retains_pre_extraction_quality_ceiling(self) -> None:
+    def test_facade_and_renderer_meet_quality_and_installer_contracts(self) -> None:
         lines, complexity = function_metrics("build_markdown")
-        self.assertLessEqual(lines, 124)
-        self.assertLessEqual(complexity, 18)
+        self.assertLessEqual(lines, 10)
+        self.assertLessEqual(complexity, 2)
+        for name in (
+            "_header_lines",
+            "_append_zeek_sections",
+            "_tshark_summary_lines",
+            "_json_section",
+            "_append_tshark_json_sections",
+            "_append_tshark_samples",
+            "_append_tshark_sections",
+            "render_markdown",
+        ):
+            lines, complexity = function_metrics(name, RENDERER)
+            self.assertLessEqual(lines, 50)
+            self.assertLessEqual(complexity, 10)
+        self.assertLessEqual(len(RENDERER.read_text().splitlines()), 600)
+        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
+        renderer_copy = (
+            'cp "$REPO_DIR/n8n/bin/pcap_markdown_renderer.py" '
+            '"$STACK_DIR/bin/pcap_markdown_renderer.py"'
+        )
+        workflow_copy = (
+            'cp "$REPO_DIR/n8n/bin/pcap_processor_workflow.py" '
+            '"$STACK_DIR/bin/pcap_processor_workflow.py"'
+        )
+        self.assertEqual(installer.count(renderer_copy), 1)
+        self.assertLess(installer.index(renderer_copy), installer.index(workflow_copy))
 
     def test_minimal_projection_is_byte_exact_and_nonmutating(self) -> None:
         analysis = {}
