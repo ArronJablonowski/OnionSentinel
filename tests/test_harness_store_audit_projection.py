@@ -185,7 +185,7 @@ class HarnessStoreAuditProjectionTests(unittest.TestCase):
             )
         return result, trace
 
-    def test_public_signature_and_current_debt_are_exact(self) -> None:
+    def test_public_signature_and_changed_functions_are_within_budget(self) -> None:
         self.assertEqual(
             str(
                 inspect.signature(
@@ -194,10 +194,16 @@ class HarnessStoreAuditProjectionTests(unittest.TestCase):
             ),
             "(self, event: 'Mapping[str, Any]') -> 'None'",
         )
-        self.assertEqual(
-            function_metrics("HarnessStoreFoundation._audit_event"),
-            (32, 14),
-        )
+        for name in (
+            "_audit_run_identity",
+            "_audit_log_level",
+            "_audit_log_fields",
+            "HarnessStoreFoundation._audit_event",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
 
     def test_failed_event_preserves_query_lifetime_conversion_and_log_projection(self) -> None:
         trace = []

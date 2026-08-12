@@ -90,6 +90,43 @@ def _probe_existing_schema_version(path: Path) -> int | None:
         connection.close()
 
 
+def _audit_run_identity(
+    path: Path,
+    event: Mapping[str, Any],
+) -> dict[str, Any]:
+    with _connect(path) as connection:
+        run = connection.execute(
+            """
+            SELECT correlation_id, case_id, alert_id, role, task_kind,
+                   assigned_route, assigned_reviewer_route, status
+            FROM harness_runs WHERE run_id = ?
+            """,
+            (str(event.get("run_id") or ""),),
+        ).fetchone()
+    return dict(run) if run is not None else {}
+
+
+def _audit_log_level(event: Mapping[str, Any]) -> str:
+    return (
+        "error"
+        if str(event.get("event_type") or "") == "run.failed"
+        else "info"
+    )
+
+
+def _audit_log_fields(event: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "run_id": str(event.get("run_id") or ""),
+        "trace_sequence": int(event.get("sequence") or 0),
+        "harness_event_type": str(event.get("event_type") or ""),
+        "stage": str(event.get("stage") or ""),
+        "event_id": str(event.get("event_id") or ""),
+        "event_created_at": str(event.get("created_at") or ""),
+        "event_sha256": str(event.get("event_sha256") or ""),
+        "payload_sha256": str(event.get("payload_sha256") or ""),
+    }
+
+
 @contextlib.contextmanager
 def _connect(path: Path) -> Iterable[sqlite3.Connection]:
     if path.is_symlink():
@@ -160,29 +197,14 @@ class HarnessStoreFoundation:
     def _audit_event(self, event: Mapping[str, Any]) -> None:
         """Mirror committed event metadata without duplicating evidence."""
         try:
-            with _connect(self.path) as connection:
-                run = connection.execute(
-                    """
-                    SELECT correlation_id, case_id, alert_id, role, task_kind,
-                           assigned_route, assigned_reviewer_route, status
-                    FROM harness_runs WHERE run_id = ?
-                    """,
-                    (str(event.get("run_id") or ""),),
-                ).fetchone()
-            identity = dict(run) if run is not None else {}
-            self.logger.log(
-                "error"
-                if str(event.get("event_type") or "") == "run.failed"
-                else "info",
+            identity = _audit_run_identity(self.path, event)
+            log = self.logger.log
+            level = _audit_log_level(event)
+            fields = _audit_log_fields(event)
+            log(
+                level,
                 "harness.event",
-                run_id=str(event.get("run_id") or ""),
-                trace_sequence=int(event.get("sequence") or 0),
-                harness_event_type=str(event.get("event_type") or ""),
-                stage=str(event.get("stage") or ""),
-                event_id=str(event.get("event_id") or ""),
-                event_created_at=str(event.get("created_at") or ""),
-                event_sha256=str(event.get("event_sha256") or ""),
-                payload_sha256=str(event.get("payload_sha256") or ""),
+                **fields,
                 **identity,
             )
         except Exception:
