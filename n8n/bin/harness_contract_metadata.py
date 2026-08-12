@@ -21,6 +21,30 @@ def _redacted_string(value: object, maximum: int = MAX_EVENT_STRING) -> str:
     return text[:maximum]
 
 
+def _is_metadata_scalar(value: object) -> bool:
+    return value is None or isinstance(value, (bool, int, float))
+
+
+def _is_metadata_sequence(value: object) -> bool:
+    return isinstance(value, Sequence) and not isinstance(
+        value,
+        (bytes, bytearray, memoryview),
+    )
+
+
+def _sanitize_sequence(
+    value: Sequence[Any],
+    *,
+    depth: int,
+    item_budget: list[int],
+) -> list[Any]:
+    return [
+        sanitize_metadata(item, depth=depth + 1, item_budget=item_budget)
+        for item in list(value)[:MAX_EVENT_ITEMS]
+        if item_budget[0] > 0
+    ]
+
+
 def sanitize_metadata(
     value: Any,
     *,
@@ -33,21 +57,18 @@ def sanitize_metadata(
     if depth > 8 or item_budget[0] <= 0:
         return "[truncated]"
     item_budget[0] -= 1
-    if value is None or isinstance(value, (bool, int, float)):
+    if _is_metadata_scalar(value):
         return value
     if isinstance(value, str):
         return _redacted_string(value)
     if isinstance(value, Mapping):
         return _sanitize_mapping(value, depth=depth, item_budget=item_budget)
-    if isinstance(value, Sequence) and not isinstance(
-        value,
-        (bytes, bytearray, memoryview),
-    ):
-        return [
-            sanitize_metadata(item, depth=depth + 1, item_budget=item_budget)
-            for item in list(value)[:MAX_EVENT_ITEMS]
-            if item_budget[0] > 0
-        ]
+    if _is_metadata_sequence(value):
+        return _sanitize_sequence(
+            value,
+            depth=depth,
+            item_budget=item_budget,
+        )
     return _redacted_string(value)
 
 

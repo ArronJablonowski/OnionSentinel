@@ -2,6 +2,7 @@
 """Characterize bounded, secret-safe harness metadata projection."""
 from __future__ import annotations
 
+import ast
 import copy
 import math
 import sys
@@ -16,6 +17,26 @@ if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
 import harness_contract_metadata as METADATA  # noqa: E402
+
+
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse((BIN_DIR / "harness_contract_metadata.py").read_text())
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    complexity = 1
+    for node in ast.walk(target):
+        if isinstance(node, (ast.If, ast.For, ast.While, ast.IfExp)):
+            complexity += 1
+        elif isinstance(node, ast.Try):
+            complexity += len(node.handlers)
+        elif isinstance(node, ast.BoolOp):
+            complexity += max(0, len(node.values) - 1)
+        elif isinstance(node, ast.comprehension):
+            complexity += 1 + len(node.ifs)
+    return target.end_lineno - target.lineno + 1, complexity
 
 
 class StringValue:
@@ -62,6 +83,19 @@ class MaterializedSequence(Sequence):
 
 
 class HarnessMetadataSanitizationCharacterizationTests(unittest.TestCase):
+    def test_sanitization_owners_stay_small_and_cohesive(self) -> None:
+        for name in (
+            "_is_metadata_scalar",
+            "_is_metadata_sequence",
+            "_sanitize_sequence",
+            "sanitize_metadata",
+            "_sanitize_mapping",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
+
     def test_scalar_types_and_nonfinite_floats_are_returned_unchanged(self) -> None:
         self.assertIsNone(METADATA.sanitize_metadata(None))
         self.assertIs(METADATA.sanitize_metadata(True), True)
