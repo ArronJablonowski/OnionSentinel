@@ -131,12 +131,10 @@ def _read_snapshot_stream(
                 )
 
 
-def _bounded_ps_output() -> str:
-    """Read one process-table snapshot with strict time and byte ceilings."""
-
+def __start_snapshot_process() -> subprocess.Popen[bytes]:
     snapshot_env = os.environ.copy()
     snapshot_env.update({"LC_ALL": "C", "LANG": "C"})
-    process = subprocess.Popen(
+    return subprocess.Popen(
         [
             str(_PS_PATH),
             "-ww",
@@ -149,6 +147,12 @@ def _bounded_ps_output() -> str:
         env=snapshot_env,
         start_new_session=True,
     )
+
+
+def _bounded_ps_output() -> str:
+    """Read one process-table snapshot with strict time and byte ceilings."""
+
+    process = __start_snapshot_process()
     assert process.stdout is not None and process.stderr is not None
     selector = selectors.DefaultSelector()
     streams = {

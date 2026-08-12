@@ -491,6 +491,11 @@ nonzero exits, post-spawn initialization failure, progress/lease failure,
 nested containment, detached descendants, PID reuse, zombie exclusion,
 verified cleanup, and isolated flat-bin startup.
 
+The observation owner composes its fixed `ps` argv, inherited environment plus
+C locale, pipe capture, and isolated session in a private launcher. Snapshot
+timeout/byte ceilings, parsing, errors, cleanup, and process identity semantics
+remain in the bounded observation boundary.
+
 ## Scheduler and Harness
 
 ### `auto-run-ai-analysis.py`
