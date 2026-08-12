@@ -3473,11 +3473,15 @@ classification, safe public-record projection (including bounded User-Agent
 evidence), and stable unavailable/error response shape. It depends only on the
 state contract and performs no storage or network access.
 
-`software_inventory_assets.py` owns complete-inventory identity labeling and
-fail-closed endpoint operating-system correlation. Passive evidence can receive
-an OS projection only through one current, high-confidence, non-DHCP static
-asset association; conflicts, partial inventories, stale validity, and dynamic
-address claims remain unlabeled or uncorrelated.
+`software_inventory_asset_labels.py` owns complete-inventory hostname/IP
+identity claims, unique labels, and bounded Asset Inventory OS fallback.
+`software_inventory_os_correlation.py` owns fail-closed endpoint
+operating-system correlation, while `software_inventory_assets.py` preserves
+the stable two-function compatibility surface. Passive evidence can receive an
+OS projection only through one current, high-confidence, non-DHCP static asset
+association; conflicts, partial inventories, stale validity, and dynamic
+address claims remain unlabeled or uncorrelated. Both owners depend inward on
+the state/query contracts and never import the facade.
 
 `software_inventory_response.py` owns bounded state-to-API composition:
 time-window selection, fixed filtering and sorting, pagination, summaries,

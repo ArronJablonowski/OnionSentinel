@@ -3554,6 +3554,31 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/software_inventory_asset_labels.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/software_inventory_asset_labels.py",
+      "required_symbols": [
+        "apply_asset_labels"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/software_inventory_os_correlation.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/software_inventory_os_correlation.py",
+      "required_symbols": [
+        "correlate_asset_operating_systems"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/software_inventory_assets.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/software_inventory_assets.py",
+      "required_symbols": [
+        "apply_asset_labels",
+        "correlate_asset_operating_systems"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_software_inventory_service.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_software_inventory_service.py",

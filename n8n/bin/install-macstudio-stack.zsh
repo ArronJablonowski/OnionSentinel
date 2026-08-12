@@ -1277,6 +1277,8 @@ cp "$REPO_DIR/onion-sentinel-dashboard/cti_program_validation.py" "$DASHBOARD_RU
 cp "$REPO_DIR/onion-sentinel-dashboard/cti_program_store.py" "$DASHBOARD_RUNTIME_DIR/cti_program_store.py"
 cp "$REPO_DIR/n8n/bin/asset_inventory.py" "$DASHBOARD_RUNTIME_DIR/asset_inventory.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory.py" "$DASHBOARD_RUNTIME_DIR/software_inventory.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory_asset_labels.py" "$DASHBOARD_RUNTIME_DIR/software_inventory_asset_labels.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory_os_correlation.py" "$DASHBOARD_RUNTIME_DIR/software_inventory_os_correlation.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory_assets.py" "$DASHBOARD_RUNTIME_DIR/software_inventory_assets.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory_query.py" "$DASHBOARD_RUNTIME_DIR/software_inventory_query.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory_response.py" "$DASHBOARD_RUNTIME_DIR/software_inventory_response.py"

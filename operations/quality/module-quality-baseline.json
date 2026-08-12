@@ -107,13 +107,6 @@
       "max_complexity": 45,
       "max_lines": 171
     },
-    "onion-sentinel-dashboard/software_inventory_assets.py::apply_asset_labels": {
-      "max_complexity": 36
-    },
-    "onion-sentinel-dashboard/software_inventory_assets.py::correlate_asset_operating_systems": {
-      "max_complexity": 51,
-      "max_lines": 180
-    },
     "onion-sentinel-dashboard/software_inventory_query.py::parse_filters": {
       "max_complexity": 22
     },

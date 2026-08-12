@@ -81,6 +81,28 @@ class SoftwareInventoryAssetsArchitectureTests(unittest.TestCase):
         value.update(updates)
         return value
 
+    def test_owner_dependency_chain_is_inward_and_bounded(self) -> None:
+        facade = (DASHBOARD / "software_inventory_assets.py").read_text()
+        labels = (
+            DASHBOARD / "software_inventory_asset_labels.py"
+        ).read_text()
+        correlation = (
+            DASHBOARD / "software_inventory_os_correlation.py"
+        ).read_text()
+        self.assertLessEqual(len(facade.splitlines()), 250)
+        self.assertLessEqual(len(labels.splitlines()), 600)
+        self.assertLessEqual(len(correlation.splitlines()), 600)
+        self.assertNotIn("software_inventory_assets", labels)
+        self.assertNotIn("software_inventory_assets", correlation)
+        self.assertIn(
+            "from software_inventory_asset_labels import apply_asset_labels",
+            facade,
+        )
+        self.assertIn(
+            "from software_inventory_os_correlation import",
+            facade,
+        )
+
     def test_public_signatures_are_exact(self) -> None:
         self.assertEqual(
             str(inspect.signature(inventory_assets.apply_asset_labels)),

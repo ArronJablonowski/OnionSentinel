@@ -22,7 +22,9 @@ dependency.
 | `cti_program_validation.py` | Pure CTI normalization, URL restrictions, and credential-reference-only policy. |
 | `cti_program_store.py` | Guarded reads, optimistic revisions, owner-only atomic persistence, digesting, and public projection. |
 | `software_inventory.py` | Thin compatibility facade for the collector-produced Software Inventory snapshot. |
-| `software_inventory_assets.py` | Complete-inventory asset labeling and fail-closed endpoint OS correlation policy. |
+| `software_inventory_asset_labels.py` | Complete-inventory hostname/IP identity claims, unique labels, and bounded Asset Inventory OS fallback. |
+| `software_inventory_os_correlation.py` | Fail-closed trusted endpoint OS projection across one static asset association. |
+| `software_inventory_assets.py` | Stable compatibility facade for asset labeling and endpoint OS correlation. |
 | `software_inventory_query.py` | Fixed filter contract, freshness classification, public evidence projection, and bounded error payloads. |
 | `software_inventory_response.py` | Bounded filtering, sorting, pagination, summary, coverage, and warning composition. |
 | `software_inventory_state.py` | Owner-controlled snapshot reads, schema validation, provenance enforcement, and normalized state projection. |
