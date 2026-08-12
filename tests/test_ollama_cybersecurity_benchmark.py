@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import dataclasses
+import hashlib
 import io
+import inspect
 import json
 import sys
 import tempfile
@@ -20,6 +23,94 @@ SPEC.loader.exec_module(BENCHMARK)
 
 
 class OllamaCybersecurityBenchmarkTests(unittest.TestCase):
+    def test_compatibility_namespace_and_signatures_are_exact(self) -> None:
+        self.assertEqual(
+            sorted(name for name in vars(BENCHMARK) if not name.startswith("__")),
+            [
+                "Any", "BENCHMARK_CASES", "BenchmarkCase", "DEFAULT_MODELS",
+                "DEFAULT_OLLAMA_URL", "Iterable", "MAX_RESPONSE_BYTES", "Path",
+                "QUERY_SYSTEM_PROMPT", "QueryBenchmarkCase", "SCRIPT_DIR",
+                "SYSTEM_PROMPT", "_batch_prompt", "_bounded_json_request", "_case",
+                "_extract_json", "_normalized_answer", "_normalized_query",
+                "_ns_to_seconds", "_query_batch_prompt", "_query_validation",
+                "_select_models", "annotations", "argparse", "asdict",
+                "benchmark_cases", "benchmark_model", "dataclass", "discovery",
+                "dt", "execution", "installed_models", "json", "main",
+                "parse_args", "query_benchmark_cases", "reporting", "run_batch",
+                "run_query_batch", "score_batch", "score_query_batch", "scoring",
+                "sys", "time", "urllib", "write_markdown",
+            ],
+        )
+        self.assertEqual(
+            str(inspect.signature(BENCHMARK._case)),
+            "(case_id: 'str', category: 'str', title: 'str', evidence: "
+            "'Iterable[str]', question: 'str', choices: 'Iterable[str]', "
+            "expected_answer: 'str', required_evidence: 'Iterable[str]') -> "
+            "'BenchmarkCase'",
+        )
+        self.assertEqual(
+            str(inspect.signature(BENCHMARK.benchmark_cases)),
+            "() -> 'tuple[BenchmarkCase, ...]'",
+        )
+        self.assertEqual(
+            str(inspect.signature(BENCHMARK.run_batch)),
+            "(ollama_url: 'str', model: 'str', cases: 'list[BenchmarkCase]', "
+            "repetition: 'int', timeout: 'int', retries: 'int', "
+            "temperature: 'float') -> 'dict[str, Any]'",
+        )
+
+    def test_decision_fixture_contract_is_byte_stable(self) -> None:
+        cases = BENCHMARK.benchmark_cases()
+        self.assertIs(cases, BENCHMARK.BENCHMARK_CASES)
+        self.assertEqual(
+            [field.name for field in dataclasses.fields(BENCHMARK.BenchmarkCase)],
+            [
+                "case_id", "category", "title", "evidence", "question",
+                "choices", "expected_answer", "required_evidence",
+            ],
+        )
+        manifest = [dataclasses.asdict(case) for case in cases]
+        encoded = json.dumps(
+            manifest,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.assertEqual(len(cases), 36)
+        self.assertEqual(
+            hashlib.sha256(encoded).hexdigest(),
+            "5815b01b9313b75d25917df4c7ea5d7442af310791524f85931166691c7314aa",
+        )
+        self.assertTrue(all(isinstance(case, BENCHMARK.BenchmarkCase) for case in cases))
+        self.assertTrue(all(isinstance(case.evidence, tuple) for case in cases))
+        self.assertTrue(all(isinstance(case.choices, tuple) for case in cases))
+        self.assertTrue(all(isinstance(case.required_evidence, tuple) for case in cases))
+
+        model_bytes = json.dumps(
+            BENCHMARK.DEFAULT_MODELS,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.assertEqual(
+            hashlib.sha256(model_bytes).hexdigest(),
+            "09b2284115f91eb94034fdab1c55069ab8be8d045dec4e39cbd78b2b5f83488b",
+        )
+
+    def test_combined_benchmark_corpus_is_exactly_42_cases(self) -> None:
+        decision_ids = [case.case_id for case in BENCHMARK.benchmark_cases()]
+        query_ids = [case.case_id for case in BENCHMARK.query_benchmark_cases()]
+        self.assertEqual(len(decision_ids) + len(query_ids), 42)
+        self.assertEqual(
+            decision_ids,
+            [
+                "P01", "P02", "P03", "P04", "P05", "P06",
+                "T01", "T02", "T03", "T04", "T05", "T06",
+                "N01", "N02", "N03", "N04", "N05", "N06",
+                "C01", "C02", "C03", "C04", "C05", "C06",
+                "I01", "I02", "I03", "I04", "I05", "I06",
+                "S01", "S02", "S03", "S04", "S05", "S06",
+            ],
+        )
+        self.assertEqual(query_ids, ["QK01", "QK02", "QD01", "QD02", "QO01", "QO02"])
+
     def test_installed_models_preserves_exact_order_and_bounds_the_tags_response(self) -> None:
         payload = json.dumps({
             "models": [
