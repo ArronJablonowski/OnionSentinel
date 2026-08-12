@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import inspect
 import json
 import sys
 import tempfile
@@ -31,6 +33,116 @@ worker = load_module("process_pcap_evidence_pivots", "process-pcap-evidence.py")
 
 
 class PcapEvidencePivotTest(unittest.TestCase):
+    def test_facade_namespace_signatures_and_policy_values_are_stable(self) -> None:
+        names = sorted(
+            name
+            for name in vars(queries)
+            if not (name.startswith("__") and name.endswith("__"))
+        )
+        self.assertEqual(len(names), 54)
+        self.assertEqual(
+            hashlib.sha256("\n".join(names).encode("utf-8")).hexdigest(),
+            "9cd11501951b27a90b5043ff28e01536b27f3ee09d536b55ec26bcca5a9d749f",
+        )
+        metadata = [
+            (
+                name,
+                type(value).__module__,
+                type(value).__qualname__,
+                getattr(value, "__module__", None),
+                getattr(value, "__qualname__", None),
+            )
+            for name in names
+            for value in (getattr(queries, name),)
+        ]
+        expected_metadata = {
+            (3, 9): "6f429c17625eaaa4b422259e1800c00343972f7021ae0ef35fd629c9c8145b5c",
+            (3, 14): "4c5267d0b5087913dc247fcab59515c67b9bbb050cb2277f71a3ec269d926cf0",
+        }
+        self.assertEqual(
+            hashlib.sha256(
+                json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            expected_metadata[sys.version_info[:2]],
+        )
+        expected_signatures = {
+            "_nested": "(record: 'dict[str, Any]', path: 'tuple[str, ...]') -> 'Any'",
+            "_normalize_filters": "(operation: 'str', raw: 'Any') -> 'dict[str, Any]'",
+            "_filter_matches": "(candidate: 'Any', field: 'str', expected: 'Any') -> 'bool'",
+            "_project_record": "(operation: 'str', candidate: 'Any') -> 'Any'",
+            "_query_candidates": "(evidence: 'list[Any]', operation: 'str') -> 'tuple[list[Any], list[str], bool]'",
+            "query_derived_pcap_evidence": "(pcap_context: 'dict[str, Any]', requests: 'Any') -> 'dict[str, Any]'",
+            "_normalize_request": "(raw: 'Any') -> 'dict[str, Any]'",
+            "_execute_request": "(evidence: 'list[Any]', request: 'dict[str, Any]') -> 'dict[str, Any]'",
+        }
+        self.assertEqual(
+            {
+                name: str(inspect.signature(getattr(queries, name)))
+                for name in expected_signatures
+            },
+            expected_signatures,
+        )
+        policy_names = (
+            "MAX_QUERY_REQUESTS", "MAX_QUERY_LIMIT", "MAX_QUERY_RESULT_BYTES",
+            "MAX_QUERY_SCAN_RECORDS", "MAX_REQUEST_TEXT_CHARS", "QUERY_CONTRACT",
+            "QUERY_PATHS", "FLOW_FILTERS", "FILTERS_BY_OPERATION", "IP_FILTERS",
+            "PORT_FILTERS", "INTEGER_FILTER_RANGES", "BOOLEAN_FILTERS", "TIME_FILTERS",
+            "FILTER_FIELD_ALIASES", "BASE_OUTPUT_FIELDS", "OUTPUT_FIELDS_BY_OPERATION",
+            "FORBIDDEN_OUTPUT_KEYS", "NESTED_OUTPUT_FIELDS", "COVERAGE_SCALAR_FIELDS",
+            "CONTROL_OR_ESCAPE",
+        )
+
+        def stable(value):
+            if isinstance(value, dict):
+                return {
+                    "__type__": "dict",
+                    "items": [
+                        [stable(key), stable(item)]
+                        for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+                    ],
+                }
+            if isinstance(value, (set, frozenset)):
+                return {
+                    "__type__": type(value).__name__,
+                    "items": sorted(
+                        (stable(item) for item in value),
+                        key=lambda item: json.dumps(item, sort_keys=True),
+                    ),
+                }
+            if isinstance(value, tuple):
+                return {"__type__": "tuple", "items": [stable(item) for item in value]}
+            if hasattr(value, "pattern"):
+                return {
+                    "__type__": "regex",
+                    "pattern": value.pattern,
+                    "flags": value.flags,
+                }
+            return value
+
+        policy = {name: stable(getattr(queries, name)) for name in policy_names}
+        self.assertEqual(
+            hashlib.sha256(
+                json.dumps(policy, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            "52d3826e1a77a8aca3c0b0e96ec069e442fdd21568a5a6f8472c3fc24b8992cf",
+        )
+        self.assertEqual(
+            {name: type(getattr(queries, name)).__name__ for name in policy_names},
+            {
+                "MAX_QUERY_REQUESTS": "int", "MAX_QUERY_LIMIT": "int",
+                "MAX_QUERY_RESULT_BYTES": "int", "MAX_QUERY_SCAN_RECORDS": "int",
+                "MAX_REQUEST_TEXT_CHARS": "int", "QUERY_CONTRACT": "str",
+                "QUERY_PATHS": "dict", "FLOW_FILTERS": "set",
+                "FILTERS_BY_OPERATION": "dict", "IP_FILTERS": "set",
+                "PORT_FILTERS": "set", "INTEGER_FILTER_RANGES": "dict",
+                "BOOLEAN_FILTERS": "set", "TIME_FILTERS": "set",
+                "FILTER_FIELD_ALIASES": "dict", "BASE_OUTPUT_FIELDS": "set",
+                "OUTPUT_FIELDS_BY_OPERATION": "dict", "FORBIDDEN_OUTPUT_KEYS": "set",
+                "NESTED_OUTPUT_FIELDS": "dict", "COVERAGE_SCALAR_FIELDS": "set",
+                "CONTROL_OR_ESCAPE": "Pattern",
+            },
+        )
+
     def setUp(self) -> None:
         self.context = {
             "parsed_evidence": [
