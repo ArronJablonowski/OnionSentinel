@@ -3460,13 +3460,15 @@ reload isolation and late-bound test overrides while reducing
 
 ### Software Inventory state validation
 
-`software_inventory_state.py` owns owner-controlled bounded snapshot reads,
-schema and timestamp validation, evidence provenance enforcement, and normalized
+`software_inventory_state_io.py` owns owner-controlled, no-follow bounded JSON
+snapshot reads, open-time identity verification, descriptor closure, and digesting.
+It accepts the state error type as an inward dependency parameter and never imports
+the state facade. `software_inventory_state.py` retains the stable read wrapper and
+owns schema/timestamp validation, evidence provenance enforcement, and normalized
 state projection. `software_inventory.py` remains the package-free compatibility
 facade and owns query/asset response composition; the production installer copies
-both files together. Four unchanged legacy validators retain their exact
-ratcheting complexity/length allowances under the new module path; those
-allowances may shrink but cannot grow and are not approval for new debt.
+the complete state dependency chain together. The state path has no remaining
+ratcheting quality exception.
 
 `software_inventory_query.py` owns the fixed public filter contract, freshness
 classification, safe public-record projection (including bounded User-Agent

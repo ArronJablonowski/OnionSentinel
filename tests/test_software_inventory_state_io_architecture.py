@@ -65,6 +65,16 @@ class SoftwareInventoryStateIoArchitectureTests(unittest.TestCase):
             ),
             800,
         )
+        io_path = DASHBOARD / "software_inventory_state_io.py"
+        self.assertLessEqual(len(io_path.read_text().splitlines()), 600)
+        self.assertNotIn(
+            "from software_inventory_state import", io_path.read_text()
+        )
+        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
+        self.assertIn(
+            'software_inventory_state_io.py" "$DASHBOARD_RUNTIME_DIR/',
+            installer,
+        )
         content = b'{"value":1,"nested":{"ok":true}}'
         path = self.private_file("state.json", content)
         original_open = os.open

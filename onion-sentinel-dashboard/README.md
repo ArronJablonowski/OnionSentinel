@@ -29,7 +29,8 @@ dependency.
 | `software_inventory_response_selection.py` | Time-window filtering, fixed filter application, stable sorting, and bounded pagination. |
 | `software_inventory_response_projection.py` | Public record, summary, platform, coverage, warning, and page projection. |
 | `software_inventory_response.py` | Stable status/load/enrichment response orchestrator. |
-| `software_inventory_state.py` | Owner-controlled snapshot reads, schema validation, provenance enforcement, and normalized state projection. |
+| `software_inventory_state_io.py` | Owner-controlled, no-follow, bounded JSON snapshot reads and digesting. |
+| `software_inventory_state.py` | Snapshot schema validation, provenance enforcement, and normalized state projection. |
 | `ac_hunter_review.py` | Read-only AC Hunter client, in-memory auth refresh, normalization, deterministic triage, and owner-only last-good cache. |
 | `artifact_cache.py` | Thread-safe, single-flight cache for parsed Markdown/JSON artifacts. |
 | `response_cache.py` | Short-lived, bounded cache for serialized read-only API responses. |

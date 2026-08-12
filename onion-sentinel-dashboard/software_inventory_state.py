@@ -8,14 +8,11 @@ request.
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import ipaddress
-import json
-import os
 import re
-import stat
 from pathlib import Path
-from typing import Any
+
+from software_inventory_state_io import read_bounded_regular_json
 
 
 STATE_SCHEMA = "onion-sentinel-software-inventory-state-v1"
@@ -123,59 +120,7 @@ def _safe_text(
 
 def _read_bounded_regular_json(path: Path, maximum_bytes: int) -> tuple[dict, str]:
     """Read one owner-controlled regular file without following symlinks."""
-    try:
-        before = path.lstat()
-    except FileNotFoundError as exc:
-        raise InventoryStateError("Software Inventory has not been collected yet") from exc
-    except OSError as exc:
-        raise InventoryStateError("Software Inventory state is unavailable") from exc
-    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-        raise InventoryStateError("Software Inventory state is not a regular file")
-    if before.st_uid != os.getuid():
-        raise InventoryStateError("Software Inventory state has an unexpected owner")
-    if before.st_mode & 0o022:
-        raise InventoryStateError("Software Inventory state is writable by another user")
-    if before.st_size <= 0 or before.st_size > maximum_bytes:
-        raise InventoryStateError("Software Inventory state exceeds its size boundary")
-
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(str(path), flags)
-        try:
-            opened = os.fstat(descriptor)
-            if (
-                opened.st_dev != before.st_dev
-                or opened.st_ino != before.st_ino
-                or not stat.S_ISREG(opened.st_mode)
-                or opened.st_size != before.st_size
-            ):
-                raise InventoryStateError("Software Inventory state changed while opening")
-            chunks: list[bytes] = []
-            remaining = maximum_bytes + 1
-            while remaining > 0:
-                chunk = os.read(descriptor, min(1024 * 1024, remaining))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            raw = b"".join(chunks)
-        finally:
-            os.close(descriptor)
-    except InventoryStateError:
-        raise
-    except OSError as exc:
-        raise InventoryStateError("Software Inventory state could not be read") from exc
-    if len(raw) > maximum_bytes:
-        raise InventoryStateError("Software Inventory state exceeds its size boundary")
-    try:
-        payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise InventoryStateError("Software Inventory state is not valid JSON") from exc
-    if not isinstance(payload, dict):
-        raise InventoryStateError("Software Inventory state must be an object")
-    return payload, hashlib.sha256(raw).hexdigest()
+    return read_bounded_regular_json(path, maximum_bytes, InventoryStateError)
 
 
 def _source_status_counts(
