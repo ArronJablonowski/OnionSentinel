@@ -176,97 +176,25 @@ def aggregate_zeek_log(
 
 
 def run_zeek(pcap_files: list[Path], work_dir: Path) -> dict[str, Any]:
-    zeek = tool_path("ZEEK_BIN", "zeek")
-    if not zeek:
-        return {"available": False, "reason": "zeek executable not found on PATH or ZEEK_BIN"}
-    zeek_dir = work_dir / "zeek"
-    zeek_dir.mkdir(parents=True, exist_ok=True)
-    commands: list[dict[str, Any]] = []
-    log_names = {
-        "conn": ("conn.log",),
-        "dns": ("dns.log",),
-        "tls": ("ssl.log", "tls.log"),
-        "http": ("http.log",),
-        "files": ("files.log",),
-        "notice": ("notice.log",),
-        "weird": ("weird.log",),
-    }
-    counters = {key: BoundedTopCounter(HEAVY_HITTER_CAPACITY) for key in log_names}
-    coverage = {key: CoverageTracker() for key in log_names}
-    query_samples = {key: DeterministicReservoir(QUERY_INDEX_LIMIT) for key in log_names}
-    files_processed = 0
-
-    for index, pcap in enumerate(pcap_files):
-        # Zeek uses fixed output names. A distinct workspace per capture keeps
-        # one run from overwriting or silently mixing another capture's logs.
-        capture_dir = zeek_dir / f"{index:04d}-{safe_filename(pcap.stem)}"
-        capture_dir.mkdir(parents=True, exist_ok=False)
-        try:
-            result = run_command(
-                [zeek, "-C", "LogAscii::use_json=T", "-r", str(pcap)],
-                cwd=capture_dir,
-                timeout=PARSER_TIMEOUT_SECONDS,
-            )
-            commands.append({key: result[key] for key in ("ok", "returncode", "stderr", "command")})
-            for log_key, candidates in log_names.items():
-                path = next((capture_dir / name for name in candidates if (capture_dir / name).exists()), None)
-                if path is not None:
-                    aggregate_zeek_log(
-                        path,
-                        ZEEK_SUMMARY_FIELDS[log_key],
-                        counters[log_key],
-                        coverage[log_key],
-                        query_samples[log_key],
-                        log_key,
-                    )
-            if result["ok"]:
-                files_processed += 1
-        finally:
-            shutil.rmtree(capture_dir, ignore_errors=True)
-    record_counts = {key: coverage[key].total_records for key in log_names}
-    valid_timestamps = [item for item in coverage.values() if item.first_timestamp is not None]
-    return {
-        "available": True,
-        "commands": commands,
-        "record_counts": record_counts,
-        "coverage": {
-            "pcap_files_total": len(pcap_files),
-            "pcap_files_processed": files_processed,
-            "records_aggregated": sum(record_counts.values()),
-            "first_timestamp_epoch": min((item.first_timestamp for item in valid_timestamps), default=None),
-            "last_timestamp_epoch": max((item.last_timestamp for item in valid_timestamps), default=None),
-            "per_log": {key: coverage[key].as_dict() for key in log_names},
-            "complete": files_processed == len(pcap_files) and all(item.get("ok") for item in commands),
-        },
-        "sampling": {
-            "strategy": "full-stream-bounded-heavy-hitters",
-            "heavy_hitter_capacity_per_log": HEAVY_HITTER_CAPACITY,
-            "query_index_strategy": "deterministic-reservoir-per-log",
-            "query_index_limit_per_log": QUERY_INDEX_LIMIT,
-            "query_index_records": {
-                key: len(query_samples[key].records())
-                for key in log_names
-            },
-            "records_truncated_before_aggregation": {key: False for key in log_names},
-            "invalid_json_lines": {key: coverage[key].malformed_records for key in log_names},
-        },
-        "top_connections": counters["conn"].most_common(ZEEK_SUMMARY_FIELDS["conn"], SUMMARY_LIMIT),
-        "dns_queries": counters["dns"].most_common(ZEEK_SUMMARY_FIELDS["dns"], SUMMARY_LIMIT),
-        "tls_sni": counters["tls"].most_common(ZEEK_SUMMARY_FIELDS["tls"], SUMMARY_LIMIT),
-        "http_hosts": counters["http"].most_common(ZEEK_SUMMARY_FIELDS["http"], SUMMARY_LIMIT),
-        "files": counters["files"].most_common(ZEEK_SUMMARY_FIELDS["files"], SUMMARY_LIMIT),
-        "notices": counters["notice"].most_common(ZEEK_SUMMARY_FIELDS["notice"], SUMMARY_LIMIT),
-        "weird": counters["weird"].most_common(ZEEK_SUMMARY_FIELDS["weird"], SUMMARY_LIMIT),
-        # This bounded index is retained only for local, allowlisted follow-up
-        # queries. It is stripped before either the initial local prompt or any
-        # hosted-model request is assembled.
-        "_local_query_index": {
-            "connections": query_samples["conn"].records(),
-            "dns": query_samples["dns"].records(),
-            "tls": query_samples["tls"].records(),
-            "http": query_samples["http"].records(),
-            "files": query_samples["files"].records(),
-            "notices": query_samples["notice"].records(),
-            "weird": query_samples["weird"].records(),
-        },
-    }
+    workflow = __import__("pcap_zeek_workflow")
+    return workflow.run_zeek(
+        pcap_files,
+        work_dir,
+        policy=workflow.ZeekPolicy(
+            summary_fields=ZEEK_SUMMARY_FIELDS,
+            heavy_hitter_capacity=HEAVY_HITTER_CAPACITY,
+            query_index_limit=QUERY_INDEX_LIMIT,
+            summary_limit=SUMMARY_LIMIT,
+            parser_timeout_seconds=PARSER_TIMEOUT_SECONDS,
+        ),
+        dependencies=workflow.ZeekDependencies(
+            tool_path=tool_path,
+            safe_filename=safe_filename,
+            run_command=run_command,
+            aggregate_log=aggregate_zeek_log,
+            counter_factory=BoundedTopCounter,
+            coverage_factory=CoverageTracker,
+            reservoir_factory=DeterministicReservoir,
+            remove_tree=shutil.rmtree,
+        ),
+    )

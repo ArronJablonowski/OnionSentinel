@@ -1012,6 +1012,7 @@ cp "$REPO_DIR/n8n/bin/pcap_processor_storage_scope.py" "$STACK_DIR/bin/pcap_proc
 cp "$REPO_DIR/n8n/bin/pcap_processor_storage_artifacts.py" "$STACK_DIR/bin/pcap_processor_storage_artifacts.py"
 cp "$REPO_DIR/n8n/bin/pcap_processor_storage_records.py" "$STACK_DIR/bin/pcap_processor_storage_records.py"
 cp "$REPO_DIR/n8n/bin/pcap_processor_storage.py" "$STACK_DIR/bin/pcap_processor_storage.py"
+cp "$REPO_DIR/n8n/bin/pcap_zeek_workflow.py" "$STACK_DIR/bin/pcap_zeek_workflow.py"
 cp "$REPO_DIR/n8n/bin/pcap_processor_zeek.py" "$STACK_DIR/bin/pcap_processor_zeek.py"
 cp "$REPO_DIR/n8n/bin/pcap_processor_tshark_contract.py" "$STACK_DIR/bin/pcap_processor_tshark_contract.py"
 cp "$REPO_DIR/n8n/bin/pcap_processor_tshark_state.py" "$STACK_DIR/bin/pcap_processor_tshark_state.py"

@@ -13,6 +13,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "n8n/bin/pcap_processor_zeek.py"
+WORKFLOW = ROOT / "n8n/bin/pcap_zeek_workflow.py"
 BIN = ROOT / "n8n/bin"
 if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
@@ -29,8 +30,8 @@ def load_zeek():
     return module
 
 
-def function_metrics(name: str) -> tuple[int, int]:
-    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+def function_metrics(name: str, path: Path = SCRIPT) -> tuple[int, int]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     target = next(
         node
         for node in tree.body
@@ -142,10 +143,36 @@ class PcapZeekWorkflowArchitectureTests(unittest.TestCase):
         FakeCoverage.instances = []
         FakeReservoir.instances = []
 
-    def test_run_zeek_retains_pre_extraction_quality_ceiling(self) -> None:
+    def test_facade_and_workflow_meet_quality_and_installer_contracts(self) -> None:
         lines, complexity = function_metrics("run_zeek")
-        self.assertLessEqual(lines, 150)
-        self.assertLessEqual(complexity, 23)
+        self.assertLessEqual(lines, 50)
+        self.assertLessEqual(complexity, 5)
+        for name in (
+            "_initial_state",
+            "_aggregate_capture_logs",
+            "_run_capture",
+            "_coverage_projection",
+            "_sampling_projection",
+            "_summary_projection",
+            "_query_index_projection",
+            "_final_projection",
+            "run_zeek",
+        ):
+            lines, complexity = function_metrics(name, WORKFLOW)
+            self.assertLessEqual(lines, 50)
+            self.assertLessEqual(complexity, 10)
+        self.assertLessEqual(len(WORKFLOW.read_text().splitlines()), 600)
+        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
+        workflow_copy = (
+            'cp "$REPO_DIR/n8n/bin/pcap_zeek_workflow.py" '
+            '"$STACK_DIR/bin/pcap_zeek_workflow.py"'
+        )
+        facade_copy = (
+            'cp "$REPO_DIR/n8n/bin/pcap_processor_zeek.py" '
+            '"$STACK_DIR/bin/pcap_processor_zeek.py"'
+        )
+        self.assertEqual(installer.count(workflow_copy), 1)
+        self.assertLess(installer.index(workflow_copy), installer.index(facade_copy))
 
     def test_missing_executable_returns_exact_bounded_reason(self) -> None:
         captures = [Path("synthetic.pcap")]
