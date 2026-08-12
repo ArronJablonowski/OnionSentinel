@@ -15,6 +15,29 @@ def _nonnegative_modifier(value: object) -> int | None:
     return int(text)
 
 
+def _content_modifiers(spec: dict[str, Any]) -> dict[str, Any]:
+    value = spec.get("modifiers")
+    return value if isinstance(value, dict) else {}
+
+
+def _packet_content_supported(
+    buffer_name: str,
+    modifiers: dict[str, Any],
+) -> bool:
+    if buffer_name not in {"", "pkt_data"}:
+        return False
+    return not any(name in modifiers for name in ("dotprefix", "bsize"))
+
+
+def _deployed_modifiers_supported(modifiers: dict[str, Any]) -> bool:
+    if "rawbytes" in modifiers:
+        return False
+    return not (
+        "bsize" in modifiers
+        and _nonnegative_modifier(modifiers.get("bsize")) is None
+    )
+
+
 def _content_evaluation_supported(
     spec: dict[str, Any],
     *,
@@ -24,19 +47,13 @@ def _content_evaluation_supported(
     if spec.get("source") != "deployed_rule":
         return True
     buffer_name = str(spec.get("buffer") or "").strip().lower()
-    modifiers = spec.get("modifiers") if isinstance(spec.get("modifiers"), dict) else {}
+    modifiers = _content_modifiers(spec)
     if application_buffer is None:
-        if buffer_name not in {"", "pkt_data"}:
-            return False
-        if any(name in modifiers for name in ("dotprefix", "bsize")):
+        if not _packet_content_supported(buffer_name, modifiers):
             return False
     elif buffer_name != application_buffer:
         return False
-    if "rawbytes" in modifiers:
-        return False
-    if "bsize" in modifiers and _nonnegative_modifier(modifiers.get("bsize")) is None:
-        return False
-    return True
+    return _deployed_modifiers_supported(modifiers)
 
 
 def _prepare_content_payload(
@@ -47,7 +64,7 @@ def _prepare_content_payload(
 ) -> tuple[str, bytes, dict[str, Any]]:
     if not _content_evaluation_supported(spec, application_buffer=application_buffer):
         return "unsupported", payload, {}
-    modifiers = spec.get("modifiers") if isinstance(spec.get("modifiers"), dict) else {}
+    modifiers = _content_modifiers(spec)
     if "bsize" in modifiers:
         expected_size = _nonnegative_modifier(modifiers.get("bsize"))
         if expected_size is None:
@@ -69,21 +86,41 @@ def _content_bounds(
     if relative and any(key in modifiers for key in ("offset", "depth")):
         return None
     if relative:
-        if previous_match_end is None:
+        return _relative_content_bounds(
+            payload,
+            modifiers,
+            previous_match_end=previous_match_end,
+        )
+    return _absolute_content_bounds(payload, modifiers)
+
+
+def _relative_content_bounds(
+    payload: bytes,
+    modifiers: dict[str, Any],
+    *,
+    previous_match_end: int | None,
+) -> tuple[int, int] | None:
+    if previous_match_end is None:
+        return None
+    distance = 0
+    if "distance" in modifiers:
+        distance = _nonnegative_modifier(modifiers.get("distance"))
+        if distance is None:
             return None
-        distance = 0
-        if "distance" in modifiers:
-            distance = _nonnegative_modifier(modifiers.get("distance"))
-            if distance is None:
-                return None
-        start = previous_match_end + distance
-        end = len(payload)
-        if "within" in modifiers:
-            within = _nonnegative_modifier(modifiers.get("within"))
-            if within is None:
-                return None
-            end = min(len(payload), start + within)
-        return start, end
+    start = previous_match_end + distance
+    end = len(payload)
+    if "within" in modifiers:
+        within = _nonnegative_modifier(modifiers.get("within"))
+        if within is None:
+            return None
+        end = min(len(payload), start + within)
+    return start, end
+
+
+def _absolute_content_bounds(
+    payload: bytes,
+    modifiers: dict[str, Any],
+) -> tuple[int, int] | None:
     start = 0
     if "offset" in modifiers:
         start = _nonnegative_modifier(modifiers.get("offset"))
@@ -98,6 +135,35 @@ def _content_bounds(
     return start, end
 
 
+def _startswith_content_positions(
+    haystack: bytes,
+    needle: bytes,
+    *,
+    start: int,
+    end: int,
+) -> list[int]:
+    if start <= 0 and len(needle) <= end and haystack.startswith(needle):
+        return [0]
+    return []
+
+
+def _endswith_content_positions(
+    haystack: bytes,
+    needle: bytes,
+    *,
+    start: int,
+    end: int,
+) -> list[int]:
+    position = len(haystack) - len(needle)
+    if (
+        position >= start
+        and position + len(needle) <= end
+        and haystack.endswith(needle)
+    ):
+        return [position]
+    return []
+
+
 def _anchored_content_positions(
     payload: bytes,
     marker: bytes,
@@ -109,14 +175,19 @@ def _anchored_content_positions(
     haystack = payload.lower() if "nocase" in modifiers else payload
     needle = marker.lower() if "nocase" in modifiers else marker
     if "startswith" in modifiers:
-        if start <= 0 and len(needle) <= end and haystack.startswith(needle):
-            return [0]
-        return []
+        return _startswith_content_positions(
+            haystack,
+            needle,
+            start=start,
+            end=end,
+        )
     if "endswith" in modifiers:
-        position = len(haystack) - len(needle)
-        if position >= start and position + len(needle) <= end and haystack.endswith(needle):
-            return [position]
-        return []
+        return _endswith_content_positions(
+            haystack,
+            needle,
+            start=start,
+            end=end,
+        )
     return None
 
 
@@ -228,6 +299,43 @@ def _evaluate_content_candidates(
     return supported, satisfied, next_cursors
 
 
+def _ordered_content_candidates(
+    cursors: set[int | None],
+    *,
+    relative: bool,
+) -> list[int | None]:
+    if not relative:
+        return [None]
+    return sorted(cursors, key=lambda value: -1 if value is None else value)
+
+
+def _evaluate_ordered_content_clause(
+    payload: bytes,
+    marker: bytes,
+    spec: dict[str, Any],
+    cursors: set[int | None],
+    cursor_unknown: bool,
+    *,
+    application_buffer: str | None,
+) -> tuple[bool | None, set[int | None], bool]:
+    modifiers = _content_modifiers(spec)
+    relative = "distance" in modifiers or "within" in modifiers
+    if relative and not cursors:
+        return (None if cursor_unknown else False), cursors, cursor_unknown
+    supported, satisfied, next_cursors = _evaluate_content_candidates(
+        payload,
+        marker,
+        spec,
+        _ordered_content_candidates(cursors, relative=relative),
+        relative=relative,
+        application_buffer=application_buffer,
+        existing_cursors=cursors,
+    )
+    if not supported:
+        return None, set(), True
+    return satisfied, (next_cursors if satisfied else set()), False
+
+
 def _ordered_deployed_content_constraints(
     payload: bytes,
     marker_values: list[tuple[dict[str, Any], bytes]],
@@ -243,36 +351,18 @@ def _ordered_deployed_content_constraints(
         if spec.get("source") != "deployed_rule":
             continue
         marker_id = str(spec["id"])
-        modifiers = spec.get("modifiers") if isinstance(spec.get("modifiers"), dict) else {}
-        relative = "distance" in modifiers or "within" in modifiers
         buffer_name = str(spec.get("buffer") or "pkt_data").strip().lower()
         if buffer_name != current_buffer:
             current_buffer = buffer_name
             cursors = {None}
             cursor_unknown = False
-        if relative and not cursors:
-            results[marker_id] = None if cursor_unknown else False
-            continue
-        candidates = (
-            sorted(cursors, key=lambda value: -1 if value is None else value)
-            if relative
-            else [None]
-        )
-        supported, satisfied, next_cursors = _evaluate_content_candidates(
+        result, cursors, cursor_unknown = _evaluate_ordered_content_clause(
             payload,
             marker,
             spec,
-            candidates,
-            relative=relative,
+            cursors,
+            cursor_unknown,
             application_buffer=application_buffer,
-            existing_cursors=cursors,
         )
-        if not supported:
-            results[marker_id] = None
-            cursors = set()
-            cursor_unknown = True
-            continue
-        results[marker_id] = satisfied
-        cursors = next_cursors if satisfied else set()
-        cursor_unknown = False
+        results[marker_id] = result
     return results

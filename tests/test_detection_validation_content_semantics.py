@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import copy
 import importlib.util
 import sys
@@ -25,10 +26,83 @@ def load_module():
     return module
 
 
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+    class Complexity(ast.NodeVisitor):
+        def __init__(self):
+            self.value = 1
+
+        def visit_FunctionDef(self, node):
+            return
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_If(self, node):
+            self.value += 1
+            self.generic_visit(node)
+
+        visit_For = visit_If
+        visit_While = visit_If
+
+        def visit_Try(self, node):
+            self.value += len(node.handlers)
+            self.generic_visit(node)
+
+        def visit_BoolOp(self, node):
+            self.value += max(0, len(node.values) - 1)
+            self.generic_visit(node)
+
+        def visit_IfExp(self, node):
+            self.value += 1
+            self.generic_visit(node)
+
+        def visit_GeneratorExp(self, node):
+            self.value += sum(
+                1 + len(generator.ifs) for generator in node.generators
+            )
+            self.generic_visit(node)
+
+        visit_SetComp = visit_GeneratorExp
+
+    visitor = Complexity()
+    for child in target.body:
+        visitor.visit(child)
+    return target.end_lineno - target.lineno + 1, visitor.value
+
+
 class DetectionValidationContentSemanticsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.module = load_module()
+
+    def test_changed_functions_meet_quality_boundaries(self):
+        for name in (
+            "_content_modifiers",
+            "_packet_content_supported",
+            "_deployed_modifiers_supported",
+            "_content_evaluation_supported",
+            "_prepare_content_payload",
+            "_content_bounds",
+            "_relative_content_bounds",
+            "_absolute_content_bounds",
+            "_startswith_content_positions",
+            "_endswith_content_positions",
+            "_anchored_content_positions",
+            "_ordered_content_candidates",
+            "_evaluate_ordered_content_clause",
+            "_ordered_deployed_content_constraints",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
+        self.assertLessEqual(len(SCRIPT.read_text().splitlines()), 600)
 
     def test_nonnegative_modifier_conversion_is_exact(self):
         cases = (
