@@ -2937,6 +2937,16 @@ evaluation, bounded launchd registration probes, and duplicate worker-lane
 detection. The public checks retain their stable, secret-safe component results;
 network contact remains an explicit Relay TCP opt-in owned by `check_relay`.
 
+### Web recovery supervisor
+
+`ensure-onion-sentinel-web.py` remains the launchd-facing recovery CLI. Private
+phases own owner-only restart-state admission and atomic publication, current
+window projection and quarantine, listener ownership/classification refusal,
+bounded post-start health convergence, runtime path composition, and CLI error
+translation. The public recovery flow still limits termination to the reviewed
+simple-HTTP collision, scopes restart to the exact LaunchAgent label, honors
+maintenance/check-only precedence, and preserves JSON and exit contracts.
+
 ## Deployment Map
 
 The current production installer copies individual files. These additions are

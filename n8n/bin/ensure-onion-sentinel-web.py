@@ -178,6 +178,48 @@ def ensure_started(label: str, plist_path: Path) -> bool:
     return not registered
 
 
+def __load_restart_state(path: Path) -> dict[str, object]:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return {}
+    if path.is_symlink() or not path.is_file() or metadata.st_uid != os.getuid():
+        raise RuntimeError("restart state file is unsafe")
+    if metadata.st_mode & 0o077:
+        raise RuntimeError("restart state file permissions are too open")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise RuntimeError("restart state file is invalid") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("restart state file is invalid")
+    return value
+
+
+def __recent_restart_attempts(
+    value: dict[str, object], current: float, window_seconds: int,
+) -> list[float]:
+    return [
+        float(item)
+        for item in value.get("attempts", [])
+        if isinstance(item, (int, float))
+        and 0 <= current - float(item) <= window_seconds
+    ]
+
+
+def __publish_restart_state(path: Path, state: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent,
+        prefix=f".{path.name}.", delete=False,
+    ) as handle:
+        json.dump(state, handle, sort_keys=True, separators=(",", ":"))
+        handle.write("\n")
+        temporary = Path(handle.name)
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
 def authorize_restart(
     state_path: Path,
     *,
@@ -191,27 +233,7 @@ def authorize_restart(
     path = state_path.expanduser()
     if window_seconds < 1 or max_restarts < 1:
         raise RuntimeError("restart budget is invalid")
-    try:
-        metadata = path.lstat()
-    except FileNotFoundError:
-        value: object = {}
-    else:
-        if path.is_symlink() or not path.is_file() or metadata.st_uid != os.getuid():
-            raise RuntimeError("restart state file is unsafe")
-        if metadata.st_mode & 0o077:
-            raise RuntimeError("restart state file permissions are too open")
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError) as exc:
-            raise RuntimeError("restart state file is invalid") from exc
-    if not isinstance(value, dict):
-        raise RuntimeError("restart state file is invalid")
-    attempts = [
-        float(item)
-        for item in value.get("attempts", [])
-        if isinstance(item, (int, float))
-        and 0 <= current - float(item) <= window_seconds
-    ]
+    attempts = __recent_restart_attempts(__load_restart_state(path), current, window_seconds)
     allowed = len(attempts) < max_restarts
     if allowed:
         attempts.append(current)
@@ -223,20 +245,72 @@ def authorize_restart(
         "quarantined": not allowed,
         "updated_at": current,
     }
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        delete=False,
-    ) as handle:
-        json.dump(state, handle, sort_keys=True, separators=(",", ":"))
-        handle.write("\n")
-        temporary = Path(handle.name)
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
+    __publish_restart_state(path, state)
     return allowed, state
+
+
+def __listener_admission(port: int, pids: list[int]) -> tuple[list[str], dict[str, object] | None]:
+    kinds: list[str] = []
+    for pid in pids:
+        uid, command = process_details(pid)
+        kind = command_kind(command, port)
+        kinds.append(kind)
+        if uid != os.getuid() or kind == "unknown":
+            return kinds, {
+                "ok": False,
+                "state": "refused",
+                "recovered": False,
+                "detail": "unknown listener requires operator review",
+                "listener_pid": pid,
+            }
+    if len(pids) > 1:
+        return kinds, {
+            "ok": False,
+            "state": "refused",
+            "recovered": False,
+            "detail": "multiple listeners require operator review",
+        }
+    return kinds, None
+
+
+def __restart_budget_refusal(
+    restart_state_path: Path | None,
+    restart_window_seconds: int,
+    max_restarts: int,
+) -> dict[str, object] | None:
+    if restart_state_path is None:
+        return None
+    allowed, budget = authorize_restart(
+        restart_state_path,
+        window_seconds=restart_window_seconds,
+        max_restarts=max_restarts,
+    )
+    if allowed:
+        return None
+    return {
+        "ok": False,
+        "state": "quarantined",
+        "recovered": False,
+        "detail": "automatic restart budget exhausted",
+        "restart_attempts": len(budget["attempts"]),
+        "restart_window_seconds": budget["window_seconds"],
+    }
+
+
+def __await_recovery(health_url: str, bootstrapped: bool) -> dict[str, object]:
+    last_detail = "not-ready"
+    for _ in range(24):
+        healthy, last_detail = probe_health(health_url, timeout=1.0)
+        if healthy:
+            return {
+                "ok": True,
+                "state": "recovered",
+                "recovered": True,
+                "bootstrapped": bootstrapped,
+                "detail": last_detail,
+            }
+        time.sleep(0.5)
+    return {"ok": False, "state": "failed", "recovered": False, "detail": last_detail}
 
 
 def recover(
@@ -253,43 +327,12 @@ def recover(
         return {"ok": True, "state": "healthy", "recovered": False, "detail": detail}
 
     pids = listener_pids(port)
-    kinds: list[str] = []
-    for pid in pids:
-        uid, command = process_details(pid)
-        kind = command_kind(command, port)
-        kinds.append(kind)
-        if uid != os.getuid() or kind == "unknown":
-            return {
-                "ok": False,
-                "state": "refused",
-                "recovered": False,
-                "detail": "unknown listener requires operator review",
-                "listener_pid": pid,
-            }
-
-    if len(pids) > 1:
-        return {
-            "ok": False,
-            "state": "refused",
-            "recovered": False,
-            "detail": "multiple listeners require operator review",
-        }
-
-    if restart_state_path is not None:
-        allowed, budget = authorize_restart(
-            restart_state_path,
-            window_seconds=restart_window_seconds,
-            max_restarts=max_restarts,
-        )
-        if not allowed:
-            return {
-                "ok": False,
-                "state": "quarantined",
-                "recovered": False,
-                "detail": "automatic restart budget exhausted",
-                "restart_attempts": len(budget["attempts"]),
-                "restart_window_seconds": budget["window_seconds"],
-            }
+    kinds, refusal = __listener_admission(port, pids)
+    if refusal is not None:
+        return refusal
+    refusal = __restart_budget_refusal(restart_state_path, restart_window_seconds, max_restarts)
+    if refusal is not None:
+        return refusal
 
     if pids and kinds == ["unsafe-simple-http"]:
         terminate_known_simple_server(pids[0])
@@ -297,22 +340,10 @@ def recover(
     # No listener and an unhealthy expected listener are both safely handled by
     # launchd. The -k operation is scoped to Onion Sentinel's own service label.
     bootstrapped = ensure_started(label, plist_path)
-    last_detail = "not-ready"
-    for _ in range(24):
-        healthy, last_detail = probe_health(health_url, timeout=1.0)
-        if healthy:
-            return {
-                "ok": True,
-                "state": "recovered",
-                "recovered": True,
-                "bootstrapped": bootstrapped,
-                "detail": last_detail,
-            }
-        time.sleep(0.5)
-    return {"ok": False, "state": "failed", "recovered": False, "detail": last_detail}
+    return __await_recovery(health_url, bootstrapped)
 
 
-def main() -> int:
+def __parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--label", default=DEFAULT_LABEL)
@@ -327,8 +358,10 @@ def main() -> int:
     )
     parser.add_argument("--max-restarts", type=int, default=DEFAULT_MAX_RESTARTS)
     parser.add_argument("--check-only", action="store_true")
-    args = parser.parse_args()
+    return parser.parse_args()
 
+
+def __runtime_paths(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     plist_path = (
         Path(args.plist)
         if args.plist
@@ -344,30 +377,50 @@ def main() -> int:
         if args.restart_state
         else Path.home() / "n8n-local" / "logs" / "onion-sentinel-web-restart-budget.json"
     )
+    return plist_path, hold_path, restart_state_path
+
+
+def __maintenance_result() -> dict[str, object]:
+    return {
+        "ok": True,
+        "state": "maintenance",
+        "recovered": False,
+        "detail": "planned maintenance hold",
+    }
+
+
+def __check_only_result(health_url: str) -> dict[str, object]:
+    healthy, detail = probe_health(health_url)
+    return {"ok": healthy, "state": "healthy" if healthy else "failed", "detail": detail}
+
+
+def __safe_recovery(
+    args: argparse.Namespace, plist_path: Path, restart_state_path: Path,
+) -> dict[str, object]:
+    try:
+        return recover(
+            args.port,
+            args.label,
+            args.health_url,
+            plist_path,
+            restart_state_path,
+            args.restart_window_seconds,
+            args.max_restarts,
+        )
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "state": "failed", "recovered": False, "detail": str(exc)}
+
+
+def main() -> int:
+    args = __parse_args()
+    plist_path, hold_path, restart_state_path = __runtime_paths(args)
 
     if maintenance_hold_active(hold_path):
-        result = {
-            "ok": True,
-            "state": "maintenance",
-            "recovered": False,
-            "detail": "planned maintenance hold",
-        }
+        result = __maintenance_result()
     elif args.check_only:
-        healthy, detail = probe_health(args.health_url)
-        result = {"ok": healthy, "state": "healthy" if healthy else "failed", "detail": detail}
+        result = __check_only_result(args.health_url)
     else:
-        try:
-            result = recover(
-                args.port,
-                args.label,
-                args.health_url,
-                plist_path,
-                restart_state_path,
-                args.restart_window_seconds,
-                args.max_restarts,
-            )
-        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-            result = {"ok": False, "state": "failed", "recovered": False, "detail": str(exc)}
+        result = __safe_recovery(args, plist_path, restart_state_path)
     print(json.dumps(result, sort_keys=True))
     return 0 if result.get("ok") is True else 1
 
