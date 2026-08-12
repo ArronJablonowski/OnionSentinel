@@ -99,6 +99,87 @@ def _canonicalize_sqlite_snapshot(
     return journal_mode
 
 
+def __copy_sqlite_snapshot(source: Path, destination: Path) -> str:
+    # sqlite3.Connection's context manager commits or rolls back but does not
+    # close the handle. Explicit closing keeps repeated backup jobs bounded.
+    with closing(sqlite3.connect(source)) as src, closing(
+        sqlite3.connect(destination)
+    ) as dst:
+        with src, dst:
+            src.backup(dst)
+            return _canonicalize_sqlite_snapshot(dst, destination)
+
+
+def __verify_sqlite_snapshot(
+    destination: Path,
+    *,
+    required_tables: tuple[str, ...],
+    count_table: str,
+) -> tuple[str, int, int, str, int, int]:
+    with closing(sqlite3.connect(destination)) as check:
+        quick_check, rows = _validate_sqlite_connection(
+            check,
+            required_tables=required_tables,
+            count_table=count_table,
+        )
+        foreign_key_errors = len(
+            check.execute("PRAGMA foreign_key_check").fetchall()
+        )
+        if foreign_key_errors:
+            raise RuntimeError(
+                f"SQLite backup failed foreign_key_check: "
+                f"{foreign_key_errors} row(s)"
+            )
+        with closing(sqlite3.connect(":memory:")) as restored:
+            check.backup(restored)
+            restore_check, restored_rows = _validate_sqlite_connection(
+                restored,
+                required_tables=required_tables,
+                count_table=count_table,
+            )
+            restore_foreign_key_errors = len(
+                restored.execute("PRAGMA foreign_key_check").fetchall()
+            )
+    return (
+        quick_check,
+        rows,
+        foreign_key_errors,
+        restore_check,
+        restored_rows,
+        restore_foreign_key_errors,
+    )
+
+
+def __validate_logical_restore(
+    *,
+    rows: int,
+    restored_rows: int,
+    restore_foreign_key_errors: int,
+) -> None:
+    if restore_foreign_key_errors:
+        raise RuntimeError(
+            "SQLite logical restore failed foreign_key_check: "
+            f"{restore_foreign_key_errors} row(s)"
+        )
+    if restored_rows != rows:
+        raise RuntimeError(
+            "SQLite logical restore row count does not match snapshot"
+        )
+
+
+def __validate_no_sqlite_sidecars(destination: Path) -> None:
+    unexpected_sidecars = [
+        path.name
+        for path in _sqlite_sidecar_paths(destination)
+        if path.exists() or path.is_symlink()
+    ]
+    if unexpected_sidecars:
+        raise RuntimeError(
+            "canonical SQLite backup retained transient sidecar(s): "
+            + ", ".join(unexpected_sidecars)
+        )
+
+
 def backup_sqlite_database(
     source: Path,
     destination: Path,
@@ -114,50 +195,25 @@ def backup_sqlite_database(
     """
     if source.is_symlink() or not source.is_file():
         raise RuntimeError(f"SQLite source is not a regular file: {source}")
-    # sqlite3.Connection's context manager commits or rolls back but does not
-    # close the handle. Explicit closing keeps repeated backup jobs bounded.
-    with closing(sqlite3.connect(source)) as src, closing(sqlite3.connect(destination)) as dst:
-        with src, dst:
-            src.backup(dst)
-            journal_mode = _canonicalize_sqlite_snapshot(dst, destination)
-    with closing(sqlite3.connect(destination)) as check:
-        quick_check, rows = _validate_sqlite_connection(
-            check,
-            required_tables=required_tables,
-            count_table=count_table,
-        )
-        foreign_key_errors = len(check.execute("PRAGMA foreign_key_check").fetchall())
-        if foreign_key_errors:
-            raise RuntimeError(
-                f"SQLite backup failed foreign_key_check: {foreign_key_errors} row(s)"
-            )
-        with closing(sqlite3.connect(":memory:")) as restored:
-            check.backup(restored)
-            restore_check, restored_rows = _validate_sqlite_connection(
-                restored,
-                required_tables=required_tables,
-                count_table=count_table,
-            )
-            restore_foreign_key_errors = len(
-                restored.execute("PRAGMA foreign_key_check").fetchall()
-            )
-    if restore_foreign_key_errors:
-        raise RuntimeError(
-            "SQLite logical restore failed foreign_key_check: "
-            f"{restore_foreign_key_errors} row(s)"
-        )
-    if restored_rows != rows:
-        raise RuntimeError("SQLite logical restore row count does not match snapshot")
-    unexpected_sidecars = [
-        path.name
-        for path in _sqlite_sidecar_paths(destination)
-        if path.exists() or path.is_symlink()
-    ]
-    if unexpected_sidecars:
-        raise RuntimeError(
-            "canonical SQLite backup retained transient sidecar(s): "
-            + ", ".join(unexpected_sidecars)
-        )
+    journal_mode = __copy_sqlite_snapshot(source, destination)
+    (
+        quick_check,
+        rows,
+        foreign_key_errors,
+        restore_check,
+        restored_rows,
+        restore_foreign_key_errors,
+    ) = __verify_sqlite_snapshot(
+        destination,
+        required_tables=required_tables,
+        count_table=count_table,
+    )
+    __validate_logical_restore(
+        rows=rows,
+        restored_rows=restored_rows,
+        restore_foreign_key_errors=restore_foreign_key_errors,
+    )
+    __validate_no_sqlite_sidecars(destination)
     return {
         "rows": rows,
         "quick_check": quick_check,

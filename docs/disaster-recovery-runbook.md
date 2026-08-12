@@ -718,6 +718,12 @@ with files mode `0600`, retained for seven days, and must never enter Git.
 Because it contains secrets and live operator state, any off-host copy must
 use an operator-controlled encrypted backup target.
 
+The SQLite backup path keeps online copy/canonicalization, persisted snapshot
+verification, logical in-memory restore, and transient-sidecar refusal as
+separate fail-closed phases. Every connection is explicitly closed; no bundle
+is publishable unless all phases preserve the same required tables and row
+count with clean quick-check and foreign-key results.
+
 Qualify a bundle with a full isolated restore rather than relying only on dump
 creation checks:
 
