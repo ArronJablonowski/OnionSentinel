@@ -94,14 +94,25 @@ class FakeCandidates:
 
 
 class FakeReader:
-    def __init__(self, database_type, records):
+    def __init__(
+        self,
+        database_type,
+        records,
+        *,
+        metadata_error=None,
+        close_error=None,
+    ):
         self.database_type = database_type
         self.records = records
+        self.metadata_error = metadata_error
+        self.close_error = close_error
         self.calls = []
         self.closed = False
 
     def metadata(self):
         self.calls.append(["metadata"])
+        if self.metadata_error is not None:
+            raise self.metadata_error
         return types.SimpleNamespace(database_type=self.database_type)
 
     def get(self, address):
@@ -113,6 +124,8 @@ class FakeReader:
 
     def close(self):
         self.calls.append(["close"])
+        if self.close_error is not None:
+            raise self.close_error
         self.closed = True
 
 
@@ -316,6 +329,142 @@ class MaxmindGeoipSummaryArchitectureTests(unittest.TestCase):
 
         self.assertTrue(reader.closed)
         self.assertEqual(reader.calls[-1], ["close"])
+
+    def test_metadata_failure_records_unreadable_but_leaks_open_reader(self) -> None:
+        candidates = FakeCandidates([])
+        reader = FakeReader(
+            "GeoLite2-City",
+            {},
+            metadata_error=RuntimeError("unsafe\nmetadata detail"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "city.mmdb"
+            path.write_bytes(b"synthetic")
+            fake_module = types.SimpleNamespace(open_database=lambda _path: reader)
+            with mock.patch.dict(sys.modules, {"maxminddb": fake_module}):
+                result = self.contract.maxmind_geoip_summary(candidates, path)
+
+        self.assertFalse(result["available"])
+        self.assertEqual(
+            result["reason"], "Configured MaxMind MMDB files could not be opened"
+        )
+        self.assertEqual(result["databases"]["city"]["state"], "unreadable")
+        self.assertEqual(
+            result["databases"]["city"]["error"], "unsafe metadata detail"
+        )
+        self.assertEqual(reader.calls, [["metadata"]])
+        self.assertFalse(reader.closed)
+
+    def test_mixed_open_and_metadata_failures_preserve_ready_reader(self) -> None:
+        candidates = FakeCandidates([
+            {"ip": "8.8.8.8", "role": "destination", "count": 2}
+        ])
+        metadata_failed = FakeReader(
+            "GeoLite2-Country",
+            {},
+            metadata_error=RuntimeError("country metadata failed"),
+        )
+        ready = FakeReader(
+            "GeoLite2-City",
+            {"8.8.8.8": {"city": {"names": {"en": "Mountain View"}}}},
+        )
+        open_calls = []
+
+        def open_database(path):
+            database_type = Path(path).stem
+            open_calls.append(database_type)
+            if database_type == "asn":
+                raise RuntimeError("asn open failed")
+            return {"country": metadata_failed, "city": ready}[database_type]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = {}
+            for database_type in ("country", "asn", "city"):
+                path = root / f"{database_type}.mmdb"
+                path.write_bytes(b"synthetic")
+                paths[database_type] = path
+            fake_module = types.SimpleNamespace(open_database=open_database)
+            with mock.patch.dict(sys.modules, {"maxminddb": fake_module}):
+                result = self.contract.maxmind_geoip_summary(candidates, paths)
+
+        self.assertEqual(open_calls, ["country", "asn", "city"])
+        self.assertEqual(result["databases"]["asn"]["state"], "unreadable")
+        self.assertEqual(result["databases"]["asn"]["error"], "asn open failed")
+        self.assertEqual(result["databases"]["country"]["state"], "unreadable")
+        self.assertEqual(
+            result["databases"]["country"]["error"], "country metadata failed"
+        )
+        self.assertEqual(result["databases"]["city"]["state"], "ready")
+        self.assertEqual(result["lookups_attempted"], 1)
+        self.assertEqual(result["records"][0]["database_sources"], ["city"])
+        self.assertEqual(metadata_failed.calls, [["metadata"]])
+        self.assertFalse(metadata_failed.closed)
+        self.assertEqual(
+            ready.calls, [["metadata"], ["get", "8.8.8.8"], ["close"]]
+        )
+        self.assertTrue(ready.closed)
+
+    def test_close_failure_propagates_and_stops_later_cleanup(self) -> None:
+        candidates = FakeCandidates([])
+        first = FakeReader(
+            "GeoLite2-City",
+            {},
+            close_error=RuntimeError("first close failed"),
+        )
+        second = FakeReader("GeoLite2-Country", {})
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = {}
+            for database_type in ("city", "country"):
+                path = root / f"{database_type}.mmdb"
+                path.write_bytes(b"synthetic")
+                paths[database_type] = path
+            readers = {"city": first, "country": second}
+            fake_module = types.SimpleNamespace(
+                open_database=lambda path: readers[Path(path).stem]
+            )
+            with (
+                mock.patch.dict(sys.modules, {"maxminddb": fake_module}),
+                self.assertRaisesRegex(RuntimeError, "first close failed"),
+            ):
+                self.contract.maxmind_geoip_summary(candidates, paths)
+
+        self.assertEqual(first.calls, [["metadata"], ["close"]])
+        self.assertEqual(second.calls, [["metadata"]])
+        self.assertFalse(first.closed)
+        self.assertFalse(second.closed)
+
+    def test_close_failure_retains_body_failure_as_exception_context(self) -> None:
+        candidates = FakeCandidates([
+            {"ip": "8.8.8.8", "role": "destination", "count": 1}
+        ])
+        reader = FakeReader(
+            "GeoLite2-City",
+            {"8.8.8.8": {"city": {}}},
+            close_error=RuntimeError("synthetic close failure"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "city.mmdb"
+            path.write_bytes(b"synthetic")
+            fake_module = types.SimpleNamespace(open_database=lambda _path: reader)
+            with (
+                mock.patch.dict(sys.modules, {"maxminddb": fake_module}),
+                mock.patch.object(
+                    self.contract,
+                    "compact_maxmind_record",
+                    side_effect=ValueError("synthetic body failure"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "synthetic close failure") as raised,
+            ):
+                self.contract.maxmind_geoip_summary(candidates, path)
+
+        self.assertIsInstance(raised.exception.__context__, ValueError)
+        self.assertEqual(str(raised.exception.__context__), "synthetic body failure")
+        self.assertEqual(
+            reader.calls,
+            [["metadata"], ["get", "8.8.8.8"], ["close"]],
+        )
 
 
 if __name__ == "__main__":
