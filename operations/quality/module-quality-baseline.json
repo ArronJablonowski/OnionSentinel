@@ -42,13 +42,6 @@
     "n8n/bin/export-adjudicated-analysis-replays.py::replay_case": {
       "max_complexity": 28
     },
-    "n8n/bin/harness_contracts.py::JobEnvelope.from_prompt": {
-      "max_complexity": 18
-    },
-    "n8n/bin/harness_contracts.py::investigation_skill_selection_attestation": {
-      "max_complexity": 30,
-      "max_lines": 128
-    },
     "n8n/bin/harness_memory.py::memory_promotion_decision": {
       "max_complexity": 24
     },

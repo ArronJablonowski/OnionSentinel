@@ -2590,6 +2590,56 @@
       ]
     },
     {
+      "path": "n8n/bin/harness_contracts.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_contracts.py",
+      "required_symbols": [
+        "JobEnvelope",
+        "approximate_evidence_rows",
+        "bounded_metadata",
+        "hypothesis_manifest_digest",
+        "investigation_skill_selection_attestation",
+        "ledger_manifest",
+        "sanitize_metadata"
+      ]
+    },
+    {
+      "path": "n8n/bin/harness_contract_metadata.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_contract_metadata.py",
+      "required_symbols": [
+        "_redacted_string",
+        "bounded_metadata",
+        "sanitize_metadata"
+      ]
+    },
+    {
+      "path": "n8n/bin/harness_contract_skill_attestation.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_contract_skill_attestation.py",
+      "required_symbols": [
+        "investigation_skill_selection_attestation"
+      ]
+    },
+    {
+      "path": "n8n/bin/harness_contract_ledger.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_contract_ledger.py",
+      "required_symbols": [
+        "approximate_evidence_rows",
+        "hypothesis_manifest_digest",
+        "ledger_manifest"
+      ]
+    },
+    {
+      "path": "n8n/bin/harness_contract_job.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_contract_job.py",
+      "required_symbols": [
+        "job_envelope_values"
+      ]
+    },
+    {
       "path": "n8n/bin/harness_query_contract.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/harness_query_contract.py",

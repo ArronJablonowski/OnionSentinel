@@ -824,13 +824,17 @@ The facade and legacy harness re-export the exact historical public symbols;
 SQLite and run execution depend inward on this policy unit. The former
 `HarnessPolicy.from_dict` size/complexity allowance is retired.
 
-`n8n/bin/harness_contracts.py` owns immutable job envelopes, bounded and
-secret-safe audit metadata, content-free investigation-skill attestations,
-hypothesis and terminal ledger manifests, and conservative evidence-row
-accounting. It depends only on `harness_policy.py` plus SQLite's read interface;
-it has no database lifecycle, network, model, or query execution authority.
-Unchanged legacy complexity allowances for skill attestation and job-envelope
-parsing move exactly to this owner and remain ratcheting.
+`n8n/bin/harness_contracts.py` is the stable facade and immutable
+`JobEnvelope` boundary for four inward contract owners.
+`harness_contract_metadata.py` owns bounded, secret-safe audit projection;
+`harness_contract_skill_attestation.py` owns content-free investigation-skill
+identity validation; `harness_contract_ledger.py` owns hypothesis and terminal
+ledger manifests plus conservative evidence-row accounting; and
+`harness_contract_job.py` owns prompt-to-envelope field validation and
+projection. Dependencies flow from the facade to these owners and inward to
+`harness_policy.py`; owners never import the facade. The unit has no database
+lifecycle, network, model, query-execution, credential, or evidence-mutation
+authority. The skill-attestation and job-envelope allowances are retired.
 
 `n8n/bin/harness_query_contract.py` is the stable facade for query-result
 observation and exact per-query status resolution from a Security Onion batch.
