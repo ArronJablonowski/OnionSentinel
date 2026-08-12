@@ -10,131 +10,21 @@ from dashboard_builder_contract import (  # noqa: F401
 from dashboard_builder_settings import *  # noqa: F403
 from dashboard_builder_report_core import *  # noqa: F403
 from dashboard_builder_reports import *  # noqa: F403
+from dashboard_builder_executive import *  # noqa: F403
+from dashboard_builder_executive import (  # noqa: F401
+    _executive_ai_rows,
+    _executive_cache_kpi,
+    _executive_cache_view,
+    _executive_donut_rows,
+    _executive_home_view,
+    _executive_hourly_view,
+    _executive_severity_rows,
+    _executive_status_rows,
+)
+from dashboard_builder_siem import *  # noqa: F403
+from dashboard_builder_siem import _siem_recommendation_view  # noqa: F401
 
 
-def pct(part: int | float, total: int | float) -> int:
-    """Return a rounded percent while avoiding divide-by-zero noise."""
-    if not total:
-        return 0
-    return round((part / total) * 100)
-
-
-def counter_top(items: list[tuple[str, int]], limit: int = 6) -> list[tuple[str, int]]:
-    """Aggregate label/value pairs and return the largest entries."""
-    totals: dict[str, int] = {}
-    for label, value in items:
-        cleaned = str(label or 'n/a').strip() or 'n/a'
-        totals[cleaned] = totals.get(cleaned, 0) + int(value or 0)
-    return sorted(totals.items(), key=lambda item: (item[1], item[0].lower()), reverse=True)[:limit]
-
-
-def _executive_donut_rows(rows: list[tuple[str, int, str]]) -> tuple[ExecutiveDonutRowViewModel, ...]:
-    return tuple(ExecutiveDonutRowViewModel(label, value, class_name) for label, value, class_name in rows)
-
-
-def _executive_hourly_view(metrics: HourlyIntakeMetrics) -> ExecutiveHourlyIntakeViewModel:
-    buckets = tuple(ExecutiveHourlyBucketViewModel(
-        start_utc_iso=bucket.start_utc.isoformat().replace('+00:00', 'Z'),
-        fallback_label=bucket.start_utc.strftime('%H:00 UTC'),
-        count=bucket.count, current=bucket.current,
-    ) for bucket in metrics.buckets)
-    return ExecutiveHourlyIntakeViewModel(buckets=buckets, exact=metrics.exact)
-
-
-def _executive_cache_view(metrics: EnrichmentCacheMetrics) -> ExecutiveCacheViewModel:
-    hit_rate = f'{metrics.hit_rate:g}%' if metrics.hit_rate is not None else 'n/a'
-    return ExecutiveCacheViewModel(
-        available=metrics.available, runtime_available=metrics.runtime_available,
-        fresh_entries=metrics.fresh_entries, stale_entries=metrics.stale_entries,
-        api_calls_avoided=metrics.api_calls_avoided, hit_rate=hit_rate,
-        provider_loads=metrics.provider_loads, stale_fallbacks=metrics.stale_fallbacks,
-        payload_size=human_size(metrics.payload_bytes),
-    )
-
-
-def _executive_cache_kpi(metrics: EnrichmentCacheMetrics) -> tuple[str, str, str]:
-    if metrics.runtime_available and metrics.hit_rate is not None:
-        return 'Cache hit rate', f'{metrics.hit_rate:g}%', f'{metrics.api_calls_avoided} API calls avoided since restart'
-    value = str(metrics.fresh_entries) if metrics.available else 'n/a'
-    return 'Reusable enrichments', value, 'Fresh durable cache results'
-
-
-def _executive_severity_rows(reports: list[AlertReport]) -> tuple[ExecutiveDonutRowViewModel, ...]:
-    order = (('Critical', 'critical'), ('High', 'high'), ('Medium', 'medium'), ('Low', 'low'), ('Info', 'informational'))
-    counts = {level: sum(1 for report in reports if criticality_class(report.criticality) == level) for _label, level in order}
-    return tuple(ExecutiveDonutRowViewModel(label, counts[level], level) for label, level in order)
-
-
-def _executive_status_rows(reports: list[AlertReport]) -> tuple[ExecutiveDonutRowViewModel, ...]:
-    order = (('Accepted', 'accepted'), ('Suppressed', 'suppressed'), ('Escalated', 'escalated'), ('Stored', 'stored'), ('Other', 'other'))
-    counts = {key: 0 for _label, key in order}
-    for report in reports:
-        key = report.filter_status if report.filter_status in counts else 'other'
-        counts[key] += 1
-    return tuple(ExecutiveDonutRowViewModel(label, counts[key], key) for label, key in order)
-
-
-def _executive_ai_rows(reports: list[AlertReport]) -> tuple[ExecutiveDonutRowViewModel, ...]:
-    states = (('Analyzed', 'analyzed', 'cyan'), ('Queued', 'queued', 'amber'), ('Analyzing', 'analyzing', 'green'))
-    rows = [ExecutiveDonutRowViewModel(label, sum(1 for report in reports if report.ai_status_key == key), css) for label, key, css in states]
-    other = sum(1 for report in reports if report.ai_status_key not in {'analyzed', 'queued', 'analyzing'})
-    return tuple(rows + [ExecutiveDonutRowViewModel('Other', other, 'info')])
-
-
-def _executive_home_view(
-    reports: list[AlertReport], hourly: HourlyIntakeMetrics, cache: EnrichmentCacheMetrics,
-) -> ExecutiveHomePageViewModel:
-    total = len(reports)
-    urgent = sum(1 for report in reports if criticality_class(report.criticality) in {'critical', 'high'})
-    suppressed = sum(1 for report in reports if report.filter_status == 'suppressed')
-    analyzed = sum(1 for report in reports if report.ai_status_key == 'analyzed')
-    latest = max((report.alert_ts for report in reports), default=0)
-    cache_label, cache_value, cache_note = _executive_cache_kpi(cache)
-    return ExecutiveHomePageViewModel(
-        latest_seen=human_time(latest) if latest else 'n/a', total_groups=total,
-        total_observations=sum(max(1, int(report.repeat_count or 1)) for report in reports),
-        urgent_groups=urgent, suppressed_groups=suppressed, analyzed_groups=analyzed,
-        urgent_percent=pct(urgent, total), ai_percent=pct(analyzed, total),
-        suppression_percent=pct(suppressed, total), cache_kpi_label=cache_label,
-        cache_kpi_value=cache_value, cache_kpi_note=cache_note,
-        severity_rows=_executive_severity_rows(reports), status_rows=_executive_status_rows(reports),
-        ai_rows=_executive_ai_rows(reports),
-        top_rule_rows=tuple(counter_top([(r.rule_name, r.repeat_count) for r in reports], 7)),
-        destination_rows=tuple(counter_top([(r.destination_ip, r.repeat_count) for r in reports], 7)),
-        source_ip_rows=tuple(counter_top([(r.source_ip, r.repeat_count) for r in reports], 7)),
-        source_rows=tuple(counter_top([(r.alert_source, 1) for r in reports], 5)),
-        hourly=_executive_hourly_view(hourly), cache=_executive_cache_view(cache),
-    )
-
-
-def executive_donut(title: str, center: str, subtitle: str, rows: list[tuple[str, int, str]]) -> str:
-    return render_executive_donut(title, center, subtitle, _executive_donut_rows(rows))
-
-
-
-def executive_bar_card(title: str, subtitle: str, rows: list[tuple[str, int]], suffix: str = '') -> str:
-    return render_executive_bar_card(title, subtitle, tuple(rows), suffix)
-
-
-
-def executive_hourly_intake_card(metrics: HourlyIntakeMetrics) -> str:
-    return render_executive_hourly_intake(_executive_hourly_view(metrics))
-
-
-
-def executive_cache_card(metrics: EnrichmentCacheMetrics) -> str:
-    return render_executive_cache(_executive_cache_view(metrics))
-
-
-
-def executive_home_section(
-    reports: list[AlertReport],
-    hourly_metrics: HourlyIntakeMetrics | None = None,
-    cache_metrics: EnrichmentCacheMetrics | None = None,
-) -> str:
-    hourly = hourly_metrics or load_hourly_alert_intake(DB_PATH)
-    cache = cache_metrics or load_enrichment_cache_metrics(DB_PATH)
-    return render_executive_home(_executive_home_view(reports, hourly, cache))
 
 
 def _publication_paths() -> DashboardPublicationPaths:
@@ -267,97 +157,6 @@ def cyber_threat_intel_page_section(reports: list[AlertReport]) -> str:
 
 
 
-
-def siem_engineering_html_list(values: object, empty: str) -> str:
-    return render_siem_engineering_html_list(values, empty)
-
-
-def _siem_recommendation_view(report: AlertReport) -> SiemRecommendationViewModel:
-    analysis = report.ai_analysis if isinstance(report.ai_analysis, dict) else {}
-    response = analysis.get('response') if isinstance(analysis.get('response'), dict) else {}
-    normalize = lambda value: normalize_iso_display_text(value)
-    return SiemRecommendationViewModel(
-        title=report.title, digest=report.digest, rel_source=report.rel_source,
-        summary=normalize(report.summary), ai_summary=normalize(ai_summary_for(report)),
-        criticality=report.criticality, criticality_rank=report.criticality_rank,
-        alert_source=report.alert_source, source_ip=report.source_ip,
-        destination_ip=report.destination_ip, destination_port=report.destination_port,
-        source_endpoint=report.source_endpoint, destination_endpoint=report.destination_endpoint,
-        rule_id=report.rule_id, rule_name=report.rule_name,
-        raw_alert_count=report.raw_alert_count, total_seen_count=report.total_seen_count,
-        repeat_count=report.repeat_count, first_seen=normalize(report.first_seen),
-        last_seen=last_seen_iso_for(report), alert_group_key=report.alert_group_key,
-        alert_ts=report.alert_ts, ai_status_key=report.ai_status_key,
-        ai_status_label=report.ai_status_label, ai_status_detail=normalize(report.ai_status_detail),
-        enrichment_status_label=report.enrichment_status_label,
-        enrichment_status_detail=normalize(report.enrichment_status_detail),
-        enrichment_record_count=report.enrichment_record_count,
-        enrichment_skip_count=report.enrichment_skip_count,
-        enrichment_error_count=report.enrichment_error_count,
-        pcap_status_label=report.pcap_status_label,
-        pcap_status_detail=normalize(report.pcap_status_detail),
-        tuning_recommendation=report.tuning_recommendation,
-        tuning_reason=normalize(report.tuning_reason),
-        recommended_tuning_actions=tuple(normalize(action) for action in report.recommended_tuning_actions),
-        generated_at=normalize(analysis.get('generated_at') or 'n/a'), response=response,
-    )
-
-
-def siem_engineering_detail_report(report: AlertReport, recommendation_kind: str) -> str:
-    return render_siem_engineering_detail_report(
-        _siem_recommendation_view(report), recommendation_kind
-    )
-
-
-
-def siem_engineering_tuning_row(report: AlertReport, index: int) -> str:
-    return render_siem_engineering_tuning_row(_siem_recommendation_view(report), index)
-
-
-
-def siem_engineering_detection_row(report: AlertReport, index: int) -> str:
-    return render_siem_engineering_detection_row(_siem_recommendation_view(report), index)
-
-
-
-def siem_engineering_roi_score(report: AlertReport) -> tuple[int, int, int, float]:
-    return render_siem_engineering_roi_score(_siem_recommendation_view(report))
-
-
-
-def siem_engineering_best_roi_section(reports: list[AlertReport]) -> str:
-    views = tuple(_siem_recommendation_view(report) for report in reports)
-    return render_siem_engineering_best_roi(views)
-
-
-
-def siem_engineering_table(title: str, subtitle: str, rows: str, empty: str) -> str:
-    return render_siem_engineering_table(title, rows, empty)
-
-
-
-def siem_engineering_page_section(reports: list[AlertReport]) -> str:
-    settings = load_soc_ai_settings()
-    actionable = [
-        report for report in reports
-        if report.tuning_recommendation
-        and report.tuning_recommendation not in {'none', 'n/a', 'needs_more_data'}
-    ]
-    repeated = sorted(
-        [report for report in reports if report.repeat_count >= 3 and report not in actionable],
-        key=lambda report: (report.repeat_count, report.criticality_rank), reverse=True,
-    )[:4]
-    view = SiemEngineeringPageViewModel(
-        mode=str(settings.get('mode', 'ollama')),
-        local_model=str(settings.get('ollama_model') or current_local_ai_model()),
-        cloud_model=str(settings.get('cloud_model') or settings.get('cloud_provider') or 'not configured'),
-        analyzed=sum(1 for report in reports if report.ai_status_key == 'analyzed'),
-        total=len(reports),
-        all_candidates=tuple(_siem_recommendation_view(report) for report in reports),
-        actionable=tuple(_siem_recommendation_view(report) for report in actionable),
-        repeated=tuple(_siem_recommendation_view(report) for report in repeated),
-    )
-    return render_siem_engineering_page(view)
 
 
 

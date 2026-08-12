@@ -3544,6 +3544,24 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_builder_executive.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_executive.py",
+      "required_symbols": [
+        "_executive_home_view",
+        "executive_home_section"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_builder_siem.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_siem.py",
+      "required_symbols": [
+        "_siem_recommendation_view",
+        "siem_engineering_page_section"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_builder_pages.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_pages.py",

@@ -2276,9 +2276,12 @@ Current owner:
 99-line compatibility entrypoint. Its implementation is split across bounded
 `dashboard_builder_contract.py`, `dashboard_builder_settings.py`,
 `dashboard_builder_report_core.py`, `dashboard_builder_reports.py`,
+`dashboard_builder_executive.py`, `dashboard_builder_siem.py`,
 `dashboard_builder_pages.py`, `dashboard_builder_publication.py`, and
-`dashboard_builder_runtime.py` modules. Every layer is below 800 lines and is
-installed beside the entrypoint.
+`dashboard_builder_runtime.py` modules. Executive and SIEM view-model
+projection now have dedicated owners; `dashboard_builder_pages.py` retains the
+historical flat compatibility surface for the remaining page composition.
+Every builder layer is below 600 lines and is installed beside the entrypoint.
 
 | Boundary | Responsibilities |
 | --- | --- |

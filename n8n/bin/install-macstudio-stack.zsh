@@ -1011,6 +1011,8 @@ cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_builder_contract.py" "$
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_builder_settings.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_settings.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_builder_report_core.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_report_core.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_builder_reports.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_reports.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_builder_executive.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_executive.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_builder_siem.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_siem.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_builder_pages.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_pages.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_builder_publication.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_publication.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_builder_runtime.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_builder_runtime.py"

@@ -10,6 +10,8 @@ _LAYER_NAMES = (
     "dashboard_builder_settings",
     "dashboard_builder_report_core",
     "dashboard_builder_reports",
+    "dashboard_builder_executive",
+    "dashboard_builder_siem",
     "dashboard_builder_pages",
     "dashboard_builder_publication",
 )
@@ -21,6 +23,8 @@ for _layer_name in _LAYER_NAMES:
     _settings,
     _report_core,
     _reports,
+    _executive,
+    _siem,
     _pages,
     _publication,
 ) = tuple(importlib.import_module(name) for name in _LAYER_NAMES)
@@ -31,9 +35,15 @@ BUILDER_MODULES: tuple[types.ModuleType, ...] = (
     _settings,
     _report_core,
     _reports,
+    _executive,
+    _siem,
     _pages,
     _publication,
 )
+
+# Keep the historical runtime namespace exact: owner modules participate in
+# composition but their private loader aliases were never public facade names.
+del _executive, _siem
 
 
 def _public_namespace(module: types.ModuleType) -> dict[str, object]:

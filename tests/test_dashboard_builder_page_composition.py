@@ -253,7 +253,7 @@ class DashboardBuilderPageCompositionTests(unittest.TestCase):
                 module for module in self.builder._runtime.BUILDER_MODULES
                 if hasattr(module, "render_executive_home")
             ]
-            self.assertEqual(len(owners), 6)
+            self.assertEqual(len(owners), 8)
             self.assertTrue(all(
                 module.render_executive_home is self.builder.render_executive_home
                 for module in owners
