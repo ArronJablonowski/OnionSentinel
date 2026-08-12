@@ -167,24 +167,40 @@ def _validate_nonnegative(value: object, message: str) -> None:
         raise InvestigationQueryContractError(message)
 
 
-def _validate_result_counts(
+def _validate_hit_count_consistency(
     value: dict[str, Any],
-    expected_query: dict[str, Any],
-    status: str,
     hits: list[object],
-) -> str:
-    for field in ("returned_hits", "total_hits"):
-        _validate_nonnegative(value.get(field), f"result {field} is invalid")
+) -> None:
     if value["returned_hits"] != len(hits) or value["total_hits"] < len(hits):
         raise InvestigationQueryContractError("result hit counts are inconsistent")
+
+
+def _validated_total_hits_relation(value: dict[str, Any]) -> str:
     relation = value.get("total_hits_relation")
     if relation not in {"eq", "gte"}:
         raise InvestigationQueryContractError("result total-hits relation is invalid")
+    return relation
+
+
+def _validate_result_truncation(
+    value: dict[str, Any],
+    expected_query: dict[str, Any],
+    relation: str,
+    hits: list[object],
+) -> None:
     expected_truncated = relation != "eq" or (
         expected_query["aggregation"] != "count" and value["total_hits"] > len(hits)
     )
     if value.get("truncated") is not expected_truncated:
         raise InvestigationQueryContractError("result truncation flag is inconsistent")
+
+
+def _validate_result_coverage_semantics(
+    value: dict[str, Any],
+    expected_query: dict[str, Any],
+    status: str,
+    relation: str,
+) -> None:
     expected_coverage = result_coverage(
         expected_query,
         status=status,
@@ -196,8 +212,29 @@ def _validate_result_counts(
         raise InvestigationQueryContractError(
             "result evidence coverage semantics are inconsistent"
         )
+
+
+def _validate_count_aggregation_hits(
+    expected_query: dict[str, Any],
+    hits: list[object],
+) -> None:
     if expected_query["aggregation"] == "count" and hits:
         raise InvestigationQueryContractError("count aggregation returned event bodies")
+
+
+def _validate_result_counts(
+    value: dict[str, Any],
+    expected_query: dict[str, Any],
+    status: str,
+    hits: list[object],
+) -> str:
+    for field in ("returned_hits", "total_hits"):
+        _validate_nonnegative(value.get(field), f"result {field} is invalid")
+    _validate_hit_count_consistency(value, hits)
+    relation = _validated_total_hits_relation(value)
+    _validate_result_truncation(value, expected_query, relation, hits)
+    _validate_result_coverage_semantics(value, expected_query, status, relation)
+    _validate_count_aggregation_hits(expected_query, hits)
     return relation
 
 

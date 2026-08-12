@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import importlib.util
 import sys
@@ -27,6 +28,52 @@ def load_module():
 
 
 RESULT = load_module()
+
+
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+    class Complexity(ast.NodeVisitor):
+        def __init__(self):
+            self.value = 1
+
+        def visit_FunctionDef(self, node):
+            return
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_If(self, node):
+            self.value += 1
+            self.generic_visit(node)
+
+        visit_For = visit_If
+        visit_While = visit_If
+
+        def visit_Try(self, node):
+            self.value += len(node.handlers)
+            self.generic_visit(node)
+
+        def visit_BoolOp(self, node):
+            self.value += max(0, len(node.values) - 1)
+            self.generic_visit(node)
+
+        def visit_IfExp(self, node):
+            self.value += 1
+            self.generic_visit(node)
+
+        def visit_comprehension(self, node):
+            self.value += 1 + len(node.ifs)
+            self.generic_visit(node)
+
+    complexity = Complexity()
+    for statement in target.body:
+        complexity.visit(statement)
+    return target.end_lineno - target.lineno + 1, complexity.value
 
 
 def query(*, aggregation: str = "events") -> dict[str, object]:
@@ -61,6 +108,22 @@ def valid_value(
 
 
 class InvestigationQueryResultCountTests(unittest.TestCase):
+    def test_changed_owner_architecture_is_bounded(self):
+        names = (
+            "_validate_hit_count_consistency",
+            "_validated_total_hits_relation",
+            "_validate_result_truncation",
+            "_validate_result_coverage_semantics",
+            "_validate_count_aggregation_hits",
+            "_validate_result_counts",
+        )
+        for name in names:
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
+        self.assertLessEqual(len(SCRIPT.read_text().splitlines()), 600)
+
     def assert_contract_error(self, message: str, call) -> None:
         with self.assertRaisesRegex(
             RESULT.InvestigationQueryContractError,
