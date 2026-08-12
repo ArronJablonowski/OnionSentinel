@@ -2725,6 +2725,12 @@ secret-filtered. Scores prioritize review but never independently establish
 malware or malicious intent. Existing page/API fields, verdict meanings,
 fresh/stale cache behavior, and single-flight refresh semantics remain stable.
 
+`n8n/bin/ac_hunter_contract.py` remains the fixed request/response trust
+boundary shared with the Relay. Login field validation and response metadata
+validation are isolated in private helpers while the operation allowlist,
+encoded request bytes, validation precedence, bounds, errors, and public
+contract surface remain exact.
+
 ## Alert Store
 
 Current owner: `n8n/alert_store/alert_store.js` (12,586 lines). The runtime

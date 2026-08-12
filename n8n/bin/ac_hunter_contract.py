@@ -211,14 +211,7 @@ def _login_form(params: object, body: object, headers: object) -> UpstreamReques
     )
 
 
-def _login(params: object, body: object, headers: object) -> UpstreamRequest:
-    _empty_params(params)
-    source = _mapping(body, "body")
-    _exact_keys(
-        source,
-        {"email", "password", "csrf_token", "next", "remember"},
-        "body",
-    )
+def __login_fields(source: dict[str, Any]) -> list[tuple[str, str]]:
     email = _bounded_text(
         source.get("email"),
         "email",
@@ -258,7 +251,17 @@ def _login(params: object, body: object, headers: object) -> UpstreamRequest:
         fields.append(("csrf_token", csrf_token))
     if remember:
         fields.append(("remember", "y"))
-    encoded = urlencode(fields).encode("utf-8")
+    return fields
+
+
+def _login(params: object, body: object, headers: object) -> UpstreamRequest:
+    _empty_params(params)
+    source = _mapping(body, "body")
+    _exact_keys(
+        source,
+        {"email", "password", "csrf_token", "next", "remember"},
+        "body",
+    )
     return UpstreamRequest(
         method="POST",
         path="/auth/login",
@@ -267,7 +270,7 @@ def _login(params: object, body: object, headers: object) -> UpstreamRequest:
             form=True,
             accept="text/html, application/xhtml+xml;q=0.9",
         ),
-        body=encoded,
+        body=urlencode(__login_fields(source)).encode("utf-8"),
         response_kind="none",
         allowed_statuses=(302, 303),
     )
@@ -520,23 +523,10 @@ def compile_request(payload: object) -> tuple[str, UpstreamRequest]:
     return request_id, request
 
 
-def validate_relay_response(payload: object, request_id: str) -> dict[str, Any]:
-    source = _mapping(payload, "relay response")
-    _exact_keys(
-        source,
-        {
-            "contract",
-            "request_id",
-            "ok",
-            "status",
-            "content_type",
-            "headers",
-            "body",
-            "duration_ms",
-            "error",
-        },
-        "relay response",
-    )
+def __validate_response_metadata(
+    source: dict[str, Any],
+    request_id: str,
+) -> None:
     if source.get("contract") != CONTRACT or source.get("request_id") != request_id:
         raise AcHunterContractError("relay response binding is invalid")
     if not isinstance(source.get("ok"), bool):
@@ -551,6 +541,19 @@ def validate_relay_response(payload: object, request_id: str) -> dict[str, Any]:
         or not 0 <= duration <= 300_000
     ):
         raise AcHunterContractError("relay response duration is invalid")
+
+
+def validate_relay_response(payload: object, request_id: str) -> dict[str, Any]:
+    source = _mapping(payload, "relay response")
+    _exact_keys(
+        source,
+        {
+            "contract", "request_id", "ok", "status", "content_type",
+            "headers", "body", "duration_ms", "error",
+        },
+        "relay response",
+    )
+    __validate_response_metadata(source, request_id)
     headers = _mapping(source.get("headers"), "relay response headers")
     _exact_keys(headers, {"location", "set_cookie"}, "relay response headers")
     location = headers.get("location", "")
