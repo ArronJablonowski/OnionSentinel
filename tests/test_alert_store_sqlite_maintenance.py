@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import gc
 import os
 from pathlib import Path
@@ -85,7 +86,7 @@ class AlertStoreSqliteMaintenancePermissionsTests(unittest.TestCase):
         )
 
     def create_valid_database(self) -> None:
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.executescript(SCHEMA)
 
     def test_database_fixture_closes_its_connection(self) -> None:

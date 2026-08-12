@@ -1,3 +1,4 @@
+from contextlib import closing
 import datetime as dt
 import gc
 import importlib.util
@@ -21,7 +22,7 @@ SPEC.loader.exec_module(REPORT)
 class HarnessObservabilityTests(unittest.TestCase):
     def make_database(self, root: Path) -> Path:
         path = root / "harness.sqlite3"
-        with sqlite3.connect(path) as connection:
+        with closing(sqlite3.connect(path)) as connection, connection:
             connection.executescript("""
                 CREATE TABLE harness_runs (status TEXT, stage TEXT, started_at TEXT, updated_at TEXT, completed_at TEXT, terminal_reason TEXT);
                 CREATE TABLE harness_events (event_type TEXT);

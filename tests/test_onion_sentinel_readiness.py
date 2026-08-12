@@ -1,3 +1,4 @@
+from contextlib import closing
 import gc
 import importlib.util
 import json
@@ -41,7 +42,9 @@ class ReadinessTests(unittest.TestCase):
             path.write_text(json.dumps(value))
             os.chmod(path, 0o600 if name == "incident-evidence.json" else 0o644)
         for name in ("alerts.sqlite3", "investigation-harness.sqlite3"):
-            with sqlite3.connect(stack / "alert_store_data" / name) as connection:
+            with closing(
+                sqlite3.connect(stack / "alert_store_data" / name)
+            ) as connection, connection:
                 connection.execute("CREATE TABLE metadata (value TEXT)")
         return stack
 
@@ -106,7 +109,7 @@ class ReadinessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.sqlite3"
-            with sqlite3.connect(source):
+            with closing(sqlite3.connect(source)):
                 pass
             link = root / "link.sqlite3"
             link.symlink_to(source)
@@ -117,7 +120,7 @@ class ReadinessTests(unittest.TestCase):
     def test_database_check_does_not_apply_config_file_size_limit(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "large.sqlite3"
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection, connection:
                 connection.execute("CREATE TABLE payload (value BLOB)")
                 connection.execute(
                     "INSERT INTO payload VALUES (zeroblob(?))",
