@@ -164,7 +164,19 @@ class AdjudicatedReplayCaseArchitectureTests(unittest.TestCase):
         self.assertEqual(signature.parameters["analysis_root"].kind.name, "KEYWORD_ONLY")
         self.assertEqual(signature.parameters["prompt_root"].kind.name, "KEYWORD_ONLY")
         self.assertEqual(str(signature.return_annotation), "dict[str, Any]")
-        self.assertEqual(function_metrics("replay_case"), (81, 28))
+        for name in (
+            "_load_replay_material",
+            "_explicit_adjudication_factors",
+            "_add_adjudication_duplicate",
+            "_expected_adjudication",
+            "_bounded_row_text",
+            "_adjudication_provenance",
+            "_completed_reviewer_response",
+            "replay_case",
+        ):
+            lines, complexity = function_metrics(name)
+            self.assertLessEqual(lines, 50)
+            self.assertLessEqual(complexity, 10)
         source = EXPORTER_PATH.read_text(encoding="utf-8")
         self.assertEqual(source.count("replay_case("), 2)
         self.assertLessEqual(len(source.splitlines()), 800)

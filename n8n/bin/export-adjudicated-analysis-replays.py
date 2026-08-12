@@ -374,13 +374,12 @@ def evidence_reference_catalog(prompt_package: dict[str, Any]) -> list[str]:
     return sorted(references)[:MAX_EVIDENCE_REFS]
 
 
-def replay_case(
-    runner: Any,
+def _load_replay_material(
     item: sqlite3.Row,
     *,
     analysis_root: Path,
     prompt_root: Path,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     artifact_path = confined_path(item["artifact_path"], analysis_root)
     artifact = bounded_json(artifact_path, MAX_ARTIFACT_BYTES)
     prompt_path = confined_path(artifact.get("prompt_package"), prompt_root)
@@ -393,27 +392,49 @@ def replay_case(
     response = json.loads(response_text)
     if not isinstance(response, dict):
         raise ValueError("analysis response_json root must be an object")
-    outcome = runner.normalized_detection_outcome(item["outcome_override"])
-    expected: dict[str, Any] = {"detection_outcome": outcome}
-    explicit_factors: dict[str, Any] = {}
+    return prompt_package, response
+
+
+def _explicit_adjudication_factors(
+    item: sqlite3.Row,
+) -> dict[str, Any]:
+    factors: dict[str, Any] = {}
     for field, allowed in FACTORED_VALUES.items():
         value = str(item[field] or "").strip()
         if not value:
             continue
         if value not in allowed:
             raise ValueError(f"analyst adjudication has invalid {field}")
-        expected[field] = value
-        explicit_factors[field] = value
+        factors[field] = value
+    return factors
+
+
+def _add_adjudication_duplicate(
+    item: sqlite3.Row,
+    expected: dict[str, Any],
+    explicit_factors: dict[str, Any],
+) -> None:
     duplicate_value = item["duplicate_of"]
     if duplicate_value is None:
         if "handling" in expected or "event_status" in expected:
             expected["duplicate_of"] = None
-    else:
-        normalized_duplicate = str(duplicate_value).strip()[:256]
-        if not normalized_duplicate:
-            raise ValueError("analyst adjudication has an empty duplicate_of")
-        expected["duplicate_of"] = normalized_duplicate
-        explicit_factors["duplicate_of"] = normalized_duplicate
+        return
+    normalized_duplicate = str(duplicate_value).strip()[:256]
+    if not normalized_duplicate:
+        raise ValueError("analyst adjudication has an empty duplicate_of")
+    expected["duplicate_of"] = normalized_duplicate
+    explicit_factors["duplicate_of"] = normalized_duplicate
+
+
+def _expected_adjudication(
+    runner: Any,
+    item: sqlite3.Row,
+) -> dict[str, Any]:
+    outcome = runner.normalized_detection_outcome(item["outcome_override"])
+    expected: dict[str, Any] = {"detection_outcome": outcome}
+    explicit_factors = _explicit_adjudication_factors(item)
+    expected.update(explicit_factors)
+    _add_adjudication_duplicate(item, expected, explicit_factors)
     contradictions = adjudication_verdict_contradictions(
         runner,
         outcome,
@@ -424,36 +445,76 @@ def replay_case(
             "analyst adjudication has contradictory authoritative labels: "
             + "; ".join(contradictions)
         )
-    case_id = f"adjudication-{str(item['adjudication_id'] or '')[:160]}"
-    result = {
-        "case_id": case_id,
-        "label_source": "analyst_adjudication",
-        "label_provenance": {
-            "adjudication_id": str(item["adjudication_id"] or "")[:160],
-            "analysis_id": str(item["analysis_id"] or "")[:160],
-            "created_at": str(item["created_at"] or "")[:80],
-            "confidence": str(item["adjudication_confidence"] or "")[:16],
-            "agent_role": str(item["agent_role"] or "")[:64],
-            "rationale": str(item["rationale"] or "")[:4000],
-            "evidence_gap": str(item["evidence_gap"] or "")[:2000],
-            "next_action": str(item["next_action"] or "")[:2000],
-            "factored_labels": [
-                field for field in (*FACTORED_VALUES, "duplicate_of")
-                if field in expected
-            ],
-        },
-        "expected": expected,
-        "allowed_evidence_refs": evidence_reference_catalog(prompt_package),
-        "prompt_package": prompt_package,
-        "primary_response": response,
+    return expected
+
+
+def _bounded_row_text(
+    item: sqlite3.Row,
+    key: str,
+    limit: int,
+) -> str:
+    return str(item[key] or "")[:limit]
+
+
+def _adjudication_provenance(
+    item: sqlite3.Row,
+    expected: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "adjudication_id": _bounded_row_text(item, "adjudication_id", 160),
+        "analysis_id": _bounded_row_text(item, "analysis_id", 160),
+        "created_at": _bounded_row_text(item, "created_at", 80),
+        "confidence": _bounded_row_text(item, "adjudication_confidence", 16),
+        "agent_role": _bounded_row_text(item, "agent_role", 64),
+        "rationale": _bounded_row_text(item, "rationale", 4000),
+        "evidence_gap": _bounded_row_text(item, "evidence_gap", 2000),
+        "next_action": _bounded_row_text(item, "next_action", 2000),
+        "factored_labels": [
+            field for field in (*FACTORED_VALUES, "duplicate_of")
+            if field in expected
+        ],
     }
+
+
+def _completed_reviewer_response(
+    response: dict[str, Any],
+) -> dict[str, Any] | None:
     second_opinion = response.get("_second_opinion")
     if (
         isinstance(second_opinion, dict)
         and second_opinion.get("status") == "completed"
         and isinstance(second_opinion.get("response"), dict)
     ):
-        result["reviewer_response"] = second_opinion["response"]
+        return second_opinion["response"]
+    return None
+
+
+def replay_case(
+    runner: Any,
+    item: sqlite3.Row,
+    *,
+    analysis_root: Path,
+    prompt_root: Path,
+) -> dict[str, Any]:
+    prompt_package, response = _load_replay_material(
+        item,
+        analysis_root=analysis_root,
+        prompt_root=prompt_root,
+    )
+    expected = _expected_adjudication(runner, item)
+    case_id = f"adjudication-{str(item['adjudication_id'] or '')[:160]}"
+    result = {
+        "case_id": case_id,
+        "label_source": "analyst_adjudication",
+        "label_provenance": _adjudication_provenance(item, expected),
+        "expected": expected,
+        "allowed_evidence_refs": evidence_reference_catalog(prompt_package),
+        "prompt_package": prompt_package,
+        "primary_response": response,
+    }
+    reviewer_response = _completed_reviewer_response(response)
+    if reviewer_response is not None:
+        result["reviewer_response"] = reviewer_response
     return result
 
 
