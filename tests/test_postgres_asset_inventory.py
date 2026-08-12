@@ -367,13 +367,13 @@ class PostgresAssetInventoryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_dashboard_uses_server_side_paging(self) -> None:
-        portal_config = (
-            ROOT / "onion-sentinel-dashboard/portal_runtime_config.py"
+        portal_constants = (
+            ROOT / "onion-sentinel-dashboard/portal_runtime_constants.py"
         ).read_text(encoding="utf-8")
         asset_runtime = PORTAL_ASSET_RUNTIME.read_text(encoding="utf-8")
         asset_page = ASSET_PAGE.read_text(encoding="utf-8")
         self.assertIn('"/assets/inventory?', asset_runtime)
-        self.assertIn("ASSET_DATABASE_READ_ENABLED", portal_config)
+        self.assertIn("ASSET_DATABASE_READ_ENABLED", portal_constants)
         self.assertIn("asset-page-previous", asset_page)
         self.assertIn("asset-page-next", asset_page)
         self.assertIn("limit:pageSize.value", asset_page)

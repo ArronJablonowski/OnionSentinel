@@ -2235,6 +2235,71 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_runtime_config.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_runtime_config.py",
+      "required_symbols": [
+        "CronJobSummary"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_runtime_standard_dependencies.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_runtime_standard_dependencies.py",
+      "required_symbols": [
+        "PORTAL_SOURCE_DIR",
+        "ArtifactCache",
+        "BoundedResponseError",
+        "JsonlLogIndex"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_runtime_settings_dependencies.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_runtime_settings_dependencies.py",
+      "required_symbols": [
+        "SocAiSettingsNormalizationPolicy",
+        "default_soc_ai_settings",
+        "resolve_cli_harness",
+        "compose_ollama_models_response"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_runtime_admin_dependencies.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_runtime_admin_dependencies.py",
+      "required_symbols": [
+        "AdminDashboardSources",
+        "claim_action_lock",
+        "compose_admin_service_statuses",
+        "compose_pcap_workflow_health"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_runtime_soc_dependencies.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_runtime_soc_dependencies.py",
+      "required_symbols": [
+        "SocGroupQueryRequest",
+        "dispatch_soc_read",
+        "render_incident_response_report",
+        "normalize_pcap_request_policy",
+        "ResponseCache"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_runtime_constants.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_runtime_constants.py",
+      "required_symbols": [
+        "DEFAULT_HOST",
+        "DEFAULT_PORT",
+        "ASSET_DATABASE_READ_ENABLED",
+        "SOC_ALERT_ARTIFACT_CACHE",
+        "ADMIN_ACTIONS"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_ai_settings_normalizer.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_ai_settings_normalizer.py",

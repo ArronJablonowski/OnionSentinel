@@ -14,6 +14,9 @@ dependency.
 | `onion_sentinel_request_routes.py` | Exact HEAD/GET/POST dispatch, health, authentication, logs, static, and SOC adapters. |
 | `onion_sentinel_release.py` | Literal owner-only runtime release identity loading without evaluating secrets. |
 | `report_portal.py` | Transitional SOC API implementation imported from the dedicated server; non-SOC routes are not exposed by `onion_sentinel_server.py`. |
+| `portal_runtime_config.py` | Exact thin compatibility facade for the report portal's historical runtime namespace. |
+| `portal_runtime_*_dependencies.py` | Ordered standard, settings, admin/operational, and SOC/incident dependency manifests and legacy aliases. |
+| `portal_runtime_constants.py` | Host paths, credential locations, bounded caches/locks, limits, and service/action policy constants. |
 | `software_inventory.py` | Thin compatibility facade for the collector-produced Software Inventory snapshot. |
 | `software_inventory_assets.py` | Complete-inventory asset labeling and fail-closed endpoint OS correlation policy. |
 | `software_inventory_query.py` | Fixed filter contract, freshness classification, public evidence projection, and bounded error payloads. |

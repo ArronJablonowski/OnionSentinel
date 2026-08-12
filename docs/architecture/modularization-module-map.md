@@ -3176,13 +3176,22 @@ routes or report IDs.
 
 ### Portal configuration composition root
 
-`portal_runtime_config.py` owns the report portal's imports, immutable defaults,
-filesystem locations, limits, route constants, service/action definitions, and
-small configuration data types. `report_portal.py` re-exports those names
-before binding compatibility delegates, so existing callers and tests can
-still patch facade attributes without domain modules importing the entrypoint.
-Both the configuration root and compatibility facade remain below the
-800-line hard review threshold; the HTTP handler remains below 250 lines.
+`portal_runtime_config.py` is the exact, package-free compatibility facade for
+the report portal's 545-name runtime namespace and retains the
+`CronJobSummary` type so its historical module identity does not change.
+`portal_runtime_standard_dependencies.py`,
+`portal_runtime_settings_dependencies.py`,
+`portal_runtime_admin_dependencies.py`, and
+`portal_runtime_soc_dependencies.py` own the ordered dependency manifests and
+legacy aliases for their respective domains. `portal_runtime_constants.py`
+owns immutable defaults, filesystem and credential locations, limits, bounded
+cache/lock instances, route constants, and service/action definitions.
+`report_portal.py` re-exports the composed names before binding compatibility
+delegates, so existing callers and tests can still patch facade attributes
+without domain modules importing the entrypoint. All configuration owners are
+below the 600-line target; the compatibility facade and HTTP handler remain
+below 250 lines. The production installer copies every owner before service
+startup.
 
 ### Portal compatibility bindings
 
