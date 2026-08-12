@@ -72,9 +72,6 @@
     "n8n/bin/verify-agent-memory.py::verify_setup": {
       "max_complexity": 20
     },
-    "onion-sentinel-dashboard/ac_hunter_transport.py::AcHunterApiClient._authenticate": {
-      "max_complexity": 16
-    },
     "onion-sentinel-dashboard/scripts/dashboard_pcap_components.py::render_pcap_evidence_markdown": {
       "max_complexity": 22
     },

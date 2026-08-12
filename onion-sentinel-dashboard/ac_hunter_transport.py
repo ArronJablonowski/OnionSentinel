@@ -220,86 +220,95 @@ class AcHunterApiClient:
     ) -> bool:
         return response.get("ok") is True and response.get("status") in set(statuses)
 
+    def _authentication_is_fresh(self) -> bool:
+        return bool(
+            self._jwt
+            and self._jwt_expiry
+            > self.clock() + JWT_REFRESH_SKEW_SECONDS
+        )
+
+    def _authentication_headers(self) -> Dict[str, str]:
+        cookie = self._cookie_header()
+        return {"cookie": cookie} if cookie else {}
+
+    def _login_form_token(self) -> str:
+        form = self.transport.call("login_form")
+        self._accept_cookies(form)
+        if not self._success(form):
+            raise AcHunterAuthenticationError(
+                "AC Hunter login form was unavailable"
+            )
+        parser = _CsrfParser()
+        raw_html = form.get("body")
+        if isinstance(raw_html, str):
+            try:
+                parser.feed(raw_html)
+            except Exception:
+                parser.token = ""
+        return parser.token
+
+    def _submit_login(self, csrf_token: str) -> None:
+        email, password = self.credentials_loader()
+        login = self.transport.call(
+            "login",
+            headers=self._authentication_headers(),
+            body={
+                "email": email,
+                "password": password,
+                "csrf_token": csrf_token,
+                "next": "/jwt/json",
+                "remember": False,
+            },
+        )
+        # Drop the only local references to the credential strings as soon as
+        # the bounded relay invocation has returned.
+        del email
+        del password
+        self._accept_cookies(login)
+        if not self._success(login, (302, 303)):
+            raise AcHunterAuthenticationError(
+                "AC Hunter service-account login failed"
+            )
+
+    def _admit_issued_token(self, payload: object) -> Tuple[str, float]:
+        token = payload.get("token") if isinstance(payload, dict) else None
+        if (
+            not isinstance(token, str)
+            or not 16 <= len(token) <= 16384
+            or not re.fullmatch(r"[A-Za-z0-9._~-]+", token)
+        ):
+            raise AcHunterAuthenticationError(
+                "AC Hunter JWT issuance returned an invalid token"
+            )
+        expiry = self._token_expiry(token)
+        now = self.clock()
+        if expiry <= now + 10 or expiry > now + 15 * 60:
+            raise AcHunterAuthenticationError(
+                "AC Hunter JWT expiry is outside the expected window"
+            )
+        return token, expiry
+
+    def _request_token(self) -> Tuple[str, float]:
+        response = self.transport.call(
+            "jwt", headers=self._authentication_headers()
+        )
+        self._accept_cookies(response)
+        if not self._success(response):
+            raise AcHunterAuthenticationError(
+                "AC Hunter JWT issuance failed"
+            )
+        return self._admit_issued_token(response.get("body"))
+
     def _authenticate(self) -> None:
         with self._auth_lock:
-            if (
-                self._jwt
-                and self._jwt_expiry
-                > self.clock() + JWT_REFRESH_SKEW_SECONDS
-            ):
+            if self._authentication_is_fresh():
                 return
             self._jwt = ""
             self._jwt_expiry = 0.0
             self._cookies.clear()
-
-            form = self.transport.call("login_form")
-            self._accept_cookies(form)
-            if not self._success(form):
-                raise AcHunterAuthenticationError(
-                    "AC Hunter login form was unavailable"
-                )
-            parser = _CsrfParser()
-            raw_html = form.get("body")
-            if isinstance(raw_html, str):
-                try:
-                    parser.feed(raw_html)
-                except Exception:
-                    parser.token = ""
-
-            email, password = self.credentials_loader()
-            login_headers: Dict[str, str] = {}
-            cookie = self._cookie_header()
-            if cookie:
-                login_headers["cookie"] = cookie
-            login = self.transport.call(
-                "login",
-                headers=login_headers,
-                body={
-                    "email": email,
-                    "password": password,
-                    "csrf_token": parser.token,
-                    "next": "/jwt/json",
-                    "remember": False,
-                },
-            )
-            # Drop the only local references to the credential strings as soon
-            # as the bounded relay invocation has returned.
-            del email
-            del password
-            self._accept_cookies(login)
-            if not self._success(login, (302, 303)):
-                raise AcHunterAuthenticationError(
-                    "AC Hunter service-account login failed"
-                )
-
-            jwt_headers: Dict[str, str] = {}
-            cookie = self._cookie_header()
-            if cookie:
-                jwt_headers["cookie"] = cookie
-            token_response = self.transport.call("jwt", headers=jwt_headers)
-            self._accept_cookies(token_response)
-            if not self._success(token_response):
-                raise AcHunterAuthenticationError(
-                    "AC Hunter JWT issuance failed"
-                )
-            payload = token_response.get("body")
-            token = payload.get("token") if isinstance(payload, dict) else None
-            if (
-                not isinstance(token, str)
-                or not 16 <= len(token) <= 16384
-                or not re.fullmatch(r"[A-Za-z0-9._~-]+", token)
-            ):
-                raise AcHunterAuthenticationError(
-                    "AC Hunter JWT issuance returned an invalid token"
-                )
-            expiry = self._token_expiry(token)
-            now = self.clock()
-            if expiry <= now + 10 or expiry > now + 15 * 60:
-                raise AcHunterAuthenticationError(
-                    "AC Hunter JWT expiry is outside the expected window"
-                )
-            self._jwt = token
-            self._jwt_expiry = expiry
+            csrf_token = self._login_form_token()
+            self._submit_login(csrf_token)
+            self._jwt, self._jwt_expiry = self._request_token()
 
     def invalidate_authentication(self) -> None:
         with self._auth_lock:

@@ -161,12 +161,10 @@ class AcHunterAuthenticationArchitectureTests(unittest.TestCase):
         self.assertEqual(list(signature.parameters), ["self"])
         self.assertEqual(str(signature.return_annotation), "None")
         baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
-        self.assertEqual(
-            baseline["functions"][
-                "onion-sentinel-dashboard/ac_hunter_transport.py::"
-                "AcHunterApiClient._authenticate"
-            ],
-            {"max_complexity": 16},
+        self.assertNotIn(
+            "onion-sentinel-dashboard/ac_hunter_transport.py::"
+            "AcHunterApiClient._authenticate",
+            baseline["functions"],
         )
 
         client, transport, events, credentials = self.client({})
