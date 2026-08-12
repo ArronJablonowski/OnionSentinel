@@ -42,14 +42,6 @@
     "n8n/bin/export-adjudicated-analysis-replays.py::replay_case": {
       "max_complexity": 28
     },
-    "n8n/bin/harness_run_execution.py::HarnessRunExecution.model_call": {
-      "max_complexity": 18,
-      "max_lines": 123
-    },
-    "n8n/bin/harness_run_execution.py::HarnessRunExecution.query_round": {
-      "max_complexity": 62,
-      "max_lines": 249
-    },
     "n8n/bin/harness_run_foundation.py::HarnessRunFoundation.preflight_model_call": {
       "max_complexity": 16,
       "max_lines": 103

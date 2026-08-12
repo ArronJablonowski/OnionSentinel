@@ -2648,6 +2648,31 @@
       ]
     },
     {
+      "path": "n8n/bin/harness_run_execution.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_run_execution.py",
+      "required_symbols": [
+        "HarnessRunExecution",
+        "PHASE_STAGE_MAP"
+      ]
+    },
+    {
+      "path": "n8n/bin/harness_run_model_execution.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_run_model_execution.py",
+      "required_symbols": [
+        "record_model_call"
+      ]
+    },
+    {
+      "path": "n8n/bin/harness_run_query_execution.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_run_query_execution.py",
+      "required_symbols": [
+        "record_query_round"
+      ]
+    },
+    {
       "path": "n8n/bin/harness_query_contract.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/harness_query_contract.py",
