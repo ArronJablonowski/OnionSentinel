@@ -355,6 +355,35 @@ class MaxmindGeoipSummaryArchitectureTests(unittest.TestCase):
         self.assertEqual(reader.calls, [["metadata"]])
         self.assertFalse(reader.closed)
 
+    def test_metadata_status_sanitization_failure_leaks_open_reader(self) -> None:
+        candidates = FakeCandidates([])
+        reader = FakeReader("GeoLite2-City", {})
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "city.mmdb"
+            path.write_bytes(b"synthetic")
+            fake_module = types.SimpleNamespace(open_database=lambda _path: reader)
+
+            def sanitize(value, limit):
+                if limit == 120:
+                    raise ValueError("synthetic status sanitization failure")
+                return str(value)
+
+            with (
+                mock.patch.dict(sys.modules, {"maxminddb": fake_module}),
+                mock.patch.object(
+                    self.contract,
+                    "sanitize_evidence_text",
+                    side_effect=sanitize,
+                ),
+                self.assertRaisesRegex(
+                    ValueError, "synthetic status sanitization failure"
+                ),
+            ):
+                self.contract.maxmind_geoip_summary(candidates, path)
+
+        self.assertEqual(reader.calls, [["metadata"]])
+        self.assertFalse(reader.closed)
+
     def test_mixed_open_and_metadata_failures_preserve_ready_reader(self) -> None:
         candidates = FakeCandidates([
             {"ip": "8.8.8.8", "role": "destination", "count": 2}
