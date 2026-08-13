@@ -347,6 +347,57 @@ class ApplicationLogTests(unittest.TestCase):
         self.assertEqual(response["member"], "1")
         self.assertEqual(response["content"], "backup-one")
 
+    def test_fixed_member_resolution_defaults_and_rejects_outside_backup_policy(self) -> None:
+        spec = application_logs.LOG_SPECS_BY_ID["onion-sentinel-application"]
+
+        self.assertEqual(
+            application_logs._resolve_member(
+                spec, self.runtime_root, "", self.home
+            ),
+            ("current", spec.basename),
+        )
+        self.assertEqual(
+            application_logs._resolve_member(
+                spec, self.runtime_root, str(spec.backups), self.home
+            ),
+            (str(spec.backups), f"{spec.basename}.{spec.backups}"),
+        )
+        for member in (str(spec.backups + 1), "-1", "../current"):
+            with self.subTest(member=member), self.assertRaisesRegex(
+                application_logs.ApplicationLogError, "Unknown log member"
+            ):
+                application_logs._resolve_member(
+                    spec, self.runtime_root, member, self.home
+                )
+
+    def test_family_member_resolution_defaults_newest_and_distinguishes_rejections(self) -> None:
+        spec = application_logs.LOG_SPECS_BY_ID["ensure-stack-runs"]
+        older = "ensure-n8n-stack-20260801-120000Z.log"
+        newest = "ensure-n8n-stack-20260802-120000Z.log"
+        self.write_runtime(older, "older")
+        self.write_runtime(newest, "newest")
+
+        self.assertEqual(
+            application_logs._resolve_member(
+                spec, self.runtime_root, "", self.home
+            ),
+            (newest, newest),
+        )
+        with self.assertRaisesRegex(
+            application_logs.ApplicationLogError, "Unknown log member"
+        ):
+            application_logs._resolve_member(
+                spec, self.runtime_root, "../newest", self.home
+            )
+        unavailable = "ensure-n8n-stack-20260803-120000Z.log"
+        with self.assertRaisesRegex(
+            application_logs.ApplicationLogError,
+            "Unknown or unavailable log member",
+        ):
+            application_logs._resolve_member(
+                spec, self.runtime_root, unavailable, self.home
+            )
+
     def test_alert_store_rotation_reads_only_whitelisted_env_settings(self) -> None:
         env_path = self.home / "n8n-local" / ".env"
         env_path.write_text(
