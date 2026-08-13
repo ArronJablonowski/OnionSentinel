@@ -63,15 +63,8 @@ def verified_observation(
     observed_model = str(envelope.get("model") or "").strip()
     if not provider or not observed_model:
         raise SystemExit("OpenClaw response omitted observed provider/model provenance")
+    observed_name = _observed_ollama_model_name(observed_model)
     expected_provider, separator, expected_name = expected_model.partition("/")
-    observed_name = observed_model
-    observed_prefix, observed_separator, namespaced_name = observed_model.partition("/")
-    if observed_separator:
-        if observed_prefix.lower() != "ollama":
-            raise SystemExit(
-                "OpenClaw executed a different provider/model than the assigned route"
-            )
-        observed_name = namespaced_name
     if (
         provider.lower() != "ollama"
         or separator != "/"
@@ -83,6 +76,17 @@ def verified_observation(
             "OpenClaw executed a different provider/model than the assigned route"
         )
     return "ollama", f"ollama/{observed_name}"
+
+
+def _observed_ollama_model_name(observed_model: str) -> str:
+    observed_prefix, separator, observed_name = observed_model.partition("/")
+    if not separator:
+        return observed_model
+    if observed_prefix.lower() != "ollama":
+        raise SystemExit(
+            "OpenClaw executed a different provider/model than the assigned route"
+        )
+    return observed_name
 
 
 def _isolated_paths(work_dir: Path) -> dict[str, Path]:
