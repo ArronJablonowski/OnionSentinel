@@ -8,6 +8,8 @@ import json
 import re
 from typing import Any, Callable
 
+from . import adjudication_choices
+
 
 @dataclass(frozen=True)
 class PackageDependencies:
@@ -109,23 +111,11 @@ def _contract(disputed: list[dict[str, Any]], case_id: str) -> dict[str, Any]:
 def _identity_and_choices(
     response: dict[str, Any], contract: dict[str, Any], errors: list[str]
 ) -> tuple[str, str, float]:
-    if str(response.get("adjudication_case_id") or "") != str(contract.get("case_id") or ""):
-        errors.append("adjudication_case_id does not match the contract")
-    if str(response.get("adjudication_evidence_hash") or "") != str(contract.get("evidence_hash") or ""):
-        errors.append("adjudication_evidence_hash does not match the contract")
-    decision = str(response.get("decision") or "").strip().lower()
-    if decision not in set(contract.get("allowed_decisions") or []):
-        errors.append("decision is outside the closed vocabulary")
-    confidence = str(response.get("confidence") or "").strip().lower()
-    if confidence not in {"low", "medium", "high"}:
-        errors.append("confidence is outside the closed vocabulary")
-    try:
-        confidence_score = float(response.get("confidence_score"))
-    except (TypeError, ValueError, OverflowError):
-        confidence_score = -1.0
-    if not 0.0 <= confidence_score <= 1.0:
-        errors.append("confidence_score must be between 0 and 1")
-    return decision, confidence, confidence_score
+    adjudication_choices.validate_identity(response, contract, errors)
+    decision = adjudication_choices.normalized_decision(response, contract, errors)
+    confidence = adjudication_choices.normalized_confidence(response, errors)
+    score = adjudication_choices.normalized_confidence_score(response, errors)
+    return decision, confidence, score
 
 
 def _field_partition(
