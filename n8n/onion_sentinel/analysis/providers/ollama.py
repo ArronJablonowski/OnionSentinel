@@ -11,6 +11,42 @@ DEFAULT_MODEL = "devstral:latest"
 DEFAULT_URL = "http://127.0.0.1:11434"
 
 
+def _chat_body(
+    model: str, system: str, task: str, prompt_package: dict[str, Any], args: Any
+) -> bytes:
+    user = {"task": task, "prompt_package": prompt_package}
+    return json.dumps({
+        "model": model,
+        "stream": False,
+        "format": "json",
+        "options": {
+            "temperature": args.temperature,
+            "num_predict": args.max_predict_tokens,
+        },
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(user, separators=(",", ":"))},
+        ],
+    }).encode("utf-8")
+
+
+def _admit_response(
+    payload: dict[str, Any], model: str,
+    extract_json_object: Callable[[str], dict[str, Any]],
+) -> dict[str, Any]:
+    content = payload.get("message", {}).get("content", "")
+    if not content:
+        raise SystemExit("Ollama returned no message content")
+    observed_model = str(payload.get("model") or "").strip()
+    if observed_model and observed_model != model:
+        raise SystemExit("Ollama executed a different model than the assigned route")
+    result = extract_json_object(content)
+    result["_analysis_model"] = observed_model or model
+    result["_analysis_model_path"] = "ollama"
+    result["_analysis_provider"] = "ollama"
+    return result
+
+
 def request(
     prompt_package: dict[str, Any],
     args: Any,
@@ -31,25 +67,7 @@ def request(
     model = str(settings.get("ollama_model") or fallback_model)
     url = str(settings.get("ollama_url") or default_url).rstrip("/") + "/api/chat"
     system = load_system_prompt(system_prompt_file or args.system_prompt_file)
-    user = {"task": task, "prompt_package": prompt_package}
-    body = json.dumps(
-        {
-            "model": model,
-            "stream": False,
-            "format": "json",
-            "options": {
-                "temperature": args.temperature,
-                "num_predict": args.max_predict_tokens,
-            },
-            "messages": [
-                {"role": "system", "content": system},
-                {
-                    "role": "user",
-                    "content": json.dumps(user, separators=(",", ":")),
-                },
-            ],
-        }
-    ).encode("utf-8")
+    body = _chat_body(model, system, task, prompt_package, args)
     http_request = request_factory(
         url,
         data=body,
@@ -61,17 +79,7 @@ def request(
             payload = read_bounded_json(response, max_bytes=args.max_response_bytes)
     except transport_errors as exc:
         raise SystemExit(f"Ollama request failed at {url}: {exc}") from exc
-    content = payload.get("message", {}).get("content", "")
-    if not content:
-        raise SystemExit("Ollama returned no message content")
-    observed_model = str(payload.get("model") or "").strip()
-    if observed_model and observed_model != model:
-        raise SystemExit("Ollama executed a different model than the assigned route")
-    result = extract_json_object(content)
-    result["_analysis_model"] = observed_model or model
-    result["_analysis_model_path"] = "ollama"
-    result["_analysis_provider"] = "ollama"
-    return result
+    return _admit_response(payload, model, extract_json_object)
 
 
 def unload_model(
