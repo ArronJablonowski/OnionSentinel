@@ -46,35 +46,56 @@ def _family_members(root: Path) -> tuple[list[dict[str, object]], int, int]:
     names: list[str] = []
     retained_size = 0
     try:
-        try:
-            with os.scandir(root_fd) as entries:
-                for entry in entries:
-                    if not ENSURE_STACK_RE.fullmatch(entry.name):
-                        continue
-                    try:
-                        metadata = entry.stat(follow_symlinks=False)
-                    except OSError:
-                        continue
-                    if (
-                        not stat.S_ISREG(metadata.st_mode)
-                        or metadata.st_uid != os.getuid()
-                        or stat.S_IMODE(metadata.st_mode) & 0o022
-                    ):
-                        continue
-                    names.append(entry.name)
-                    retained_size += int(metadata.st_size)
-        except OSError as exc:
-            raise ApplicationLogError(503, "Log directory is unavailable") from exc
+        names, retained_size = _admitted_family_names(root_fd)
     finally:
         os.close(root_fd)
     names.sort(reverse=True)
+    members = _family_member_metadata(root, names)
+    return members, len(names), retained_size
+
+
+def _admitted_family_names(root_fd: int) -> tuple[list[str], int]:
+    names: list[str] = []
+    retained_size = 0
+    try:
+        with os.scandir(root_fd) as entries:
+            for entry in entries:
+                metadata = _admitted_family_metadata(entry)
+                if metadata is None:
+                    continue
+                names.append(entry.name)
+                retained_size += int(metadata.st_size)
+    except OSError as exc:
+        raise ApplicationLogError(503, "Log directory is unavailable") from exc
+    return names, retained_size
+
+
+def _admitted_family_metadata(entry: os.DirEntry[str]) -> os.stat_result | None:
+    if not ENSURE_STACK_RE.fullmatch(entry.name):
+        return None
+    try:
+        metadata = entry.stat(follow_symlinks=False)
+    except OSError:
+        return None
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+    ):
+        return None
+    return metadata
+
+
+def _family_member_metadata(
+    root: Path, names: list[str]
+) -> list[dict[str, object]]:
     members: list[dict[str, object]] = []
     for name in names[:MAX_FAMILY_MEMBERS]:
         metadata = _member_metadata(root, name)
         if metadata is None:
             continue
         members.append({"id": name, "label": name, **metadata})
-    return members, len(names), retained_size
+    return members
 
 
 def _spec_catalog_item(spec: LogSpec, home: Path) -> dict[str, object]:
