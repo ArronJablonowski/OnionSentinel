@@ -38,6 +38,17 @@ class TrackingDict(dict):
         return super().__getitem__(key)
 
 
+class TrackingString:
+    def __init__(self, value, *, trace, label):
+        self.value = value
+        self.trace = trace
+        self.label = label
+
+    def __str__(self):
+        self.trace.append(("str", self.label))
+        return self.value
+
+
 class OpenClawProviderAdapterTests(unittest.TestCase):
     MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,239}$")
 
@@ -234,6 +245,59 @@ class OpenClawProviderAdapterTests(unittest.TestCase):
                 },
                 "ollama/gemma4:26b-mlx",
             )
+
+    def test_observation_preserves_access_coercion_and_accepted_spelling(self) -> None:
+        trace: list[object] = []
+        envelope = TrackingDict({
+            "provider": TrackingString(" OLLAMA ", trace=trace, label="provider"),
+            "model": TrackingString(
+                " OllAmA/Gemma4:26B-MLX ", trace=trace, label="model"
+            ),
+        }, trace=trace, label="envelope")
+
+        self.assertEqual(
+            openclaw.verified_observation(
+                envelope, "OlLaMa/gemma4:26b-mlx"
+            ),
+            ("ollama", "ollama/Gemma4:26B-MLX"),
+        )
+        self.assertEqual(trace, [
+            ("get", "envelope", "provider"),
+            ("str", "provider"),
+            ("get", "envelope", "model"),
+            ("str", "model"),
+        ])
+
+    def test_observation_missing_provenance_preserves_error_and_nonmutation(self) -> None:
+        trace: list[object] = []
+        envelope = TrackingDict({"provider": "", "model": " present "},
+                                trace=trace, label="envelope")
+        snapshot = dict(envelope)
+
+        with self.assertRaisesRegex(
+            SystemExit,
+            "OpenClaw response omitted observed provider/model provenance",
+        ):
+            openclaw.verified_observation(envelope, "ollama/present")
+
+        self.assertEqual(envelope, snapshot)
+        self.assertEqual(trace, [
+            ("get", "envelope", "provider"),
+            ("get", "envelope", "model"),
+        ])
+
+    def test_observation_preserves_route_rejection_boundaries(self) -> None:
+        cases = (
+            ({"provider": "ollama", "model": "openai/model"}, "ollama/model"),
+            ({"provider": "ollama", "model": "model"}, "openai/model"),
+            ({"provider": "ollama", "model": "model"}, "ollama/"),
+            ({"provider": "ollama", "model": "other"}, "ollama/model"),
+        )
+        for envelope, expected_model in cases:
+            with self.subTest(
+                envelope=envelope, expected_model=expected_model
+            ), self.assertRaisesRegex(SystemExit, "different provider/model"):
+                openclaw.verified_observation(envelope, expected_model)
 
     def test_locked_chat_always_unloads_after_failure(self) -> None:
         events: list[object] = []
