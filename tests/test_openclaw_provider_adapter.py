@@ -449,6 +449,111 @@ class OpenClawProviderAdapterTests(unittest.TestCase):
         self.assertEqual(events[1][1:], ("synthetic:latest", 42.0))
         self.assertEqual(events[2], 2)
 
+    def test_locked_chat_preserves_success_order_arguments_and_timeout_default(self) -> None:
+        events: list[object] = []
+        prompt_package = {"alert": {"id": "lock-order"}}
+        args = SimpleNamespace(timeout=0)
+        settings = self.settings()
+        expected = {"summary": "success"}
+        with tempfile.TemporaryDirectory() as name:
+            lock_path = Path(name) / "nested" / "ollama.lock"
+
+            def validate(model, observed_settings):
+                events.append(("validate", model, observed_settings is settings))
+
+            def flock(_handle, operation):
+                events.append(("flock", operation))
+
+            def infer(observed_package, observed_args, observed_settings, **kwargs):
+                events.append((
+                    "infer", observed_package is prompt_package,
+                    observed_args is args, observed_settings is settings, kwargs,
+                ))
+                return expected
+
+            def unload(observed_settings, model, **kwargs):
+                events.append(("unload", observed_settings is settings, model, kwargs))
+
+            result = openclaw.locked_chat(
+                prompt_package, args, settings,
+                model="ollama/synthetic:latest", reasoning_effort="high",
+                system_prompt_file=Path("/synthetic/system.md"),
+                independent_review=True, boolean_setting=bool,
+                model_pattern=self.MODEL_PATTERN,
+                reasoning_efforts=frozenset({"high"}), validate=validate,
+                lock_path=lock_path, flock=flock, lock_exclusive=11,
+                lock_unlock=22, infer=infer, unload=unload,
+            )
+
+            self.assertIs(result, expected)
+            self.assertEqual([event[0] for event in events], [
+                "validate", "flock", "infer", "unload", "flock",
+            ])
+            self.assertEqual(events[1], ("flock", 11))
+            self.assertEqual(events[2][4], {
+                "model": "ollama/synthetic:latest",
+                "reasoning_effort": "high",
+                "system_prompt_file": Path("/synthetic/system.md"),
+                "independent_review": True,
+            })
+            self.assertEqual(events[3], (
+                "unload", True, "synthetic:latest", {"timeout": 30.0},
+            ))
+            self.assertEqual(events[4], ("flock", 22))
+            self.assertEqual(lock_path.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(lock_path.stat().st_mode & 0o777, 0o600)
+
+    def test_locked_chat_unload_failure_masks_inference_and_still_unlocks(self) -> None:
+        events: list[object] = []
+        with tempfile.TemporaryDirectory() as name:
+            with self.assertRaisesRegex(RuntimeError, "unload failure"):
+                openclaw.locked_chat(
+                    {}, SimpleNamespace(), self.settings(),
+                    model="ollama/synthetic:latest", reasoning_effort="high",
+                    system_prompt_file=None, independent_review=False,
+                    boolean_setting=bool, model_pattern=self.MODEL_PATTERN,
+                    reasoning_efforts=frozenset({"high"}), validate=self.validate,
+                    lock_path=Path(name) / "ollama.lock",
+                    flock=lambda _handle, operation: events.append(operation),
+                    lock_exclusive=1, lock_unlock=2,
+                    infer=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                        SystemExit("inference failure")
+                    ),
+                    unload=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                        RuntimeError("unload failure")
+                    ),
+                )
+        self.assertEqual(events, [1, 2])
+
+    def test_locked_chat_validation_failures_have_no_filesystem_effects(self) -> None:
+        cases = (
+            ({**self.settings(), "openclaw_enabled": False},
+             "ollama/synthetic:latest", "high", "is disabled"),
+            (self.settings(), "ollama/other", "high", "not the enabled"),
+            (self.settings(), "ollama/synthetic:latest", "medium", "not the enabled"),
+        )
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            for index, (settings, model, effort, message) in enumerate(cases):
+                lock_path = root / str(index) / "ollama.lock"
+                with self.subTest(message=message), self.assertRaisesRegex(
+                    SystemExit, message
+                ):
+                    openclaw.locked_chat(
+                        {}, SimpleNamespace(), settings, model=model,
+                        reasoning_effort=effort, system_prompt_file=None,
+                        independent_review=False, boolean_setting=bool,
+                        model_pattern=self.MODEL_PATTERN,
+                        reasoning_efforts=frozenset({"high"}),
+                        validate=lambda *_args: self.fail("validate called"),
+                        lock_path=lock_path,
+                        flock=lambda *_args: self.fail("flock called"),
+                        lock_exclusive=1, lock_unlock=2,
+                        infer=lambda *_args, **_kwargs: self.fail("infer called"),
+                        unload=lambda *_args, **_kwargs: self.fail("unload called"),
+                    )
+                self.assertFalse(lock_path.parent.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
