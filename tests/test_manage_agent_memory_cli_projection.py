@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import importlib.util
 import io
@@ -33,6 +34,27 @@ def load_module(name: str = "manage_agent_memory_cli_projection"):
 memory_cli = load_module()
 
 
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == name
+    )
+    complexity = 1
+    for node in ast.walk(target):
+        if isinstance(node, (ast.If, ast.For, ast.AsyncFor, ast.While)):
+            complexity += 1
+        elif isinstance(node, ast.Try):
+            complexity += len(node.handlers)
+        elif isinstance(node, ast.BoolOp):
+            complexity += max(0, len(node.values) - 1)
+        elif isinstance(node, ast.comprehension):
+            complexity += 1 + len(node.ifs)
+    return target.end_lineno - target.lineno + 1, complexity
+
+
 class TrackingMapping(dict):
     def __init__(self, values):
         super().__init__(values)
@@ -56,6 +78,21 @@ class Recorder:
 
 
 class ManageAgentMemoryCliProjectionTests(unittest.TestCase):
+    def test_decomposed_cli_owners_stay_within_quality_bounds(self):
+        self.assertLessEqual(len(MODULE_PATH.read_text(encoding="utf-8").splitlines()), 250)
+        for name in (
+            "_add_quarantine_parser",
+            "build_parser",
+            "_writeback",
+            "_quarantine",
+            "dispatch",
+            "main",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
+
     def invoke(self, argv, *, loaded=None, quarantine=None):
         recorder = Recorder()
         stdout = io.StringIO()
