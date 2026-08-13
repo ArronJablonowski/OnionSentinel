@@ -65,6 +65,20 @@ def _append_warning(response: dict[str, Any], warning: str) -> None:
     response["_verdict_validation"] = validation
 
 
+def _authorization_audit(supported: bool) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "authorization_supported": supported,
+        "override_applied": False,
+        "required_sources": [
+            "approved_change",
+            "human_adjudication",
+            "operator_assertion",
+            "policy_exception",
+        ],
+    }
+
+
 def apply_authorized_benign(
     response: dict[str, Any],
     prompt_package: dict[str, Any] | None,
@@ -76,15 +90,7 @@ def apply_authorized_benign(
     if str(response.get("activity_disposition") or "").strip().lower() != "authorized_benign":
         return response
     supported = deps.has_authorization_evidence(prompt_package)
-    audit: dict[str, Any] = {
-        "version": 1,
-        "authorization_supported": supported,
-        "override_applied": False,
-        "required_sources": [
-            "approved_change", "human_adjudication", "operator_assertion",
-            "policy_exception",
-        ],
-    }
+    audit = _authorization_audit(supported)
     if supported:
         response["_authorization_evidence_guard"] = audit
         return response
