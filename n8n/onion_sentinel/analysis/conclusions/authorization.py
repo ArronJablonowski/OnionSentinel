@@ -135,6 +135,31 @@ def _policy_class(prompt_package: dict[str, Any]) -> str:
     )
 
 
+def _policy_audit(
+    policy_class: str,
+    authorized: bool,
+    endpoint: bool,
+) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "policy_class": policy_class,
+        "authorization_supported": authorized,
+        "endpoint_attribution_supported": endpoint,
+        "override_applied": False,
+    }
+
+
+def _policy_gap(endpoint: bool) -> str:
+    return (
+        "Policy-sensitive application activity has endpoint attribution "
+        "but no structured local authorization evidence; no-action is not established."
+        if endpoint else
+        "Policy-sensitive application activity lacks trusted endpoint "
+        "attribution and structured local authorization evidence; "
+        "benign/no-action is not established."
+    )
+
+
 def apply_policy_sensitive(
     response: dict[str, Any],
     prompt_package: dict[str, Any] | None,
@@ -152,13 +177,7 @@ def apply_policy_sensitive(
 
     authorized = deps.has_authorization_evidence(prompt_package)
     endpoint = deps.has_trusted_endpoint_evidence(prompt_package)
-    audit: dict[str, Any] = {
-        "version": 1,
-        "policy_class": policy_class,
-        "authorization_supported": authorized,
-        "endpoint_attribution_supported": endpoint,
-        "override_applied": False,
-    }
+    audit = _policy_audit(policy_class, authorized, endpoint)
     if authorized:
         response["_policy_sensitive_activity_guard"] = audit
         return response
@@ -175,15 +194,7 @@ def apply_policy_sensitive(
         deps,
     )
     _derive_outcome(response, deps)
-    gap = (
-        "Policy-sensitive application activity lacks trusted endpoint "
-        "attribution and structured local authorization evidence; "
-        "benign/no-action is not established."
-        if not endpoint else
-        "Policy-sensitive application activity has endpoint attribution "
-        "but no structured local authorization evidence; no-action is not established."
-    )
-    _append_gap(response, gap)
+    _append_gap(response, _policy_gap(endpoint))
     _append_warning(
         response,
         "unsupported policy-sensitive benign/no_action claim was downgraded",
