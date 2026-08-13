@@ -39,17 +39,19 @@ def output_text(envelope: dict[str, Any]) -> str:
     """Extract only text outputs from OpenClaw's documented JSON envelope."""
     outputs = envelope.get("outputs")
     if isinstance(outputs, list):
-        texts = [
-            str(item.get("text") or "")
-            for item in outputs
-            if isinstance(item, dict) and item.get("text") is not None
-        ]
+        texts = [_output_item_text(item) for item in outputs if isinstance(item, dict)]
         if any(texts):
             return "\n".join(text for text in texts if text)
     for key in ("text", "output", "response"):
         if isinstance(envelope.get(key), str) and envelope[key].strip():
             return envelope[key]
     raise SystemExit("OpenClaw completed without a text model output")
+
+
+def _output_item_text(item: dict[str, Any]) -> str:
+    if item.get("text") is None:
+        return ""
+    return str(item.get("text") or "")
 
 
 def verified_observation(
