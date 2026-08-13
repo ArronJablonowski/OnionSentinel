@@ -329,20 +329,19 @@ def collect_snapshot(
     )
 
 
-def failed_state(
-    previous_state: Dict[str, Any],
-    now: dt.datetime,
-    error: str,
-    source_statuses: Optional[Dict[str, Dict[str, Any]]] = None,
-) -> Dict[str, Any]:
-    previous = validate_state(previous_state)
-    prior_collection = previous["collection"]
-    has_snapshot = bool(
+def _has_complete_snapshot(previous: Dict[str, Any]) -> bool:
+    collection = previous["collection"]
+    return bool(
         previous["updated_at"]
-        and prior_collection["last_success_at"]
-        and previous["updated_at"] == prior_collection["last_success_at"]
-        and prior_collection["window"]
+        and collection["last_success_at"]
+        and previous["updated_at"] == collection["last_success_at"]
+        and collection["window"]
     )
+
+
+def _failed_source_statuses(
+    source_statuses: Optional[Dict[str, Dict[str, Any]]],
+) -> Dict[str, Dict[str, Any]]:
     statuses = {
         source: _empty_source_status()
         for source in SOURCES
@@ -351,6 +350,19 @@ def failed_state(
         for source in SOURCES:
             if source in source_statuses:
                 statuses[source] = source_statuses[source]
+    return statuses
+
+
+def failed_state(
+    previous_state: Dict[str, Any],
+    now: dt.datetime,
+    error: str,
+    source_statuses: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    previous = validate_state(previous_state)
+    prior_collection = previous["collection"]
+    has_snapshot = _has_complete_snapshot(previous)
+    statuses = _failed_source_statuses(source_statuses)
     stamp = format_timestamp(now)
     return validate_state(
         {
