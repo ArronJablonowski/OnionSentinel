@@ -49,6 +49,114 @@ def read_json(path: Path, **_kwargs):
 
 
 class HermesProviderAdapterTests(unittest.TestCase):
+    def invoke_isolated(self, run_command, trace, **overrides):
+        values = {
+            "serialized": '{"bounded":true}',
+            "args": SimpleNamespace(timeout=15.0, max_response_bytes=4096),
+            "model": "gpt-5.6-sol",
+            "executable": "/usr/local/bin/hermes",
+            "dedicated_auth": {"providers": {"openai-codex": {"token": "redacted"}}},
+            "atomic_write_json": lambda path, value: (
+                trace.append(("atomic", path.name)),
+                path.write_text(json.dumps(value), encoding="utf-8"),
+            )[-1],
+            "run_command": run_command,
+            "sanitized_env": lambda _executable, **kwargs: {
+                "HOME": kwargs["extra"]["HOME"]
+            },
+            "load_dedicated_auth": lambda path: (
+                trace.append(("load", path.name)),
+                {"providers": {"openai-codex": {"token": "rotated"}}},
+            )[-1],
+            "write_dedicated_auth": lambda path, value: trace.append(
+                ("write", path.name, value["providers"]["openai-codex"]["token"])
+            ),
+            "auth_file": Path("/private/tmp/synthetic-hermes-auth.json"),
+            "process_error": ProcessError,
+            "artifact_error": ArtifactError,
+            "summarize_failure": cli_common.summarize_harness_failure,
+            "verify_usage": lambda path, **kwargs: (
+                trace.append(("verify", path.name, kwargs["expected_model"])),
+                {"attested": True},
+            )[-1],
+            "extract_json": lambda value: (
+                trace.append(("extract", value)), json.loads(value)
+            )[-1],
+            "max_stderr_bytes": 1024,
+        }
+        values.update(overrides)
+        return hermes._invoke_isolated(**values)
+
+    def test_isolated_invocation_persists_rotation_before_process_error(self) -> None:
+        trace: list[object] = []
+
+        def run(*_args, **_kwargs):
+            trace.append("run")
+            raise ProcessError("bounded process failure")
+
+        with self.assertRaisesRegex(
+            SystemExit, "Hermes Agent analysis failed: bounded process failure"
+        ) as raised:
+            self.invoke_isolated(run, trace)
+        self.assertIsInstance(raised.exception.__cause__, ProcessError)
+        self.assertEqual(
+            trace[1:],
+            ["run", ("load", "auth.json"),
+             ("write", "synthetic-hermes-auth.json", "rotated")],
+        )
+
+    def test_rotation_failure_precedes_the_original_invocation_error(self) -> None:
+        trace: list[object] = []
+
+        def fail_write(_path, _value):
+            trace.append("write-failed")
+            raise ArtifactError("synthetic rotation failure")
+
+        with self.assertRaisesRegex(
+            SystemExit, "credential rotation could not be persisted"
+        ) as raised:
+            self.invoke_isolated(
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    FileNotFoundError("missing")
+                ),
+                trace,
+                write_dedicated_auth=fail_write,
+            )
+        self.assertIsInstance(raised.exception.__cause__, ArtifactError)
+        self.assertEqual(trace[-2:], [("load", "auth.json"), "write-failed"])
+
+    def test_success_verifies_usage_before_extracting_and_cleans_temp_root(self) -> None:
+        trace: list[object] = []
+        work_dirs: list[Path] = []
+
+        def run(command, **kwargs):
+            trace.append("run")
+            work_dirs.append(Path(kwargs["cwd"]))
+            self.assertIn("--safe-mode", command)
+            self.assertEqual(kwargs["timeout_seconds"], 15.0)
+            self.assertEqual(kwargs["max_stdout_bytes"], 4096)
+            self.assertEqual(kwargs["max_stderr_bytes"], 1024)
+            return SimpleNamespace(returncode=0, stdout='{"summary":"ok"}', stderr="")
+
+        response, usage = self.invoke_isolated(run, trace)
+        self.assertEqual(response, {"summary": "ok"})
+        self.assertEqual(usage, {"attested": True})
+        self.assertEqual(trace[-2:], [
+            ("verify", "usage.json", "gpt-5.6-sol"),
+            ("extract", '{"summary":"ok"}'),
+        ])
+        self.assertFalse(work_dirs[0].exists())
+
+    def test_unexpected_exception_is_reraised_after_rotation(self) -> None:
+        trace: list[object] = []
+        failure = KeyboardInterrupt("synthetic interrupt")
+        with self.assertRaises(KeyboardInterrupt) as raised:
+            self.invoke_isolated(
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(failure), trace
+            )
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(trace[-1], ("write", "synthetic-hermes-auth.json", "rotated"))
+
     def test_provider_credentials_preserve_access_order_identity_and_empty_admission(self) -> None:
         trace: list[object] = []
         provider_state = {"access_token": "dedicated"}
