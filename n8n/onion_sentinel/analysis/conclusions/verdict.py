@@ -168,9 +168,7 @@ def normalize(
     """Normalize factored fields and reconcile the compatibility outcome."""
     raw_outcome = response.get("detection_outcome")
     canonical = normalize_outcome(raw_outcome, allowed=outcome_values)
-    invalid: dict[str, Any] = {}
-    if _token(raw_outcome) not in set(outcome_values) | set(ALIASES):
-        invalid["detection_outcome"] = raw_outcome
+    invalid = _outcome_invalid(raw_outcome, outcome_values)
     factors = legacy_factors(
         canonical,
         escalation_needed=boolean_setting(response.get("escalation_needed")),
@@ -178,30 +176,40 @@ def normalize(
     supplied, supplied_invalid = _apply_supplied(
         response,
         factors,
-        enum_fields={
-            "event_status": event_status_values,
-            "detection_validity": validity_values,
-            "activity_disposition": disposition_values,
-            "handling": handling_values,
-        },
+        enum_fields=_enum_fields(
+            event_status_values, validity_values,
+            disposition_values, handling_values,
+        ),
     )
     invalid.update(supplied_invalid)
     derived = derive_outcome(factors)
     contradictions = _contradictions(factors, canonical)
-    warnings: list[str] = []
-    if supplied and derived != canonical:
-        mismatch = f"factored verdict derives {derived}, but model supplied {canonical}"
-        if len(supplied) == len(factored_keys) and not invalid:
-            warnings.append(mismatch)
-        else:
-            contradictions.insert(0, mismatch)
-    source = "legacy_derived" if not supplied else (
-        "model_factored" if len(supplied) == len(factored_keys) else "hybrid"
+    warnings = _mismatch_findings(
+        supplied, derived, canonical, factored_keys, invalid, contradictions
     )
-    canonical_outcome = derived if supplied else canonical
+    source, canonical_outcome = _verdict_source_and_outcome(
+        supplied, factored_keys, derived, canonical
+    )
     response.update(factors)
     response["detection_outcome"] = canonical_outcome
-    response["_verdict_validation"] = {
+    response["_verdict_validation"] = _validation_projection(
+        source, raw_outcome, canonical_outcome, derived,
+        supplied, invalid, contradictions, warnings,
+    )
+    return response
+
+
+def _validation_projection(
+    source: str,
+    raw_outcome: Any,
+    canonical_outcome: str,
+    derived: str,
+    supplied: list[str],
+    invalid: Mapping[str, Any],
+    contradictions: list[str],
+    warnings: list[str],
+) -> dict[str, Any]:
+    return {
         "version": 1,
         "source": source,
         "model_detection_outcome": raw_outcome,
@@ -213,4 +221,56 @@ def normalize(
         "warnings": warnings,
         "material_contradiction": bool(contradictions or invalid),
     }
-    return response
+
+
+def _outcome_invalid(
+    raw_outcome: Any,
+    outcome_values: Collection[str],
+) -> dict[str, Any]:
+    if _token(raw_outcome) not in set(outcome_values) | set(ALIASES):
+        return {"detection_outcome": raw_outcome}
+    return {}
+
+
+def _enum_fields(
+    event_status_values: Collection[str],
+    validity_values: Collection[str],
+    disposition_values: Collection[str],
+    handling_values: Collection[str],
+) -> dict[str, Collection[str]]:
+    return {
+        "event_status": event_status_values,
+        "detection_validity": validity_values,
+        "activity_disposition": disposition_values,
+        "handling": handling_values,
+    }
+
+
+def _verdict_source_and_outcome(
+    supplied: list[str],
+    factored_keys: Collection[str],
+    derived: str,
+    canonical: str,
+) -> tuple[str, str]:
+    source = "legacy_derived" if not supplied else (
+        "model_factored" if len(supplied) == len(factored_keys) else "hybrid"
+    )
+    return source, derived if supplied else canonical
+
+
+def _mismatch_findings(
+    supplied: list[str],
+    derived: str,
+    canonical: str,
+    factored_keys: Collection[str],
+    invalid: Mapping[str, Any],
+    contradictions: list[str],
+) -> list[str]:
+    warnings: list[str] = []
+    if supplied and derived != canonical:
+        mismatch = f"factored verdict derives {derived}, but model supplied {canonical}"
+        if len(supplied) == len(factored_keys) and not invalid:
+            warnings.append(mismatch)
+        else:
+            contradictions.insert(0, mismatch)
+    return warnings
