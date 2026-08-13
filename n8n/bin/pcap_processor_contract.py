@@ -165,32 +165,48 @@ def safe_filename(value: object) -> str:
     return (cleaned or "pcap")[:140]
 
 
-def configured_maxmind_db_paths(settings_path: Path = DEFAULT_AI_SETTINGS) -> dict[str, Path]:
-    """Resolve the three local MMDB paths while migrating the City-only key.
-
-    Environment overrides remain useful for ephemeral deployments. The legacy
-    MAXMIND_GEOIP_DB_PATH and maxmind_geoip_db_path values apply only to City so
-    an existing operator configuration is never silently discarded.
-    """
+def _maxmind_settings(settings_path: Path) -> dict[str, Any]:
     try:
         settings = json.loads(settings_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         settings = {}
-    settings = settings if isinstance(settings, dict) else {}
-    legacy_city = str(
+    return settings if isinstance(settings, dict) else {}
+
+
+def _legacy_city_path(settings: dict[str, Any]) -> str:
+    return str(
         os.environ.get("MAXMIND_GEOIP_DB_PATH")
         or settings.get("maxmind_geoip_db_path")
         or ""
     ).strip()
-    paths: dict[str, Path] = {}
-    for database_type, default_path in DEFAULT_MAXMIND_DBS.items():
-        environment_key = f"MAXMIND_GEOIP_{database_type.upper()}_DB_PATH"
-        setting_key = f"maxmind_geoip_{database_type}_db_path"
-        configured = str(os.environ.get(environment_key) or settings.get(setting_key) or "").strip()
-        if database_type == "city" and not configured:
-            configured = legacy_city
-        paths[database_type] = Path(configured or default_path).expanduser()
-    return paths
+
+
+def _configured_maxmind_path(
+    database_type: str,
+    default_path: Path,
+    settings: dict[str, Any],
+    legacy_city: str,
+) -> Path:
+    environment_key = f"MAXMIND_GEOIP_{database_type.upper()}_DB_PATH"
+    setting_key = f"maxmind_geoip_{database_type}_db_path"
+    configured = str(
+        os.environ.get(environment_key) or settings.get(setting_key) or ""
+    ).strip()
+    if database_type == "city" and not configured:
+        configured = legacy_city
+    return Path(configured or default_path).expanduser()
+
+
+def configured_maxmind_db_paths(settings_path: Path = DEFAULT_AI_SETTINGS) -> dict[str, Path]:
+    """Resolve the three local MMDB paths while migrating the City-only key."""
+    settings = _maxmind_settings(settings_path)
+    legacy_city = _legacy_city_path(settings)
+    return {
+        database_type: _configured_maxmind_path(
+            database_type, default_path, settings, legacy_city
+        )
+        for database_type, default_path in DEFAULT_MAXMIND_DBS.items()
+    }
 
 
 def configured_maxmind_db_path(settings_path: Path = DEFAULT_AI_SETTINGS) -> Path:
@@ -245,25 +261,28 @@ def _maxmind_name(record: object) -> str:
     return sanitize_evidence_text(names.get("en"), 160) if isinstance(names, dict) else ""
 
 
-def compact_maxmind_record(address: str, record: dict[str, Any], roles: list[str], count: int) -> dict[str, Any]:
-    """Keep only useful offline GeoIP context; raw MMDB records stay local."""
-    country = record.get("country") if isinstance(record.get("country"), dict) else {}
-    registered = record.get("registered_country") if isinstance(record.get("registered_country"), dict) else {}
-    continent = record.get("continent") if isinstance(record.get("continent"), dict) else {}
-    city = record.get("city") if isinstance(record.get("city"), dict) else {}
-    location = record.get("location") if isinstance(record.get("location"), dict) else {}
-    subdivisions = record.get("subdivisions") if isinstance(record.get("subdivisions"), list) else []
-    subdivision = subdivisions[0] if subdivisions and isinstance(subdivisions[0], dict) else {}
-    output: dict[str, Any] = {
-        "ip": address,
-        "roles": sorted(set(roles)),
-        "packet_observations": count,
-        "continent": _maxmind_name(continent),
+def _maxmind_section(record: dict[str, Any], name: str) -> dict[str, Any]:
+    value = record.get(name)
+    return value if isinstance(value, dict) else {}
+
+
+def _maxmind_subdivision(record: dict[str, Any]) -> dict[str, Any]:
+    subdivisions = record.get("subdivisions")
+    values = subdivisions if isinstance(subdivisions, list) else []
+    return values[0] if values and isinstance(values[0], dict) else {}
+
+
+def _compact_maxmind_fields(record: dict[str, Any]) -> dict[str, Any]:
+    country = _maxmind_section(record, "country")
+    registered = _maxmind_section(record, "registered_country")
+    location = _maxmind_section(record, "location")
+    return {
+        "continent": _maxmind_name(_maxmind_section(record, "continent")),
         "country_iso_code": sanitize_evidence_text(country.get("iso_code"), 8),
         "country": _maxmind_name(country),
         "registered_country_iso_code": sanitize_evidence_text(registered.get("iso_code"), 8),
-        "subdivision": _maxmind_name(subdivision),
-        "city": _maxmind_name(city),
+        "subdivision": _maxmind_name(_maxmind_subdivision(record)),
+        "city": _maxmind_name(_maxmind_section(record, "city")),
         "time_zone": sanitize_evidence_text(location.get("time_zone"), 80),
         "accuracy_radius_km": location.get("accuracy_radius"),
         "latitude": location.get("latitude"),
@@ -271,7 +290,25 @@ def compact_maxmind_record(address: str, record: dict[str, Any], roles: list[str
         "autonomous_system_number": record.get("autonomous_system_number"),
         "autonomous_system_organization": sanitize_evidence_text(record.get("autonomous_system_organization"), 200),
     }
-    return {key: value for key, value in output.items() if value not in (None, "", [], {})}
+
+
+def _without_empty_values(values: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in values.items()
+        if value not in (None, "", [], {})
+    }
+
+
+def compact_maxmind_record(address: str, record: dict[str, Any], roles: list[str], count: int) -> dict[str, Any]:
+    """Keep only useful offline GeoIP context; raw MMDB records stay local."""
+    output: dict[str, Any] = {
+        "ip": address,
+        "roles": sorted(set(roles)),
+        "packet_observations": count,
+    }
+    output.update(_compact_maxmind_fields(record))
+    return _without_empty_values(output)
 
 
 def maxmind_geoip_summary(
