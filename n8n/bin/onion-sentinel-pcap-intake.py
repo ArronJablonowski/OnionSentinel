@@ -24,8 +24,7 @@ from disk_capacity import DiskCapacityError, require_runtime_capacity
 
 REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ROOT = Path(os.environ.get(
-    "ONION_SENTINEL_PCAP_INTAKE_ROOT",
-    str(Path.home() / "n8n-local" / "pcap-evidence" / "artifacts"),
+    "ONION_SENTINEL_PCAP_INTAKE_ROOT", str(Path.home() / "n8n-local" / "pcap-evidence" / "artifacts"),
 ))
 RESERVATION_NAME = ".onion-sentinel-reservation.json"
 MAX_ARTIFACT_BYTES = max(1, int(os.environ.get(
@@ -165,22 +164,26 @@ def cleanup(request_id: str) -> int:
     return 0
 
 
-def validate_rsync(args: list[str]) -> list[str]:
+def _admit_rsync_mode(args: list[str]) -> None:
     if not args or Path(args[0]).name != "rsync" or "--server" not in args:
         reject("only rsync server mode is permitted")
     if "--sender" in args or "--daemon" in args:
         reject("only inbound rsync receiver mode is permitted")
     if any(arg in {"--delete", "--remove-source-files", "--rsync-path"} for arg in args):
         reject("destructive or command-changing rsync options are not permitted")
-    raw_target = args[-1].rstrip("/")
+
+
+def _resolve_rsync_target(raw_target: str) -> Path:
+    raw_target = raw_target.rstrip("/")
     target = Path(raw_target)
-    if target.is_absolute():
-        resolved = target.resolve(strict=False)
-    else:
-        resolved = (Path.home() / target).resolve(strict=False)
+    resolved = target.resolve(strict=False) if target.is_absolute() else (Path.home() / target).resolve(strict=False)
     root = ROOT.resolve(strict=False)
     if resolved.parent != root or not REQUEST_ID.fullmatch(resolved.name):
         reject("rsync target is outside a single request directory")
+    return resolved
+
+
+def _admit_rsync_capacity(args: list[str], resolved: Path) -> None:
     request_id = resolved.name
     reservation = load_reservation(request_id)
     expected_size = int(reservation["expected_size"])
@@ -193,33 +196,54 @@ def validate_rsync(args: list[str]) -> list[str]:
     )
     if not any(arg.startswith("--max-size=") for arg in args):
         args.insert(-2, f"--max-size={expected_size}")
+
+
+def validate_rsync(args: list[str]) -> list[str]:
+    _admit_rsync_mode(args)
+    _admit_rsync_capacity(args, _resolve_rsync_target(args[-1]))
     return args
 
 
-def main() -> int:
+def _original_command() -> list[str]:
     original = os.environ.get("SSH_ORIGINAL_COMMAND", "")
     if not original:
         reject("interactive sessions are not permitted")
     try:
-        args = shlex.split(original)
+        return shlex.split(original)
     except ValueError as exc:
         reject(f"invalid command: {exc}")
-    if args[:1] == ["onion-sentinel-pcap-intake"]:
-        if len(args) == 4 and args[1] == "prepare":
-            return prepare(args[2], args[3])
-        if len(args) == 6 and args[1] == "verify":
-            return verify(args[2], args[3], args[4], args[5])
-        if len(args) == 3 and args[1] == "cleanup":
-            return cleanup(args[2])
-        reject("unsupported intake control command")
-    validated = validate_rsync(args)
+
+
+def _dispatch_control(args: list[str]) -> int:
+    if len(args) == 4 and args[1] == "prepare":
+        return prepare(args[2], args[3])
+    if len(args) == 6 and args[1] == "verify":
+        return verify(args[2], args[3], args[4], args[5])
+    if len(args) == 3 and args[1] == "cleanup":
+        return cleanup(args[2])
+    reject("unsupported intake control command")
+
+
+def _rsync_executable() -> str:
     rsync = next((path for path in ("/opt/homebrew/bin/rsync", "/usr/local/bin/rsync", "/usr/bin/rsync") if Path(path).is_file()), None)
     if not rsync:
         rsync = shutil.which("rsync")
     if not rsync:
         reject("rsync is unavailable")
+    return rsync
+
+
+def _exec_rsync(validated: list[str]) -> int:
+    rsync = _rsync_executable()
     os.execv(rsync, [rsync, *validated[1:]])
     return 127
+
+
+def main() -> int:
+    args = _original_command()
+    if args[:1] == ["onion-sentinel-pcap-intake"]:
+        return _dispatch_control(args)
+    return _exec_rsync(validate_rsync(args))
 
 
 if __name__ == "__main__":
