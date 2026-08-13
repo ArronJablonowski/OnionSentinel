@@ -60,7 +60,7 @@ class TraceDict(dict):
 
 
 class DhcpAssetContractValidationTests(unittest.TestCase):
-    def test_signatures_and_current_complexity_debt_are_stable(self) -> None:
+    def test_signatures_and_changed_functions_are_within_budget(self) -> None:
         self.assertEqual(
             str(inspect.signature(CONTRACT._validate_accounting)),
             "(payload: 'dict', observations: 'object') -> 'list[object]'",
@@ -70,8 +70,21 @@ class DhcpAssetContractValidationTests(unittest.TestCase):
             "(payload: 'dict', expected_window: 'dict | None') -> "
             "'tuple[dt.datetime, dt.datetime]'",
         )
-        self.assertEqual(function_metrics("_validate_accounting"), (21, 11))
-        self.assertEqual(function_metrics("_validated_window"), (35, 13))
+        for name in (
+            "_validate_accounting",
+            "_validated_observations",
+            "_valid_nonnegative_integer",
+            "_valid_returned_count",
+            "_validated_window",
+            "_validate_query_audit",
+            "_response_window",
+            "_validate_window_bounds",
+            "_validate_expected_window",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
 
     def valid_accounting(self, observations=None):
         observations = [{"n": 1}] if observations is None else observations

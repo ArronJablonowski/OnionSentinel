@@ -39,33 +39,59 @@ def format_timestamp(value: dt.datetime) -> str:
 
 
 def _validate_accounting(payload: dict, observations: object) -> list[object]:
-    if (
-        not isinstance(observations, list)
-        or len(observations) > MAX_RESPONSE_OBSERVATIONS
-    ):
-        raise ValueError("relay response contains an invalid observation list")
+    validated = _validated_observations(observations)
     if payload.get("status") not in {"ok", "partial"}:
         raise ValueError("relay response contains an invalid status")
     hits_total = payload.get("hits_total")
     returned = payload.get("returned")
     if (
-        isinstance(hits_total, bool)
-        or not isinstance(hits_total, int)
-        or hits_total < 0
-        or isinstance(returned, bool)
-        or not isinstance(returned, int)
-        or returned != len(observations)
+        not _valid_nonnegative_integer(hits_total)
+        or not _valid_returned_count(returned, validated)
         or not isinstance(payload.get("truncated"), bool)
     ):
         raise ValueError("relay response contains invalid result accounting")
+    return validated
+
+
+def _validated_observations(observations: object) -> list[object]:
+    if (
+        not isinstance(observations, list)
+        or len(observations) > MAX_RESPONSE_OBSERVATIONS
+    ):
+        raise ValueError("relay response contains an invalid observation list")
     return observations
+
+
+def _valid_nonnegative_integer(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int)
+        and value >= 0
+    )
+
+
+def _valid_returned_count(value: object, observations: list[object]) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int)
+        and value == len(observations)
+    )
 
 
 def _validated_window(
     payload: dict,
     expected_window: dict | None,
 ) -> tuple[dt.datetime, dt.datetime]:
-    audit = payload.get("query_audit")
+    _validate_query_audit(payload.get("query_audit"))
+    response_window = _response_window(payload.get("window"))
+    window_start = parse_timestamp(response_window["start"])
+    window_end = parse_timestamp(response_window["end"])
+    _validate_window_bounds(window_start, window_end)
+    _validate_expected_window(window_start, window_end, expected_window)
+    return window_start, window_end
+
+
+def _validate_query_audit(audit: object) -> None:
     if (
         not isinstance(audit, dict)
         or audit.get("index") != "logs-zeek-so"
@@ -75,19 +101,33 @@ def _validated_window(
         )
     ):
         raise ValueError("relay response contains an invalid fixed-query audit")
-    response_window = payload.get("window")
+
+
+def _response_window(response_window: object) -> dict:
     if (
         not isinstance(response_window, dict)
         or set(response_window) != {"start", "end"}
     ):
         raise ValueError("relay response contains an invalid query window")
-    window_start = parse_timestamp(response_window["start"])
-    window_end = parse_timestamp(response_window["end"])
+    return response_window
+
+
+def _validate_window_bounds(
+    window_start: dt.datetime,
+    window_end: dt.datetime,
+) -> None:
     if (
         window_start >= window_end
         or window_end - window_start > dt.timedelta(hours=24)
     ):
         raise ValueError("relay response query window is out of bounds")
+
+
+def _validate_expected_window(
+    window_start: dt.datetime,
+    window_end: dt.datetime,
+    expected_window: dict | None,
+) -> None:
     if expected_window is not None and (
         format_timestamp(window_start)
         != format_timestamp(parse_timestamp(expected_window["start"]))
@@ -95,7 +135,6 @@ def _validated_window(
         != format_timestamp(parse_timestamp(expected_window["end"]))
     ):
         raise ValueError("relay response query window does not match the request")
-    return window_start, window_end
 
 
 def _normalize_observation(
