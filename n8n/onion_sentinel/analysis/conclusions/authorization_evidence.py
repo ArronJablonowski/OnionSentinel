@@ -159,21 +159,29 @@ def _ports(value: dict[str, Any], key: str, *, maximum: int) -> list[int] | None
     return normalized
 
 
+def _port_range(item: Any) -> list[int] | None:
+    valid = (
+        isinstance(item, list)
+        and len(item) == 2
+        and all(
+            isinstance(part, int) and not isinstance(part, bool)
+            for part in item
+        )
+        and 1 <= item[0] <= item[1] <= 65535
+    )
+    return list(item) if valid else None
+
+
 def _port_ranges(value: dict[str, Any]) -> list[list[int]] | None:
     raw = value.get("destination_port_ranges")
     if not isinstance(raw, list) or len(raw) > 20:
         return None
     normalized: list[list[int]] = []
     for item in raw:
-        valid = (
-            isinstance(item, list) and len(item) == 2
-            and all(isinstance(part, int) and not isinstance(part, bool) for part in item)
-            and 1 <= item[0] <= item[1] <= 65535
-            and item not in normalized
-        )
-        if not valid:
+        port_range = _port_range(item)
+        if port_range is None or port_range in normalized:
             return None
-        normalized.append(list(item))
+        normalized.append(port_range)
     return normalized
 
 
