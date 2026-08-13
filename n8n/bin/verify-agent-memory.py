@@ -26,6 +26,21 @@ DEFAULT_CONFIG_DIR = HOME / "n8n-local" / "config"
 DEFAULT_MEMORY_DIR = HOME / "n8n-local" / "soc-alerts" / "agent-memory"
 
 
+def _managed_memory_issues(text: str) -> list[str]:
+    if text.count(MANAGED_START) != 1 or text.count(MANAGED_END) != 1:
+        return ["invalid-managed-section"]
+    return []
+
+
+def _prompt_issues(text: str) -> list[str]:
+    lowered = text.lower()
+    return [
+        f"prompt-missing-{term}"
+        for term in ("memory", "shared", "memory_candidates")
+        if term not in lowered
+    ]
+
+
 def _file_contract(path: Path, *, managed_memory: bool = False) -> list[str]:
     issues: list[str] = []
     if not path.is_file():
@@ -38,15 +53,12 @@ def _file_contract(path: Path, *, managed_memory: bool = False) -> list[str]:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return issues + ["read-failed"]
-    if managed_memory:
-        if text.count(MANAGED_START) != 1 or text.count(MANAGED_END) != 1:
-            issues.append("invalid-managed-section")
-    else:
-        lowered = text.lower()
-        for term in ("memory", "shared", "memory_candidates"):
-            if term not in lowered:
-                issues.append(f"prompt-missing-{term}")
-    return issues
+    content_issues = (
+        _managed_memory_issues(text)
+        if managed_memory
+        else _prompt_issues(text)
+    )
+    return issues + content_issues
 
 
 def verify_setup(config_dir: Path, memory_dir: Path) -> dict[str, Any]:
