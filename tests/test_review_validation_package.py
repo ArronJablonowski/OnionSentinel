@@ -107,6 +107,72 @@ class ReviewValidationPackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewError, "no current corroborating"):
             validation.validate(response(), package, dependencies())
 
+    def test_narrative_domains_admit_domains_and_dotted_hosts_case_insensitively(self) -> None:
+        allowed = {
+            ("domain", "Example.COM"),
+            ("host", "Api.COM"),
+            ("host", "bare-host"),
+        }
+        errors: list[str] = []
+
+        narrative, admitted = validation._narrative_domains(
+            "example.com and API.COM were observed",
+            allowed,
+            (set(), set(), set()),
+            errors,
+            dependencies(),
+        )
+
+        self.assertEqual(narrative, {"example.com", "api.com"})
+        self.assertEqual(admitted, {"example.com", "api.com"})
+        self.assertEqual(errors, [])
+
+    def test_narrative_domains_exclude_each_non_domain_catalog(self) -> None:
+        deps = dependencies(
+            known_field_paths=frozenset({"alert.signature"}),
+            non_domain_suffixes=frozenset({"local"}),
+        )
+        errors: list[str] = []
+
+        narrative, allowed = validation._narrative_domains(
+            "alert.signature taxonomy.token artifact.bin shorthand.rule host.local foreign.example",
+            set(),
+            ({"taxonomy.token"}, {"artifact.bin"}, {"shorthand.rule"}),
+            errors,
+            deps,
+        )
+
+        self.assertEqual(narrative, {"foreign.example"})
+        self.assertEqual(allowed, set())
+        self.assertEqual(
+            errors,
+            ["reviewer introduced foreign domain or FQDN value(s): foreign.example"],
+        )
+
+    def test_narrative_domains_sort_deduplicate_and_cap_foreign_error(self) -> None:
+        candidates = " ".join(
+            ["z.example", "a.example", "z.example"]
+            + [f"d{index}.example" for index in range(12)]
+        )
+        errors: list[str] = []
+
+        narrative, _ = validation._narrative_domains(
+            candidates,
+            set(),
+            (set(), set(), set()),
+            errors,
+            dependencies(),
+        )
+
+        self.assertEqual(len(narrative), 14)
+        self.assertEqual(
+            errors,
+            [
+                "reviewer introduced foreign domain or FQDN value(s): "
+                + ",".join(sorted(narrative)[:10])
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
