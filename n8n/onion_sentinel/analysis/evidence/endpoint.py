@@ -136,16 +136,8 @@ def _relevant_live_result(
     )
 
 
-def _live_accumulator_has_evidence(
-    value: Any,
-    policy: Policy,
-    dependencies: Dependencies,
-) -> bool:
-    if not isinstance(value, dict):
-        return False
-    batches = value.get("batches")
-    results = value.get("results")
-    provenance_ok = (
+def _valid_live_batches(value: dict[str, Any], batches: Any, policy: Policy) -> bool:
+    return (
         value.get("schema") == policy.live_schema
         and value.get("read_only") is True
         and isinstance(batches, list)
@@ -155,6 +147,18 @@ def _live_accumulator_has_evidence(
             for item in batches
         )
     )
+
+
+def _live_accumulator_has_evidence(
+    value: Any,
+    policy: Policy,
+    dependencies: Dependencies,
+) -> bool:
+    if not isinstance(value, dict):
+        return False
+    batches = value.get("batches")
+    results = value.get("results")
+    provenance_ok = _valid_live_batches(value, batches, policy)
     return bool(
         provenance_ok
         and value.get("complete") is True
