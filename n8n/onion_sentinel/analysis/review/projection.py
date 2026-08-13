@@ -25,22 +25,35 @@ def _completed_shadow_result(adjudication: Any) -> dict[str, Any] | None:
     return result
 
 
+def _validation_allows_projection(validation: Any) -> bool:
+    return bool(
+        isinstance(validation, dict)
+        and validation.get("valid") is True
+        and validation.get("automation_authorized") is False
+    )
+
+
+def _remaining_disagreements(result: dict[str, Any]) -> set[str]:
+    remaining = result.get("remaining_disagreements")
+    if not isinstance(remaining, list):
+        return set()
+    return {
+        str(item or "").strip()
+        for item in remaining
+        if str(item or "").strip()
+    }
+
+
 def _validated_decision(adjudication: Any) -> tuple[str, dict[str, Any]] | None:
     result = _completed_shadow_result(adjudication)
     if result is None:
         return None
     validation = result.get("_adjudication_contract_validation")
     decision = str(result.get("decision") or "").strip().lower()
-    remaining = {
-        str(item or "").strip()
-        for item in result.get("remaining_disagreements", [])
-        if str(item or "").strip()
-    } if isinstance(result.get("remaining_disagreements"), list) else set()
     if (
-        not isinstance(validation, dict) or validation.get("valid") is not True
-        or validation.get("automation_authorized") is not False
+        not _validation_allows_projection(validation)
         or decision not in {"primary_supported", "reviewer_supported"}
-        or remaining
+        or _remaining_disagreements(result)
     ):
         return None
     return decision, result
