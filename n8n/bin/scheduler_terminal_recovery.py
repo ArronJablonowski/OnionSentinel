@@ -192,7 +192,7 @@ def _load_runs(
     ]
 
 
-def _run_identity_matches(
+def _run_route_matches(
     job: RecoveryJob,
     run: RecoveryRun,
     provider_lane: str,
@@ -208,12 +208,28 @@ def _run_identity_matches(
     ).strip()
     if expected_route and expected_route != run.assigned_route:
         return False
+    return True
+
+
+def _payload_alerts_match(job: RecoveryJob, run: RecoveryRun) -> bool:
     payload_alerts = {
         str(job.payload.get(key) or "").strip()
         for key in ("alert_id", "representative_alert_id")
         if str(job.payload.get(key) or "").strip()
     }
     return not payload_alerts or payload_alerts == {run.alert_id}
+
+
+def _run_identity_matches(
+    job: RecoveryJob,
+    run: RecoveryRun,
+    provider_lane: str,
+) -> bool:
+    return _run_route_matches(
+        job,
+        run,
+        provider_lane,
+    ) and _payload_alerts_match(job, run)
 
 
 def _incident_commit_matches(
