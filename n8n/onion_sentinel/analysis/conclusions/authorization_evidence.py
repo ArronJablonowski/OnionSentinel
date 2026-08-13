@@ -118,6 +118,16 @@ def _valid_ip(text: str) -> bool:
     return True
 
 
+def _canonical_string(
+    item: Any,
+    validator: Callable[[str], bool],
+) -> str | None:
+    text = str(item or "").strip().lower()
+    if not text or text != item or not validator(text):
+        return None
+    return text
+
+
 def _strings(
     value: dict[str, Any], key: str, *, maximum: int, required: bool,
     validator: Callable[[str], bool],
@@ -127,8 +137,8 @@ def _strings(
         return None
     normalized: list[str] = []
     for item in raw:
-        text = str(item or "").strip().lower()
-        if not text or text != item or not validator(text) or text in normalized:
+        text = _canonical_string(item, validator)
+        if text is None or text in normalized:
             return None
         normalized.append(text)
     return normalized
