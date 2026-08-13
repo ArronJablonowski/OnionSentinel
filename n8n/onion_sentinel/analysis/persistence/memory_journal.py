@@ -337,6 +337,28 @@ def process_committed(
     return receipt, receipt_path
 
 
+def _candidate_manifest_valid(
+    lane: dict[str, Any],
+    canonical_digest: Callable[[Any], str],
+) -> bool:
+    candidates = lane.get("candidates")
+    return (
+        isinstance(candidates, list)
+        and canonical_digest(candidates)
+        == str(lane.get("candidate_manifest_digest") or "")
+    )
+
+
+def _load_regular_task(
+    task_path: Path,
+    max_bytes: int,
+    load_json: Callable[..., dict[str, Any]],
+) -> dict[str, Any]:
+    if task_path.is_symlink() or not task_path.is_file():
+        raise RuntimeError("committed memory task must be a regular file")
+    return load_json(task_path, max_bytes)
+
+
 def _validated_task(
     task_path: Path,
     *,
@@ -346,9 +368,7 @@ def _validated_task(
     load_json: Callable[..., dict[str, Any]],
     canonical_digest: Callable[[Any], str],
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    if task_path.is_symlink() or not task_path.is_file():
-        raise RuntimeError("committed memory task must be a regular file")
-    task = load_json(task_path, max_bytes)
+    task = _load_regular_task(task_path, max_bytes, load_json)
     if task.get("schema") != schema:
         raise RuntimeError("committed memory task schema is invalid")
     analysis_id = str(task.get("analysis_id") or "")
@@ -360,8 +380,7 @@ def _validated_task(
     if not isinstance(primary, dict) or not isinstance(reviewer, dict):
         raise RuntimeError("committed memory task lanes are invalid")
     for lane in (primary, reviewer):
-        candidates = lane.get("candidates")
-        if not isinstance(candidates, list) or canonical_digest(candidates) != str(lane.get("candidate_manifest_digest") or ""):
+        if not _candidate_manifest_valid(lane, canonical_digest):
             raise RuntimeError("committed memory candidate manifest is invalid")
     return task, primary, reviewer
 
