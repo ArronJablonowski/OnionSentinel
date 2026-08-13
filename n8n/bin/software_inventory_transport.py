@@ -284,37 +284,42 @@ def build_request(
     }
 
 
-def relay_failure_diagnostic(stdout: object, stderr: object) -> str:
+def _diagnostic_text(value: object) -> str:
+    return " ".join(
+        "".join(
+            character if character.isprintable() else " "
+            for character in str(value or "")
+        ).split()
+    )
+
+
+def _relay_payload_messages(payload: object) -> List[str]:
+    if not isinstance(payload, dict):
+        return []
     messages: List[str] = []
+    for key in (
+        "error",
+        "detail",
+        "upstream_error",
+        "upstream_detail",
+        "transport_detail",
+    ):
+        raw = payload.get(key)
+        if not isinstance(raw, str):
+            continue
+        text = _diagnostic_text(raw)
+        if text:
+            messages.append(text[:300])
+    return messages
+
+
+def relay_failure_diagnostic(stdout: object, stderr: object) -> str:
     try:
         payload = json.loads(str(stdout or ""))
     except json.JSONDecodeError:
         payload = None
-    if isinstance(payload, dict):
-        for key in (
-            "error",
-            "detail",
-            "upstream_error",
-            "upstream_detail",
-            "transport_detail",
-        ):
-            raw = payload.get(key)
-            if not isinstance(raw, str):
-                continue
-            text = " ".join(
-                "".join(
-                    character if character.isprintable() else " "
-                    for character in raw
-                ).split()
-            )
-            if text:
-                messages.append(text[:300])
-    stderr_text = " ".join(
-        "".join(
-            character if character.isprintable() else " "
-            for character in str(stderr or "")
-        ).split()
-    )
+    messages = _relay_payload_messages(payload)
+    stderr_text = _diagnostic_text(stderr)
     if stderr_text:
         messages.append(stderr_text[:300])
     return "; ".join(messages)[:700]
