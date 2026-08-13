@@ -90,77 +90,145 @@ def load_wrapper_field_catalog(wrapper_path: Path) -> dict[str, set[str]]:
     return catalog
 
 
-def evaluate(
-    candidate_dir: Path,
-    fixture_path: Path,
-    wrapper_path: Path = DEFAULT_SECURITY_ONION_WRAPPER,
-) -> dict[str, Any]:
+def _load_fixture(fixture_path: Path) -> dict[str, Any]:
     fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
     if fixture.get("schema") != "onion-sentinel-skill-offline-replay-v1":
         raise ValueError("unsupported offline replay fixture schema")
-    manifests = {
+    return fixture
+
+
+def _load_candidates(candidate_dir: Path) -> dict[str, dict[str, Any]]:
+    return {
         value["id"]: value
         for value in (
             skills.load_manifest(path)
             for path in sorted(candidate_dir.glob("*.candidate.json"))
         )
     }
-    records = [
+
+
+def _shadow_records(manifests: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
         {"state": "shadow", "manifest": simulated_shadow(manifest)}
         for manifest in manifests.values()
     ]
+
+
+def _field_catalogs(
+    fixture: dict[str, Any],
+    wrapper_path: Path,
+) -> tuple[dict[str, Any], dict[str, set[str]]]:
     fixture_catalog = fixture.get("field_catalog")
     if not isinstance(fixture_catalog, dict):
         raise ValueError("field_catalog must be an object")
-    wrapper_catalog = load_wrapper_field_catalog(wrapper_path)
+    return fixture_catalog, load_wrapper_field_catalog(wrapper_path)
 
+
+def _template_catalog(
+    template: dict[str, Any],
+    fixture_catalog: dict[str, Any],
+    wrapper_catalog: dict[str, set[str]],
+) -> tuple[set[str], str]:
+    template_id = str(template["id"])
+    wrapper_pack = TEMPLATE_PACKS.get(template_id)
+    if wrapper_pack:
+        return (
+            wrapper_catalog[wrapper_pack],
+            f"security-onion-wrapper:{wrapper_pack}",
+        )
+    return (
+        set(fixture_catalog.get(template["backend"], [])),
+        f"synthetic-fixture:{template['backend']}",
+    )
+
+
+def _mapping_gaps(
+    actual: list[str],
+    manifests: dict[str, dict[str, Any]],
+    fixture_catalog: dict[str, Any],
+    wrapper_catalog: dict[str, set[str]],
+) -> list[dict[str, Any]]:
+    gaps: list[dict[str, Any]] = []
+    for skill_id in actual:
+        manifest = manifests[skill_id]
+        for template in manifest["query_templates"]:
+            available, provenance = _template_catalog(
+                template,
+                fixture_catalog,
+                wrapper_catalog,
+            )
+            missing = sorted(set(template["expected_fields"]) - available)
+            if missing:
+                gaps.append({
+                    "skill_id": skill_id,
+                    "template_id": template["id"],
+                    "backend": template["backend"],
+                    "catalog": provenance,
+                    "missing_fields": missing,
+                })
+    return gaps
+
+
+def _evaluate_case(
+    case: Any,
+    records: list[dict[str, Any]],
+    manifests: dict[str, dict[str, Any]],
+    fixture_catalog: dict[str, Any],
+    wrapper_catalog: dict[str, set[str]],
+) -> dict[str, Any]:
+    if not isinstance(case, dict):
+        raise ValueError("replay case must be an object")
+    expected = sorted(case.get("expected_selected", []))
+    selection = skills.resolve_manifests(
+        records,
+        case.get("context", {}),
+        str(case.get("role") or ""),
+        case.get("permitted_capabilities", []),
+        allow_shadow=True,
+    )
+    actual = sorted(item["id"] for item in selection["selected"])
+    mapping_gaps = _mapping_gaps(
+        actual,
+        manifests,
+        fixture_catalog,
+        wrapper_catalog,
+    )
+    return {
+        "id": str(case.get("id") or ""),
+        "passed": actual == expected and not mapping_gaps,
+        "expected_selected": expected,
+        "actual_selected": actual,
+        "mapping_gaps": mapping_gaps,
+    }
+
+
+def _evaluate_cases(
+    cases: Any,
+    records: list[dict[str, Any]],
+    manifests: dict[str, dict[str, Any]],
+    fixture_catalog: dict[str, Any],
+    wrapper_catalog: dict[str, set[str]],
+) -> tuple[list[dict[str, Any]], int]:
     results: list[dict[str, Any]] = []
     passed = 0
-    for case in fixture.get("cases", []):
-        if not isinstance(case, dict):
-            raise ValueError("replay case must be an object")
-        expected = sorted(case.get("expected_selected", []))
-        selection = skills.resolve_manifests(
+    for case in cases:
+        result = _evaluate_case(
+            case,
             records,
-            case.get("context", {}),
-            str(case.get("role") or ""),
-            case.get("permitted_capabilities", []),
-            allow_shadow=True,
+            manifests,
+            fixture_catalog,
+            wrapper_catalog,
         )
-        actual = sorted(item["id"] for item in selection["selected"])
-        mapping_gaps: list[dict[str, Any]] = []
-        for skill_id in actual:
-            manifest = manifests[skill_id]
-            for template in manifest["query_templates"]:
-                template_id = str(template["id"])
-                wrapper_pack = TEMPLATE_PACKS.get(template_id)
-                if wrapper_pack:
-                    available = wrapper_catalog[wrapper_pack]
-                    provenance = f"security-onion-wrapper:{wrapper_pack}"
-                else:
-                    available = set(
-                        fixture_catalog.get(template["backend"], [])
-                    )
-                    provenance = f"synthetic-fixture:{template['backend']}"
-                missing = sorted(set(template["expected_fields"]) - available)
-                if missing:
-                    mapping_gaps.append({
-                        "skill_id": skill_id,
-                        "template_id": template["id"],
-                        "backend": template["backend"],
-                        "catalog": provenance,
-                        "missing_fields": missing,
-                    })
-        ok = actual == expected and not mapping_gaps
-        passed += int(ok)
-        results.append({
-            "id": str(case.get("id") or ""),
-            "passed": ok,
-            "expected_selected": expected,
-            "actual_selected": actual,
-            "mapping_gaps": mapping_gaps,
-        })
+        passed += int(result["passed"])
+        results.append(result)
+    return results, passed
 
+
+def _evaluation_result(
+    manifests: dict[str, dict[str, Any]],
+    results: list[dict[str, Any]],
+    passed: int,
+) -> dict[str, Any]:
     return {
         "schema": "onion-sentinel-skill-offline-replay-result-v1",
         "simulation_only": True,
@@ -177,6 +245,25 @@ def evaluate(
         "passed": passed == len(results) and len(results) > 0,
         "results": results,
     }
+
+
+def evaluate(
+    candidate_dir: Path,
+    fixture_path: Path,
+    wrapper_path: Path = DEFAULT_SECURITY_ONION_WRAPPER,
+) -> dict[str, Any]:
+    fixture = _load_fixture(fixture_path)
+    manifests = _load_candidates(candidate_dir)
+    records = _shadow_records(manifests)
+    fixture_catalog, wrapper_catalog = _field_catalogs(fixture, wrapper_path)
+    results, passed = _evaluate_cases(
+        fixture.get("cases", []),
+        records,
+        manifests,
+        fixture_catalog,
+        wrapper_catalog,
+    )
+    return _evaluation_result(manifests, results, passed)
 
 
 def parse_args() -> argparse.Namespace:
