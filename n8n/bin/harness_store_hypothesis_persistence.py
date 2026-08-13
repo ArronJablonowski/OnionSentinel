@@ -101,28 +101,69 @@ def _normalize_hypothesis(
 ) -> dict[str, str] | None:
     if not isinstance(item, dict):
         return None
-    hypothesis_id = re.sub(
+    hypothesis_id = _hypothesis_identity(item, index)
+    statement, status = _hypothesis_statement_status(item)
+    if not _valid_hypothesis(hypothesis_id, statement, status):
+        return None
+    supporting = _known_references(item, "supporting_evidence", known_refs)
+    contradicting = _known_references(item, "contradicting_evidence", known_refs)
+    status = _evidence_bound_status(status, supporting, contradicting)
+    return _hypothesis_projection(
+        item,
+        hypothesis_id=hypothesis_id,
+        statement=statement,
+        status=status,
+        supporting=supporting,
+        contradicting=contradicting,
+    )
+
+
+def _hypothesis_identity(item: Mapping[str, Any], index: int) -> str:
+    return re.sub(
         r"[^A-Za-z0-9._-]+",
         "-",
         str(item.get("id") or f"hypothesis-{index}"),
     ).strip("-")[:64]
+
+
+def _hypothesis_statement_status(item: Mapping[str, Any]) -> tuple[str, str]:
     statement = _redacted_string(
         str(item.get("statement") or "").strip(),
         4_000,
     )
     status = str(item.get("status") or "unresolved").strip().lower()
-    if (
-        not hypothesis_id
-        or not statement
-        or status not in {"supported", "contradicted", "unresolved"}
-    ):
-        return None
-    supporting = _known_references(item, "supporting_evidence", known_refs)
-    contradicting = _known_references(item, "contradicting_evidence", known_refs)
+    return statement, status
+
+
+def _valid_hypothesis(hypothesis_id: str, statement: str, status: str) -> bool:
+    return bool(
+        hypothesis_id
+        and statement
+        and status in {"supported", "contradicted", "unresolved"}
+    )
+
+
+def _evidence_bound_status(
+    status: str,
+    supporting: Sequence[str],
+    contradicting: Sequence[str],
+) -> str:
     if status == "supported" and not supporting:
-        status = "unresolved"
+        return "unresolved"
     elif status == "contradicted" and not contradicting:
-        status = "unresolved"
+        return "unresolved"
+    return status
+
+
+def _hypothesis_projection(
+    item: Mapping[str, Any],
+    *,
+    hypothesis_id: str,
+    statement: str,
+    status: str,
+    supporting: Sequence[str],
+    contradicting: Sequence[str],
+) -> dict[str, str]:
     return {
         "hypothesis_id": hypothesis_id,
         "statement": statement,

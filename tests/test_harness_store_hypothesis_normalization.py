@@ -55,13 +55,24 @@ class TraceDict(dict):
 
 
 class HarnessStoreHypothesisNormalizationTests(unittest.TestCase):
-    def test_static_signature_and_current_complexity_debt(self) -> None:
+    def test_static_signature_and_changed_functions_are_within_budget(self) -> None:
         self.assertEqual(
             str(inspect.signature(OWNER._normalize_hypothesis)),
             "(item: 'Any', index: 'int', known_refs: 'set[str]') -> "
             "'dict[str, str] | None'",
         )
-        self.assertEqual(function_metrics("_normalize_hypothesis"), (41, 12))
+        for name in (
+            "_normalize_hypothesis",
+            "_hypothesis_identity",
+            "_hypothesis_statement_status",
+            "_valid_hypothesis",
+            "_evidence_bound_status",
+            "_hypothesis_projection",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
 
     def test_non_dictionary_is_rejected_without_helper_calls(self) -> None:
         with (
