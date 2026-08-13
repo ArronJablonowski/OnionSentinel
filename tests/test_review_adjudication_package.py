@@ -93,6 +93,74 @@ class ReviewAdjudicationPackageTests(unittest.TestCase):
                 self.deps,
             )
 
+    def test_identity_and_choices_normalize_valid_closed_values(self) -> None:
+        package = build_package()
+        contract = package["adjudication_contract"]
+        errors: list[str] = []
+
+        decision, confidence, score = adjudication._identity_and_choices(
+            response(
+                package,
+                decision="  REVIEWER_SUPPORTED  ",
+                confidence="  Medium  ",
+                confidence_score="1",
+            ),
+            contract,
+            errors,
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(decision, "reviewer_supported")
+        self.assertEqual(confidence, "medium")
+        self.assertEqual(score, 1.0)
+
+    def test_identity_and_choices_preserve_error_order_and_score_sentinel(self) -> None:
+        package = build_package()
+        contract = package["adjudication_contract"]
+        errors: list[str] = []
+
+        result = adjudication._identity_and_choices(
+            {
+                "adjudication_case_id": "wrong-case",
+                "adjudication_evidence_hash": "wrong-hash",
+                "decision": "compromise",
+                "confidence": "certain",
+                "confidence_score": object(),
+            },
+            contract,
+            errors,
+        )
+
+        self.assertEqual(result, ("compromise", "certain", -1.0))
+        self.assertEqual(
+            errors,
+            [
+                "adjudication_case_id does not match the contract",
+                "adjudication_evidence_hash does not match the contract",
+                "decision is outside the closed vocabulary",
+                "confidence is outside the closed vocabulary",
+                "confidence_score must be between 0 and 1",
+            ],
+        )
+
+    def test_identity_and_choices_reject_non_finite_and_out_of_range_scores(self) -> None:
+        package = build_package()
+        contract = package["adjudication_contract"]
+
+        for value in ("nan", "inf", "-inf", -0.001, 1.001):
+            with self.subTest(value=value):
+                errors: list[str] = []
+                _, _, score = adjudication._identity_and_choices(
+                    response(package, confidence_score=value),
+                    contract,
+                    errors,
+                )
+                self.assertEqual(
+                    errors,
+                    ["confidence_score must be between 0 and 1"],
+                )
+                self.assertEqual(str(score), str(float(value)))
+
 
 if __name__ == "__main__":
     unittest.main()
