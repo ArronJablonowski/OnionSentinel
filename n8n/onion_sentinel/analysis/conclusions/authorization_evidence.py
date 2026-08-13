@@ -81,6 +81,28 @@ def _port(alert: dict[str, Any], key: str) -> int | None:
     return parsed if str(value).strip() == str(parsed) and 1 <= parsed <= 65535 else None
 
 
+def _network_event_values_valid(
+    timestamp: dt.datetime | None,
+    source_ip: str | None,
+    destination_ip: str | None,
+    destination_port: int | None,
+) -> bool:
+    return bool(
+        timestamp is not None
+        and source_ip is not None
+        and destination_ip is not None
+        and bool(source_ip or destination_ip)
+        and destination_port is not None
+    )
+
+
+def _event_identity_values_valid(rule_id: str, transport: str) -> bool:
+    return bool(
+        re.fullmatch(r"[a-z0-9_.:-]{1,128}", rule_id)
+        and re.fullmatch(r"[a-z0-9_.-]{1,32}", transport)
+    )
+
+
 def prompt_event(prompt_package: dict[str, Any]) -> EventTuple | None:
     """Normalize the exact alert tuple used by the prompt builder."""
     alert = prompt_package.get("alert")
@@ -95,12 +117,9 @@ def prompt_event(prompt_package: dict[str, Any]) -> EventTuple | None:
     transport = str(
         alert.get("transport_protocol") or alert.get("network_protocol") or ""
     ).strip().lower()
-    valid = (
-        timestamp is not None and source_ip is not None and destination_ip is not None
-        and bool(source_ip or destination_ip) and destination_port is not None
-        and bool(re.fullmatch(r"[a-z0-9_.:-]{1,128}", rule_id))
-        and bool(re.fullmatch(r"[a-z0-9_.-]{1,32}", transport))
-    )
+    valid = _network_event_values_valid(
+        timestamp, source_ip, destination_ip, destination_port
+    ) and _event_identity_values_valid(rule_id, transport)
     if not valid:
         return None
     return EventTuple(
