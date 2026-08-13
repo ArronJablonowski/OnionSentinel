@@ -238,13 +238,47 @@ def _coverage_parts_valid(
     start: dt.datetime | None, end: dt.datetime | None,
 ) -> bool:
     return bool(
-        source_ips is not None and destination_ips is not None
-        and (source_ips or destination_ips) and rule_ids is not None
-        and source_ports is not None and destination_ports is not None
-        and ranges is not None and (destination_ports or ranges)
-        and transports is not None and start is not None and end is not None
-        and end > start
+        _coverage_address_parts_valid(source_ips, destination_ips, rule_ids)
+        and _coverage_port_parts_valid(
+            source_ports, destination_ports, ranges, transports
+        )
+        and _coverage_window_valid(start, end)
     )
+
+
+def _coverage_address_parts_valid(
+    source_ips: Any,
+    destination_ips: Any,
+    rule_ids: Any,
+) -> bool:
+    return bool(
+        source_ips is not None
+        and destination_ips is not None
+        and (source_ips or destination_ips)
+        and rule_ids is not None
+    )
+
+
+def _coverage_port_parts_valid(
+    source_ports: Any,
+    destination_ports: Any,
+    ranges: Any,
+    transports: Any,
+) -> bool:
+    return bool(
+        source_ports is not None
+        and destination_ports is not None
+        and ranges is not None
+        and (destination_ports or ranges)
+        and transports is not None
+    )
+
+
+def _coverage_window_valid(
+    start: dt.datetime | None,
+    end: dt.datetime | None,
+) -> bool:
+    return bool(start is not None and end is not None and end > start)
 
 
 def _coverage_matches_event(coverage: dict[str, Any], event: EventTuple) -> bool:
