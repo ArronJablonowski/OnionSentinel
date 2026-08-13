@@ -46,6 +46,26 @@ def _trusted_catalog(
     return catalog
 
 
+def _resolved_candidate(
+    raw_value: str,
+    catalog: dict[str, list[tuple[str, str]]],
+) -> tuple[str, str] | None:
+    candidates = catalog.get(raw_value, []) or catalog.get(
+        raw_value.lower().rstrip("."), []
+    )
+    unique = sorted(set(candidates))
+    return unique[0] if len(unique) == 1 else None
+
+
+def _final_recovery(
+    recovered: dict[str, list[str]],
+) -> dict[str, list[str]] | None:
+    for kind in recovered:
+        recovered[kind] = sorted(set(recovered[kind]))
+    total = sum(len(values) for values in recovered.values())
+    return recovered if 1 <= total <= 8 else None
+
+
 def recover(
     value: Any, authorization_context: Any,
 ) -> dict[str, list[str]] | None:
@@ -61,14 +81,8 @@ def recover(
     catalog = _trusted_catalog(permitted)
     recovered = {kind: [] for kind in OBSERVABLE_KINDS}
     for raw_value in sorted(raw_values):
-        candidates = catalog.get(raw_value, []) or catalog.get(
-            raw_value.lower().rstrip("."), []
-        )
-        unique = sorted(set(candidates))
-        if len(unique) == 1:
-            kind, trusted_value = unique[0]
+        candidate = _resolved_candidate(raw_value, catalog)
+        if candidate is not None:
+            kind, trusted_value = candidate
             recovered[kind].append(trusted_value)
-    for kind in recovered:
-        recovered[kind] = sorted(set(recovered[kind]))
-    total = sum(len(values) for values in recovered.values())
-    return recovered if 1 <= total <= 8 else None
+    return _final_recovery(recovered)
