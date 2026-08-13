@@ -41,7 +41,7 @@ def controlled_json(path: Path, maximum: int) -> dict:
     return payload
 
 
-def env_value(path: Path, key: str) -> str:
+def _controlled_env_lines(path: Path) -> list[str]:
     info = path.lstat()
     if (
         not stat.S_ISREG(info.st_mode)
@@ -51,13 +51,22 @@ def env_value(path: Path, key: str) -> str:
         or info.st_size > 1024 * 1024
     ):
         raise ValueError("runtime environment file is not owner-controlled")
+    return path.read_text(encoding="utf-8").splitlines()
+
+
+def _env_values(lines: list[str]) -> dict[str, str]:
     values = {}
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    for raw in lines:
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         name, value = line.split("=", 1)
         values[name.strip()] = value.strip()
+    return values
+
+
+def env_value(path: Path, key: str) -> str:
+    values = _env_values(_controlled_env_lines(path))
     return values.get(key) or values.get("N8N_POST_COMMIT_TOKEN", "")
 
 
@@ -144,7 +153,7 @@ def atomic_write(path: Path, payload: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", type=Path, default=DEFAULT_ENV)
     parser.add_argument("--inventory", type=Path, default=DEFAULT_INVENTORY)
@@ -153,18 +162,20 @@ def main() -> int:
     parser.add_argument("--api-url", default="http://127.0.0.1:8787")
     parser.add_argument("--replace", action="store_true")
     parser.add_argument("--confirm", required=True)
-    args = parser.parse_args()
-    if args.confirm != "MIGRATE-ASSETS-TO-POSTGRESQL":
-        raise SystemExit("exact migration confirmation is required")
+    return parser
 
+
+def _source_state(args: argparse.Namespace) -> tuple[str, dict, dict, list[dict], str]:
     token = env_value(args.env, "ASSET_STORE_WRITE_TOKEN")
     if len(token) < 32:
         raise SystemExit("ASSET_STORE_WRITE_TOKEN is missing or too short")
     inventory = controlled_json(args.inventory, MAX_INVENTORY_BYTES)
     dhcp = controlled_json(args.dhcp_state, MAX_DHCP_BYTES)
     source_records = canonical(inventory)
-    source_digest = digest(source_records)
+    return token, inventory, dhcp, source_records, digest(source_records)
 
+
+def _import_state(args: argparse.Namespace, token: str, inventory: dict, dhcp: dict) -> tuple[dict, dict]:
     imported = request_json(
         f"{args.api_url.rstrip('/')}/assets/import",
         method="POST",
@@ -181,29 +192,41 @@ def main() -> int:
         token=token,
         payload={"state": dhcp, "actor": "verified-json-migration"},
     )
-    snapshot_response = request_json(
-        f"{args.api_url.rstrip('/')}/assets/snapshot"
-    )
+    return imported, dhcp_result
+
+
+def _verified_asset_snapshot(args: argparse.Namespace, source_records: list[dict], source_digest: str) -> tuple[dict, list[dict], str]:
+    snapshot_response = request_json(f"{args.api_url.rstrip('/')}/assets/snapshot")
     snapshot = snapshot_response["inventory"]
     target_records = canonical(snapshot)
     target_digest = digest(target_records)
     if source_digest != target_digest or len(source_records) != len(target_records):
         raise SystemExit("PostgreSQL verification failed: asset snapshot differs")
-    database_dhcp = request_json(
-        f"{args.api_url.rstrip('/')}/assets/dhcp-state"
-    )["state"]
-    source_dhcp_ids = sorted(
-        str(item.get("discovery_id") or "")
-        for item in dhcp.get("observations", [])
-    )
-    target_dhcp_ids = sorted(
-        str(item.get("discovery_id") or "")
-        for item in database_dhcp.get("observations", [])
-    )
+    return snapshot, target_records, target_digest
+
+
+def _discovery_ids(state: dict) -> list[str]:
+    return sorted(str(item.get("discovery_id") or "") for item in state.get("observations", []))
+
+
+def _verified_dhcp_ids(args: argparse.Namespace, dhcp: dict) -> list[str]:
+    database_dhcp = request_json(f"{args.api_url.rstrip('/')}/assets/dhcp-state")["state"]
+    source_dhcp_ids = _discovery_ids(dhcp)
+    target_dhcp_ids = _discovery_ids(database_dhcp)
     if source_dhcp_ids != target_dhcp_ids:
         raise SystemExit("PostgreSQL verification failed: DHCP identities differ")
+    return target_dhcp_ids
+
+
+def migrate(args: argparse.Namespace) -> dict:
+    token, inventory, dhcp, source_records, source_digest = _source_state(args)
+    imported, dhcp_result = _import_state(args, token, inventory, dhcp)
+    snapshot, target_records, target_digest = _verified_asset_snapshot(
+        args, source_records, source_digest
+    )
+    target_dhcp_ids = _verified_dhcp_ids(args, dhcp)
     atomic_write(args.export, snapshot)
-    print(json.dumps({
+    return {
         "ok": True,
         "asset_records": len(target_records),
         "asset_digest": target_digest,
@@ -211,7 +234,14 @@ def main() -> int:
         "imported": imported.get("imported"),
         "dhcp_retained": dhcp_result.get("retained"),
         "export": str(args.export),
-    }, sort_keys=True))
+    }
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if args.confirm != "MIGRATE-ASSETS-TO-POSTGRESQL":
+        raise SystemExit("exact migration confirmation is required")
+    print(json.dumps(migrate(args), sort_keys=True))
     return 0
 
 
