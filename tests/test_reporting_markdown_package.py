@@ -193,6 +193,61 @@ class ReportingMarkdownPackageTests(unittest.TestCase):
                 "_incident_query_audit": {"queries": [{"window": None}]}
             })
 
+    def test_appliance_osquery_audit_preserves_numbering_preview_error_order(self) -> None:
+        response = {
+            "_incident_osquery_audit": {
+                "trusted_source": "relay",
+                "read_only": False,
+                "queries": [
+                    "ignored",
+                    {
+                        "pack": "process review",
+                        "target": "appliance-a",
+                        "status": "partial",
+                        "query_digest": "digest",
+                        "total_rows": 3,
+                        "returned_rows": 1,
+                        "support_binding_count": 2,
+                        "duration_ms": 17,
+                        "query": "select pid from processes;",
+                        "rows_preview": [{"z": 1, "a": 2}],
+                        "error": "bounded failure",
+                    },
+                ],
+            }
+        }
+        snapshot = __import__("copy").deepcopy(response)
+        lines = incident.render_appliance_osquery_audit(response)
+
+        self.assertEqual(lines[:6], [
+            "## Security Onion Appliance OSQuery Snapshot Audit", "",
+            "- **Trusted source:** relay", "- **Read only:** False", "",
+            "### OSquery 2: process review",
+        ])
+        self.assertEqual(lines[-8:], [
+            "#### Bounded Result Preview", "", "```json",
+            '[\n  {\n    "a": 2,\n    "z": 1\n  }\n]', "```", "",
+            "- **Error:** bounded failure", "",
+        ])
+        self.assertLess(lines.index("```sql"), lines.index("#### Bounded Result Preview"))
+        self.assertEqual(response, snapshot)
+
+    def test_appliance_osquery_audit_empty_defaults_and_preview_boundaries(self) -> None:
+        self.assertEqual(incident.render_appliance_osquery_audit({}), [])
+        empty = incident.render_appliance_osquery_audit({
+            "_incident_osquery_audit": {"queries": "not-a-list"}
+        })
+        self.assertEqual(empty[-1], (
+            "No validated Security Onion appliance OSQuery snapshots were recorded."
+        ))
+        defaults = incident.render_appliance_osquery_audit({
+            "_incident_osquery_audit": {"queries": [{}]}
+        })
+        self.assertIn("### OSquery 1: reviewed pack", defaults)
+        self.assertIn("- **Rows:** 0 total; 0 returned", defaults)
+        self.assertNotIn("#### Bounded Result Preview", defaults)
+        self.assertNotIn("- **Error:**", "\n".join(defaults))
+
     def test_reporting_modules_do_not_perform_io(self) -> None:
         for path in (
             N8N_ROOT / "onion_sentinel" / "analysis" / "reporting" / "incident.py",
