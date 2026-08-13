@@ -166,19 +166,14 @@ def _narrative_domains(
     errors: list[str],
     deps: Dependencies,
 ) -> tuple[set[str], set[str]]:
-    allowed_domains = {
-        value.lower() for kind, value in allowed
-        if kind == "domain" or (kind == "host" and "." in value)
-    }
+    allowed_domains = _allowed_domains(allowed)
     taxonomy, artifacts, rule_shorthands = catalogs
     narrative_domains = {
         candidate.lower()
         for candidate in deps.domain_re.findall(response_text)
-        if candidate.lower() not in deps.known_field_paths
-        and candidate.lower() not in taxonomy
-        and candidate.lower() not in artifacts
-        and candidate.lower() not in rule_shorthands
-        and candidate.rsplit(".", 1)[-1].lower() not in deps.non_domain_suffixes
+        if _is_narrative_domain(
+            candidate, taxonomy, artifacts, rule_shorthands, deps
+        )
     }
     foreign_domains = sorted(narrative_domains.difference(allowed_domains))
     if foreign_domains:
@@ -187,6 +182,34 @@ def _narrative_domains(
             + ",".join(foreign_domains[:10])
         )
     return narrative_domains, allowed_domains
+
+
+def _allowed_domains(allowed: set[tuple[str, str]]) -> set[str]:
+    return {
+        value.lower() for kind, value in allowed
+        if kind == "domain" or (kind == "host" and "." in value)
+    }
+
+
+def _is_narrative_domain(
+    candidate: str,
+    taxonomy: set[str],
+    artifacts: set[str],
+    rule_shorthands: set[str],
+    deps: Dependencies,
+) -> bool:
+    normalized = candidate.lower()
+    excluded = (
+        deps.known_field_paths,
+        taxonomy,
+        artifacts,
+        rule_shorthands,
+    )
+    suffix = candidate.rsplit(".", 1)[-1].lower()
+    return (
+        all(normalized not in catalog for catalog in excluded)
+        and suffix not in deps.non_domain_suffixes
+    )
 
 
 def _narrative_community_ids(
