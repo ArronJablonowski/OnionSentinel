@@ -44,15 +44,20 @@ def bounded_json(path: Path, maximum_bytes: int) -> object:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def load_config(path: Path) -> dict:
-    config = bounded_json(path, MAX_CONFIG_BYTES)
+def _validate_config_shape(config: object) -> None:
     if not isinstance(config, dict) or set(config) - CONFIG_KEYS:
         raise ValueError("DHCP discovery config contains unsupported fields")
     if not isinstance(config.get("enabled"), bool):
         raise ValueError("DHCP discovery config requires a boolean enabled field")
+
+
+def _validate_config_strings(config: dict) -> None:
     for key in ("host", "ssh_user", "ssh_key", "known_hosts"):
         if not isinstance(config.get(key), str) or not config[key].strip():
             raise ValueError(f"DHCP discovery config requires {key}")
+
+
+def _validate_config_numbers(config: dict) -> None:
     numeric_limits = {
         "connect_timeout_seconds": (1, 120),
         "timeout_seconds": (5, 300),
@@ -72,6 +77,13 @@ def load_config(path: Path) -> dict:
             raise ValueError(
                 f"DHCP discovery config {key} must be from {minimum} through {maximum}"
             )
+
+
+def load_config(path: Path) -> dict:
+    config = bounded_json(path, MAX_CONFIG_BYTES)
+    _validate_config_shape(config)
+    _validate_config_strings(config)
+    _validate_config_numbers(config)
     config["ssh_key"] = str(Path(config["ssh_key"]).expanduser())
     config["known_hosts"] = str(Path(config["known_hosts"]).expanduser())
     return config
@@ -205,12 +217,7 @@ def _merge_one(records: dict[tuple[str, str], dict], item: dict) -> None:
     record["observation_count"] = int(record.get("observation_count") or 0) + 1
 
 
-def merge_observations(
-    state: dict,
-    incoming: list[dict],
-    now: dt.datetime,
-    retention_days: int,
-) -> list[dict]:
+def _existing_observation_records(state: dict) -> dict[tuple[str, str], dict]:
     records: dict[tuple[str, str], dict] = {}
     for raw in state.get("observations", []):
         if not isinstance(raw, dict):
@@ -219,12 +226,24 @@ def merge_observations(
         identity_value = str(raw.get("identity_value") or "")
         if identity_type in {"mac", "hostname", "ip"} and identity_value:
             records[(identity_type, identity_value)] = dict(raw)
+    return records
+
+
+def _merge_incoming_observations(
+    records: dict[tuple[str, str], dict],
+    incoming: list[dict],
+) -> None:
     for item in sorted(
         incoming,
         key=lambda value: (value["observed_at"], value["evidence_id"]),
     ):
         _merge_one(records, item)
-    cutoff = now - dt.timedelta(days=retention_days)
+
+
+def _retained_observations(
+    records: dict[tuple[str, str], dict],
+    cutoff: dt.datetime,
+) -> list[dict]:
     retained = []
     for record in records.values():
         try:
@@ -237,3 +256,15 @@ def merge_observations(
         reverse=True,
     )
     return retained[:MAX_OBSERVATIONS]
+
+
+def merge_observations(
+    state: dict,
+    incoming: list[dict],
+    now: dt.datetime,
+    retention_days: int,
+) -> list[dict]:
+    records = _existing_observation_records(state)
+    _merge_incoming_observations(records, incoming)
+    cutoff = now - dt.timedelta(days=retention_days)
+    return _retained_observations(records, cutoff)

@@ -58,7 +58,7 @@ class DhcpAssetStateProjectionTests(unittest.TestCase):
             "retention_days": 30,
         }
 
-    def test_signatures_and_current_complexity_debt_are_stable(self) -> None:
+    def test_signatures_and_decomposed_phase_bounds_are_stable(self) -> None:
         self.assertEqual(
             str(inspect.signature(STATE.load_config)),
             "(path: 'Path') -> 'dict'",
@@ -68,8 +68,20 @@ class DhcpAssetStateProjectionTests(unittest.TestCase):
             "(state: 'dict', incoming: 'list[dict]', now: 'dt.datetime', "
             "retention_days: 'int') -> 'list[dict]'",
         )
-        self.assertEqual(function_metrics("load_config"), (31, 11))
-        self.assertEqual(function_metrics("merge_observations"), (32, 11))
+        for name in (
+            "_validate_config_shape",
+            "_validate_config_strings",
+            "_validate_config_numbers",
+            "load_config",
+            "_existing_observation_records",
+            "_merge_incoming_observations",
+            "_retained_observations",
+            "merge_observations",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
 
     def test_load_config_preserves_bounded_load_identity_and_path_mutations(self) -> None:
         config = self.valid_config()
