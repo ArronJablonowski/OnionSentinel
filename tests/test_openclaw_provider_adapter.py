@@ -182,6 +182,123 @@ class OpenClawProviderAdapterTests(unittest.TestCase):
         self.assertEqual(result["_analysis_model"], "ollama/synthetic:latest")
         self.assertEqual(result["_analysis_provider"], "ollama")
 
+    def test_infer_preserves_ordered_ephemeral_execution_and_projection(self) -> None:
+        events: list[object] = []
+        observed: dict[str, object] = {}
+        prompt_package = {"alert": {"id": "ordered"}}
+        settings = self.settings()
+        args = SimpleNamespace(timeout=17.5, max_response_bytes=8192)
+
+        def validate(model, observed_settings):
+            events.append(("validate", model, observed_settings is settings))
+
+        def resolve(observed_settings):
+            events.append(("resolve", observed_settings is settings))
+            return "/synthetic/openclaw"
+
+        def build(observed_package, observed_args, **kwargs):
+            events.append((
+                "build", observed_package is prompt_package,
+                observed_args is args, kwargs,
+            ))
+            return {"z": 1, "a": "value"}
+
+        def write_config(path, value):
+            events.append(("write", value))
+            path.write_text("{}", encoding="utf-8")
+            observed["config"] = path
+
+        def environment(executable, **kwargs):
+            events.append(("environment", executable))
+            observed["environment_extra"] = kwargs["extra"]
+            return {"ISOLATED": "1"}
+
+        def run(command, **kwargs):
+            events.append(("run",))
+            observed["command"] = command
+            observed["run_kwargs"] = kwargs
+            observed["config_mode"] = observed["config"].stat().st_mode & 0o777
+            observed["directory_modes"] = {
+                path: Path(value).stat().st_mode & 0o777
+                for path, value in observed["environment_extra"].items()
+                if path in {
+                    "HOME", "OPENCLAW_STATE_DIR", "OPENCLAW_WORKSPACE_DIR",
+                    "XDG_CONFIG_HOME", "TMPDIR",
+                }
+            }
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({
+                    "ok": True,
+                    "provider": "ollama",
+                    "model": "synthetic:latest",
+                    "text": '{"summary":"ordered"}',
+                }),
+                stderr="",
+            )
+
+        def extract(value):
+            events.append(("extract", value))
+            return json.loads(value)
+
+        result = openclaw.infer_unlocked(
+            prompt_package, args, settings,
+            model="ollama/synthetic:latest", reasoning_effort="medium",
+            system_prompt_file=Path("/synthetic/system.md"),
+            independent_review=True, validate=validate,
+            resolve_executable=resolve, build_payload=build,
+            atomic_write_json=write_config, run_command=run,
+            sanitized_env=environment, process_error=SyntheticProcessError,
+            summarize_failure=cli_common.summarize_harness_failure,
+            extract_json=extract, max_prompt_bytes=4096, max_stderr_bytes=1024,
+        )
+
+        self.assertEqual([event[0] for event in events], [
+            "validate", "resolve", "build", "write", "environment", "run",
+            "extract",
+        ])
+        self.assertEqual(observed["command"], [
+            "/synthetic/openclaw", "infer", "model", "run", "--local",
+            "--model", "ollama/synthetic:latest", "--thinking", "medium",
+            "--prompt", '{"z":1,"a":"value"}', "--json",
+        ])
+        self.assertEqual(observed["run_kwargs"]["timeout_seconds"], 17.5)
+        self.assertEqual(observed["run_kwargs"]["max_stdout_bytes"], 8192)
+        self.assertEqual(observed["run_kwargs"]["max_stderr_bytes"], 1024)
+        self.assertEqual(observed["run_kwargs"]["env"], {"ISOLATED": "1"})
+        self.assertEqual(observed["config_mode"], 0o600)
+        self.assertEqual(set(observed["directory_modes"].values()), {0o700})
+        self.assertFalse(observed["run_kwargs"]["cwd"].exists())
+        self.assertFalse(observed["config"].exists())
+        self.assertEqual(result, {
+            "summary": "ordered",
+            "_analysis_model": "ollama/synthetic:latest",
+            "_analysis_model_path": "openclaw",
+            "_analysis_provider": "ollama",
+            "_analysis_harness": "openclaw",
+        })
+        self.assertEqual(prompt_package, {"alert": {"id": "ordered"}})
+        self.assertEqual(settings, self.settings())
+
+    def test_infer_prompt_limit_stops_before_ephemeral_execution(self) -> None:
+        events: list[str] = []
+        with self.assertRaisesRegex(SystemExit, "safe prompt argument limit"):
+            openclaw.infer_unlocked(
+                {}, SimpleNamespace(timeout=1, max_response_bytes=1), {},
+                model="ollama/model", reasoning_effort="low",
+                system_prompt_file=None, independent_review=False,
+                validate=lambda *_args: events.append("validate"),
+                resolve_executable=lambda *_args: events.append("resolve") or "openclaw",
+                build_payload=lambda *_args, **_kwargs: events.append("build") or {"x": "é"},
+                atomic_write_json=lambda *_args: events.append("write"),
+                run_command=lambda *_args, **_kwargs: events.append("run"),
+                sanitized_env=lambda *_args, **_kwargs: events.append("environment"),
+                process_error=SyntheticProcessError,
+                summarize_failure=cli_common.summarize_harness_failure,
+                extract_json=json.loads, max_prompt_bytes=10, max_stderr_bytes=1,
+            )
+        self.assertEqual(events, ["validate", "resolve", "build"])
+
     def test_hosted_or_remote_routes_fail_before_execution(self) -> None:
         for model, settings in (
             ("openai/gpt-5.6-sol", self.settings()),
