@@ -151,6 +151,31 @@ def persist_postcommit(
     return receipt, receipt_path
 
 
+def _persist_staged_task(
+    task: dict[str, Any],
+    *,
+    analysis_id: Any,
+    pending_dir: Path,
+    max_bytes: int,
+    canonical_digest: Callable[[Any], str],
+    safe_filename: Callable[[Any], str],
+    load_json: Callable[..., dict[str, Any]],
+    atomic_write_private_json: Callable[[Path, dict[str, Any]], None],
+) -> Path:
+    encoded = json.dumps(task, sort_keys=True, separators=(",", ":")).encode()
+    if len(encoded) > max_bytes:
+        raise RuntimeError("memory writeback task exceeds its byte limit")
+    path = pending_dir / f"{safe_filename(analysis_id)}.json"
+    if path.exists():
+        if canonical_digest(load_json(path, max_bytes)) != canonical_digest(task):
+            raise RuntimeError(
+                "memory writeback task identity collides with different content"
+            )
+        return path
+    atomic_write_private_json(path, task)
+    return path
+
+
 def stage(
     *,
     analysis_id: str,
@@ -193,15 +218,12 @@ def stage(
         reviewer=(reviewer, reviewer_allowed, reviewer_reason),
         canonical_digest=canonical_digest,
     )
-    if len(json.dumps(task, sort_keys=True, separators=(",", ":")).encode()) > max_bytes:
-        raise RuntimeError("memory writeback task exceeds its byte limit")
-    path = pending_dir / f"{safe_filename(analysis_id)}.json"
-    if path.exists():
-        if canonical_digest(load_json(path, max_bytes)) != canonical_digest(task):
-            raise RuntimeError("memory writeback task identity collides with different content")
-        return path
-    atomic_write_private_json(path, task)
-    return path
+    return _persist_staged_task(
+        task, analysis_id=analysis_id, pending_dir=pending_dir,
+        max_bytes=max_bytes, canonical_digest=canonical_digest,
+        safe_filename=safe_filename, load_json=load_json,
+        atomic_write_private_json=atomic_write_private_json,
+    )
 
 
 def _task(
