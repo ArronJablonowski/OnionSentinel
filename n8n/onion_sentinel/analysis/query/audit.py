@@ -73,21 +73,27 @@ def _result_ids(item: dict[str, Any]) -> list[str]:
     return [str(item["query_id"])] if item.get("query_id") else []
 
 
-def _request_result_maps(
-    round_result: dict[str, Any],
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    requests = round_result.get("requests") if isinstance(round_result.get("requests"), list) else []
-    results = round_result.get("results") if isinstance(round_result.get("results"), list) else []
-    request_by_id = {
+def _requests_by_id(requests: list[Any]) -> dict[str, dict[str, Any]]:
+    return {
         str(item.get("query_id")): item
         for item in requests
         if isinstance(item, dict) and item.get("query_id")
     }
+
+
+def _results_by_id(results: list[Any]) -> dict[str, dict[str, Any]]:
     result_by_id: dict[str, dict[str, Any]] = {}
     for item in results:
         if isinstance(item, dict):
             for query_id in _result_ids(item):
                 result_by_id[query_id] = item
+    return result_by_id
+
+
+def _add_rejected_request_stubs(
+    request_by_id: dict[str, dict[str, Any]],
+    result_by_id: dict[str, dict[str, Any]],
+) -> None:
     for query_id, result in result_by_id.items():
         if query_id not in request_by_id:
             request_by_id[query_id] = {
@@ -96,6 +102,16 @@ def _request_result_maps(
                 "purpose": result.get("purpose") or "proposal rejected before execution",
                 "rejected_before_execution": True,
             }
+
+
+def _request_result_maps(
+    round_result: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    requests = round_result.get("requests") if isinstance(round_result.get("requests"), list) else []
+    results = round_result.get("results") if isinstance(round_result.get("results"), list) else []
+    request_by_id = _requests_by_id(requests)
+    result_by_id = _results_by_id(results)
+    _add_rejected_request_stubs(request_by_id, result_by_id)
     return request_by_id, result_by_id
 
 
