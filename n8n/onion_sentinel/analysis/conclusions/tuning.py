@@ -18,32 +18,42 @@ def material_evidence_gap_signals(
 ) -> list[str]:
     """Return bounded, non-sensitive signals that make control tuning unsafe."""
     signals: list[str] = []
-
-    def add(signal: str) -> None:
-        if signal not in signals and len(signals) < 12:
-            signals.append(signal)
-
     if deps.bounded_text_list(response.get("evidence_gaps"), limit=1):
-        add("reported_evidence_gaps")
-    report = response.get("incident_response_report")
-    if isinstance(report, dict) and (
-        deps.bounded_text_list(report.get("evidence_gaps"), limit=1)
-        or deps.bounded_text_list(report.get("constraints"), limit=1)
-    ):
-        add("incident_report_evidence_gaps")
-    completeness = response.get("_incident_evidence_completeness")
-    if isinstance(completeness, dict) and (
-        completeness.get("complete_for_high_confidence") is False
-        or bool(completeness.get("limiters"))
-    ):
-        add("incident_evidence_incomplete")
+        _add_signal(signals, "reported_evidence_gaps")
+    if _incident_report_has_evidence_gaps(response, deps):
+        _add_signal(signals, "incident_report_evidence_gaps")
+    if _incident_evidence_incomplete(response):
+        _add_signal(signals, "incident_evidence_incomplete")
     reference_validation = response.get("_evidence_reference_validation")
     if isinstance(reference_validation, dict) and bool(reference_validation.get("invalid_refs")):
-        add("invalid_evidence_references")
+        _add_signal(signals, "invalid_evidence_references")
     verdict_validation = response.get("_verdict_validation")
     if isinstance(verdict_validation, dict) and verdict_validation.get("material_contradiction"):
-        add("material_evidence_contradiction")
+        _add_signal(signals, "material_evidence_contradiction")
     return signals
+
+
+def _add_signal(signals: list[str], signal: str) -> None:
+    if signal not in signals and len(signals) < 12:
+        signals.append(signal)
+
+
+def _incident_report_has_evidence_gaps(
+    response: dict[str, Any], deps: Dependencies
+) -> bool:
+    report = response.get("incident_response_report")
+    return isinstance(report, dict) and bool(
+        deps.bounded_text_list(report.get("evidence_gaps"), limit=1)
+        or deps.bounded_text_list(report.get("constraints"), limit=1)
+    )
+
+
+def _incident_evidence_incomplete(response: dict[str, Any]) -> bool:
+    completeness = response.get("_incident_evidence_completeness")
+    return isinstance(completeness, dict) and (
+        completeness.get("complete_for_high_confidence") is False
+        or bool(completeness.get("limiters"))
+    )
 
 
 def unresolved_reviewer_material_disagreement(response: dict[str, Any]) -> bool:
