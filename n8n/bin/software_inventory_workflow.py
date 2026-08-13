@@ -195,6 +195,101 @@ def collect_source(
         ) from exc
 
 
+def _collect_snapshot_source(
+    config: Dict[str, Any],
+    source: str,
+    window: Dict[str, str],
+    now: dt.datetime,
+    deadline: float,
+    page_fetcher: PageFetcher,
+    endpoint_cache: Optional[Dict[str, Any]],
+    statuses: Dict[str, Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if source == "osquery_apps" and endpoint_cache is not None:
+        source_records = list(endpoint_cache["records"])
+        latest = str(endpoint_cache["updated_at"])
+        source_status = _source_status(
+            status="ok",
+            complete=True,
+            pages=1,
+            returned=len(source_records),
+            latest=latest,
+            now=now,
+        )
+        return source_records, source_status
+    try:
+        return collect_source(
+            config,
+            source,
+            window,
+            now,
+            deadline,
+            page_fetcher=page_fetcher,
+        )
+    except SoftwareInventoryError as exc:
+        if exc.source_statuses:
+            statuses.update(exc.source_statuses)
+        raise SoftwareInventoryError(str(exc), statuses) from exc
+
+
+def _admit_snapshot_records(
+    records: List[Dict[str, Any]],
+    evidence_ids: Set[str],
+    source_records: List[Dict[str, Any]],
+    statuses: Dict[str, Dict[str, Any]],
+) -> None:
+    for record in source_records:
+        if record["evidence_id"] in evidence_ids:
+            raise SoftwareInventoryError(
+                "software inventory snapshot repeated an evidence identity",
+                statuses,
+            )
+        evidence_ids.add(record["evidence_id"])
+        records.append(record)
+        if len(records) > MAX_TOTAL_RECORDS:
+            raise SoftwareInventoryError(
+                "software inventory snapshot exceeded the record limit",
+                statuses,
+            )
+
+
+def _validated_snapshot(
+    records: List[Dict[str, Any]],
+    statuses: Dict[str, Dict[str, Any]],
+    window: Dict[str, str],
+    now: dt.datetime,
+    endpoint_cache: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    records.sort(
+        key=lambda item: (
+            item["asset_ref"].casefold(),
+            item["product"].casefold(),
+            item["version"].casefold(),
+            item["source"],
+            item["evidence_id"],
+        )
+    )
+    stamp = format_timestamp(now)
+    payload = {
+        "schema": STATE_SCHEMA,
+        "version": 1,
+        "updated_at": stamp,
+        "collection": {
+            "status": "ok",
+            "last_attempt_at": stamp,
+            "last_success_at": stamp,
+            "last_error": "",
+            "window": window,
+            "source_statuses": statuses,
+            "complete": True,
+        },
+        "records": records,
+    }
+    if endpoint_cache is not None:
+        payload["collection"]["osquery_ready"] = endpoint_cache["targets"]
+    return validate_state(payload)
+
+
 def collect_snapshot(
     config: Dict[str, Any],
     previous_state: Dict[str, Any],
@@ -212,73 +307,26 @@ def collect_snapshot(
     records: List[Dict[str, Any]] = []
     evidence_ids: Set[str] = set()
     for source in SOURCES:
-        if source == "osquery_apps" and endpoint_cache is not None:
-            source_records = list(endpoint_cache["records"])
-            latest = str(endpoint_cache["updated_at"])
-            source_status = _source_status(
-                status="ok",
-                complete=True,
-                pages=1,
-                returned=len(source_records),
-                latest=latest,
-                now=now,
-            )
-        else:
-            try:
-                source_records, source_status = collect_source(
-                    config,
-                    source,
-                    window,
-                    now,
-                    deadline,
-                    page_fetcher=page_fetcher,
-                )
-            except SoftwareInventoryError as exc:
-                if exc.source_statuses:
-                    statuses.update(exc.source_statuses)
-                raise SoftwareInventoryError(str(exc), statuses) from exc
-        statuses[source] = source_status
-        for record in source_records:
-            if record["evidence_id"] in evidence_ids:
-                raise SoftwareInventoryError(
-                    "software inventory snapshot repeated an evidence identity",
-                    statuses,
-                )
-            evidence_ids.add(record["evidence_id"])
-            records.append(record)
-            if len(records) > MAX_TOTAL_RECORDS:
-                raise SoftwareInventoryError(
-                    "software inventory snapshot exceeded the record limit",
-                    statuses,
-                )
-    records.sort(
-        key=lambda item: (
-            item["asset_ref"].casefold(),
-            item["product"].casefold(),
-            item["version"].casefold(),
-            item["source"],
-            item["evidence_id"],
+        source_records, source_status = _collect_snapshot_source(
+            config,
+            source,
+            window,
+            now,
+            deadline,
+            page_fetcher,
+            endpoint_cache,
+            statuses,
         )
+        statuses[source] = source_status
+        _admit_snapshot_records(
+            records,
+            evidence_ids,
+            source_records,
+            statuses,
+        )
+    return _validated_snapshot(
+        records, statuses, window, now, endpoint_cache
     )
-    stamp = format_timestamp(now)
-    payload = {
-            "schema": STATE_SCHEMA,
-            "version": 1,
-            "updated_at": stamp,
-            "collection": {
-                "status": "ok",
-                "last_attempt_at": stamp,
-                "last_success_at": stamp,
-                "last_error": "",
-                "window": window,
-                "source_statuses": statuses,
-                "complete": True,
-            },
-            "records": records,
-        }
-    if endpoint_cache is not None:
-        payload["collection"]["osquery_ready"] = endpoint_cache["targets"]
-    return validate_state(payload)
 
 
 def failed_state(
