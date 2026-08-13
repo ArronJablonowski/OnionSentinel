@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +39,16 @@ class TrackingDict(dict):
         return super().get(key, default)
 
 
+class TrackingUsage(dict):
+    def __init__(self, *args, trace, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.trace = trace
+
+    def __getitem__(self, key):
+        self.trace.append(("usage", key))
+        return super().__getitem__(key)
+
+
 def read_json(path: Path, **_kwargs):
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -49,6 +60,111 @@ def read_json(path: Path, **_kwargs):
 
 
 class HermesProviderAdapterTests(unittest.TestCase):
+    def chat_boundary(self, trace, **overrides):
+        invoke_side_effect = overrides.pop("invoke_side_effect", None)
+        response = {"summary": "bounded"}
+        usage = TrackingUsage(
+            {"model": "gpt-5.6-sol", "provider": "openai-codex"}, trace=trace
+        )
+        handle = SimpleNamespace(
+            __enter__=lambda self: trace.append("enter") or self,
+            __exit__=lambda self, *args: trace.append(("exit", args[0])) or False,
+        )
+
+        class Handle:
+            def __enter__(self):
+                trace.append("enter")
+                return handle
+
+            def __exit__(self, exc_type, _exc, _tb):
+                trace.append(("exit", exc_type))
+                return False
+
+        values = {
+            "prompt_package": {"alert": {"id": "synthetic"}},
+            "args": SimpleNamespace(timeout=15.0, max_response_bytes=4096),
+            "settings": {
+                "hermes_agent_enabled": True,
+                "hermes_agent_model": "gpt-5.6-sol",
+                "hermes_agent_reasoning_effort": "medium",
+            },
+            "model": "gpt-5.6-sol",
+            "reasoning_effort": "medium",
+            "system_prompt_file": None,
+            "independent_review": False,
+            "boolean_setting": bool,
+            "model_catalog": ("gpt-5.6-sol",),
+            "required_effort": "medium",
+            "resolve_executable": lambda _settings: trace.append("resolve") or "/bin/hermes",
+            "build_payload": lambda *_args, **_kwargs: trace.append("payload") or {},
+            "auth_file": Path("/private/tmp/synthetic-hermes-auth.json"),
+            "load_dedicated_auth": lambda _path: trace.append("load") or {"auth": True},
+            "write_dedicated_auth": lambda *_args: None,
+            "atomic_write_json": lambda *_args: None,
+            "run_command": lambda *_args, **_kwargs: None,
+            "sanitized_env": lambda *_args, **_kwargs: {},
+            "process_error": ProcessError,
+            "artifact_error": ArtifactError,
+            "summarize_failure": cli_common.summarize_harness_failure,
+            "verify_usage": lambda *_args, **_kwargs: usage,
+            "extract_json": json.loads,
+            "max_prompt_bytes": 4096,
+            "max_stderr_bytes": 1024,
+            "flock": lambda _handle, operation: trace.append(("flock", operation)),
+            "lock_exclusive": 1,
+            "lock_unlock": 2,
+        }
+        values.update(overrides)
+        with mock.patch.object(hermes, "_open_auth_lock", return_value=Handle()), \
+                mock.patch.object(
+                    hermes,
+                    "_invoke_isolated",
+                    side_effect=invoke_side_effect or (
+                        lambda *_args, **_kwargs: (
+                            trace.append("invoke"), (response, usage)
+                        )[-1]
+                    ),
+                ):
+            result = hermes.chat(**values)
+        return result, response
+
+    def test_chat_preserves_lock_transaction_and_usage_projection_order(self) -> None:
+        trace: list[object] = []
+        result, response = self.chat_boundary(trace)
+        self.assertIs(result, response)
+        self.assertEqual(trace, [
+            "resolve", "payload", "enter", ("flock", 1), "load", "invoke",
+            ("flock", 2), ("exit", None),
+            ("usage", "model"), ("usage", "provider"),
+        ])
+        self.assertEqual(result["_analysis_model_path"], "hermes-agent")
+        self.assertEqual(result["_analysis_harness"], "hermes-agent")
+
+    def test_chat_unlocks_and_closes_when_invocation_fails(self) -> None:
+        trace: list[object] = []
+        failure = ProcessError("synthetic invocation failure")
+        with self.assertRaises(ProcessError) as raised:
+            self.chat_boundary(trace, invoke_side_effect=failure)
+        self.assertIs(raised.exception, failure)
+        self.assertIn(("flock", 2), trace)
+        self.assertEqual(trace[-1], ("exit", ProcessError))
+
+    def test_chat_auth_unavailable_preserves_path_message_cause_and_unlock(self) -> None:
+        trace: list[object] = []
+        failure = ArtifactError("credential detail must remain chained")
+        with self.assertRaisesRegex(
+            SystemExit,
+            r"dedicated authentication is unavailable at /private/tmp/"
+            r"synthetic-hermes-auth.json",
+        ) as raised:
+            self.chat_boundary(
+                trace,
+                load_dedicated_auth=lambda _path: (_ for _ in ()).throw(failure),
+            )
+        self.assertIs(raised.exception.__cause__, failure)
+        self.assertIn(("flock", 2), trace)
+        self.assertEqual(trace[-1], ("exit", SystemExit))
+
     def invoke_isolated(self, run_command, trace, **overrides):
         values = {
             "serialized": '{"bounded":true}',
