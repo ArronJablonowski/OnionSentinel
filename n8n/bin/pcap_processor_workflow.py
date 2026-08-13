@@ -72,52 +72,94 @@ def process_one(request: dict[str, Any], args: argparse.Namespace, direct_pcap: 
     )
 
 
-def main() -> int:
-    args = parse_args()
-    require_runtime_capacity(args.out_dir, 0, label="PCAP analysis")
-    consume_wake_marker(args.wake_file)
+def _manual_request(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "request_id": safe_filename(args.pcap.stem),
+        "alert_id": args.alert_id,
+        "group_id": args.group_id,
+        "artifact_path": str(args.pcap),
+        "status": "manual",
+    }
+
+
+def _existing_analysis(existing: Path) -> dict[str, Any]:
+    analysis = json.loads(existing.read_text(encoding="utf-8"))
+    analysis["_json_path"] = str(existing)
+    analysis["_markdown_path"] = str(
+        existing.with_name(
+            existing.name.replace("-pcap-analysis.json", "-pcap-analysis.md")
+        )
+    )
+    return analysis
+
+
+def _report_pending_failure(
+    args: argparse.Namespace, request_id: str, error: Exception
+) -> None:
+    try:
+        report_analysis_status(
+            args.alert_store_url, request_id, "failed", str(error)
+        )
+    except Exception as status_error:
+        print(
+            f"status update failed for {request_id}: {status_error}",
+            file=sys.stderr,
+        )
+    print(f"PCAP analysis failed for {request_id}: {error}", file=sys.stderr)
+
+
+def _process_pending_request(
+    request: dict[str, Any], args: argparse.Namespace
+) -> tuple[bool, Any]:
+    request_id = safe_filename(request.get("request_id"))
+    existing = analysis_json_path(args.out_dir, request_id)
+    try:
+        report_analysis_status(args.alert_store_url, request_id, "processing")
+        if existing.exists() and not args.overwrite:
+            analysis = _existing_analysis(existing)
+        else:
+            analysis = process_one(request, args)
+        report_analysis_status(args.alert_store_url, request_id, "completed")
+        return True, analysis
+    except Exception as error:
+        _report_pending_failure(args, request_id, error)
+        return False, None
+
+
+def _pending_analyses(args: argparse.Namespace) -> tuple[list[Any], int]:
+    requests = pending_requests(
+        args.db, args.request_id, args.limit, args.out_dir, args.overwrite
+    )
+    processed: list[Any] = []
     failed_count = 0
-    if args.pcap:
-        request = {
-            "request_id": safe_filename(args.pcap.stem),
-            "alert_id": args.alert_id,
-            "group_id": args.group_id,
-            "artifact_path": str(args.pcap),
-            "status": "manual",
-        }
-        processed = [process_one(request, args, args.pcap)]
-    else:
-        requests = pending_requests(args.db, args.request_id, args.limit, args.out_dir, args.overwrite)
-        processed = []
-        for request in requests:
-            request_id = safe_filename(request.get("request_id"))
-            existing = analysis_json_path(args.out_dir, request_id)
-            try:
-                report_analysis_status(args.alert_store_url, request_id, "processing")
-                if existing.exists() and not args.overwrite:
-                    analysis = json.loads(existing.read_text(encoding="utf-8"))
-                    analysis["_json_path"] = str(existing)
-                    analysis["_markdown_path"] = str(existing.with_name(existing.name.replace("-pcap-analysis.json", "-pcap-analysis.md")))
-                else:
-                    analysis = process_one(request, args)
-                report_analysis_status(args.alert_store_url, request_id, "completed")
-                processed.append(analysis)
-            except Exception as exc:
-                failed_count += 1
-                try:
-                    report_analysis_status(args.alert_store_url, request_id, "failed", str(exc))
-                except Exception as status_exc:
-                    print(f"status update failed for {request_id}: {status_exc}", file=sys.stderr)
-                print(f"PCAP analysis failed for {request_id}: {exc}", file=sys.stderr)
-        if not args.request_id and len(requests) >= args.limit:
-            # A full batch may have more durable work behind it. Recreate the
-            # consumed marker so launchd drains the next bounded batch without
-            # waiting for the five-minute recovery timer.
-            signal_follow_up(args.wake_file)
+    for request in requests:
+        succeeded, analysis = _process_pending_request(request, args)
+        if succeeded:
+            processed.append(analysis)
+        else:
+            failed_count += 1
+    if not args.request_id and len(requests) >= args.limit:
+        signal_follow_up(args.wake_file)
+    return processed, failed_count
+
+
+def _emit_processed(args: argparse.Namespace, processed: list[Any]) -> None:
     if args.stdout:
         print(json.dumps(processed, indent=2, sort_keys=True))
     else:
         for item in processed:
             print(item["_markdown_path"])
             print(item["_json_path"])
+
+
+def main() -> int:
+    args = parse_args()
+    require_runtime_capacity(args.out_dir, 0, label="PCAP analysis")
+    consume_wake_marker(args.wake_file)
+    if args.pcap:
+        processed = [process_one(_manual_request(args), args, args.pcap)]
+        failed_count = 0
+    else:
+        processed, failed_count = _pending_analyses(args)
+    _emit_processed(args, processed)
     return 1 if failed_count else 0
