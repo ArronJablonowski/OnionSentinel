@@ -28,8 +28,7 @@ def validate_release_id(release_id: str) -> str:
     return release_id
 
 
-def set_runtime_release_id(env_path: Path, release_id: str) -> None:
-    release_id = validate_release_id(release_id)
+def _read_runtime_env_lines(env_path: Path) -> list[str]:
     if env_path.is_symlink():
         raise ReleaseIdError("runtime .env must not be a symbolic link")
     try:
@@ -39,10 +38,12 @@ def set_runtime_release_id(env_path: Path, release_id: str) -> None:
     if len(raw) > MAX_ENV_BYTES:
         raise ReleaseIdError("runtime .env exceeds its byte limit")
     try:
-        lines = raw.decode("utf-8").splitlines()
+        return raw.decode("utf-8").splitlines()
     except UnicodeDecodeError as exc:
         raise ReleaseIdError("runtime .env is not valid UTF-8") from exc
 
+
+def _render_release_env(lines: list[str], release_id: str) -> str:
     replacement = f"{RELEASE_KEY}={release_id}"
     output: list[str] = []
     replaced = False
@@ -58,7 +59,10 @@ def set_runtime_release_id(env_path: Path, release_id: str) -> None:
         if output and output[-1]:
             output.append("")
         output.append(replacement)
+    return "\n".join(output) + "\n"
 
+
+def _write_runtime_env_atomically(env_path: Path, content: str) -> None:
     env_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with tempfile.NamedTemporaryFile(
         "w",
@@ -67,7 +71,7 @@ def set_runtime_release_id(env_path: Path, release_id: str) -> None:
         prefix=f".{env_path.name}.",
         delete=False,
     ) as handle:
-        handle.write("\n".join(output) + "\n")
+        handle.write(content)
         handle.flush()
         os.fsync(handle.fileno())
         temporary = Path(handle.name)
@@ -76,6 +80,13 @@ def set_runtime_release_id(env_path: Path, release_id: str) -> None:
         os.replace(temporary, env_path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def set_runtime_release_id(env_path: Path, release_id: str) -> None:
+    release_id = validate_release_id(release_id)
+    lines = _read_runtime_env_lines(env_path)
+    content = _render_release_env(lines, release_id)
+    _write_runtime_env_atomically(env_path, content)
 
 
 def parse_args() -> argparse.Namespace:
