@@ -110,6 +110,30 @@ def render_incident_response(
     return lines
 
 
+def _security_onion_query_lines(index: int, query: dict[str, Any]) -> list[str]:
+    return [
+        f"### Query {index}: {query.get('pack') or 'evidence pack'}",
+        "",
+        f"- **Status:** {query.get('status') or 'unknown'}",
+        f"- **Digest:** `{query.get('query_digest') or 'n/a'}`",
+        f"- **Window:** {query.get('window', {}).get('start', '')} to {query.get('window', {}).get('end', '')}",
+        f"- **Hits:** {query.get('total_hits', 0)} total; {query.get('returned_hits', 0)} returned",
+        "",
+        "#### KQL (analyst-readable equivalent)",
+        "",
+        "```kql",
+        str(query.get("kql_equivalent") or "n/a"),
+        "```",
+        "",
+        "#### Elasticsearch Query DSL (exact executed request)",
+        "",
+        "```json",
+        json.dumps(query.get("query_dsl") or {}, indent=2, sort_keys=True),
+        "```",
+        "",
+    ]
+
+
 def render_security_onion_query_audit(response: dict[str, Any]) -> list[str]:
     """Render exact Security Onion query provenance and analyst equivalents."""
     audit = response.get("_incident_query_audit")
@@ -131,29 +155,7 @@ def render_security_onion_query_audit(response: dict[str, Any]) -> list[str]:
     for index, query in enumerate(queries, 1):
         if not isinstance(query, dict):
             continue
-        lines.extend(
-            [
-                f"### Query {index}: {query.get('pack') or 'evidence pack'}",
-                "",
-                f"- **Status:** {query.get('status') or 'unknown'}",
-                f"- **Digest:** `{query.get('query_digest') or 'n/a'}`",
-                f"- **Window:** {query.get('window', {}).get('start', '')} to {query.get('window', {}).get('end', '')}",
-                f"- **Hits:** {query.get('total_hits', 0)} total; {query.get('returned_hits', 0)} returned",
-                "",
-                "#### KQL (analyst-readable equivalent)",
-                "",
-                "```kql",
-                str(query.get("kql_equivalent") or "n/a"),
-                "```",
-                "",
-                "#### Elasticsearch Query DSL (exact executed request)",
-                "",
-                "```json",
-                json.dumps(query.get("query_dsl") or {}, indent=2, sort_keys=True),
-                "```",
-                "",
-            ]
-        )
+        lines.extend(_security_onion_query_lines(index, query))
     return lines
 
 
