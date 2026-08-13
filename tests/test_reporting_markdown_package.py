@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import copy
 from pathlib import Path
 import sys
 import unittest
@@ -78,6 +79,99 @@ class ReportingMarkdownPackageTests(unittest.TestCase):
             hashlib.sha256(rendered.encode("utf-8")).hexdigest(),
             "7a7b5ab81b8aa3598bfe7fdd14dfc0920dac06dd26122877297e7aea0f868aff",
         )
+
+    def test_context_preserves_reviewer_projection_disputes_and_identity(self) -> None:
+        alert = {
+            "alert_id": "alert-1", "rule_name": "Rule",
+            "triage_level": "HIGH", "triage_score": 90,
+            "seen_count": 4, "first_seen": "old", "last_seen": "new",
+        }
+        policy = {"hosted_second_opinion_allowed": True}
+        grouped = {"total_observations": 7, "raw_alert_rows": 3}
+        secondary = {"summary": "review"}
+        comparison = {"disputed_fields": [
+            "ignored",
+            {"field": "outcome", "primary": None, "reviewer": 7,
+             "material": True},
+            {},
+        ]}
+        authorization = {"authorized": False}
+        second = {
+            "response": secondary, "comparison": comparison,
+            "automation_authorization": authorization,
+        }
+        adjudicated = {"decision": "primary"}
+        adjudication = {"response": adjudicated}
+        prompt = {
+            "alert": alert, "analysis_policy": policy,
+            "grouped_alert_context": grouped,
+        }
+        response = {
+            "correlation_assessment": {"raw": True},
+            "_second_opinion": second,
+            "_disagreement_adjudication": adjudication,
+            "_analysis_model_path": "codex-cli",
+            "_analysis_input_mode": "alert",
+            "_analysis_model": "gpt-5.6-sol",
+        }
+        before_prompt = copy.deepcopy(prompt)
+        before_response = copy.deepcopy(response)
+        events: list[object] = []
+        normalized = {"normalized": True}
+
+        context = markdown._context(
+            prompt, response, "generated", Path("/reports/result.json"),
+            normalize_correlation=lambda value: events.append(
+                ("normalize", value is response["correlation_assessment"])
+            ) or normalized,
+            safe_filename=lambda value: events.append(("safe", value)) or "tag",
+        )
+
+        self.assertEqual(events, [("normalize", True), ("safe", "codex-cli")])
+        self.assertIs(context["alert"], alert)
+        self.assertIs(context["policy"], policy)
+        self.assertIs(context["correlation"], normalized)
+        self.assertIs(context["second"], second)
+        self.assertIs(context["secondary"], secondary)
+        self.assertIs(context["comparison"], comparison)
+        self.assertIs(context["authorization"], authorization)
+        self.assertIs(context["adjudication"], adjudication)
+        self.assertIs(context["adjudication_response"], adjudicated)
+        self.assertEqual(context["disputed"], [
+            "outcome: primary=None; reviewer=7 (material)",
+            "unknown: primary=n/a; reviewer=n/a",
+        ])
+        self.assertEqual(context["level"], "high")
+        self.assertEqual(context["total_observations"], 7)
+        self.assertEqual(context["first_seen"], "old")
+        self.assertEqual(context["analysis_tag"], "tag")
+        self.assertEqual(context["json_name"], "result.json")
+        self.assertEqual(prompt, before_prompt)
+        self.assertEqual(response, before_response)
+
+    def test_context_preserves_defaults_tag_precedence_and_malformed_disputes(self) -> None:
+        calls: list[object] = []
+        context = markdown._context(
+            {}, {"_analysis_input_mode": "manual"}, "now", Path("a.json"),
+            normalize_correlation=lambda value: calls.append(
+                ("normalize", value)
+            ) or {},
+            safe_filename=lambda value: calls.append(("safe", value)) or value,
+        )
+        self.assertEqual(calls, [("normalize", None), ("safe", "manual")])
+        self.assertEqual(context["rule_name"], "Security Onion Alert")
+        self.assertEqual(context["level"], "unknown")
+        self.assertEqual(context["raw_alert_rows"], 1)
+        self.assertEqual(context["analysis_tag"], "manual")
+
+        with self.assertRaises(TypeError):
+            markdown._context(
+                {}, {"_second_opinion": {
+                    "comparison": {"disputed_fields": None}
+                }}, "now", Path("a.json"),
+                normalize_correlation=lambda _value: {},
+                safe_filename=str,
+            )
 
     def test_query_audits_preserve_exact_copyable_query_blocks(self) -> None:
         response = {
