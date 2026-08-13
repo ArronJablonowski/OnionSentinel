@@ -434,7 +434,9 @@ def disabled_state(
     )
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def _parse_workflow_args(
+    argv: Optional[List[str]],
+) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
@@ -447,7 +449,84 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--database-api-url",
         default=DEFAULT_DATABASE_API_URL,
     )
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
+
+
+def _run_configured_inventory(
+    args: argparse.Namespace,
+    logger: SecurityJsonlLogger,
+    previous: Dict[str, Any],
+    config: Dict[str, Any],
+    attempted_at: dt.datetime,
+) -> int:
+    if not config["enabled"]:
+        updated = disabled_state(previous, attempted_at)
+        atomic_write_json(args.state, updated)
+        logger.log(
+            "info",
+            "software_inventory.disabled",
+            retained=len(updated["records"]),
+        )
+        return 0
+    endpoint_cache = load_endpoint_cache(args.endpoint_cache, attempted_at)
+    updated = collect_snapshot(
+        config,
+        previous,
+        attempted_at,
+        endpoint_cache=endpoint_cache,
+    )
+    database_result = publish_database_snapshot(
+        updated,
+        api_url=args.database_api_url,
+        token=database_write_token(args.env),
+    )
+    atomic_write_json(args.state, updated)
+    logger.log(
+        "info",
+        "software_inventory.completed",
+        returned=len(updated["records"]),
+        storage_backend="postgresql",
+        snapshot_id=database_result["snapshot_id"],
+        source_statuses=updated["collection"]["source_statuses"],
+    )
+    return 0
+
+
+def _settle_workflow_failure(
+    args: argparse.Namespace,
+    logger: SecurityJsonlLogger,
+    previous: Optional[Dict[str, Any]],
+    attempted_at: dt.datetime,
+    exc: BaseException,
+) -> int:
+    message = " ".join(str(exc).split())[:500]
+    statuses = (
+        exc.source_statuses
+        if isinstance(exc, SoftwareInventoryError)
+        else None
+    )
+    if previous is not None:
+        try:
+            updated = failed_state(
+                previous,
+                attempted_at,
+                message,
+                statuses,
+            )
+            atomic_write_json(args.state, updated)
+        except (OSError, UnicodeError, ValueError, RuntimeError):
+            pass
+    logger.log(
+        "error",
+        "software_inventory.failed",
+        error=message,
+        retained=len(previous["records"]) if previous else 0,
+    )
+    return 1
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = _parse_workflow_args(argv)
     logger = SecurityJsonlLogger(args.log, service="software-inventory")
     attempted_at = utc_now()
     previous: Optional[Dict[str, Any]] = None
@@ -455,37 +534,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         with collector_lock(args.state):
             previous = load_state(args.state)
             config = load_config(args.config)
-            if not config["enabled"]:
-                updated = disabled_state(previous, attempted_at)
-                atomic_write_json(args.state, updated)
-                logger.log(
-                    "info",
-                    "software_inventory.disabled",
-                    retained=len(updated["records"]),
-                )
-                return 0
-            endpoint_cache = load_endpoint_cache(args.endpoint_cache, attempted_at)
-            updated = collect_snapshot(
-                config,
+            return _run_configured_inventory(
+                args,
+                logger,
                 previous,
+                config,
                 attempted_at,
-                endpoint_cache=endpoint_cache,
             )
-            database_result = publish_database_snapshot(
-                updated,
-                api_url=args.database_api_url,
-                token=database_write_token(args.env),
-            )
-            atomic_write_json(args.state, updated)
-            logger.log(
-                "info",
-                "software_inventory.completed",
-                returned=len(updated["records"]),
-                storage_backend="postgresql",
-                snapshot_id=database_result["snapshot_id"],
-                source_statuses=updated["collection"]["source_statuses"],
-            )
-            return 0
     except (
         BoundedProcessError,
         OSError,
@@ -494,30 +549,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         RuntimeError,
         json.JSONDecodeError,
     ) as exc:
-        message = " ".join(str(exc).split())[:500]
-        statuses = (
-            exc.source_statuses
-            if isinstance(exc, SoftwareInventoryError)
-            else None
+        return _settle_workflow_failure(
+            args,
+            logger,
+            previous,
+            attempted_at,
+            exc,
         )
-        if previous is not None:
-            try:
-                updated = failed_state(
-                    previous,
-                    attempted_at,
-                    message,
-                    statuses,
-                )
-                atomic_write_json(args.state, updated)
-            except (OSError, UnicodeError, ValueError, RuntimeError):
-                pass
-        logger.log(
-            "error",
-            "software_inventory.failed",
-            error=message,
-            retained=len(previous["records"]) if previous else 0,
-        )
-        return 1
 
 
 if __name__ == "__main__":
