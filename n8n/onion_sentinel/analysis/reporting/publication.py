@@ -26,6 +26,40 @@ class OutputPublicationPlan:
         return json.dumps(self.enriched, indent=2, sort_keys=True) + "\n"
 
 
+def _enriched_payload(
+    prompt_path: Path, prompt_package: dict[str, Any], response: dict[str, Any],
+    args: Any, analysis_id: str, generated_at: str, alert: dict[str, Any],
+    saved_response_input_mode: str, default_second_opinion_prompt_file: Path,
+) -> dict[str, Any]:
+    return {
+        "analysis_id": analysis_id,
+        "analysis_type": (
+            "saved-response"
+            if response.get("_analysis_input_mode") == saved_response_input_mode
+            else str(response.get("_analysis_model_path") or "unknown")
+        ),
+        "analysis_input_mode": str(
+            response.get("_analysis_input_mode") or "model_execution"
+        ),
+        "generated_at": generated_at,
+        "prompt_package": str(prompt_path),
+        "alert_id": alert.get("alert_id"),
+        "rule_name": alert.get("rule_name"),
+        "triage_level": alert.get("triage_level"),
+        "system_prompt_file": str(args.system_prompt_file),
+        "second_opinion_system_prompt_file": str(
+            prompt_package.get("second_opinion_system_prompt_file")
+            or getattr(
+                args, "second_opinion_prompt_file",
+                default_second_opinion_prompt_file,
+            )
+        ),
+        "agent_memory_file": prompt_package.get("agent_memory_file"),
+        "shared_memory_file": prompt_package.get("shared_memory_file"),
+        "response": response,
+    }
+
+
 def build_plan(
     prompt_path: Path,
     prompt_package: dict[str, Any],
@@ -50,34 +84,10 @@ def build_plan(
     root = Path(args.out_dir).expanduser()
     json_path = root / f"{base}.json"
     markdown_path = root / f"{base}.md"
-    enriched = {
-        "analysis_id": analysis_id,
-        "analysis_type": (
-            "saved-response"
-            if response.get("_analysis_input_mode") == saved_response_input_mode
-            else str(response.get("_analysis_model_path") or "unknown")
-        ),
-        "analysis_input_mode": str(
-            response.get("_analysis_input_mode") or "model_execution"
-        ),
-        "generated_at": generated_at,
-        "prompt_package": str(prompt_path),
-        "alert_id": alert.get("alert_id"),
-        "rule_name": alert.get("rule_name"),
-        "triage_level": alert.get("triage_level"),
-        "system_prompt_file": str(args.system_prompt_file),
-        "second_opinion_system_prompt_file": str(
-            prompt_package.get("second_opinion_system_prompt_file")
-            or getattr(
-                args,
-                "second_opinion_prompt_file",
-                default_second_opinion_prompt_file,
-            )
-        ),
-        "agent_memory_file": prompt_package.get("agent_memory_file"),
-        "shared_memory_file": prompt_package.get("shared_memory_file"),
-        "response": response,
-    }
+    enriched = _enriched_payload(
+        prompt_path, prompt_package, response, args, analysis_id, generated_at,
+        alert, saved_response_input_mode, default_second_opinion_prompt_file,
+    )
     return OutputPublicationPlan(
         root=root,
         json_path=json_path,
