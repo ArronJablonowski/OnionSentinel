@@ -169,6 +169,21 @@ def parse_codex_cli_route(route: str) -> tuple[str, str] | None:
     return model, effort
 
 
+def _harness_route_metadata(
+    canonical: str,
+    provider: str,
+) -> tuple[str, str, str, str] | None:
+    parsed = parse_cli_harness_route(canonical, provider)
+    if not parsed:
+        return None
+    model, _ = parsed
+    if provider == "hermes-agent":
+        return canonical, model, provider, "openai-codex"
+    return canonical, model, provider, (
+        model.split("/", 1)[0] if "/" in model else provider
+    )
+
+
 def model_route_metadata(
     settings: dict[str, Any], route: str
 ) -> tuple[str, str, str, str]:
@@ -181,14 +196,10 @@ def model_route_metadata(
     if parsed := parse_codex_cli_route(canonical):
         model, _ = parsed
         return canonical, model, "frontier-codex-cli", "codex-cli"
-    if parsed := parse_cli_harness_route(canonical, "hermes-agent"):
-        model, _ = parsed
-        return canonical, model, "hermes-agent", "openai-codex"
-    if parsed := parse_cli_harness_route(canonical, "openclaw"):
-        model, _ = parsed
-        return canonical, model, "openclaw", (
-            model.split("/", 1)[0] if "/" in model else "openclaw"
-        )
+    if metadata := _harness_route_metadata(canonical, "hermes-agent"):
+        return metadata
+    if metadata := _harness_route_metadata(canonical, "openclaw"):
+        return metadata
     if canonical == "codex-cli":
         model = str(
             settings.get("codex_cli_model") or settings.get("cloud_model") or ""
