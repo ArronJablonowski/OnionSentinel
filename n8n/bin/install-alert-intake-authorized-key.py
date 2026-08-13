@@ -21,29 +21,48 @@ MARKER = "onion-sentinel-alert-intake@relay"
 MAX_INPUT_BYTES = 16 * 1024
 
 
-def read_public_key() -> tuple[str, str]:
-    raw = os.read(0, MAX_INPUT_BYTES + 1)
+def _decode_key_input(raw: bytes) -> str:
     if len(raw) > MAX_INPUT_BYTES:
         raise SystemExit("public key input exceeds the size limit")
     try:
         text = raw.decode("ascii")
     except UnicodeDecodeError as exc:
         raise SystemExit("public key must be ASCII") from exc
+    return text
+
+
+def _single_key_line(text: str) -> str:
     if "\\n" in text:
         raise SystemExit("public key contains a literal \\\\n sequence")
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if len(lines) != 1:
         raise SystemExit("provide exactly one public key on stdin")
-    fields = lines[0].split()
+    return lines[0]
+
+
+def _key_identity(line: str) -> tuple[str, str]:
+    fields = line.split()
     if len(fields) < 2 or fields[0] != "ssh-ed25519":
         raise SystemExit("the alert-intake identity must be one ssh-ed25519 public key")
+    return fields[0], fields[1]
+
+
+def _validate_key_payload(key_data: str) -> None:
     try:
-        decoded = base64.b64decode(fields[1], validate=True)
+        decoded = base64.b64decode(key_data, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise SystemExit("public key payload is not valid base64") from exc
     if not decoded:
         raise SystemExit("public key payload is empty")
-    return fields[0], fields[1]
+
+
+def read_public_key() -> tuple[str, str]:
+    raw = os.read(0, MAX_INPUT_BYTES + 1)
+    text = _decode_key_input(raw)
+    line = _single_key_line(text)
+    key_type, key_data = _key_identity(line)
+    _validate_key_payload(key_data)
+    return key_type, key_data
 
 
 def load_existing(path: Path) -> list[str]:

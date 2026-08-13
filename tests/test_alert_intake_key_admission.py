@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import base64
 import binascii
 import importlib.util
@@ -20,12 +21,69 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(installer)
 
 
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse(INSTALLER_PATH.read_text(encoding="utf-8"))
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+    class Complexity(ast.NodeVisitor):
+        def __init__(self):
+            self.value = 1
+
+        def visit_FunctionDef(self, node):
+            return
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_If(self, node):
+            self.value += 1
+            self.generic_visit(node)
+
+        visit_For = visit_If
+        visit_While = visit_If
+
+        def visit_Try(self, node):
+            self.value += len(node.handlers)
+            self.generic_visit(node)
+
+        def visit_BoolOp(self, node):
+            self.value += max(0, len(node.values) - 1)
+            self.generic_visit(node)
+
+        def visit_ListComp(self, node):
+            self.value += sum(
+                1 + len(generator.ifs) for generator in node.generators
+            )
+            self.generic_visit(node)
+
+    visitor = Complexity()
+    for child in target.body:
+        visitor.visit(child)
+    return target.end_lineno - target.lineno + 1, visitor.value
+
+
 def synthetic_key(label: str = "arr263") -> tuple[str, bytes]:
     payload = base64.b64encode(f"synthetic-{label}".encode("ascii")).decode("ascii")
     return payload, f"ssh-ed25519 {payload} {label}@test\n".encode("ascii")
 
 
 class AlertIntakeKeyAdmissionTests(unittest.TestCase):
+    def test_key_admission_phases_meet_architecture_contract(self) -> None:
+        for name in (
+            "_decode_key_input",
+            "_single_key_line",
+            "_key_identity",
+            "_validate_key_payload",
+            "read_public_key",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
+
     def _read(self, raw: bytes):
         calls: list[tuple[int, int]] = []
 
