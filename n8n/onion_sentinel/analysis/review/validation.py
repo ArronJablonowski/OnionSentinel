@@ -32,6 +32,21 @@ class Dependencies:
     hypotheses_max: int
 
 
+@dataclass(frozen=True)
+class ValidationState:
+    observables: list[Any]
+    admitted: list[tuple[str, str]]
+    used: set[tuple[str, str]]
+    discarded: list[tuple[str, str]]
+    explicit_bare: list[tuple[str, str]]
+    derived: list[tuple[str, str]]
+    taxonomy: set[str]
+    artifacts: set[str]
+    rule_shorthands: set[str]
+    cited: list[Any]
+    corroborating: list[str]
+
+
 def _contract_errors(
     response: dict[str, Any],
     review_package: dict[str, Any],
@@ -378,6 +393,72 @@ def _validate_hypotheses(
         errors.append("every hypotheses entry must be an object")
 
 
+def _validation_state(
+    response: dict[str, Any],
+    review_package: dict[str, Any],
+    contract: dict[str, Any],
+    errors: list[str],
+    deps: Dependencies,
+) -> ValidationState:
+    allowed = _allowed_observables(contract)
+    observables, admitted = _admit_model_observables(response, allowed, errors, deps)
+    material, taxonomy, artifacts, rule_shorthands = _narrative_observables(
+        response, review_package, contract, allowed, errors, deps
+    )
+    used, discarded, explicit_bare, derived = _normalize_observables(
+        admitted, material, deps
+    )
+    cited, corroborating = _admit_evidence(response, review_package, errors, deps)
+    _validate_hypotheses(response, errors, deps)
+    return ValidationState(
+        observables, admitted, used, discarded, explicit_bare, derived,
+        taxonomy, artifacts, rule_shorthands, cited, corroborating,
+    )
+
+
+def _validation_audit(
+    contract: dict[str, Any], state: ValidationState
+) -> dict[str, Any]:
+    normalized = [
+        {"kind": kind, "value": value} for kind, value in sorted(state.used)
+    ]
+    admitted_set = set(state.admitted)
+    return {
+        "schema": "onion-sentinel-independent-review-validation-v1",
+        "valid": True,
+        "case_id": contract.get("case_id"),
+        "evidence_hash": contract.get("evidence_hash"),
+        "observable_count": len(normalized),
+        "observable_normalization": {
+            "schema": "onion-sentinel-reviewer-observable-normalization-v1",
+            "model_supplied_count": len(state.observables),
+            "canonical_model_supplied_count": len(admitted_set),
+            "retained_model_supplied_count": len(
+                admitted_set.difference(state.discarded)
+            ),
+            "duplicate_count": len(state.admitted) - len(admitted_set),
+            "discarded_unused_bounded_count": len(state.discarded),
+            "discarded_unused_bounded_observables": [
+                {"kind": kind, "value": value} for kind, value in state.discarded
+            ],
+            "explicit_bare_model_observable_count": len(state.explicit_bare),
+            "explicit_bare_model_observables": [
+                {"kind": kind, "value": value} for kind, value in state.explicit_bare
+            ],
+            "derived_count": len(state.derived),
+            "derived_observables": [
+                {"kind": kind, "value": value} for kind, value in state.derived
+            ],
+            "normalization_applied": normalized != state.observables,
+            "allowed_non_domain_taxonomy_count": len(state.taxonomy),
+            "allowed_non_domain_artifact_count": len(state.artifacts),
+            "allowed_non_domain_rule_shorthand_count": len(state.rule_shorthands),
+        },
+        "evidence_reference_count": len(state.cited),
+        "corroborating_evidence_count": len(state.corroborating),
+    }
+
+
 def validate(
     response: dict[str, Any],
     review_package: dict[str, Any],
@@ -390,54 +471,14 @@ def validate(
     if not isinstance(contract, dict):
         raise deps.error_type("review contract is unavailable")
     errors = _contract_errors(response, review_package, contract, deps)
-    allowed = _allowed_observables(contract)
-    observables, admitted = _admit_model_observables(response, allowed, errors, deps)
-    material, taxonomy, artifacts, rule_shorthands = _narrative_observables(
-        response, review_package, contract, allowed, errors, deps
-    )
-    used, discarded, explicit_bare, derived = _normalize_observables(
-        admitted, material, deps
-    )
-    cited, corroborating = _admit_evidence(response, review_package, errors, deps)
-    _validate_hypotheses(response, errors, deps)
+    state = _validation_state(response, review_package, contract, errors, deps)
     errors.extend(deps.repetition_reasons(response))
     if errors:
         raise deps.error_type("; ".join(errors)[:2000])
 
-    normalized = [{"kind": kind, "value": value} for kind, value in sorted(used)]
     validated = dict(response)
-    validated["observables_used"] = normalized
-    admitted_set = set(admitted)
-    validated["_review_contract_validation"] = {
-        "schema": "onion-sentinel-independent-review-validation-v1",
-        "valid": True,
-        "case_id": contract.get("case_id"),
-        "evidence_hash": contract.get("evidence_hash"),
-        "observable_count": len(normalized),
-        "observable_normalization": {
-            "schema": "onion-sentinel-reviewer-observable-normalization-v1",
-            "model_supplied_count": len(observables),
-            "canonical_model_supplied_count": len(admitted_set),
-            "retained_model_supplied_count": len(admitted_set.difference(discarded)),
-            "duplicate_count": len(admitted) - len(admitted_set),
-            "discarded_unused_bounded_count": len(discarded),
-            "discarded_unused_bounded_observables": [
-                {"kind": kind, "value": value} for kind, value in discarded
-            ],
-            "explicit_bare_model_observable_count": len(explicit_bare),
-            "explicit_bare_model_observables": [
-                {"kind": kind, "value": value} for kind, value in explicit_bare
-            ],
-            "derived_count": len(derived),
-            "derived_observables": [
-                {"kind": kind, "value": value} for kind, value in derived
-            ],
-            "normalization_applied": normalized != observables,
-            "allowed_non_domain_taxonomy_count": len(taxonomy),
-            "allowed_non_domain_artifact_count": len(artifacts),
-            "allowed_non_domain_rule_shorthand_count": len(rule_shorthands),
-        },
-        "evidence_reference_count": len(cited),
-        "corroborating_evidence_count": len(corroborating),
-    }
+    validated["observables_used"] = [
+        {"kind": kind, "value": value} for kind, value in sorted(state.used)
+    ]
+    validated["_review_contract_validation"] = _validation_audit(contract, state)
     return validated
