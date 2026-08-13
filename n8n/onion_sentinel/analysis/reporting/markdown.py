@@ -12,18 +12,7 @@ def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _context(
-    prompt_package: dict[str, Any],
-    response: dict[str, Any],
-    generated_at: str,
-    json_path: Path,
-    *,
-    normalize_correlation: Callable[[Any], dict[str, Any]],
-    safe_filename: Callable[[Any], str],
-) -> dict[str, Any]:
-    alert = prompt_package.get("alert", {})
-    grouped = _mapping(prompt_package.get("grouped_alert_context"))
-    correlation = normalize_correlation(response.get("correlation_assessment"))
+def _review_context(response: dict[str, Any]) -> dict[str, Any]:
     second = _mapping(response.get("_second_opinion"))
     secondary = _mapping(second.get("response"))
     comparison = _mapping(second.get("comparison"))
@@ -39,6 +28,30 @@ def _context(
         for item in comparison.get("disputed_fields", [])
         if isinstance(item, dict)
     ]
+    return {
+        "second": second,
+        "secondary": secondary,
+        "comparison": comparison,
+        "authorization": authorization,
+        "adjudication": adjudication,
+        "adjudication_response": adjudication_response,
+        "disputed": disputed,
+    }
+
+
+def _context(
+    prompt_package: dict[str, Any],
+    response: dict[str, Any],
+    generated_at: str,
+    json_path: Path,
+    *,
+    normalize_correlation: Callable[[Any], dict[str, Any]],
+    safe_filename: Callable[[Any], str],
+) -> dict[str, Any]:
+    alert = prompt_package.get("alert", {})
+    grouped = _mapping(prompt_package.get("grouped_alert_context"))
+    correlation = normalize_correlation(response.get("correlation_assessment"))
+    review = _review_context(response)
     model_path = str(response.get("_analysis_model_path") or "")
     input_mode = str(response.get("_analysis_input_mode") or "")
     return {
@@ -57,13 +70,7 @@ def _context(
         "first_seen": grouped.get("first_seen", alert.get("first_seen", "")),
         "last_seen": grouped.get("last_seen", alert.get("last_seen", "")),
         "correlation": correlation,
-        "second": second,
-        "secondary": secondary,
-        "comparison": comparison,
-        "authorization": authorization,
-        "adjudication": adjudication,
-        "adjudication_response": adjudication_response,
-        "disputed": disputed,
+        **review,
         "input_mode": input_mode,
         "model_path": model_path,
         "model": str(response.get("_analysis_model") or ""),
