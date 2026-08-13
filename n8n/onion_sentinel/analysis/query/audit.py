@@ -219,27 +219,35 @@ def _normalizations(round_result: dict[str, Any], limit: int) -> list[dict[str, 
     ][:limit]
 
 
-def round_audit(
-    round_result: dict[str, Any], *, policy: Policy, dependencies: Dependencies,
-) -> dict[str, Any]:
-    results = round_result.get("results", [])
-    results = results if isinstance(results, list) else []
-    valid_results = [item for item in results if isinstance(item, dict)]
-    trusted = [
+def _trusted_query_entries(
+    results: list[dict[str, Any]], limit: int
+) -> list[dict[str, Any]]:
+    return [
         entry
-        for item in valid_results
+        for item in results
         for entry in (
             item.get("trusted_query_audit")
             if isinstance(item.get("trusted_query_audit"), list)
             else []
         )
         if isinstance(entry, dict)
-    ]
+    ][:limit]
+
+
+def round_audit(
+    round_result: dict[str, Any], *, policy: Policy, dependencies: Dependencies,
+) -> dict[str, Any]:
+    results = round_result.get("results", [])
+    results = results if isinstance(results, list) else []
+    valid_results = [item for item in results if isinstance(item, dict)]
+    trusted = _trusted_query_entries(
+        valid_results, policy.maximum_queries_per_round
+    )
     return {
         "round": round_result.get("round"),
         "request_count": len(round_result.get("requests") or []),
         "results": [_result_summary(item) for item in valid_results],
-        "trusted_queries": trusted[: policy.maximum_queries_per_round],
+        "trusted_queries": trusted,
         "tool_call_bindings": tool_call_bindings(
             round_result, policy=policy, dependencies=dependencies
         ),
