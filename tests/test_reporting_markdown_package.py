@@ -126,6 +126,73 @@ class ReportingMarkdownPackageTests(unittest.TestCase):
         self.assertIn('"pid": "1"', appliance)
         self.assertIn("```sql\nselect * from listening_ports;\n```", live)
 
+    def test_security_onion_audit_preserves_defaults_numbering_and_exact_lines(self) -> None:
+        response = {
+            "_incident_query_audit": {
+                "queries": [
+                    "ignored",
+                    {
+                        "window": {"start": "first", "end": "last"},
+                        "query_dsl": {"z": 1, "a": {"b": 2}},
+                    },
+                ]
+            }
+        }
+        snapshot = {
+            "_incident_query_audit": {
+                "queries": [
+                    "ignored",
+                    {
+                        "window": {"start": "first", "end": "last"},
+                        "query_dsl": {"z": 1, "a": {"b": 2}},
+                    },
+                ]
+            }
+        }
+
+        self.assertEqual(incident.render_security_onion_query_audit(response), [
+            "## Security Onion Query Audit",
+            "",
+            "- **Trusted source:** n/a",
+            "- **Read only:** True",
+            "- **Complete:** False",
+            "- **Partial:** True",
+            "",
+            "### Query 2: evidence pack",
+            "",
+            "- **Status:** unknown",
+            "- **Digest:** `n/a`",
+            "- **Window:** first to last",
+            "- **Hits:** 0 total; 0 returned",
+            "",
+            "#### KQL (analyst-readable equivalent)",
+            "",
+            "```kql",
+            "n/a",
+            "```",
+            "",
+            "#### Elasticsearch Query DSL (exact executed request)",
+            "",
+            "```json",
+            '{\n  "a": {\n    "b": 2\n  },\n  "z": 1\n}',
+            "```",
+            "",
+        ])
+        self.assertEqual(response, snapshot)
+
+    def test_security_onion_audit_empty_and_invalid_window_boundaries(self) -> None:
+        self.assertEqual(incident.render_security_onion_query_audit({}), [])
+        self.assertEqual(
+            incident.render_security_onion_query_audit({
+                "_incident_query_audit": {"queries": "not-a-list"}
+            })[-1],
+            "No restricted Security Onion queries were recorded.",
+        )
+        with self.assertRaises(AttributeError):
+            incident.render_security_onion_query_audit({
+                "_incident_query_audit": {"queries": [{"window": None}]}
+            })
+
     def test_reporting_modules_do_not_perform_io(self) -> None:
         for path in (
             N8N_ROOT / "onion_sentinel" / "analysis" / "reporting" / "incident.py",
