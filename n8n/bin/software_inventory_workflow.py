@@ -19,6 +19,129 @@ PageFetcher = Callable[
     ],
     Dict[str, Any],
 ]
+SOURCE_COLLECTION_ERRORS = (
+    BoundedProcessError,
+    OSError,
+    UnicodeError,
+    ValueError,
+    RuntimeError,
+    json.JSONDecodeError,
+)
+
+
+def _admit_source_page(
+    records: List[Dict[str, Any]],
+    evidence_ids: Set[str],
+    page_records: List[Dict[str, Any]],
+    latest: str,
+) -> str:
+    for record in page_records:
+        evidence_id = record["evidence_id"]
+        if evidence_id in evidence_ids:
+            raise SoftwareInventoryError(
+                "software inventory source repeated an evidence identity"
+            )
+        evidence_ids.add(evidence_id)
+        records.append(record)
+        if not latest or record["last_seen"] > latest:
+            latest = record["last_seen"]
+    return latest
+
+
+def _admit_source_cursor(
+    response: Dict[str, Any],
+    cursors: Set[str],
+) -> Dict[str, Any]:
+    after = response["after"]
+    cursor_token = json.dumps(
+        after,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    if cursor_token in cursors:
+        raise SoftwareInventoryError(
+            "software inventory relay repeated a pagination cursor"
+        )
+    cursors.add(cursor_token)
+    return after
+
+
+def _require_source_record_limit(records: List[Dict[str, Any]]) -> None:
+    if len(records) > MAX_TOTAL_RECORDS:
+        raise SoftwareInventoryError(
+            "software inventory source exceeded the record limit"
+        )
+
+
+def _source_collection_error(
+    exc: BaseException,
+    *,
+    source: str,
+    pages: int,
+    records: List[Dict[str, Any]],
+    latest: str,
+    now: dt.datetime,
+) -> SoftwareInventoryError:
+    source_status = _source_status(
+        status="failed",
+        complete=False,
+        pages=pages,
+        returned=len(records),
+        latest=latest,
+        now=now,
+    )
+    message = (
+        str(exc)
+        if isinstance(exc, SoftwareInventoryError)
+        else f"{type(exc).__name__}: {exc}"
+    )
+    return SoftwareInventoryError(message, {source: source_status})
+
+
+def _fetch_source_page(
+    config: Dict[str, Any],
+    source: str,
+    window: Dict[str, str],
+    after: Optional[Dict[str, Any]],
+    deadline: float,
+    page_fetcher: PageFetcher,
+) -> Dict[str, Any]:
+    remaining = deadline - time.monotonic()
+    if remaining <= 1:
+        raise SoftwareInventoryError(
+            "software inventory collection exceeded its wall-clock budget"
+        )
+    response = page_fetcher(
+        config,
+        source,
+        window,
+        config["page_size"],
+        after,
+        min(float(config["timeout_seconds"]), remaining),
+    )
+    return validate_response(
+        response,
+        expected_source=source,
+        expected_window=window,
+        requested_page_size=config["page_size"],
+        previous_after=after,
+    )
+
+
+def _completed_source_collection(
+    records: List[Dict[str, Any]],
+    pages: int,
+    latest: str,
+    now: dt.datetime,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    return records, _source_status(
+        status="ok",
+        complete=True,
+        pages=pages,
+        returned=len(records),
+        latest=latest,
+        now=now,
+    )
 
 
 def collect_source(
@@ -37,87 +160,39 @@ def collect_source(
     latest = ""
     try:
         while pages < config["max_pages_per_source"]:
-            remaining = deadline - time.monotonic()
-            if remaining <= 1:
-                raise SoftwareInventoryError(
-                    "software inventory collection exceeded its wall-clock budget"
-                )
-            response = page_fetcher(
+            response = _fetch_source_page(
                 config,
                 source,
                 window,
-                config["page_size"],
                 after,
-                min(float(config["timeout_seconds"]), remaining),
-            )
-            # An injected page fetcher used by tests must satisfy the same
-            # contract as the transport adapter.
-            response = validate_response(
-                response,
-                expected_source=source,
-                expected_window=window,
-                requested_page_size=config["page_size"],
-                previous_after=after,
+                deadline,
+                page_fetcher,
             )
             pages += 1
-            for record in response["records"]:
-                evidence_id = record["evidence_id"]
-                if evidence_id in evidence_ids:
-                    raise SoftwareInventoryError(
-                        "software inventory source repeated an evidence identity"
-                    )
-                evidence_ids.add(evidence_id)
-                records.append(record)
-                if not latest or record["last_seen"] > latest:
-                    latest = record["last_seen"]
-            if len(records) > MAX_TOTAL_RECORDS:
-                raise SoftwareInventoryError(
-                    "software inventory source exceeded the record limit"
-                )
-            if response["complete"]:
-                return records, _source_status(
-                    status="ok",
-                    complete=True,
-                    pages=pages,
-                    returned=len(records),
-                    latest=latest,
-                    now=now,
-                )
-            after = response["after"]
-            cursor_token = json.dumps(
-                after,
-                separators=(",", ":"),
-                sort_keys=True,
+            latest = _admit_source_page(
+                records,
+                evidence_ids,
+                response["records"],
+                latest,
             )
-            if cursor_token in cursors:
-                raise SoftwareInventoryError(
-                    "software inventory relay repeated a pagination cursor"
+            _require_source_record_limit(records)
+            if response["complete"]:
+                return _completed_source_collection(
+                    records, pages, latest, now
                 )
-            cursors.add(cursor_token)
+            after = _admit_source_cursor(response, cursors)
         raise SoftwareInventoryError(
             "software inventory source exceeded its page limit"
         )
-    except (
-        BoundedProcessError,
-        OSError,
-        UnicodeError,
-        ValueError,
-        RuntimeError,
-        json.JSONDecodeError,
-    ) as exc:
-        source_status = _source_status(
-            status="failed",
-            complete=False,
+    except SOURCE_COLLECTION_ERRORS as exc:
+        raise _source_collection_error(
+            exc,
+            source=source,
             pages=pages,
-            returned=len(records),
+            records=records,
             latest=latest,
             now=now,
-        )
-        if isinstance(exc, SoftwareInventoryError):
-            message = str(exc)
-        else:
-            message = f"{type(exc).__name__}: {exc}"
-        raise SoftwareInventoryError(message, {source: source_status}) from exc
+        ) from exc
 
 
 def collect_snapshot(
