@@ -156,13 +156,9 @@ def _recovery_projection(
     }
 
 
-def validate_controlled_recovery_payload(
-    policy: ControlledPayloadPolicy,
-    sources: ControlledPayloadSources,
+def _controlled_payload_parts(
     payload: dict[str, Any],
-    args: Any,
-) -> dict[str, Any]:
-    """Bind one recovery payload to exact frozen scheduler pins."""
+) -> tuple[dict[str, Any], dict[str, Any]]:
     identity = payload.get("controlled_job")
     response = payload.get("response")
     if (
@@ -173,6 +169,13 @@ def validate_controlled_recovery_payload(
         raise RuntimeError(
             "controlled evaluation recovery identity is incomplete"
         )
+    return identity, response
+
+
+def _expected_recovery_context(
+    sources: ControlledPayloadSources,
+    identity: dict[str, Any],
+) -> tuple[str | None, str, str, str]:
     job_type = identity.get("job_type")
     lease_token = str(identity.get("lease_token") or "")
     expected_role = {
@@ -185,13 +188,38 @@ def validate_controlled_recovery_payload(
         else sources.incident_attempt_id(lease_token)
     )
     claim_digest = sources.canonical_digest(identity, ensure_ascii=False)
+    return (
+        expected_role,
+        expected_attempt,
+        claim_digest,
+        sources.current_release_id(),
+    )
+
+
+def validate_controlled_recovery_payload(
+    policy: ControlledPayloadPolicy,
+    sources: ControlledPayloadSources,
+    payload: dict[str, Any],
+    args: Any,
+) -> dict[str, Any]:
+    """Bind one recovery payload to exact frozen scheduler pins."""
+    identity, response = _controlled_payload_parts(payload)
+    (
+        expected_role,
+        expected_attempt,
+        claim_digest,
+        current_release_id,
+    ) = _expected_recovery_context(
+        sources,
+        identity,
+    )
     if not _identity_matches(
         policy,
         identity,
         args,
         expected_role=expected_role,
         expected_attempt=expected_attempt,
-        current_release_id=sources.current_release_id(),
+        current_release_id=current_release_id,
     ) or not _response_matches(
         policy,
         payload,
