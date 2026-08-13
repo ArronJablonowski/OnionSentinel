@@ -224,6 +224,17 @@ def _record_source_fields(source: Any, supplied: set[str]) -> None:
         supplied.add("process.executable")
 
 
+def _result_list(result: dict[str, Any], key: str) -> list[Any]:
+    return result.get(key, []) if isinstance(result.get(key), list) else []
+
+
+def _result_projection_blocked(result: dict[str, Any]) -> bool:
+    return any(result.get(key) is True for key in (
+        "truncated", "model_projection_truncated", "hits_prompt_truncated",
+        "rows_prompt_truncated",
+    )) or result.get("semantic_valid") is False
+
+
 def _record_evidence_result_fields(
     result: Any,
     supplied: set[str],
@@ -233,19 +244,16 @@ def _record_evidence_result_fields(
         return
     if _status(result.get("status")) not in policy.success_statuses:
         return
-    if any(result.get(key) is True for key in (
-        "truncated", "model_projection_truncated", "hits_prompt_truncated",
-        "rows_prompt_truncated",
-    )) or result.get("semantic_valid") is False:
+    if _result_projection_blocked(result):
         return
-    for hit in result.get("hits", []) if isinstance(result.get("hits"), list) else []:
+    for hit in _result_list(result, "hits"):
         if not isinstance(hit, dict):
             continue
         source = hit.get("_source")
         if not isinstance(source, dict):
             source = hit.get("source")
         _record_source_fields(source if isinstance(source, dict) else hit, supplied)
-    for row in result.get("rows", []) if isinstance(result.get("rows"), list) else []:
+    for row in _result_list(result, "rows"):
         _record_source_fields(row, supplied)
 
 
