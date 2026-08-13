@@ -23,8 +23,72 @@ class SyntheticProcessError(Exception):
     pass
 
 
+class TrackingDict(dict):
+    def __init__(self, *args, trace, label, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.trace = trace
+        self.label = label
+
+    def get(self, key, default=None):
+        self.trace.append(("get", self.label, key))
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        self.trace.append(("getitem", self.label, key))
+        return super().__getitem__(key)
+
+
 class OpenClawProviderAdapterTests(unittest.TestCase):
     MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,239}$")
+
+    def test_output_text_preserves_list_access_coercion_and_join_order(self) -> None:
+        trace: list[object] = []
+        envelope = TrackingDict({
+            "outputs": [
+                "ignored",
+                TrackingDict({"text": None}, trace=trace, label="none"),
+                TrackingDict({"text": 7}, trace=trace, label="number"),
+                TrackingDict({"text": ""}, trace=trace, label="empty"),
+                TrackingDict({"text": "last"}, trace=trace, label="last"),
+            ],
+            "text": "fallback-must-not-be-read",
+        }, trace=trace, label="envelope")
+
+        self.assertEqual(openclaw.output_text(envelope), "7\nlast")
+        self.assertEqual(trace, [
+            ("get", "envelope", "outputs"),
+            ("get", "none", "text"),
+            ("get", "number", "text"), ("get", "number", "text"),
+            ("get", "empty", "text"), ("get", "empty", "text"),
+            ("get", "last", "text"), ("get", "last", "text"),
+        ])
+
+    def test_output_text_fallback_order_returns_original_unstripped_string(self) -> None:
+        trace: list[object] = []
+        original = "  bounded output  "
+        envelope = TrackingDict({
+            "outputs": [], "text": "   ", "output": original,
+            "response": "not-read",
+        }, trace=trace, label="envelope")
+        observed = openclaw.output_text(envelope)
+        self.assertIs(observed, original)
+        self.assertEqual(trace, [
+            ("get", "envelope", "outputs"),
+            ("get", "envelope", "text"),
+            ("getitem", "envelope", "text"),
+            ("get", "envelope", "output"),
+            ("getitem", "envelope", "output"),
+            ("getitem", "envelope", "output"),
+        ])
+
+    def test_output_text_failure_preserves_exact_message_and_envelope(self) -> None:
+        envelope = {"outputs": [{"text": None}], "text": "", "output": 7}
+        snapshot = json.loads(json.dumps(envelope))
+        with self.assertRaisesRegex(
+            SystemExit, "OpenClaw completed without a text model output"
+        ):
+            openclaw.output_text(envelope)
+        self.assertEqual(envelope, snapshot)
 
     def settings(self) -> dict[str, object]:
         return {
