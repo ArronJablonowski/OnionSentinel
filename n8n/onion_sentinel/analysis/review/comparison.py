@@ -144,20 +144,8 @@ def _snapshot(response: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def compare(
-    primary: Mapping[str, Any],
-    reviewer: Mapping[str, Any],
-    *,
-    control_tuning_values: Collection[str],
-    non_escalatory_values: Collection[str],
-    boolean_setting: Callable[[Any], bool],
-) -> dict[str, Any]:
-    """Compare independent positions without letting either model arbitrate."""
-    tuning_material = any(
-        str(item.get("tuning_recommendation") or "").strip().lower() in control_tuning_values
-        for item in (primary, reviewer)
-    )
-    checks = (
+def _comparison_checks(tuning_material: bool) -> tuple[tuple[str, bool], ...]:
+    return (
         ("detection_outcome", True), ("event_status", True),
         ("detection_validity", True), ("activity_disposition", True),
         ("handling", True), ("duplicate_of", True),
@@ -166,6 +154,16 @@ def compare(
         ("confidence", False), ("confidence_score", False),
         ("tuning_recommendation", tuning_material),
     )
+
+
+def _disputes(
+    primary: Mapping[str, Any],
+    reviewer: Mapping[str, Any],
+    checks: Collection[tuple[str, bool]],
+    *,
+    non_escalatory_values: Collection[str],
+    boolean_setting: Callable[[Any], bool],
+) -> list[dict[str, Any]]:
     disputes: list[dict[str, Any]] = []
     for field, default_material in checks:
         primary_value, reviewer_value = _nested(primary, field), _nested(reviewer, field)
@@ -181,16 +179,46 @@ def compare(
             "field": field, "primary": primary_value,
             "reviewer": reviewer_value, "material": material,
         })
-    material_disagreement = any(item["material"] for item in disputes)
+    return disputes
+
+
+def _agreement(disputes: list[dict[str, Any]]) -> tuple[str, bool, str]:
+    material = any(item["material"] for item in disputes)
     if not disputes:
-        agreement = "agreement"
-        summary = "Primary and reviewer agree on all compared disposition fields."
-    elif material_disagreement:
-        agreement = "material_disagreement"
-        summary = "Primary and reviewer disagree on an analyst-handling decision."
-    else:
-        agreement = "partial_disagreement"
-        summary = "Primary and reviewer agree on disposition but differ on advisory context."
+        return (
+            "agreement", False,
+            "Primary and reviewer agree on all compared disposition fields.",
+        )
+    if material:
+        return (
+            "material_disagreement", True,
+            "Primary and reviewer disagree on an analyst-handling decision.",
+        )
+    return (
+        "partial_disagreement", False,
+        "Primary and reviewer agree on disposition but differ on advisory context.",
+    )
+
+
+def compare(
+    primary: Mapping[str, Any],
+    reviewer: Mapping[str, Any],
+    *,
+    control_tuning_values: Collection[str],
+    non_escalatory_values: Collection[str],
+    boolean_setting: Callable[[Any], bool],
+) -> dict[str, Any]:
+    """Compare independent positions without letting either model arbitrate."""
+    tuning_material = any(
+        str(item.get("tuning_recommendation") or "").strip().lower() in control_tuning_values
+        for item in (primary, reviewer)
+    )
+    disputes = _disputes(
+        primary, reviewer, _comparison_checks(tuning_material),
+        non_escalatory_values=non_escalatory_values,
+        boolean_setting=boolean_setting,
+    )
+    agreement, material_disagreement, summary = _agreement(disputes)
     return {
         "agreement": agreement, "material_disagreement": material_disagreement,
         "disputed_fields": disputes, "summary": summary,
