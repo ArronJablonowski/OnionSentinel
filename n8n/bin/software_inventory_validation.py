@@ -51,12 +51,7 @@ def _target_asset_refs(targets: object) -> Set[str]:
     return assets
 
 
-def validated_endpoint_cache(
-    value: object,
-    now: dt.datetime,
-    maximum_age: dt.timedelta,
-) -> Optional[Dict[str, Any]]:
-    """Validate one already-loaded endpoint cache without filesystem access."""
+def _validated_endpoint_cache_envelope(value: object) -> Dict[str, Any]:
     if (
         not isinstance(value, dict)
         or set(value) != {
@@ -67,14 +62,24 @@ def validated_endpoint_cache(
         or value.get("complete") is not True
     ):
         raise ValueError("endpoint software inventory cache is invalid")
-    updated = parse_timestamp(value.get("updated_at"))
+    return value
+
+
+def validated_endpoint_cache(
+    value: object,
+    now: dt.datetime,
+    maximum_age: dt.timedelta,
+) -> Optional[Dict[str, Any]]:
+    """Validate one already-loaded endpoint cache without filesystem access."""
+    cache = _validated_endpoint_cache_envelope(value)
+    updated = parse_timestamp(cache.get("updated_at"))
     current = now.astimezone(dt.timezone.utc)
     if updated > current + dt.timedelta(minutes=5) or current - updated > maximum_age:
         return None
-    records = value.get("records")
+    records = cache.get("records")
     if not isinstance(records, list) or len(records) > MAX_TOTAL_RECORDS:
         raise ValueError("endpoint software inventory cache is out of bounds")
-    assets = _target_asset_refs(value.get("targets"))
+    assets = _target_asset_refs(cache.get("targets"))
     normalized = [
         _normalize_record(record, expected_source="osquery_apps")
         for record in records
