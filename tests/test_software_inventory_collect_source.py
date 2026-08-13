@@ -379,7 +379,7 @@ class SoftwareInventoryCollectSourceTests(unittest.TestCase):
                 self.module,
                 "_source_status",
                 return_value=expected_status,
-            ),
+            ) as record_limit_status,
         ):
             with self.assertRaisesRegex(
                 self.module.SoftwareInventoryError,
@@ -393,6 +393,14 @@ class SoftwareInventoryCollectSourceTests(unittest.TestCase):
                     20.0,
                     page_fetcher=lambda *args: {"raw": True},
                 )
+        record_limit_status.assert_called_once_with(
+            status="failed",
+            complete=False,
+            pages=1,
+            returned=2,
+            latest="2026-08-12T11:00:00.000Z",
+            now=self.now,
+        )
 
 
 if __name__ == "__main__":
