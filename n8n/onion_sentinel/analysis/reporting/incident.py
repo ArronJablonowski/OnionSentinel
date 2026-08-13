@@ -173,6 +173,30 @@ def _render_osquery_rows(query: dict[str, Any]) -> list[str]:
     ]
 
 
+def _appliance_osquery_lines(index: int, query: dict[str, Any]) -> list[str]:
+    lines = [
+        f"### OSquery {index}: {query.get('pack') or 'reviewed pack'}",
+        "",
+        f"- **Target:** {query.get('target') or 'n/a'}",
+        f"- **Status:** {query.get('status') or 'unknown'}",
+        f"- **Digest:** `{query.get('query_digest') or 'n/a'}`",
+        f"- **Rows:** {query.get('total_rows', 0)} total; {query.get('returned_rows', 0)} returned",
+        f"- **Collector-owned alert bindings:** {query.get('support_binding_count', 0)}",
+        f"- **Duration:** {query.get('duration_ms', 0)} ms",
+        "",
+        "#### OSquery SQL (exact executed command)",
+        "",
+        "```sql",
+        str(query.get("query") or "n/a"),
+        "```",
+        "",
+    ]
+    lines.extend(_render_osquery_rows(query))
+    if query.get("error"):
+        lines.extend([f"- **Error:** {query.get('error')}", ""])
+    return lines
+
+
 def render_appliance_osquery_audit(response: dict[str, Any]) -> list[str]:
     """Render read-only appliance OSQuery snapshot provenance."""
     audit = response.get("_incident_osquery_audit")
@@ -194,28 +218,7 @@ def render_appliance_osquery_audit(response: dict[str, Any]) -> list[str]:
     for index, query in enumerate(queries, 1):
         if not isinstance(query, dict):
             continue
-        lines.extend(
-            [
-                f"### OSquery {index}: {query.get('pack') or 'reviewed pack'}",
-                "",
-                f"- **Target:** {query.get('target') or 'n/a'}",
-                f"- **Status:** {query.get('status') or 'unknown'}",
-                f"- **Digest:** `{query.get('query_digest') or 'n/a'}`",
-                f"- **Rows:** {query.get('total_rows', 0)} total; {query.get('returned_rows', 0)} returned",
-                f"- **Collector-owned alert bindings:** {query.get('support_binding_count', 0)}",
-                f"- **Duration:** {query.get('duration_ms', 0)} ms",
-                "",
-                "#### OSquery SQL (exact executed command)",
-                "",
-                "```sql",
-                str(query.get("query") or "n/a"),
-                "```",
-                "",
-            ]
-        )
-        lines.extend(_render_osquery_rows(query))
-        if query.get("error"):
-            lines.extend([f"- **Error:** {query.get('error')}", ""])
+        lines.extend(_appliance_osquery_lines(index, query))
     return lines
 
 
