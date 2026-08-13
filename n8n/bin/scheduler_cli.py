@@ -98,7 +98,7 @@ def _add_runtime_paths(
     )
 
 
-def _add_scheduler_policy(
+def _add_scheduler_execution_policy(
     parser: argparse.ArgumentParser,
     defaults: SchedulerCliDefaults,
 ) -> None:
@@ -121,6 +121,9 @@ def _add_scheduler_policy(
         "--max-per-run", type=int, default=0,
         help="Maximum unique alert groups to analyze per scheduler run; 0 drains the queue until no eligible alerts remain",
     )
+
+
+def _add_controlled_identity_policy(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--only-group-id", default="",
         help=(
@@ -152,6 +155,12 @@ def _add_scheduler_policy(
             "--only-group-id, --only-alert-id, and --only-stable-group-key."
         ),
     )
+
+
+def _add_analysis_policy(
+    parser: argparse.ArgumentParser,
+    defaults: SchedulerCliDefaults,
+) -> None:
     parser.add_argument("--related-limit", type=int, default=8, help="Related alert count passed to prompt builder")
     parser.add_argument("--correlation-limit", type=int, default=8, help="Scored correlation candidates passed to prompt builder")
     parser.add_argument("--correlation-min-score", type=int, default=15, help="Minimum deterministic correlation score")
@@ -161,11 +170,27 @@ def _add_scheduler_policy(
         "--max-prompt-bytes", type=int, default=defaults.max_prompt_bytes,
         help="Hard byte ceiling for each generated AI prompt package",
     )
+
+
+def _add_scheduler_output_policy(
+    parser: argparse.ArgumentParser,
+    defaults: SchedulerCliDefaults,
+) -> None:
     parser.add_argument("--portal-wake-file", type=Path, default=defaults.portal_wake, help="Wake file for the independent dashboard refresh worker")
     parser.add_argument("--no-portal-refresh", action="store_true", help="Do not signal the independent dashboard refresh worker")
     parser.add_argument("--alert-store-url", default=defaults.alert_store_url, help="Alert-store URL for durable AI job status")
     parser.add_argument("--include-tests", action="store_true", help="Allow test/validation alert IDs")
     parser.add_argument("--dry-run", action="store_true", help="Print the selected alert without calling Ollama")
+
+
+def _add_scheduler_policy(
+    parser: argparse.ArgumentParser,
+    defaults: SchedulerCliDefaults,
+) -> None:
+    _add_scheduler_execution_policy(parser, defaults)
+    _add_controlled_identity_policy(parser)
+    _add_analysis_policy(parser, defaults)
+    _add_scheduler_output_policy(parser, defaults)
 
 
 def _validate_numeric_args(
@@ -189,10 +214,9 @@ def _normalize_controlled_identity(args: argparse.Namespace) -> None:
     args.only_dispatch_id = str(args.only_dispatch_id or "").strip()
 
 
-def _validate_controlled_identity(
+def _validate_controlled_identity_completeness(
     parser: argparse.ArgumentParser,
     args: argparse.Namespace,
-    policy: SchedulerCliPolicy,
 ) -> None:
     controlled_identity = (
         bool(args.only_group_id), bool(args.only_alert_id),
@@ -203,21 +227,60 @@ def _validate_controlled_identity(
             "--only-group-id, --only-alert-id, --only-stable-group-key, "
             "and --only-dispatch-id must be supplied together"
         )
+
+
+def _validate_controlled_group_id(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+) -> None:
     if args.only_group_id and not re.fullmatch(r"[a-f0-9]{20}", args.only_group_id):
         parser.error("--only-group-id must be one exact 20-hex stable group id")
+
+
+def _validate_controlled_alert_id(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    policy: SchedulerCliPolicy,
+) -> None:
     if args.only_alert_id and not policy.controlled_alert_id.fullmatch(args.only_alert_id):
         parser.error("--only-alert-id must be one bounded Security Onion/Elastic alert ID")
+
+
+def _validate_controlled_stable_group_key(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    policy: SchedulerCliPolicy,
+) -> None:
     if args.only_stable_group_key and not policy.stable_group_key_valid(args.only_stable_group_key):
         parser.error(
             "--only-stable-group-key must be non-empty valid UTF-8, contain "
             "no NUL, and be no longer than "
             f"{policy.stable_group_key_max_bytes} bytes"
         )
+
+
+def _validate_controlled_dispatch_id(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    policy: SchedulerCliPolicy,
+) -> None:
     if args.only_dispatch_id and not policy.controlled_dispatch_id.fullmatch(args.only_dispatch_id):
         parser.error(
             "--only-dispatch-id must be one exact 64-character lowercase "
             "SHA-256 hex digest"
         )
+
+
+def _validate_controlled_identity(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    policy: SchedulerCliPolicy,
+) -> None:
+    _validate_controlled_identity_completeness(parser, args)
+    _validate_controlled_group_id(parser, args)
+    _validate_controlled_alert_id(parser, args, policy)
+    _validate_controlled_stable_group_key(parser, args, policy)
+    _validate_controlled_dispatch_id(parser, args, policy)
 
 
 def _validate_correlation_args(
