@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import importlib.util
+import ast
 import sys
 import unittest
 from pathlib import Path
@@ -35,6 +36,57 @@ def load_result_module(name: str = "live_osquery_contract_result_projection"):
 
 
 result_contract = load_result_module()
+
+
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+    class Complexity(ast.NodeVisitor):
+        def __init__(self):
+            self.value = 1
+
+        def visit_FunctionDef(self, node):
+            return
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_If(self, node):
+            self.value += 1
+            self.generic_visit(node)
+
+        visit_For = visit_If
+        visit_While = visit_If
+
+        def visit_Try(self, node):
+            self.value += len(node.handlers)
+            self.generic_visit(node)
+
+        def visit_BoolOp(self, node):
+            self.value += max(0, len(node.values) - 1)
+            self.generic_visit(node)
+
+        def visit_IfExp(self, node):
+            self.value += 1
+            self.generic_visit(node)
+
+        def visit_ListComp(self, node):
+            self.value += sum(
+                1 + len(generator.ifs) for generator in node.generators
+            )
+            self.generic_visit(node)
+
+        visit_SetComp = visit_ListComp
+        visit_GeneratorExp = visit_ListComp
+
+    visitor = Complexity()
+    for child in target.body:
+        visitor.visit(child)
+    return target.end_lineno - target.lineno + 1, visitor.value
 
 
 def request(
@@ -101,6 +153,22 @@ class OneShotIterable:
 
 
 class LiveOsqueryResultProjectionTests(unittest.TestCase):
+    def test_changed_phases_meet_architecture_contract(self):
+        names = (
+            "_normalize_result_identity",
+            "_normalize_result",
+            "_artifact_header",
+            "_expected_result_bindings",
+            "_normalize_artifact_results",
+            "_validate_artifact_state",
+            "validate_result_artifact",
+        )
+        for name in names:
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
+
     def test_success_projection_key_order_and_input_immutability_are_exact(self):
         value = artifact()
         expected = [request()]

@@ -116,12 +116,12 @@ def _normalize_result_accounting(
     return total_rows, duration_ms, truncated
 
 
-def _normalize_result(
+def _normalize_result_identity(
     raw: Any,
     *,
     expected: dict[tuple[str, str], dict[str, Any]] | None,
     observed: set[tuple[str, str]],
-) -> dict[str, Any]:
+) -> tuple[str, str, str, str, set[str], int]:
     if not isinstance(raw, dict):
         raise LiveOsqueryContractError("each live OSQuery result must be an object")
     target_alias = _bounded_text(
@@ -148,6 +148,30 @@ def _normalize_result(
             raise LiveOsqueryContractError(
                 "result purpose does not match its submitted request"
             )
+    return (
+        target_alias,
+        query,
+        purpose,
+        query_digest,
+        expected_columns,
+        expected_row_limit,
+    )
+
+
+def _normalize_result(
+    raw: Any,
+    *,
+    expected: dict[tuple[str, str], dict[str, Any]] | None,
+    observed: set[tuple[str, str]],
+) -> dict[str, Any]:
+    (
+        target_alias,
+        query,
+        purpose,
+        query_digest,
+        expected_columns,
+        expected_row_limit,
+    ) = _normalize_result_identity(raw, expected=expected, observed=observed)
     rows = _normalize_result_rows(
         raw.get("rows"), expected_columns=expected_columns
     )
@@ -182,12 +206,7 @@ def _normalize_result(
     }
 
 
-def validate_result_artifact(
-    value: Any,
-    *,
-    expected_requests: Iterable[Any] | None = None,
-) -> dict[str, Any]:
-    """Validate a bounded result and optionally bind it to submitted requests."""
+def _artifact_header(value: Any) -> tuple[str, list[Any]]:
     if not isinstance(value, dict):
         raise LiveOsqueryContractError("live OSQuery result must be an object")
     if str(value.get("schema") or "") != SCHEMA:
@@ -196,6 +215,13 @@ def validate_result_artifact(
     raw_results = value.get("results")
     if not isinstance(raw_results, list) or len(raw_results) > MAX_REQUESTS:
         raise LiveOsqueryContractError("result list is missing or exceeds its bound")
+    return case_id, raw_results
+
+
+def _expected_result_bindings(
+    expected_requests: Iterable[Any] | None,
+    raw_results: list[Any],
+) -> dict[tuple[str, str], dict[str, Any]] | None:
     expected = (
         _normalize_expected_requests(expected_requests)
         if expected_requests is not None
@@ -205,7 +231,13 @@ def validate_result_artifact(
         raise LiveOsqueryContractError(
             "result count does not match the submitted live OSQuery requests"
         )
+    return expected
 
+
+def _normalize_artifact_results(
+    raw_results: list[Any],
+    expected: dict[tuple[str, str], dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
     observed: set[tuple[str, str]] = set()
     results = [
         _normalize_result(raw, expected=expected, observed=observed)
@@ -215,6 +247,13 @@ def validate_result_artifact(
         raise LiveOsqueryContractError(
             "live OSQuery result coverage does not match submitted requests"
         )
+    return results
+
+
+def _validate_artifact_state(
+    value: dict[str, Any],
+    results: list[dict[str, Any]],
+) -> bool:
     if value.get("read_only") is not True:
         raise LiveOsqueryContractError("live OSQuery result is not marked read-only")
     expected_complete = all(result["status"] == "ok" for result in results)
@@ -222,6 +261,19 @@ def validate_result_artifact(
         raise LiveOsqueryContractError(
             "result complete flag does not match individual query outcomes"
         )
+    return expected_complete
+
+
+def validate_result_artifact(
+    value: Any,
+    *,
+    expected_requests: Iterable[Any] | None = None,
+) -> dict[str, Any]:
+    """Validate a bounded result and optionally bind it to submitted requests."""
+    case_id, raw_results = _artifact_header(value)
+    expected = _expected_result_bindings(expected_requests, raw_results)
+    results = _normalize_artifact_results(raw_results, expected)
+    expected_complete = _validate_artifact_state(value, results)
     return {
         "schema": SCHEMA,
         "case_id": case_id,
