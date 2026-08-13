@@ -461,6 +461,44 @@ class ApplicationLogTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.status, 404)
 
+    def test_family_catalog_retained_size_includes_omitted_members(self) -> None:
+        expected_size = 0
+        valid_names = []
+        for index in range(application_logs.MAX_FAMILY_MEMBERS + 2):
+            name = f"ensure-n8n-stack-202608{index + 1:02d}-130000Z.log"
+            path = self.write_runtime(name, "x" * (index + 1))
+            expected_size += path.stat().st_size
+            valid_names.append(name)
+
+        members, count, retained_size = application_logs._family_members(
+            self.runtime_root
+        )
+
+        self.assertEqual(count, len(valid_names))
+        self.assertEqual(retained_size, expected_size)
+        self.assertEqual(len(members), application_logs.MAX_FAMILY_MEMBERS)
+        self.assertEqual(
+            [member["id"] for member in members],
+            sorted(valid_names, reverse=True)[:application_logs.MAX_FAMILY_MEMBERS],
+        )
+
+    def test_family_catalog_skips_unsafe_modes_without_counting_their_size(self) -> None:
+        safe = self.write_runtime("ensure-n8n-stack-20260801-140000Z.log", "safe")
+        writable = self.write_runtime(
+            "ensure-n8n-stack-20260802-140000Z.log", "unsafe-mode"
+        )
+        writable.chmod(0o620)
+        directory = self.runtime_root / "ensure-n8n-stack-20260803-140000Z.log"
+        directory.mkdir(mode=0o700)
+
+        members, count, retained_size = application_logs._family_members(
+            self.runtime_root
+        )
+
+        self.assertEqual([member["id"] for member in members], [safe.name])
+        self.assertEqual(count, 1)
+        self.assertEqual(retained_size, safe.stat().st_size)
+
     def test_root_must_be_owner_controlled_directory(self) -> None:
         os.chmod(self.runtime_root, 0o777)
         with self.assertRaises(application_logs.ApplicationLogError) as raised:
