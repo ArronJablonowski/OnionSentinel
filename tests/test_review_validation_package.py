@@ -173,6 +173,75 @@ class ReviewValidationPackageTests(unittest.TestCase):
             ],
         )
 
+    def test_validation_audit_accounts_for_duplicates_discards_bare_and_derived(self) -> None:
+        package = review_package()
+        package["review_contract"]["allowed_observables"] = [
+            {"kind": "ip", "value": "10.0.0.1"},
+            {"kind": "ip", "value": "10.0.0.2"},
+            {"kind": "user", "value": "analyst"},
+        ]
+        supplied = [
+            {"kind": "ip", "value": "10.0.0.2"},
+            {"kind": "ip", "value": "10.0.0.2"},
+            {"kind": "user", "value": "analyst"},
+        ]
+
+        result = validation.validate(
+            response(observables_used=supplied),
+            package,
+            dependencies(),
+        )
+
+        self.assertEqual(
+            result["observables_used"],
+            [
+                {"kind": "ip", "value": "10.0.0.1"},
+                {"kind": "user", "value": "analyst"},
+            ],
+        )
+        audit = result["_review_contract_validation"]["observable_normalization"]
+        self.assertEqual(audit["model_supplied_count"], 3)
+        self.assertEqual(audit["canonical_model_supplied_count"], 2)
+        self.assertEqual(audit["retained_model_supplied_count"], 1)
+        self.assertEqual(audit["duplicate_count"], 1)
+        self.assertEqual(audit["discarded_unused_bounded_count"], 1)
+        self.assertEqual(audit["explicit_bare_model_observable_count"], 1)
+        self.assertEqual(audit["derived_count"], 1)
+        self.assertTrue(audit["normalization_applied"])
+        self.assertEqual(supplied[0]["value"], "10.0.0.2")
+
+    def test_validation_accumulates_stage_errors_in_public_order(self) -> None:
+        package = review_package()
+        invalid = response(
+            review_case_id="wrong-case",
+            review_evidence_hash="wrong-hash",
+            summary="Observed traffic from 10.0.0.2.",
+            observables_used="not-an-array",
+            evidence_used="not-an-array",
+            hypotheses="not-an-array",
+        )
+
+        with self.assertRaises(ReviewError) as raised:
+            validation.validate(
+                invalid,
+                package,
+                dependencies(repetition_reasons=lambda _response: ["repetition error"]),
+            )
+
+        self.assertEqual(
+            str(raised.exception).split("; "),
+            [
+                "review_case_id did not echo the current case",
+                "review_evidence_hash did not echo the current evidence",
+                "observables_used must be an array",
+                "reviewer introduced foreign IP address(es): 10.0.0.2",
+                "evidence_used must be an array",
+                "reviewer cited no current corroborating collector-owned evidence",
+                "hypotheses must be an array",
+                "repetition error",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
