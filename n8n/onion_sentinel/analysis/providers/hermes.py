@@ -228,6 +228,67 @@ def _environment(
     )
 
 
+def _oneshot_command(
+    executable: str, serialized: str, model: str, usage_path: Path
+) -> list[str]:
+    return [
+        executable, "--oneshot", serialized, "--model", model,
+        "--provider", "openai-codex", "--toolsets", "context_engine",
+        "--safe-mode", "--usage-file", str(usage_path),
+    ]
+
+
+def _raise_invocation_error(
+    invocation_error: BaseException | None,
+    process: Any,
+    executable: str,
+    process_error: type[BaseException],
+    summarize_failure: Callable[[str, str, int], str],
+) -> None:
+    if isinstance(invocation_error, FileNotFoundError):
+        raise SystemExit(
+            f"Hermes Agent executable was not found: {executable}"
+        ) from invocation_error
+    if isinstance(invocation_error, process_error):
+        raise SystemExit(
+            f"Hermes Agent analysis failed: {invocation_error}"
+        ) from invocation_error
+    if invocation_error is not None:
+        raise invocation_error
+    if process is None:
+        raise SystemExit("Hermes Agent analysis failed before execution completed")
+    if process.returncode != 0:
+        detail = summarize_failure("Hermes Agent", process.stderr, process.returncode)
+        raise SystemExit(f"Hermes Agent analysis failed: {detail}")
+
+
+def _persist_rotated_auth(
+    isolated_auth: Path,
+    auth_file: Path,
+    load_dedicated_auth: Callable[[Path], dict[str, Any]],
+    write_dedicated_auth: Callable[[Path, dict[str, Any]], None],
+    artifact_error: type[Exception],
+) -> None:
+    try:
+        write_dedicated_auth(auth_file, load_dedicated_auth(isolated_auth))
+    except (OSError, artifact_error) as exc:
+        raise SystemExit(
+            "Hermes Agent credential rotation could not be persisted to its "
+            "dedicated auth store"
+        ) from exc
+
+
+def _verified_output(
+    process: Any,
+    usage_path: Path,
+    model: str,
+    verify_usage: Callable[..., dict[str, Any]],
+    extract_json: Callable[[str], dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    usage = verify_usage(usage_path, expected_model=model)
+    return extract_json(process.stdout), usage
+
+
 def _invoke_isolated(
     serialized: str,
     args: Any,
@@ -256,11 +317,7 @@ def _invoke_isolated(
         isolated_auth.chmod(0o600)
         _write_config(paths["hermes_home"] / "config.yaml", model)
         usage_path = work_dir / "usage.json"
-        command = [
-            executable, "--oneshot", serialized, "--model", model,
-            "--provider", "openai-codex", "--toolsets", "context_engine",
-            "--safe-mode", "--usage-file", str(usage_path),
-        ]
+        command = _oneshot_command(executable, serialized, model, usage_path)
         process = None
         invocation_error: BaseException | None = None
         try:
@@ -274,26 +331,14 @@ def _invoke_isolated(
             )
         except BaseException as exc:
             invocation_error = exc
-        try:
-            write_dedicated_auth(auth_file, load_dedicated_auth(isolated_auth))
-        except (OSError, artifact_error) as exc:
-            raise SystemExit(
-                "Hermes Agent credential rotation could not be persisted to its "
-                "dedicated auth store"
-            ) from exc
-        if isinstance(invocation_error, FileNotFoundError):
-            raise SystemExit(f"Hermes Agent executable was not found: {executable}") from invocation_error
-        if isinstance(invocation_error, process_error):
-            raise SystemExit(f"Hermes Agent analysis failed: {invocation_error}") from invocation_error
-        if invocation_error is not None:
-            raise invocation_error
-        if process is None:
-            raise SystemExit("Hermes Agent analysis failed before execution completed")
-        if process.returncode != 0:
-            detail = summarize_failure("Hermes Agent", process.stderr, process.returncode)
-            raise SystemExit(f"Hermes Agent analysis failed: {detail}")
-        usage = verify_usage(usage_path, expected_model=model)
-        return extract_json(process.stdout), usage
+        _persist_rotated_auth(
+            isolated_auth, auth_file, load_dedicated_auth,
+            write_dedicated_auth, artifact_error,
+        )
+        _raise_invocation_error(
+            invocation_error, process, executable, process_error, summarize_failure
+        )
+        return _verified_output(process, usage_path, model, verify_usage, extract_json)
 
 
 def _validate_assignment(
