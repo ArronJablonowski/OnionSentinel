@@ -85,6 +85,29 @@ def _lane(
     return {**receipt, "status": "persisted", "result": persisted}
 
 
+def _store_receipt(
+    receipt: dict[str, Any],
+    receipt_path: Path,
+    canonical_digest: Callable[[Any], str],
+    atomic_write_private_json: Callable[[Path, dict[str, Any]], None],
+) -> tuple[dict[str, Any], Path | None]:
+    receipt["receipt_storage"] = {
+        "status": "stored",
+        "receipt_payload_digest": canonical_digest(receipt),
+    }
+    try:
+        atomic_write_private_json(receipt_path, receipt)
+    except Exception as exc:
+        receipt["ok"] = False
+        receipt["receipt_storage"] = {
+            "status": "failed",
+            "error_type": type(exc).__name__,
+            "error_digest": canonical_digest(str(exc)),
+        }
+        return receipt, None
+    return receipt, receipt_path
+
+
 def persist_postcommit(
     *,
     analysis_id: str,
@@ -134,21 +157,7 @@ def persist_postcommit(
     }
     receipt["ok"] = all(receipt[name]["status"] != "failed" for name in ("primary", "reviewer"))
     receipt_path = receipt_dir / f"{safe_filename(analysis_id)}.json"
-    receipt["receipt_storage"] = {
-        "status": "stored",
-        "receipt_payload_digest": canonical_digest(receipt),
-    }
-    try:
-        atomic_write_private_json(receipt_path, receipt)
-    except Exception as exc:
-        receipt["ok"] = False
-        receipt["receipt_storage"] = {
-            "status": "failed",
-            "error_type": type(exc).__name__,
-            "error_digest": canonical_digest(str(exc)),
-        }
-        return receipt, None
-    return receipt, receipt_path
+    return _store_receipt(receipt, receipt_path, canonical_digest, atomic_write_private_json)
 
 
 def _persist_staged_task(
