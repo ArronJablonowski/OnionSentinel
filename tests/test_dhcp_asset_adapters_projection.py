@@ -82,7 +82,7 @@ class DhcpAssetAdaptersProjectionTests(unittest.TestCase):
             "max_stderr_bytes": 4096,
         }
 
-    def test_signatures_and_current_quality_debt_are_stable(self) -> None:
+    def test_signatures_and_decomposed_phase_bounds_are_stable(self) -> None:
         self.assertEqual(
             str(inspect.signature(ADAPTERS.asset_store_token)),
             "(path: 'Path') -> 'str'",
@@ -97,9 +97,26 @@ class DhcpAssetAdaptersProjectionTests(unittest.TestCase):
             "size: 'int', *, now_fn, run_command_fn, validate_response_fn, "
             "diagnostic_fn) -> 'dict'",
         )
-        self.assertEqual(function_metrics("asset_store_token"), (23, 13))
-        self.assertEqual(function_metrics("relay_failure_diagnostic"), (27, 13))
-        self.assertEqual(function_metrics("query_dhcp"), (63, 9))
+        for name in (
+            "_validate_asset_store_environment",
+            "_environment_values",
+            "_asset_store_write_token",
+            "asset_store_token",
+            "_normalized_diagnostic_text",
+            "_relay_payload_diagnostics",
+            "relay_failure_diagnostic",
+            "_validated_query_window",
+            "_validate_query_size",
+            "_query_request",
+            "_query_command",
+            "_run_relay_query",
+            "_validated_query_result",
+            "query_dhcp",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
 
     def test_asset_token_preserves_metadata_short_circuit_and_read_order(self) -> None:
         calls = []

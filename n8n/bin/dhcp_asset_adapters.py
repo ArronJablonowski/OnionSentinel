@@ -16,7 +16,7 @@ from dhcp_asset_contract import CONTRACT, MAX_RESPONSE_OBSERVATIONS, format_time
 MAX_ASSET_API_RESPONSE_BYTES = 1024 * 1024
 
 
-def asset_store_token(path: Path) -> str:
+def _validate_asset_store_environment(path: Path) -> None:
     metadata = path.lstat()
     if (
         not path.is_file()
@@ -26,6 +26,9 @@ def asset_store_token(path: Path) -> str:
         or metadata.st_size > 1024 * 1024
     ):
         raise ValueError("runtime environment file is not owner-controlled")
+
+
+def _environment_values(path: Path) -> dict[str, str]:
     values = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
@@ -33,12 +36,21 @@ def asset_store_token(path: Path) -> str:
             continue
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip()
+    return values
+
+
+def _asset_store_write_token(values: dict[str, str]) -> str:
     token = values.get("ASSET_STORE_WRITE_TOKEN") or values.get(
         "N8N_POST_COMMIT_TOKEN"
     )
     if not token or len(token) < 32:
         raise ValueError("asset-store write token is missing or too short")
     return token
+
+
+def asset_store_token(path: Path) -> str:
+    _validate_asset_store_environment(path)
+    return _asset_store_write_token(_environment_values(path))
 
 
 def persist_database_state(api_url: str, token: str, state: dict) -> dict:
@@ -75,8 +87,15 @@ def persist_database_state(api_url: str, token: str, state: dict) -> dict:
     return result
 
 
-def relay_failure_diagnostic(stdout: object, stderr: object) -> str:
-    """Return bounded, allowlisted diagnostics from the forced relay envelope."""
+def _normalized_diagnostic_text(value: str) -> str:
+    text = "".join(
+        character if character.isprintable() else " "
+        for character in value
+    )
+    return " ".join(text.split())
+
+
+def _relay_payload_diagnostics(stdout: object) -> list[str]:
     fields: list[str] = []
     try:
         payload = json.loads(str(stdout or ""))
@@ -87,54 +106,55 @@ def relay_failure_diagnostic(stdout: object, stderr: object) -> str:
             value = payload.get(key)
             if not isinstance(value, str):
                 continue
-            text = "".join(
-                character if character.isprintable() else " "
-                for character in value
-            )
-            text = " ".join(text.split())
+            text = _normalized_diagnostic_text(value)
             if text:
                 fields.append(text[:300])
-    stderr_text = "".join(
-        character if character.isprintable() else " "
-        for character in str(stderr or "")
-    )
-    stderr_text = " ".join(stderr_text.split())
+    return fields
+
+
+def relay_failure_diagnostic(stdout: object, stderr: object) -> str:
+    """Return bounded, allowlisted diagnostics from the forced relay envelope."""
+    fields = _relay_payload_diagnostics(stdout)
+    stderr_text = _normalized_diagnostic_text(str(stderr or ""))
     if stderr_text:
         fields.append(stderr_text[:300])
     return "; ".join(fields)[:700]
 
 
-def query_dhcp(
-    config: dict,
+def _validated_query_window(
     start: dt.datetime,
     end: dt.datetime,
-    size: int,
-    *,
     now_fn,
-    run_command_fn,
-    validate_response_fn,
-    diagnostic_fn,
-) -> dict:
-    """Run one bounded, read-only DHCP query through the forced Relay lane."""
+) -> tuple[dt.datetime, dt.datetime]:
     start = start.astimezone(dt.timezone.utc)
     end = end.astimezone(dt.timezone.utc)
     if start >= end or end - start > dt.timedelta(hours=24):
         raise ValueError("DHCP query window must be positive and no longer than 24 hours")
     if end > now_fn() + dt.timedelta(minutes=5):
         raise ValueError("DHCP query window ends too far in the future")
+    return start, end
+
+
+def _validate_query_size(size: int) -> None:
     if (
         isinstance(size, bool)
         or not isinstance(size, int)
         or not 1 <= size <= MAX_RESPONSE_OBSERVATIONS
     ):
         raise ValueError("DHCP query size must be from 1 through 1000")
-    request = {
+
+
+def _query_request(start: dt.datetime, end: dt.datetime, size: int) -> dict:
+    return {
         "contract": CONTRACT,
         "operation": "dhcp_observations",
         "window": {"start": format_timestamp(start), "end": format_timestamp(end)},
         "size": size,
     }
-    command = [
+
+
+def _query_command(config: dict) -> list[str]:
+    return [
         "/usr/bin/ssh",
         "-T",
         "-o",
@@ -151,13 +171,19 @@ def query_dhcp(
         config["ssh_key"],
         f"{config['ssh_user']}@{config['host']}",
     ]
-    proc = run_command_fn(
+
+
+def _run_relay_query(config: dict, command: list[str], request: dict, run_command_fn):
+    return run_command_fn(
         command,
         stdin_text=json.dumps(request, separators=(",", ":"), sort_keys=True),
         timeout_seconds=config["timeout_seconds"],
         max_stdout_bytes=config["max_response_bytes"],
         max_stderr_bytes=config["max_stderr_bytes"],
     )
+
+
+def _validated_query_result(proc, request: dict, validate_response_fn, diagnostic_fn):
     if proc.returncode != 0:
         detail = diagnostic_fn(proc.stdout, proc.stderr)
         raise RuntimeError(
@@ -166,4 +192,29 @@ def query_dhcp(
     return validate_response_fn(
         json.loads(proc.stdout),
         expected_window=request["window"],
+    )
+
+
+def query_dhcp(
+    config: dict,
+    start: dt.datetime,
+    end: dt.datetime,
+    size: int,
+    *,
+    now_fn,
+    run_command_fn,
+    validate_response_fn,
+    diagnostic_fn,
+) -> dict:
+    """Run one bounded, read-only DHCP query through the forced Relay lane."""
+    start, end = _validated_query_window(start, end, now_fn)
+    _validate_query_size(size)
+    request = _query_request(start, end, size)
+    command = _query_command(config)
+    proc = _run_relay_query(config, command, request, run_command_fn)
+    return _validated_query_result(
+        proc,
+        request,
+        validate_response_fn,
+        diagnostic_fn,
     )
