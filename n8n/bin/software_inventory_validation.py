@@ -290,7 +290,7 @@ def _validate_cursor_binding(
         )
 
 
-def validate_relay_response(
+def _validated_response_window(
     value: object,
     *,
     expected_source: str,
@@ -299,7 +299,6 @@ def validate_relay_response(
     previous_after: Optional[Dict[str, Any]],
     build_request: BuildRequest,
 ) -> Dict[str, Any]:
-    """Validate one already-loaded response from the fixed read-only relay."""
     if not isinstance(value, dict) or frozenset(value) not in RESPONSE_KEY_SETS:
         raise ValueError("relay response has an invalid software inventory shape")
     if (
@@ -324,6 +323,27 @@ def validate_relay_response(
                 previous_after,
             ),
         )
+    return window
+
+
+def validate_relay_response(
+    value: object,
+    *,
+    expected_source: str,
+    expected_window: Dict[str, str],
+    requested_page_size: int,
+    previous_after: Optional[Dict[str, Any]],
+    build_request: BuildRequest,
+) -> Dict[str, Any]:
+    """Validate one already-loaded response from the fixed read-only relay."""
+    window = _validated_response_window(
+        value,
+        expected_source=expected_source,
+        expected_window=expected_window,
+        requested_page_size=requested_page_size,
+        previous_after=previous_after,
+        build_request=build_request,
+    )
     records, complete, truncated = _validated_result_accounting(
         value,
         requested_page_size,
