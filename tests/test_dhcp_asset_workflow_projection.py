@@ -50,7 +50,7 @@ def observation(evidence_id: str, observed_at: str, marker: str) -> dict:
 
 
 class DhcpAssetWorkflowProjectionTests(unittest.TestCase):
-    def test_signatures_and_current_quality_debt_are_stable(self) -> None:
+    def test_signatures_and_decomposed_phase_bounds_are_stable(self) -> None:
         self.assertEqual(
             str(inspect.signature(WORKFLOW.query_complete_window)),
             "(config: 'dict', start: 'dt.datetime', end: 'dt.datetime', "
@@ -66,9 +66,25 @@ class DhcpAssetWorkflowProjectionTests(unittest.TestCase):
             "(config: 'dict', state: 'dict', now: 'dt.datetime', *, "
             "collection_window_fn, query_window_fn, merge_fn) -> 'dict'",
         )
-        self.assertEqual(function_metrics("query_complete_window"), (65, 15))
-        self.assertEqual(function_metrics("backfill"), (82, 13))
-        self.assertEqual(function_metrics("collect"), (54, 9))
+        for name in (
+            "_validate_segment_budget",
+            "_can_split_segment",
+            "_completed_query_segments",
+            "_reduced_observations",
+            "_complete_window_result",
+            "query_complete_window",
+            "_backfill_windows",
+            "_state_result",
+            "_previous_backfill",
+            "_backfill_status",
+            "backfill",
+            "_collection_status",
+            "collect",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
 
     def test_segment_budget_admission_precedes_query_calls(self) -> None:
         start = dt.datetime(2026, 8, 1, tzinfo=dt.timezone.utc)
