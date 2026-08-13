@@ -140,14 +140,14 @@ def canonical_system_prompt_file(
 
 def load_canonical_system_prompt(path: Path, agent_role: str, max_bytes: int) -> str:
     """Read one canonical prompt without symlink traversal or TOCTOU drift."""
-    try:
-        admitted = path.lstat()
-    except OSError as exc:
-        raise SystemExit(f"canonical {agent_role} system prompt is unavailable") from exc
-    if stat.S_ISLNK(admitted.st_mode) or not stat.S_ISREG(admitted.st_mode):
-        raise SystemExit(f"canonical {agent_role} system prompt must be a regular file")
-    if admitted.st_size > max_bytes:
-        raise SystemExit(f"canonical {agent_role} system prompt exceeds its byte limit")
+    chunks = _read_canonical_system_prompt(path, agent_role, max_bytes)
+    return _decode_canonical_system_prompt(chunks, agent_role)
+
+
+def _read_canonical_system_prompt(
+    path: Path, agent_role: str, max_bytes: int
+) -> bytearray:
+    admitted = _admit_canonical_system_prompt(path, agent_role, max_bytes)
     descriptor = -1
     chunks = bytearray()
     try:
@@ -170,6 +170,22 @@ def load_canonical_system_prompt(path: Path, agent_role: str, max_bytes: int) ->
             os.close(descriptor)
     if len(chunks) > max_bytes:
         raise SystemExit(f"canonical {agent_role} system prompt exceeds its byte limit")
+    return chunks
+
+
+def _admit_canonical_system_prompt(path: Path, agent_role: str, max_bytes: int) -> Any:
+    try:
+        admitted = path.lstat()
+    except OSError as exc:
+        raise SystemExit(f"canonical {agent_role} system prompt is unavailable") from exc
+    if stat.S_ISLNK(admitted.st_mode) or not stat.S_ISREG(admitted.st_mode):
+        raise SystemExit(f"canonical {agent_role} system prompt must be a regular file")
+    if admitted.st_size > max_bytes:
+        raise SystemExit(f"canonical {agent_role} system prompt exceeds its byte limit")
+    return admitted
+
+
+def _decode_canonical_system_prompt(chunks: bytearray, agent_role: str) -> str:
     try:
         prompt = bytes(chunks).decode("utf-8", errors="strict").strip()
     except UnicodeError as exc:
