@@ -71,6 +71,25 @@ def _within_budget(
     ) <= maximum_bytes
 
 
+def _audit_candidate(
+    result: dict[str, Any],
+    index: int,
+    audit: Any,
+    dependencies: Dependencies,
+) -> tuple[int, dict[str, Any], int, dict[str, Any]] | None:
+    if (
+        isinstance(audit, dict)
+        and audit.get("prompt_projection")
+        == "compacted_due_to_cumulative_byte_budget"
+    ):
+        return None
+    compact = dependencies.compact_audit(audit)
+    savings = _encoded_size(audit) - _encoded_size(compact)
+    if savings <= 0:
+        return None
+    return savings, result, index, compact
+
+
 def _audit_candidates(
     projected: list[Any], dependencies: Dependencies,
 ) -> list[tuple[int, dict[str, Any], int, dict[str, Any]]]:
@@ -85,12 +104,9 @@ def _audit_candidates(
             if not isinstance(trusted, list):
                 continue
             for index, audit in enumerate(trusted):
-                if isinstance(audit, dict) and audit.get("prompt_projection") == "compacted_due_to_cumulative_byte_budget":
-                    continue
-                compact = dependencies.compact_audit(audit)
-                savings = _encoded_size(audit) - _encoded_size(compact)
-                if savings > 0:
-                    candidates.append((savings, result, index, compact))
+                candidate = _audit_candidate(result, index, audit, dependencies)
+                if candidate is not None:
+                    candidates.append(candidate)
     return candidates
 
 
