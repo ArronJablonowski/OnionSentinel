@@ -145,6 +145,27 @@ def _trusted_audits(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
     } if isinstance(trusted, list) else {}
 
 
+def _security_onion_hit_row(
+    hit: Any,
+    index: int,
+    response_digest: str,
+    query_id: str,
+    query_digest: str,
+    dependencies: ValidationDependencies,
+) -> tuple[Any, str] | None:
+    if not isinstance(hit, dict) or not isinstance(hit.get("source"), dict):
+        return None
+    base = (
+        f"so:{response_digest[:20]}:"
+        f"{dependencies.evidence_ref_component(query_id, 32)}:"
+        f"{query_digest[:20]}:"
+        f"{dependencies.evidence_ref_component(hit.get('index'), 32)}:"
+        f"{dependencies.evidence_ref_component(hit.get('id'), 32)}:"
+        f"hit-{index}"
+    )
+    return hit["source"], base
+
+
 def _security_onion_query_rows(
     query_result: Any,
     response_digest: str,
@@ -169,17 +190,16 @@ def _security_onion_query_rows(
         return []
     rows: list[tuple[Any, str]] = []
     for index, hit in enumerate(hits[:policy.maximum_rows]):
-        if not isinstance(hit, dict) or not isinstance(hit.get("source"), dict):
-            continue
-        base = (
-            f"so:{response_digest[:20]}:"
-            f"{dependencies.evidence_ref_component(query_id, 32)}:"
-            f"{query_digest[:20]}:"
-            f"{dependencies.evidence_ref_component(hit.get('index'), 32)}:"
-            f"{dependencies.evidence_ref_component(hit.get('id'), 32)}:"
-            f"hit-{index}"
+        row = _security_onion_hit_row(
+            hit,
+            index,
+            response_digest,
+            query_id,
+            query_digest,
+            dependencies,
         )
-        rows.append((hit["source"], base))
+        if row is not None:
+            rows.append(row)
     return rows
 
 
