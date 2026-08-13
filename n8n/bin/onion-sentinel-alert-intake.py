@@ -97,39 +97,60 @@ def post_message(delivery_id: str, payload: dict) -> dict:
         }
 
 
-def main() -> int:
+def _admit_forced_command() -> None:
     if os.environ.get("SSH_ORIGINAL_COMMAND", "").strip() != "onion-sentinel-alert-intake batch":
         reject("interactive sessions and unsupported commands are not permitted")
-    batch = read_batch()
+
+
+def _validated_message(item: object, seen_ids: set[str]) -> tuple[str, dict]:
+    if not isinstance(item, dict):
+        reject("alert batch entries must be objects")
+    delivery_id = str(item.get("delivery_id") or "").strip()
+    payload = item.get("payload")
+    if not delivery_id or len(delivery_id) > 512 or delivery_id in seen_ids:
+        reject("delivery ids must be unique, non-empty, and bounded")
+    if not isinstance(payload, dict):
+        reject("alert message payload must be an object")
+    seen_ids.add(delivery_id)
+    return delivery_id, payload
+
+
+def _deadline_result(delivery_id: str) -> dict:
+    return {
+        "delivery_id": delivery_id,
+        "ok": False,
+        "retryable": True,
+        "status": "batch_deadline",
+        "reason": "batch deadline reached before delivery",
+    }
+
+
+def _deliver_batch(batch: dict) -> list[dict]:
     results = []
     seen_ids = set()
     deadline = time.monotonic() + BATCH_DEADLINE_SECONDS
     for item in batch["messages"]:
-        if not isinstance(item, dict):
-            reject("alert batch entries must be objects")
-        delivery_id = str(item.get("delivery_id") or "").strip()
-        payload = item.get("payload")
-        if not delivery_id or len(delivery_id) > 512 or delivery_id in seen_ids:
-            reject("delivery ids must be unique, non-empty, and bounded")
-        if not isinstance(payload, dict):
-            reject("alert message payload must be an object")
-        seen_ids.add(delivery_id)
+        delivery_id, payload = _validated_message(item, seen_ids)
         if time.monotonic() >= deadline:
-            results.append({
-                "delivery_id": delivery_id,
-                "ok": False,
-                "retryable": True,
-                "status": "batch_deadline",
-                "reason": "batch deadline reached before delivery",
-            })
+            results.append(_deadline_result(delivery_id))
         else:
             results.append(post_message(delivery_id, payload))
-    print(json.dumps({
+    return results
+
+
+def _batch_response(results: list[dict]) -> dict:
+    return {
         "ok": all(item["ok"] for item in results),
         "protocol": PROTOCOL,
         "processed": len(results),
         "results": results,
-    }, separators=(",", ":"), sort_keys=True))
+    }
+
+
+def main() -> int:
+    _admit_forced_command()
+    response = _batch_response(_deliver_batch(read_batch()))
+    print(json.dumps(response, separators=(",", ":"), sort_keys=True))
     return 0
 
 
