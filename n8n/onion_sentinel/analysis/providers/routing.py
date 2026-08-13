@@ -224,6 +224,19 @@ def assigned_model_metadata(
     return "", "unknown", str(settings.get("mode") or "unknown")
 
 
+def _harness_route_identity(normalized: str, provider: str) -> str | None:
+    parsed = parse_cli_harness_route(normalized, provider)
+    if not parsed:
+        return None
+    model = parsed[0].lower()
+    if provider == "hermes-agent":
+        return f"openai-codex:{model}"
+    if "/" in model:
+        provider_name, name = model.split("/", 1)
+        return f"{provider_name}:{name}"
+    return f"{provider}:{model}"
+
+
 def model_route_identity(route: Any, settings: dict[str, Any] | None = None) -> str:
     """Return a reasoning-effort-independent reviewer model identity."""
     normalized = str(route or "").strip().lower()
@@ -239,14 +252,10 @@ def model_route_identity(route: Any, settings: dict[str, Any] | None = None) -> 
             (settings or {}).get("codex_cli_model") or "configured-default"
         ).strip().lower()
         return f"openai-codex:{configured_model}"
-    if parsed := parse_cli_harness_route(normalized, "hermes-agent"):
-        return f"openai-codex:{parsed[0].lower()}"
-    if parsed := parse_cli_harness_route(normalized, "openclaw"):
-        model = parsed[0].lower()
-        if "/" in model:
-            provider, name = model.split("/", 1)
-            return f"{provider}:{name}"
-        return f"openclaw:{model}"
+    if identity := _harness_route_identity(normalized, "hermes-agent"):
+        return identity
+    if identity := _harness_route_identity(normalized, "openclaw"):
+        return identity
     if normalized.startswith("ollama:"):
         return normalized
     return normalized
