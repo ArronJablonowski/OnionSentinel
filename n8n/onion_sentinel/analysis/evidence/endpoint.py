@@ -97,6 +97,17 @@ def _support_matches(
     return support.get("observable_digest") == expected
 
 
+def _query_tables(query: str) -> set[str]:
+    return {
+        match.group(1).lower()
+        for match in re.finditer(
+            r"\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_]*)",
+            query,
+            re.IGNORECASE,
+        )
+    }
+
+
 def _relevant_live_result(
     value: Any,
     policy: Policy,
@@ -114,14 +125,7 @@ def _relevant_live_result(
         return False
     if hashlib.sha256(normalized.encode("utf-8")).hexdigest() != digest:
         return False
-    tables = {
-        match.group(1).lower()
-        for match in re.finditer(
-            r"\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_]*)",
-            query,
-            re.IGNORECASE,
-        )
-    }
+    tables = _query_tables(query)
     supports = value.get("support_bindings")
     return isinstance(supports, list) and any(
         _support_matches(item, value, digest, tables, policy)
