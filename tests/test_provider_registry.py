@@ -127,6 +127,108 @@ class ProviderRegistryTests(unittest.TestCase):
             self.dispatch(route, [route], events)
         self.assertEqual(events, ["synchronized"])
 
+    def test_dispatch_preserves_canonical_sync_parse_adapter_attest_order(self) -> None:
+        events: list[object] = []
+        prompt = {"evidence": ["bounded"]}
+        args = object()
+        settings = {"enabled": True}
+        response = {"summary": "result"}
+
+        def enabled(observed_settings):
+            events.append(("enabled", observed_settings is settings))
+            return ["codex-cli:gpt-5.6-sol:xhigh"]
+
+        def canonicalize(route, routes):
+            events.append(("canonicalize", route, tuple(routes)))
+            return "codex-cli:gpt-5.6-sol:xhigh"
+
+        def hosted(route, observed_settings):
+            events.append(("hosted", route, observed_settings is settings))
+            return True
+
+        def synchronize(observed_prompt):
+            events.append(("synchronize", observed_prompt is prompt))
+
+        def parse(route):
+            events.append(("parse", route))
+            return "gpt-5.6-sol", "xhigh"
+
+        def adapter(observed_prompt, observed_args, observed_settings, **kwargs):
+            events.append((
+                "adapter", observed_prompt is prompt, observed_args is args,
+                observed_settings is settings, kwargs,
+            ))
+            return response
+
+        def attest(observed_settings, route, observed_response):
+            events.append((
+                "attest", observed_settings is settings, route,
+                observed_response is response,
+            ))
+            return observed_response
+
+        result = registry.dispatch(
+            "gpt-cli", prompt, args, settings,
+            system_prompt_file=Path("/synthetic/system.md"),
+            independent_review=True, enabled_routes=enabled,
+            canonicalize=canonicalize, is_hosted=hosted,
+            synchronize_hosted=synchronize, parse_codex=parse,
+            parse_harness=lambda *_args: self.fail("harness parser called"),
+            codex_adapter=adapter,
+            hermes_adapter=lambda *_args, **_kwargs: self.fail("Hermes called"),
+            openclaw_adapter=lambda *_args, **_kwargs: self.fail("OpenClaw called"),
+            ollama_adapter=lambda *_args, **_kwargs: self.fail("Ollama called"),
+            attest=attest,
+        )
+
+        self.assertIs(result, response)
+        self.assertEqual([event[0] for event in events], [
+            "enabled", "canonicalize", "hosted", "synchronize", "parse",
+            "adapter", "attest",
+        ])
+        self.assertEqual(events[5][4], {
+            "model": "gpt-5.6-sol",
+            "reasoning_effort": "xhigh",
+            "system_prompt_file": Path("/synthetic/system.md"),
+            "independent_review": True,
+        })
+        self.assertEqual(events[6][2], "codex-cli:gpt-5.6-sol:xhigh")
+        self.assertEqual(prompt, {"evidence": ["bounded"]})
+        self.assertEqual(settings, {"enabled": True})
+
+    def test_route_specific_validation_errors_preserve_sync_precedence(self) -> None:
+        cases = (
+            ("codex-cli:invalid", "Configured Codex CLI route is invalid"),
+            ("hermes-agent:invalid", "Configured Hermes Agent route is invalid"),
+            ("openclaw:invalid", "Configured OpenClaw route is invalid"),
+            ("ollama:   ", "Configured Ollama route has an empty model name"),
+        )
+        for route, message in cases:
+            events: list[object] = []
+            with self.subTest(route=route), self.assertRaisesRegex(
+                SystemExit, message
+            ):
+                registry.dispatch(
+                    route, {}, object(), {}, system_prompt_file=None,
+                    independent_review=False,
+                    enabled_routes=lambda _settings: [route],
+                    canonicalize=lambda value, _routes: value,
+                    is_hosted=lambda *_args: True,
+                    synchronize_hosted=lambda _prompt: events.append("sync"),
+                    parse_codex=lambda value: events.append(("codex", value)),
+                    parse_harness=lambda value, provider: events.append(
+                        (provider, value)
+                    ),
+                    codex_adapter=lambda *_args, **_kwargs: self.fail("adapter called"),
+                    hermes_adapter=lambda *_args, **_kwargs: self.fail("adapter called"),
+                    openclaw_adapter=lambda *_args, **_kwargs: self.fail("adapter called"),
+                    ollama_adapter=lambda *_args, **_kwargs: self.fail("adapter called"),
+                    attest=lambda *_args: self.fail("attest called"),
+                )
+            self.assertEqual(events[0], "sync")
+            if not route.startswith("ollama:"):
+                self.assertEqual(len(events), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
