@@ -8,6 +8,9 @@ import re
 from typing import Any, Callable
 
 
+_INVALID_TIMELINE_ITEM = object()
+
+
 @dataclass(frozen=True)
 class Dependencies:
     is_incident_responder: Callable[[dict[str, Any] | None], bool]
@@ -46,24 +49,38 @@ def _timeline_validation(
     instants: list[dt.datetime] = []
     if isinstance(timeline, list):
         for item in timeline[:200]:
-            if not isinstance(item, dict):
+            item_invalid, instant = _timeline_item_validation(
+                item, confidence_values
+            )
+            if item_invalid:
                 invalid += 1
+            if instant is _INVALID_TIMELINE_ITEM:
                 continue
-            if any(
-                not isinstance(item.get(key), str) or not str(item.get(key) or "").strip()
-                for key in ("timestamp", "event", "source_pack")
-            ):
-                invalid += 1
-                continue
-            if str(item.get("confidence") or "").strip().lower() not in confidence_values:
-                invalid += 1
-            instant = timeline_timestamp(item.get("timestamp"))
             if instant is None:
                 unparseable += 1
             else:
                 instants.append(instant)
     out_of_order = any(later < earlier for earlier, later in zip(instants, instants[1:]))
     return invalid, unparseable, out_of_order
+
+
+def _timeline_item_validation(
+    item: Any,
+    confidence_values: frozenset[str],
+) -> tuple[bool, Any]:
+    if not isinstance(item, dict):
+        return True, _INVALID_TIMELINE_ITEM
+    if any(
+        not isinstance(item.get(key), str)
+        or not str(item.get(key) or "").strip()
+        for key in ("timestamp", "event", "source_pack")
+    ):
+        return True, _INVALID_TIMELINE_ITEM
+    invalid = (
+        str(item.get("confidence") or "").strip().lower()
+        not in confidence_values
+    )
+    return invalid, timeline_timestamp(item.get("timestamp"))
 
 
 def _field_validation(report: dict[str, Any], deps: Dependencies) -> list[str]:
