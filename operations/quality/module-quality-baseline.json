@@ -1,9 +1,6 @@
 {
   "files": {},
   "functions": {
-    "n8n/bin/evaluate-investigation-skills-v2.py::evaluate": {
-      "max_complexity": 17
-    },
     "n8n/bin/investigation_skills.py::load_investigation_skills": {
       "max_complexity": 16
     },
@@ -98,5 +95,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "84cca5941723ca9cbcc88cfa16a906555e8122e3"
+  "source_release": "47f1560f230eef76cdbf3c6ef684f972ddb3f187"
 }
