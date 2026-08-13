@@ -53,7 +53,10 @@ def source_status(
     }
 
 
-def normalize_source_status(value: object, source: str) -> Dict[str, Any]:
+def _source_status_header(
+    value: object,
+    source: str,
+) -> Tuple[Dict[str, Any], str]:
     if not isinstance(value, dict) or set(value) != SOURCE_STATUS_KEYS:
         raise ValueError(f"software inventory {source} source status is invalid")
     status = _bounded_text(
@@ -66,6 +69,13 @@ def normalize_source_status(value: object, source: str) -> Dict[str, Any]:
         raise ValueError(f"software inventory {source} status is unsupported")
     if not isinstance(value.get("complete"), bool):
         raise ValueError(f"software inventory {source} completeness is invalid")
+    return value, status
+
+
+def _source_status_counters(
+    value: Dict[str, Any],
+    source: str,
+) -> Tuple[int, int]:
     pages = _bounded_integer(
         value.get("pages"),
         field=f"software inventory {source} page count",
@@ -78,6 +88,13 @@ def normalize_source_status(value: object, source: str) -> Dict[str, Any]:
         minimum=0,
         maximum=MAX_TOTAL_RECORDS,
     )
+    return pages, returned
+
+
+def _source_status_freshness(
+    value: Dict[str, Any],
+    source: str,
+) -> Tuple[str, str]:
     normalized_freshness = _bounded_text(
         value.get("freshness"),
         field=f"software inventory {source} freshness",
@@ -95,13 +112,37 @@ def normalize_source_status(value: object, source: str) -> Dict[str, Any]:
     )
     if latest:
         latest = format_timestamp(parse_timestamp(latest))
+    return normalized_freshness, latest
+
+
+def _validate_source_status_policy(
+    value: Dict[str, Any],
+    source: str,
+    status: str,
+    normalized_freshness: str,
+) -> None:
     if status == "ok" and value["complete"] is not True:
         raise ValueError(f"software inventory {source} successful status is incomplete")
     if status != "ok" and normalized_freshness != "unknown":
         raise ValueError(f"software inventory {source} failed status claims freshness")
+
+
+def normalize_source_status(value: object, source: str) -> Dict[str, Any]:
+    normalized_value, status = _source_status_header(value, source)
+    pages, returned = _source_status_counters(normalized_value, source)
+    normalized_freshness, latest = _source_status_freshness(
+        normalized_value,
+        source,
+    )
+    _validate_source_status_policy(
+        normalized_value,
+        source,
+        status,
+        normalized_freshness,
+    )
     return {
         "status": status,
-        "complete": value["complete"],
+        "complete": normalized_value["complete"],
         "pages": pages,
         "returned": returned,
         "freshness": normalized_freshness,
