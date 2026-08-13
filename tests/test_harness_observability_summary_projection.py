@@ -196,12 +196,27 @@ class HarnessObservabilitySummaryProjectionTests(unittest.TestCase):
             result = REPORT.summarize_database(path, now)
         return result, trace, connection, path
 
-    def test_signature_and_current_size_complexity_debt_are_stable(self) -> None:
+    def test_signature_and_changed_functions_are_within_budget(self) -> None:
         self.assertEqual(
             str(inspect.signature(REPORT.summarize_database)),
             "(path: 'Path', now: 'dt.datetime') -> 'dict[str, Any]'",
         )
-        self.assertEqual(function_metrics("summarize_database"), (114, 17))
+        for name in (
+            "summarize_database",
+            "_open_observability_database",
+            "_validate_observability_database",
+            "_grouped_run_telemetry",
+            "_run_time_telemetry",
+            "_model_telemetry",
+            "_tool_telemetry",
+            "_entity_counts",
+            "_usage_telemetry",
+            "_database_summary",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
 
     def test_full_summary_preserves_admission_queries_close_and_projection(self) -> None:
         result, trace, connection, path = self.invoke()

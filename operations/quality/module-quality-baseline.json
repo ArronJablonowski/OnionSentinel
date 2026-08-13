@@ -23,10 +23,6 @@
     "n8n/bin/promote-dhcp-asset.py::reviewed_observation": {
       "max_complexity": 17
     },
-    "n8n/bin/report-harness-observability.py::summarize_database": {
-      "max_complexity": 17,
-      "max_lines": 114
-    },
     "n8n/bin/verify-agent-memory.py::verify_setup": {
       "max_complexity": 20
     },
@@ -109,5 +105,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "c498a55d674c5a8d088dc80fbca29010cfa909fd"
+  "source_release": "9336a29b6666c4683f71201adce3b73f1461b684"
 }

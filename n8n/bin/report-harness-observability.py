@@ -76,91 +76,168 @@ def grouped_rows(connection: sqlite3.Connection, sql: str) -> list[dict[str, Any
 
 
 def summarize_database(path: Path, now: dt.datetime) -> dict[str, Any]:
+    connection = _open_observability_database(path)
+    try:
+        _validate_observability_database(connection)
+        statuses, stages, event_counts = _grouped_run_telemetry(connection)
+        durations, active_ages, failures = _run_time_telemetry(connection, now)
+        model_columns, model_routes, model_durations = _model_telemetry(connection)
+        tool_calls = _tool_telemetry(connection)
+        counts = _entity_counts(connection)
+        token_usage, retry_usage = _usage_telemetry(connection, model_columns)
+    finally:
+        connection.close()
+    return _database_summary(
+        statuses=statuses,
+        stages=stages,
+        event_counts=event_counts,
+        durations=durations,
+        active_ages=active_ages,
+        failures=failures,
+        model_routes=model_routes,
+        model_durations=model_durations,
+        tool_calls=tool_calls,
+        counts=counts,
+        token_usage=token_usage,
+        retry_usage=retry_usage,
+    )
+
+
+def _open_observability_database(path: Path) -> sqlite3.Connection:
     safe_regular_file(path)
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
     connection.row_factory = sqlite3.Row
-    try:
-        connection.execute("PRAGMA query_only=ON")
-        if connection.execute("PRAGMA quick_check(1)").fetchone()[0] != "ok":
-            raise RuntimeError("harness database quick check failed")
-        statuses = grouped_rows(
-            connection,
-            "SELECT status, COUNT(*) count FROM harness_runs GROUP BY status ORDER BY status",
-        )
-        stages = grouped_rows(
-            connection,
-            "SELECT stage, COUNT(*) count FROM harness_runs WHERE status NOT IN ('succeeded','failed','cancelled') GROUP BY stage ORDER BY stage",
-        )
-        event_counts = grouped_rows(
-            connection,
-            "SELECT event_type, COUNT(*) count FROM harness_events GROUP BY event_type ORDER BY event_type",
-        )
-        durations: list[int] = []
-        active_ages: list[int] = []
-        failures: dict[str, int] = {}
-        for row in connection.execute(
-            "SELECT status, started_at, updated_at, completed_at, terminal_reason FROM harness_runs"
-        ):
-            started = parse_time(row["started_at"])
-            ended = parse_time(row["completed_at"] or row["updated_at"])
-            if started and ended and row["status"] in TERMINAL:
-                durations.append(max(0, int((ended - started).total_seconds() * 1000)))
-            if started and row["status"] not in TERMINAL:
-                active_ages.append(max(0, int((now - started).total_seconds())))
-            if row["status"] == "failed":
-                label = failure_class(row["terminal_reason"])
-                failures[label] = failures.get(label, 0) + 1
+    return connection
 
-        model_columns = table_columns(connection, "harness_model_calls")
-        model_routes = grouped_rows(
-            connection,
-            """
-            SELECT observed_provider provider, observed_model model,
-                   observed_harness harness, status, COUNT(*) count,
-                   CAST(AVG(duration_ms) AS INTEGER) average_duration_ms
-            FROM harness_model_calls
-            GROUP BY observed_provider, observed_model, observed_harness, status
-            ORDER BY observed_provider, observed_model, observed_harness, status
-            """,
-        )
-        model_durations = [
-            int(row[0])
-            for row in connection.execute("SELECT duration_ms FROM harness_model_calls")
-        ]
-        tool_calls = grouped_rows(
-            connection,
-            """
-            SELECT backend, capability, status, COUNT(*) count,
-                   SUM(CASE WHEN truncated = 1 THEN 1 ELSE 0 END) truncated_count
-            FROM harness_tool_calls
-            GROUP BY backend, capability, status
-            ORDER BY backend, capability, status
-            """,
-        )
-        counts = {
-            "runs": int(connection.execute("SELECT COUNT(*) FROM harness_runs").fetchone()[0]),
-            "events": int(connection.execute("SELECT COUNT(*) FROM harness_events").fetchone()[0]),
-            "evidence_refs": int(connection.execute("SELECT COUNT(*) FROM harness_evidence").fetchone()[0]),
-            "hypotheses": int(connection.execute("SELECT COUNT(*) FROM harness_hypotheses").fetchone()[0]),
-            "decisions": int(connection.execute("SELECT COUNT(*) FROM harness_decisions").fetchone()[0]),
-            "model_calls": int(connection.execute("SELECT COUNT(*) FROM harness_model_calls").fetchone()[0]),
-            "tool_calls": int(connection.execute("SELECT COUNT(*) FROM harness_tool_calls").fetchone()[0]),
-        }
-        token_columns = {"input_tokens", "output_tokens"}.issubset(model_columns)
-        retry_column = "attempt_count" in model_columns
-        token_usage = {"available": token_columns}
-        if token_columns:
-            token_row = connection.execute(
-                "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0) FROM harness_model_calls"
-            ).fetchone()
-            token_usage.update({"input_tokens": int(token_row[0]), "output_tokens": int(token_row[1])})
-        retry_usage = {"available": retry_column}
-        if retry_column:
-            retry_usage["retry_attempts"] = int(connection.execute(
-                "SELECT COALESCE(SUM(MAX(attempt_count - 1, 0)),0) FROM harness_model_calls"
-            ).fetchone()[0])
-    finally:
-        connection.close()
+
+def _validate_observability_database(connection: sqlite3.Connection) -> None:
+    connection.execute("PRAGMA query_only=ON")
+    if connection.execute("PRAGMA quick_check(1)").fetchone()[0] != "ok":
+        raise RuntimeError("harness database quick check failed")
+
+
+def _grouped_run_telemetry(
+    connection: sqlite3.Connection,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    statuses = grouped_rows(
+        connection,
+        "SELECT status, COUNT(*) count FROM harness_runs GROUP BY status ORDER BY status",
+    )
+    stages = grouped_rows(
+        connection,
+        "SELECT stage, COUNT(*) count FROM harness_runs WHERE status NOT IN ('succeeded','failed','cancelled') GROUP BY stage ORDER BY stage",
+    )
+    event_counts = grouped_rows(
+        connection,
+        "SELECT event_type, COUNT(*) count FROM harness_events GROUP BY event_type ORDER BY event_type",
+    )
+    return statuses, stages, event_counts
+
+
+def _run_time_telemetry(
+    connection: sqlite3.Connection,
+    now: dt.datetime,
+) -> tuple[list[int], list[int], dict[str, int]]:
+    durations: list[int] = []
+    active_ages: list[int] = []
+    failures: dict[str, int] = {}
+    for row in connection.execute(
+        "SELECT status, started_at, updated_at, completed_at, terminal_reason FROM harness_runs"
+    ):
+        started = parse_time(row["started_at"])
+        ended = parse_time(row["completed_at"] or row["updated_at"])
+        if started and ended and row["status"] in TERMINAL:
+            durations.append(max(0, int((ended - started).total_seconds() * 1000)))
+        if started and row["status"] not in TERMINAL:
+            active_ages.append(max(0, int((now - started).total_seconds())))
+        if row["status"] == "failed":
+            label = failure_class(row["terminal_reason"])
+            failures[label] = failures.get(label, 0) + 1
+    return durations, active_ages, failures
+
+
+def _model_telemetry(
+    connection: sqlite3.Connection,
+) -> tuple[set[str], list[dict[str, Any]], list[int]]:
+    model_columns = table_columns(connection, "harness_model_calls")
+    model_routes = grouped_rows(
+        connection,
+        """
+        SELECT observed_provider provider, observed_model model,
+               observed_harness harness, status, COUNT(*) count,
+               CAST(AVG(duration_ms) AS INTEGER) average_duration_ms
+        FROM harness_model_calls
+        GROUP BY observed_provider, observed_model, observed_harness, status
+        ORDER BY observed_provider, observed_model, observed_harness, status
+        """,
+    )
+    model_durations = [
+        int(row[0])
+        for row in connection.execute("SELECT duration_ms FROM harness_model_calls")
+    ]
+    return model_columns, model_routes, model_durations
+
+
+def _tool_telemetry(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    return grouped_rows(
+        connection,
+        """
+        SELECT backend, capability, status, COUNT(*) count,
+               SUM(CASE WHEN truncated = 1 THEN 1 ELSE 0 END) truncated_count
+        FROM harness_tool_calls
+        GROUP BY backend, capability, status
+        ORDER BY backend, capability, status
+        """,
+    )
+
+
+def _entity_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    return {
+        "runs": int(connection.execute("SELECT COUNT(*) FROM harness_runs").fetchone()[0]),
+        "events": int(connection.execute("SELECT COUNT(*) FROM harness_events").fetchone()[0]),
+        "evidence_refs": int(connection.execute("SELECT COUNT(*) FROM harness_evidence").fetchone()[0]),
+        "hypotheses": int(connection.execute("SELECT COUNT(*) FROM harness_hypotheses").fetchone()[0]),
+        "decisions": int(connection.execute("SELECT COUNT(*) FROM harness_decisions").fetchone()[0]),
+        "model_calls": int(connection.execute("SELECT COUNT(*) FROM harness_model_calls").fetchone()[0]),
+        "tool_calls": int(connection.execute("SELECT COUNT(*) FROM harness_tool_calls").fetchone()[0]),
+    }
+
+
+def _usage_telemetry(
+    connection: sqlite3.Connection,
+    model_columns: set[str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    token_columns = {"input_tokens", "output_tokens"}.issubset(model_columns)
+    retry_column = "attempt_count" in model_columns
+    token_usage = {"available": token_columns}
+    if token_columns:
+        token_row = connection.execute(
+            "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0) FROM harness_model_calls"
+        ).fetchone()
+        token_usage.update({"input_tokens": int(token_row[0]), "output_tokens": int(token_row[1])})
+    retry_usage = {"available": retry_column}
+    if retry_column:
+        retry_usage["retry_attempts"] = int(connection.execute(
+            "SELECT COALESCE(SUM(MAX(attempt_count - 1, 0)),0) FROM harness_model_calls"
+        ).fetchone()[0])
+    return token_usage, retry_usage
+
+
+def _database_summary(
+    *,
+    statuses: list[dict[str, Any]],
+    stages: list[dict[str, Any]],
+    event_counts: list[dict[str, Any]],
+    durations: list[int],
+    active_ages: list[int],
+    failures: dict[str, int],
+    model_routes: list[dict[str, Any]],
+    model_durations: list[int],
+    tool_calls: list[dict[str, Any]],
+    counts: dict[str, int],
+    token_usage: dict[str, Any],
+    retry_usage: dict[str, Any],
+) -> dict[str, Any]:
     return {
         "status_counts": statuses,
         "active_stage_counts": stages,
