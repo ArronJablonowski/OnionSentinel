@@ -117,18 +117,33 @@ def _apply_supplied(
 
 
 def _contradictions(factors: Mapping[str, Any], canonical: str) -> list[str]:
-    result: list[str] = []
-    if factors["event_status"] == "not_observed" and factors["detection_validity"] == "matched_intent":
-        result.append("an unobserved event cannot be a validated detection-intent match")
-    if factors["activity_disposition"] == "malicious" and factors["handling"] in {"monitor", "no_action"}:
-        result.append("malicious activity cannot use monitor/no_action handling")
-    if factors["activity_disposition"] in {"authorized_benign", "benign"} and factors["handling"] == "contain":
-        result.append("benign or authorized activity cannot use contain handling")
-    if factors["duplicate_of"] and factors["handling"] in {"contain", "escalate"}:
-        result.append("a duplicate record cannot independently authorize containment or escalation")
-    if canonical == "duplicate" and not factors["duplicate_of"]:
-        result.append("a duplicate outcome must identify the canonical alert or group in duplicate_of")
-    return result
+    rules = (
+        (
+            factors["event_status"] == "not_observed"
+            and factors["detection_validity"] == "matched_intent",
+            "an unobserved event cannot be a validated detection-intent match",
+        ),
+        (
+            factors["activity_disposition"] == "malicious"
+            and factors["handling"] in {"monitor", "no_action"},
+            "malicious activity cannot use monitor/no_action handling",
+        ),
+        (
+            factors["activity_disposition"] in {"authorized_benign", "benign"}
+            and factors["handling"] == "contain",
+            "benign or authorized activity cannot use contain handling",
+        ),
+        (
+            factors["duplicate_of"]
+            and factors["handling"] in {"contain", "escalate"},
+            "a duplicate record cannot independently authorize containment or escalation",
+        ),
+        (
+            canonical == "duplicate" and not factors["duplicate_of"],
+            "a duplicate outcome must identify the canonical alert or group in duplicate_of",
+        ),
+    )
+    return [message for contradicted, message in rules if contradicted]
 
 
 def normalize(
