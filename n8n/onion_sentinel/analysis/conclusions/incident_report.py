@@ -84,13 +84,31 @@ def _timeline_item_validation(
 
 
 def _field_validation(report: dict[str, Any], deps: Dependencies) -> list[str]:
+    return [
+        *_invalid_text_fields(report, deps.text_fields),
+        *_invalid_list_fields(report, deps.list_fields),
+    ]
+
+
+def _invalid_text_fields(
+    report: dict[str, Any],
+    text_fields: frozenset[str],
+) -> list[str]:
     invalid: list[str] = []
-    for key in deps.text_fields:
+    for key in text_fields:
         if key in report and (
             not isinstance(report.get(key), str) or not str(report.get(key) or "").strip()
         ):
             invalid.append(key)
-    for key in deps.list_fields:
+    return invalid
+
+
+def _invalid_list_fields(
+    report: dict[str, Any],
+    list_fields: frozenset[str],
+) -> list[str]:
+    invalid: list[str] = []
+    for key in list_fields:
         if key not in report:
             continue
         items = report.get(key)
