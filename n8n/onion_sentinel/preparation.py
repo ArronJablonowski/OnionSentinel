@@ -96,6 +96,19 @@ def prepare(
     ports: PreparationPorts,
 ) -> PreparedRuntime:
     """Resolve routes and prepare harness, telemetry, and resource monitoring."""
+    assigned_route, reviewer_route, configuration = _routes_and_configuration(
+        inputs, ports
+    )
+    harness = _start_harness(
+        inputs, ports, assigned_route, reviewer_route, configuration
+    )
+    return _finalize_preparation(context, inputs, ports, harness)
+
+
+def _routes_and_configuration(
+    inputs: PreparationInputs,
+    ports: PreparationPorts,
+) -> tuple[str, str, dict[str, Any]]:
     enabled = ports.enabled_routes(inputs.settings)
     agent_models = inputs.settings.get("agent_models") or {}
     reviewer_models = inputs.settings.get("agent_second_opinion_models") or {}
@@ -117,6 +130,16 @@ def prepare(
             "max_response_bytes": inputs.max_response_bytes,
         },
     }
+    return assigned_route, reviewer_route, configuration
+
+
+def _start_harness(
+    inputs: PreparationInputs,
+    ports: PreparationPorts,
+    assigned_route: str,
+    reviewer_route: str,
+    configuration: Mapping[str, Any],
+) -> Any:
     harness_policy = ports.load_harness_policy(inputs.policy_path)
     allowed, reason = ports.harness_activation(
         bool(harness_policy.enabled), assigned_route, reviewer_route
@@ -149,7 +172,15 @@ def prepare(
         )
     elif harness_policy.enabled:
         ports.warn(f"Onion Sentinel investigation harness bypassed: {reason}.")
+    return harness
 
+
+def _finalize_preparation(
+    context: RuntimeContext,
+    inputs: PreparationInputs,
+    ports: PreparationPorts,
+    harness: Any,
+) -> PreparedRuntime:
     record = ports.build_running_record()
     record["runner_pid"] = ports.process_id()
     ports.write_running_record(record)
