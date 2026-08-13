@@ -97,7 +97,7 @@ def _string_list(
     return result
 
 
-def _validate_match(value: Any, skill_id: str) -> dict[str, Any]:
+def _match_mapping(value: Any, skill_id: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{skill_id}.match must be an object")
     allowed_keys = {
@@ -109,19 +109,40 @@ def _validate_match(value: Any, skill_id: str) -> dict[str, Any]:
     unknown = set(value) - allowed_keys
     if unknown:
         raise ValueError(f"{skill_id}.match has unsupported keys: {sorted(unknown)}")
+    return value
+
+
+def _normalized_match_lists(
+    value: dict[str, Any], skill_id: str,
+) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key in ("event_datasets", "protocols", "rule_name_contains"):
         if key in value:
             result[key] = _string_list(value[key], f"{skill_id}.match.{key}")
-    if "destination_ports" in value:
-        ports = value["destination_ports"]
-        if (
-            not isinstance(ports, list)
-            or len(ports) > MAX_LIST_ITEMS
-            or any(not isinstance(port, int) or port < 1 or port > 65535 for port in ports)
-        ):
-            raise ValueError(f"{skill_id}.match.destination_ports is invalid")
-        result["destination_ports"] = list(dict.fromkeys(ports))
+    return result
+
+
+def _normalized_destination_ports(
+    value: dict[str, Any], skill_id: str,
+) -> list[int] | None:
+    if "destination_ports" not in value:
+        return None
+    ports = value["destination_ports"]
+    if (
+        not isinstance(ports, list)
+        or len(ports) > MAX_LIST_ITEMS
+        or any(not isinstance(port, int) or port < 1 or port > 65535 for port in ports)
+    ):
+        raise ValueError(f"{skill_id}.match.destination_ports is invalid")
+    return list(dict.fromkeys(ports))
+
+
+def _validate_match(value: Any, skill_id: str) -> dict[str, Any]:
+    mapping = _match_mapping(value, skill_id)
+    result = _normalized_match_lists(mapping, skill_id)
+    ports = _normalized_destination_ports(mapping, skill_id)
+    if ports is not None:
+        result["destination_ports"] = ports
     if not any(result.values()):
         raise ValueError(f"{skill_id}.match must define a bounded deterministic trigger")
     return result
@@ -158,9 +179,9 @@ def _validate_pivots(value: Any, skill_id: str) -> list[dict[str, Any]]:
     return result
 
 
-def _validate_skill(raw: Any, index: int) -> dict[str, Any]:
-    if not isinstance(raw, dict):
-        raise ValueError(f"skills[{index}] must be an object")
+def _skill_identity(
+    raw: dict[str, Any], index: int,
+) -> tuple[str, int, str, list[str]]:
     skill_id = _identifier(raw.get("id"), f"skills[{index}].id")
     version = raw.get("version")
     if not isinstance(version, int) or version < 1:
@@ -169,7 +190,14 @@ def _validate_skill(raw: Any, index: int) -> dict[str, Any]:
     if status not in SAFE_STATUSES:
         raise ValueError(f"{skill_id}.status is unsupported")
     roles = _string_list(raw.get("roles"), f"{skill_id}.roles", allowed=SAFE_ROLES, required=True)
-    skill = {
+    return skill_id, version, status, roles
+
+
+def _skill_projection(
+    raw: dict[str, Any], skill_id: str, version: int,
+    status: str, roles: list[str],
+) -> dict[str, Any]:
+    return {
         "id": skill_id,
         "version": version,
         "status": status,
@@ -208,21 +236,35 @@ def _validate_skill(raw: Any, index: int) -> dict[str, Any]:
             required=True,
         ),
     }
+
+
+def _validate_skill(raw: Any, index: int) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError(f"skills[{index}] must be an object")
+    skill_id, version, status, roles = _skill_identity(raw, index)
+    skill = _skill_projection(raw, skill_id, version, status, roles)
     skill["skill_sha256"] = _sha256(skill)
     return skill
 
 
-def load_investigation_skills(path: Path) -> dict[str, Any]:
-    """Load a strict bounded registry, returning an empty shadow registry if absent."""
+def _read_registry_bytes(path: Path) -> bytes | None:
     try:
         if path.stat().st_size > MAX_REGISTRY_BYTES:
             raise ValueError("investigation skill registry exceeds its byte limit")
         raw = path.read_bytes()
     except FileNotFoundError:
-        empty = {"schema": REGISTRY_SCHEMA, "version": 0, "mode": "shadow", "skills": []}
-        return {**empty, "registry_sha256": _sha256(empty)}
+        return None
     if len(raw) > MAX_REGISTRY_BYTES:
         raise ValueError("investigation skill registry exceeds its byte limit")
+    return raw
+
+
+def _empty_registry() -> dict[str, Any]:
+    empty = {"schema": REGISTRY_SCHEMA, "version": 0, "mode": "shadow", "skills": []}
+    return {**empty, "registry_sha256": _sha256(empty)}
+
+
+def _registry_payload(raw: bytes) -> tuple[dict[str, Any], list[Any]]:
     payload = json.loads(raw.decode("utf-8"))
     if not isinstance(payload, dict) or payload.get("schema") != REGISTRY_SCHEMA:
         raise ValueError("unsupported investigation skill registry")
@@ -231,10 +273,18 @@ def load_investigation_skills(path: Path) -> dict[str, Any]:
     raw_skills = payload.get("skills")
     if not isinstance(raw_skills, list) or len(raw_skills) > MAX_SKILLS:
         raise ValueError("investigation skills must be a bounded list")
+    return payload, raw_skills
+
+
+def _validated_skills(raw_skills: list[Any]) -> list[dict[str, Any]]:
     skills = [_validate_skill(raw_skill, index) for index, raw_skill in enumerate(raw_skills)]
     identities = [(skill["id"], skill["version"]) for skill in skills]
     if len(identities) != len(set(identities)):
         raise ValueError("investigation skill id/version pairs must be unique")
+    return skills
+
+
+def _learning_policy(payload: dict[str, Any]) -> dict[str, bool]:
     learning = payload.get("learning_policy")
     if not isinstance(learning, dict):
         raise ValueError("investigation skill learning_policy must be an object")
@@ -247,18 +297,30 @@ def load_investigation_skills(path: Path) -> dict[str, Any]:
     }
     if any(learning.get(key) is not expected for key, expected in required_learning.items()):
         raise ValueError("investigation skill learning policy weakens required promotion gates")
+    return required_learning
+
+
+def load_investigation_skills(path: Path) -> dict[str, Any]:
+    """Load a strict bounded registry, returning an empty shadow registry if absent."""
+    raw = _read_registry_bytes(path)
+    if raw is None:
+        return _empty_registry()
+    payload, raw_skills = _registry_payload(raw)
+    normalized_skills = _validated_skills(raw_skills)
+    required_learning = _learning_policy(payload)
     normalized = {
         "schema": REGISTRY_SCHEMA,
         "version": 1,
         "mode": "shadow",
         "learning_policy": required_learning,
-        "skills": skills,
+        "skills": normalized_skills,
     }
     return {**normalized, "registry_sha256": _sha256(normalized)}
 
 
-def _matches(skill: Mapping[str, Any], context: Mapping[str, Any]) -> bool:
-    match = skill.get("match") if isinstance(skill.get("match"), dict) else {}
+def _context_match_values(
+    context: Mapping[str, Any],
+) -> tuple[str, str, str, int]:
     dataset = str(context.get("event_dataset") or "").strip().lower()
     protocol = str(
         context.get("transport_protocol") or context.get("network_protocol") or ""
@@ -268,6 +330,13 @@ def _matches(skill: Mapping[str, Any], context: Mapping[str, Any]) -> bool:
         destination_port = int(context.get("destination_port"))
     except (TypeError, ValueError):
         destination_port = 0
+    return dataset, protocol, rule_name, destination_port
+
+
+def _trigger_checks(
+    match: Mapping[str, Any], dataset: str, protocol: str,
+    rule_name: str, destination_port: int,
+) -> list[bool]:
     checks: list[bool] = []
     if match.get("event_datasets"):
         checks.append(dataset in set(match["event_datasets"]))
@@ -277,6 +346,13 @@ def _matches(skill: Mapping[str, Any], context: Mapping[str, Any]) -> bool:
         checks.append(destination_port in set(match["destination_ports"]))
     if match.get("rule_name_contains"):
         checks.append(any(fragment in rule_name for fragment in match["rule_name_contains"]))
+    return checks
+
+
+def _matches(skill: Mapping[str, Any], context: Mapping[str, Any]) -> bool:
+    match = skill.get("match") if isinstance(skill.get("match"), dict) else {}
+    dataset, protocol, rule_name, destination_port = _context_match_values(context)
+    checks = _trigger_checks(match, dataset, protocol, rule_name, destination_port)
     return bool(checks) and all(checks)
 
 

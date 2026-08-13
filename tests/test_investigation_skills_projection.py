@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import importlib.util
 import json
@@ -21,6 +22,57 @@ SPEC = importlib.util.spec_from_file_location(
 skills = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(skills)
+
+
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+    class Complexity(ast.NodeVisitor):
+        def __init__(self):
+            self.value = 1
+
+        def visit_FunctionDef(self, node):
+            return
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_If(self, node):
+            self.value += 1
+            self.generic_visit(node)
+
+        visit_For = visit_If
+        visit_While = visit_If
+
+        def visit_Try(self, node):
+            self.value += len(node.handlers)
+            self.generic_visit(node)
+
+        def visit_BoolOp(self, node):
+            self.value += max(0, len(node.values) - 1)
+            self.generic_visit(node)
+
+        def visit_IfExp(self, node):
+            self.value += 1
+            self.generic_visit(node)
+
+        def visit_ListComp(self, node):
+            self.value += sum(
+                1 + len(generator.ifs) for generator in node.generators
+            )
+            self.generic_visit(node)
+
+        visit_SetComp = visit_ListComp
+        visit_GeneratorExp = visit_ListComp
+
+    visitor = Complexity()
+    for child in target.body:
+        visitor.visit(child)
+    return target.end_lineno - target.lineno + 1, visitor.value
 
 
 def checked_payload() -> dict[str, Any]:
@@ -56,6 +108,30 @@ class FakeRegistryPath:
 
 
 class InvestigationSkillsProjectionTests(unittest.TestCase):
+    def test_changed_phases_meet_architecture_contract(self) -> None:
+        for name in (
+            "_match_mapping",
+            "_normalized_match_lists",
+            "_normalized_destination_ports",
+            "_validate_match",
+            "_skill_identity",
+            "_skill_projection",
+            "_validate_skill",
+            "_read_registry_bytes",
+            "_empty_registry",
+            "_registry_payload",
+            "_validated_skills",
+            "_learning_policy",
+            "load_investigation_skills",
+            "_context_match_values",
+            "_trigger_checks",
+            "_matches",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
+
     def test_match_projection_preserves_order_normalization_and_input(self) -> None:
         raw = {
             "destination_ports": [53, 53, True],
