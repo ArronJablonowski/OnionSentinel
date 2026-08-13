@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +31,99 @@ class Response:
 
 
 class OllamaProviderAdapterTests(unittest.TestCase):
+    def test_request_preserves_prompt_precedence_and_transport_read_order(self) -> None:
+        trace: list[object] = []
+        explicit = Path("explicit-system.md")
+        response = Response()
+
+        class TracedResponse(Response):
+            def __enter__(self):
+                trace.append("enter")
+                return self
+
+            def __exit__(self, exc_type, _exc, _tb):
+                trace.append(("exit", exc_type))
+                return False
+
+        def factory(url, **kwargs):
+            trace.append(("factory", url, kwargs["method"]))
+            return "request"
+
+        def open_request(value, timeout):
+            trace.append(("open", value, timeout))
+            return response
+
+        response = TracedResponse()
+        result = ollama.request(
+            {"alert": {"id": "synthetic"}}, self.args(), {}, "task",
+            system_prompt_file=explicit,
+            load_system_prompt=lambda path: trace.append(("system", path)) or "prompt",
+            read_bounded_json=lambda observed, max_bytes: trace.append(
+                ("read", observed is response, max_bytes)
+            ) or {"message": {"content": '{"summary":"ok"}'}},
+            extract_json_object=lambda content: trace.append(
+                ("extract", content)
+            ) or json.loads(content),
+            urlopen=open_request, request_factory=factory,
+            transport_errors=(TimeoutError,),
+        )
+        self.assertEqual(trace, [
+            ("system", explicit),
+            ("factory", "http://127.0.0.1:11434/api/chat", "POST"),
+            ("open", "request", 7.0), "enter", ("read", True, 4096),
+            ("exit", None), ("extract", '{"summary":"ok"}'),
+        ])
+        self.assertEqual(result["summary"], "ok")
+
+    def test_transport_failure_preserves_exception_cause_and_skips_extraction(self) -> None:
+        failure = TimeoutError("synthetic timeout")
+        extracted = mock.Mock()
+        with self.assertRaisesRegex(SystemExit, "Ollama request failed") as raised:
+            ollama.request(
+                {}, self.args(), {}, "task",
+                system_prompt_file=None,
+                load_system_prompt=lambda _path: "system",
+                read_bounded_json=lambda *_args, **_kwargs: {},
+                extract_json_object=extracted,
+                urlopen=lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+                request_factory=lambda *_args, **_kwargs: object(),
+                transport_errors=(TimeoutError,),
+            )
+        self.assertIs(raised.exception.__cause__, failure)
+        extracted.assert_not_called()
+
+    def test_attestation_reuses_extracted_object_and_model_access_precedes_extract(self) -> None:
+        trace: list[object] = []
+        result_object: dict[str, object] = {"summary": "bounded"}
+
+        class Payload(dict):
+            def get(self, key, default=None):
+                trace.append(("get", key))
+                return super().get(key, default)
+
+        payload = Payload({
+            "model": " observed:model ",
+            "message": Payload({"content": "{}"}),
+        })
+        result = ollama.request(
+            {}, self.args(), {"ollama_model": "observed:model"}, "task",
+            system_prompt_file=None,
+            load_system_prompt=lambda _path: "system",
+            read_bounded_json=lambda *_args, **_kwargs: payload,
+            extract_json_object=lambda content: trace.append(
+                ("extract", content)
+            ) or result_object,
+            urlopen=lambda *_args, **_kwargs: Response(),
+            request_factory=lambda *_args, **_kwargs: object(),
+            transport_errors=(TimeoutError,),
+        )
+        self.assertIs(result, result_object)
+        self.assertEqual(trace, [
+            ("get", "message"), ("get", "content"),
+            ("get", "model"), ("extract", "{}"),
+        ])
+        self.assertEqual(result["_analysis_model"], "observed:model")
+
     def args(self):
         return SimpleNamespace(
             system_prompt_file=Path("synthetic-system.md"),
