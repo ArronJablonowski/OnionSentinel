@@ -7,7 +7,9 @@ from pathlib import Path
 import re
 from types import SimpleNamespace
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -113,6 +115,97 @@ class CodexProviderAdapterTests(unittest.TestCase):
                     stdout="",
                 )
             )
+
+    def test_model_and_effort_validation_precede_prompt_preparation(self) -> None:
+        prepared: list[object] = []
+        for overrides, message in (
+            ({"model": "invalid model"}, "model name is invalid"),
+            ({"reasoning_effort": "unsupported"}, "reasoning effort is invalid"),
+        ):
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(
+                SystemExit, message
+            ):
+                self.chat(
+                    lambda *_args, **_kwargs: None,
+                    prepare=lambda *_args, **_kwargs: prepared.append(True),
+                    **overrides,
+                )
+        self.assertEqual(prepared, [])
+
+    def test_independent_review_writes_schema_before_process_invocation(self) -> None:
+        trace: list[object] = []
+
+        def schema_builder(template):
+            trace.append(("schema", template))
+            return {"strict": template}
+
+        def run(command, **_kwargs):
+            schema_path = Path(command[command.index("--output-schema") + 1])
+            trace.append(("run", json.loads(schema_path.read_text(encoding="utf-8"))))
+            final_path = Path(command[command.index("--output-last-message") + 1])
+            final_path.write_text('{"summary":"reviewed"}', encoding="utf-8")
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+        result = self.chat(
+            run,
+            independent_review=True,
+            prepare=lambda *_args, **_kwargs: (
+                {"prompt_package": {"response_schema": {"type": "object"}}},
+                "{}",
+            ),
+            schema_builder=schema_builder,
+        )
+        self.assertEqual(trace, [
+            ("schema", {"type": "object"}),
+            ("run", {"strict": {"type": "object"}}),
+        ])
+        self.assertEqual(result["summary"], "reviewed")
+
+    def test_final_artifact_is_read_before_temp_directory_cleanup_and_then_extracted(self) -> None:
+        trace: list[object] = []
+        final_path: list[Path] = []
+
+        def run(command, **_kwargs):
+            path = Path(command[command.index("--output-last-message") + 1])
+            path.write_text('{"summary":"bounded"}', encoding="utf-8")
+            final_path.append(path)
+            trace.append("run")
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+        def read(path: Path, maximum: int) -> bytes:
+            trace.append(("read", path.is_file(), maximum))
+            return path.read_bytes()
+
+        def extract(value: str):
+            trace.append(("extract", final_path[0].exists(), value))
+            return json.loads(value)
+
+        with tempfile.TemporaryDirectory() as controlled:
+            result = self.chat(
+                run,
+                read_bytes=read,
+                extract_json=extract,
+                controlled_tmpdir=Path(controlled),
+            )
+            self.assertEqual(final_path[0].parent.parent, Path(controlled))
+        self.assertEqual(trace, [
+            "run",
+            ("read", True, 4096),
+            ("extract", False, '{"summary":"bounded"}'),
+        ])
+        self.assertEqual(result["_analysis_model_path"], "frontier-codex-cli")
+
+    def test_invalid_utf8_propagates_before_json_extraction(self) -> None:
+        extracted = mock.Mock()
+
+        def run(command, **_kwargs):
+            output = Path(command[command.index("--output-last-message") + 1])
+            output.write_bytes(b"\xff")
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+        with self.assertRaises(UnicodeDecodeError):
+            self.chat(run, extract_json=extracted)
+        extracted.assert_not_called()
 
     def test_sanitized_environment_does_not_inherit_provider_credentials(self) -> None:
         env = cli_common.sanitized_environment(
