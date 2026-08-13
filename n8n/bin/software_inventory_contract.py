@@ -316,12 +316,15 @@ def _read_json_file(
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def load_config(path: Path) -> Dict[str, Any]:
-    value = _read_json_file(path, MAX_CONFIG_BYTES, exact_mode=0o600)
+def _config_document(value: object) -> Dict[str, Any]:
     if not isinstance(value, dict) or set(value) != CONFIG_KEYS:
         raise ValueError("software inventory config contains unsupported or missing fields")
     if not isinstance(value.get("enabled"), bool):
         raise ValueError("software inventory config enabled must be boolean")
+    return value
+
+
+def _config_endpoint(value: Dict[str, Any]) -> Tuple[str, str]:
     host = _bounded_text(
         value.get("host"),
         field="software inventory host",
@@ -336,6 +339,10 @@ def load_config(path: Path) -> Dict[str, Any]:
     )
     if not _SAFE_HOST.fullmatch(host) or not _SAFE_USER.fullmatch(user):
         raise ValueError("software inventory SSH endpoint is invalid")
+    return host, user
+
+
+def _config_numeric_values(value: Dict[str, Any]) -> Dict[str, int]:
     numeric_limits = {
         "port": (1, 65535),
         "connect_timeout_seconds": (1, 60),
@@ -346,11 +353,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         "page_size": (1, MAX_PAGE_SIZE),
         "max_pages_per_source": (1, MAX_PAGES_PER_SOURCE),
     }
-    normalized: Dict[str, Any] = {
-        "enabled": value["enabled"],
-        "host": host,
-        "ssh_user": user,
-    }
+    normalized: Dict[str, int] = {}
     for key, limits in numeric_limits.items():
         normalized[key] = _bounded_integer(
             value.get(key),
@@ -358,6 +361,11 @@ def load_config(path: Path) -> Dict[str, Any]:
             minimum=limits[0],
             maximum=limits[1],
         )
+    return normalized
+
+
+def _config_paths(value: Dict[str, Any]) -> Dict[str, str]:
+    normalized: Dict[str, str] = {}
     for key in ("ssh_key", "known_hosts"):
         text = _bounded_text(
             value.get(key),
@@ -366,6 +374,10 @@ def load_config(path: Path) -> Dict[str, Any]:
             required=True,
         )
         normalized[key] = str(Path(text).expanduser())
+    return normalized
+
+
+def _verify_config_files(normalized: Dict[str, Any]) -> None:
     if normalized["enabled"]:
         _owner_file(
             Path(normalized["ssh_key"]),
@@ -376,6 +388,21 @@ def load_config(path: Path) -> Dict[str, Any]:
             Path(normalized["known_hosts"]),
             maximum_bytes=1024 * 1024,
         )
+
+
+def load_config(path: Path) -> Dict[str, Any]:
+    value = _config_document(
+        _read_json_file(path, MAX_CONFIG_BYTES, exact_mode=0o600)
+    )
+    host, user = _config_endpoint(value)
+    normalized: Dict[str, Any] = {
+        "enabled": value["enabled"],
+        "host": host,
+        "ssh_user": user,
+    }
+    normalized.update(_config_numeric_values(value))
+    normalized.update(_config_paths(value))
+    _verify_config_files(normalized)
     return normalized
 
 
