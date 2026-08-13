@@ -15,6 +15,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from tests.test_adjudicated_replay_case_architecture import function_metrics
+
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPORTER_PATH = ROOT / "n8n/bin/export-adjudicated-analysis-replays.py"
@@ -43,6 +45,19 @@ class FakeConnection:
 
 
 class AdjudicatedReplayExportOrchestrationTests(unittest.TestCase):
+    def test_orchestration_phases_meet_architecture_contract(self) -> None:
+        for name in (
+            "_load_export_rows",
+            "_project_replay_cases",
+            "_export_payload",
+            "_write_export",
+            "main",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
+
     def _args(self, root: Path) -> SimpleNamespace:
         database = root / "alerts.sqlite3"
         database.touch()

@@ -515,8 +515,7 @@ def atomic_private_json(path: Path, payload: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def main() -> int:
-    args = parse_args()
+def _load_export_rows(args: argparse.Namespace) -> tuple[Any, list[sqlite3.Row]]:
     if not args.db.exists():
         raise SystemExit(f"alert-store database not found: {args.db}")
     runner = load_runner(args.runner)
@@ -528,6 +527,12 @@ def main() -> int:
         raise SystemExit(f"analyst adjudication schema is unavailable: {error}") from error
     finally:
         connection.close()
+    return runner, items
+
+
+def _project_replay_cases(
+    runner: Any, items: list[sqlite3.Row], args: argparse.Namespace,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     cases = []
     skipped = []
     for item in items:
@@ -547,7 +552,13 @@ def main() -> int:
                     "reason": str(error)[:500],
                 }
             )
-    payload = {
+    return cases, skipped
+
+
+def _export_payload(
+    args: argparse.Namespace, cases: list[dict[str, Any]], skipped: list[dict[str, str]],
+) -> dict[str, Any]:
+    return {
         "schema": REPLAY_SCHEMA,
         "version": 1,
         "suite_name": "private-analyst-adjudications",
@@ -557,6 +568,12 @@ def main() -> int:
         "cases": cases,
         "skipped": skipped,
     }
+
+
+def _write_export(
+    args: argparse.Namespace, payload: dict[str, Any],
+    cases: list[dict[str, Any]], skipped: list[dict[str, str]],
+) -> None:
     atomic_private_json(args.out, payload)
     print(
         json.dumps(
@@ -569,8 +586,15 @@ def main() -> int:
             sort_keys=True,
         )
     )
-    return 0
 
+
+def main() -> int:
+    args = parse_args()
+    runner, items = _load_export_rows(args)
+    cases, skipped = _project_replay_cases(runner, items, args)
+    payload = _export_payload(args, cases, skipped)
+    _write_export(args, payload, cases, skipped)
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())
