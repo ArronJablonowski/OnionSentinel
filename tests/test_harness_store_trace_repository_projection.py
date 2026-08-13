@@ -29,10 +29,19 @@ def function_metrics(name: str) -> tuple[int, int]:
         and node.name == "HarnessStoreTraceRepository"
     )
     target = next(
-        node
-        for node in owner.body
-        if isinstance(node, ast.FunctionDef) and node.name == name
+        (
+            node
+            for node in owner.body
+            if isinstance(node, ast.FunctionDef) and node.name == name
+        ),
+        None,
     )
+    if target is None:
+        target = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == name
+        )
     complexity = 1
     for node in ast.walk(target):
         if node is target:
@@ -96,7 +105,7 @@ class HarnessStoreTraceRepositoryProjectionTests(unittest.TestCase):
         repository.path = Path("/synthetic/harness.sqlite3")
         return repository
 
-    def test_public_signatures_and_current_debt_are_stable(self) -> None:
+    def test_public_signatures_and_changed_functions_are_within_budget(self) -> None:
         self.assertEqual(
             str(inspect.signature(OWNER.HarnessStoreTraceRepository.finish)),
             "(self, run_id: 'str', *, status: 'str', reason: 'str' = '', "
@@ -106,8 +115,25 @@ class HarnessStoreTraceRepositoryProjectionTests(unittest.TestCase):
             str(inspect.signature(OWNER.HarnessStoreTraceRepository.export_trace)),
             "(self, run_id: 'str') -> 'dict[str, Any]'",
         )
-        self.assertEqual(function_metrics("finish"), (87, 14))
-        self.assertEqual(function_metrics("export_trace"), (98, 9))
+        for name in (
+            "finish",
+            "export_trace",
+            "_terminal_stage",
+            "_admit_terminal_run",
+            "_terminal_reason",
+            "_terminal_ledger_manifest",
+            "_terminal_event_payload",
+            "_update_terminal_run",
+            "_required_run",
+            "_json_rows",
+            "_rows",
+            "_collect_trace",
+            "_trace_export",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
 
     def invoke_finish(
         self,
