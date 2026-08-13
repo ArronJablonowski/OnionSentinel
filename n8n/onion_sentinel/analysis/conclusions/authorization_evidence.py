@@ -287,16 +287,49 @@ def _coverage_matches_event(coverage: dict[str, Any], event: EventTuple) -> bool
     end = canonical_timestamp(coverage["authorization_end"])
     assert start is not None and end is not None
     return bool(
-        start <= event["timestamp"] <= end
-        and (not coverage["source_ips"] or event["source_ip"] in coverage["source_ips"])
-        and (not coverage["destination_ips"] or event["destination_ip"] in coverage["destination_ips"])
+        _coverage_window_matches_event(start, end, event)
+        and _coverage_addresses_match_event(coverage, event)
         and event["rule_id"] in coverage["rule_ids"]
-        and (not coverage["source_ports"] or event["source_port"] in coverage["source_ports"])
+        and _coverage_ports_match_event(coverage, event, destination_port)
+        and event["transport"] in coverage["transport_protocols"]
+    )
+
+
+def _coverage_window_matches_event(
+    start: dt.datetime,
+    end: dt.datetime,
+    event: EventTuple,
+) -> bool:
+    return start <= event["timestamp"] <= end
+
+
+def _coverage_addresses_match_event(
+    coverage: dict[str, Any],
+    event: EventTuple,
+) -> bool:
+    return bool(
+        (not coverage["source_ips"]
+         or event["source_ip"] in coverage["source_ips"])
+        and (not coverage["destination_ips"]
+             or event["destination_ip"] in coverage["destination_ips"])
+    )
+
+
+def _coverage_ports_match_event(
+    coverage: dict[str, Any],
+    event: EventTuple,
+    destination_port: int,
+) -> bool:
+    return bool(
+        (not coverage["source_ports"]
+         or event["source_port"] in coverage["source_ports"])
         and (
             destination_port in coverage["destination_ports"]
-            or any(lower <= destination_port <= upper for lower, upper in coverage["destination_port_ranges"])
+            or any(
+                lower <= destination_port <= upper
+                for lower, upper in coverage["destination_port_ranges"]
+            )
         )
-        and event["transport"] in coverage["transport_protocols"]
     )
 
 
