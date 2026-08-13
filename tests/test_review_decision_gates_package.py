@@ -73,6 +73,79 @@ class ReviewDecisionGatesPackageTests(unittest.TestCase):
         self.assertFalse(applied)
         self.assertEqual(primary["handling"], "monitor")
 
+    def test_validated_decision_normalizes_supported_choice_and_empty_disputes(self) -> None:
+        response = {
+            "decision": "  REVIEWER_SUPPORTED  ",
+            "remaining_disagreements": ["", "   ", None],
+            "_adjudication_contract_validation": {
+                "valid": True,
+                "automation_authorized": False,
+            },
+        }
+
+        validated = projection._validated_decision({
+            "status": "completed",
+            "mode": "shadow",
+            "automation_authorized": False,
+            "response": response,
+        })
+
+        self.assertEqual(validated, ("reviewer_supported", response))
+
+    def test_validated_decision_rejects_each_authority_or_validation_widening(self) -> None:
+        valid = {
+            "status": "completed",
+            "mode": "shadow",
+            "automation_authorized": False,
+            "response": {
+                "decision": "primary_supported",
+                "remaining_disagreements": [],
+                "_adjudication_contract_validation": {
+                    "valid": True,
+                    "automation_authorized": False,
+                },
+            },
+        }
+        mutations = (
+            {"status": "failed"},
+            {"mode": "active"},
+            {"automation_authorized": 0},
+            {"response": None},
+            {"response": {**valid["response"], "decision": "unresolved"}},
+            {"response": {**valid["response"], "remaining_disagreements": ["handling"]}},
+            {"response": {**valid["response"], "_adjudication_contract_validation": None}},
+            {"response": {**valid["response"], "_adjudication_contract_validation": {
+                "valid": 1, "automation_authorized": False,
+            }}},
+            {"response": {**valid["response"], "_adjudication_contract_validation": {
+                "valid": True, "automation_authorized": 0,
+            }}},
+        )
+
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.assertIsNone(projection._validated_decision({**valid, **mutation}))
+
+    def test_malformed_remaining_disagreements_retains_legacy_empty_semantics(self) -> None:
+        adjudication = {
+            "status": "completed",
+            "mode": "shadow",
+            "automation_authorized": False,
+            "response": {
+                "decision": "primary_supported",
+                "remaining_disagreements": "handling",
+                "_adjudication_contract_validation": {
+                    "valid": True,
+                    "automation_authorized": False,
+                },
+            },
+        }
+
+        self.assertEqual(
+            projection._validated_decision(adjudication),
+            ("primary_supported", adjudication["response"]),
+        )
+
     def test_required_review_failure_caps_confidence_and_blocks_controls(self) -> None:
         response = gates.required(
             {"handling": "contain", "confidence_score": 0.95,
