@@ -99,6 +99,69 @@ class PipelinePreparationTests(unittest.TestCase):
         self.assertEqual(result.running_record["active_phase"], "primary")
         self.assertEqual(result.harness.phases[-1], ("primary", "codex:gpt-5.5", "new alert"))
 
+    def test_harness_request_preserves_complete_configuration_contract(self) -> None:
+        ports, state = self.ports()
+        inputs = self.inputs()
+
+        preparation.prepare(self.context(), inputs, ports)
+
+        request = state["request"]
+        self.assertEqual(request.run_id, "run-1")
+        self.assertIs(request.prompt_package, inputs.prompt_package)
+        self.assertEqual(request.role, "soc-analyst")
+        self.assertEqual(request.assigned_route, "codex:gpt-5.5")
+        self.assertEqual(request.reanalysis_attempt_id, "attempt-1")
+        self.assertEqual(request.policy_path, Path("policy.json"))
+        self.assertEqual(request.database_path, Path("harness.sqlite3"))
+        self.assertEqual(
+            request.configuration,
+            {
+                "query_contract": {"schema": "v1"},
+                "agent_role": "soc-analyst",
+                "assigned_route": "codex:gpt-5.5",
+                "reviewer_route": "codex:gpt-5.6",
+                "evaluation_memory_frozen": False,
+                "limits": {
+                    "max_query_rounds": 4,
+                    "max_queries_total": 20,
+                    "max_queries_per_round": 5,
+                    "max_prompt_bytes": 1000,
+                    "max_response_bytes": 2000,
+                },
+            },
+        )
+
+    def test_disabled_policy_bypasses_without_warning_and_still_starts_telemetry(self) -> None:
+        ports, state = self.ports(enabled=False, allowed=False)
+        context = self.context()
+
+        result = preparation.prepare(context, self.inputs(), ports)
+
+        self.assertIsNone(result.harness)
+        self.assertEqual(state["warnings"], [])
+        self.assertEqual(state["written"], [{"status": "running", "runner_pid": 42}])
+        self.assertEqual(state["monitor"], 1)
+        self.assertTrue(result.monitor_started)
+        self.assertEqual(context.stage, Stage.PREPARE)
+
+    def test_monitor_failure_stops_before_flag_and_context_transition(self) -> None:
+        ports, state = self.ports()
+        ports = preparation.PreparationPorts(
+            **{
+                **ports.__dict__,
+                "start_monitor": lambda: (_ for _ in ()).throw(
+                    RuntimeError("monitor failed")
+                ),
+            }
+        )
+        context = self.context()
+
+        with self.assertRaisesRegex(RuntimeError, "monitor failed"):
+            preparation.prepare(context, self.inputs(), ports)
+
+        self.assertEqual(state["written"], [{"status": "running", "runner_pid": 42}])
+        self.assertEqual(context.stage, Stage.ATTEST)
+
     def test_shadow_initialization_failure_warns_and_continues(self) -> None:
         ports, state = self.ports(start_error=RuntimeError("db busy"))
         result = preparation.prepare(self.context(), self.inputs(), ports)
