@@ -20,7 +20,8 @@ from software_inventory_normalization import (  # noqa: F401
 )
 import software_inventory_validation as _validation
 
-def database_write_token(path: Path) -> str:
+
+def _require_owner_controlled_environment(path: Path) -> None:
     metadata = path.lstat()
     if (
         not path.is_file()
@@ -30,6 +31,9 @@ def database_write_token(path: Path) -> str:
         or metadata.st_size > 1024 * 1024
     ):
         raise ValueError("runtime environment file is not owner-controlled")
+
+
+def _environment_values(path: Path) -> Dict[str, str]:
     values: Dict[str, str] = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
@@ -37,12 +41,21 @@ def database_write_token(path: Path) -> str:
             continue
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip()
+    return values
+
+
+def _database_token(values: Dict[str, str]) -> str:
     token = values.get("ASSET_STORE_WRITE_TOKEN") or values.get(
         "N8N_POST_COMMIT_TOKEN"
     )
     if not token or len(token) < 32:
         raise ValueError("software inventory database write token is missing")
     return token
+
+
+def database_write_token(path: Path) -> str:
+    _require_owner_controlled_environment(path)
+    return _database_token(_environment_values(path))
 
 
 def _database_post(
