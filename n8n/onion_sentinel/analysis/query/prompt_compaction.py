@@ -63,18 +63,24 @@ def _has_query_error(value: dict[str, Any]) -> bool:
     )
 
 
-def project_rows(
-    value: Any, state: dict[str, int | bool], *, policy: Policy,
+def _project_list(
+    value: list[Any],
+    state: dict[str, int | bool],
+    policy: Policy,
     dependencies: Dependencies,
-) -> Any:
-    """Copy broker evidence while enforcing one cumulative row budget."""
-    if isinstance(value, list):
-        return [
-            project_rows(item, state, policy=policy, dependencies=dependencies)
-            for item in value
-        ]
-    if not isinstance(value, dict):
-        return value
+) -> list[Any]:
+    return [
+        project_rows(item, state, policy=policy, dependencies=dependencies)
+        for item in value
+    ]
+
+
+def _project_mapping(
+    value: dict[str, Any],
+    state: dict[str, int | bool],
+    policy: Policy,
+    dependencies: Dependencies,
+) -> dict[str, Any]:
     output: dict[str, Any] = {}
     has_error = _has_query_error(value)
     for raw_key, child in value.items():
@@ -85,10 +91,7 @@ def project_rows(
             remaining = max(0, policy.maximum_rows - int(state["rows"]))
             selected = child[:remaining]
             state["rows"] = int(state["rows"]) + len(selected)
-            output[key] = [
-                project_rows(item, state, policy=policy, dependencies=dependencies)
-                for item in selected
-            ]
+            output[key] = _project_list(selected, state, policy, dependencies)
             if len(selected) < len(child):
                 output[f"{key}_prompt_truncated"] = True
                 state["truncated"] = True
@@ -100,6 +103,18 @@ def project_rows(
         output["error"] = dependencies.error_category(value.get("error"))
         output["error_sha256"] = dependencies.error_digest(value.get("error"))
     return output
+
+
+def project_rows(
+    value: Any, state: dict[str, int | bool], *, policy: Policy,
+    dependencies: Dependencies,
+) -> Any:
+    """Copy broker evidence while enforcing one cumulative row budget."""
+    if isinstance(value, list):
+        return _project_list(value, state, policy, dependencies)
+    if not isinstance(value, dict):
+        return value
+    return _project_mapping(value, state, policy, dependencies)
 
 
 def _project_text(
