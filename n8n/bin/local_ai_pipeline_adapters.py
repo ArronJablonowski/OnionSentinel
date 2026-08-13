@@ -128,6 +128,32 @@ def memory_guard_ports(
     )
 
 
+def _queue_analysis_index(
+    bindings: Mapping[str, Any],
+    runtime_paths: Any,
+    payload: Any,
+    controlled: bool,
+) -> Any:
+    if controlled:
+        return bindings["queue_analysis_index"](
+            payload, queue_dir=runtime_paths.index_queue_dir
+        )
+    return bindings["queue_analysis_index"](payload)
+
+
+def _submit_analysis_index(
+    bindings: Mapping[str, Any],
+    args: Any,
+    payload: Any,
+    controlled: bool,
+) -> Any:
+    if controlled:
+        return bindings["post_controlled_analysis_index"](
+            payload, args.alert_store_url
+        )
+    return bindings["post_analysis_index"](payload, args.alert_store_url)
+
+
 def publication_ports(
     bindings: Mapping[str, Any],
     module: Any,
@@ -162,16 +188,12 @@ def publication_ports(
             if harness is not None
             else None
         ),
-        queue=lambda payload, controlled: b["queue_analysis_index"](
-            payload, queue_dir=runtime_paths.index_queue_dir
-        )
-        if controlled
-        else b["queue_analysis_index"](payload),
-        submit=lambda payload, controlled: b["post_controlled_analysis_index"](
-            payload, args.alert_store_url
-        )
-        if controlled
-        else b["post_analysis_index"](payload, args.alert_store_url),
+        queue=lambda payload, controlled: _queue_analysis_index(
+            b, runtime_paths, payload, controlled
+        ),
+        submit=lambda payload, controlled: _submit_analysis_index(
+            b, args, payload, controlled
+        ),
         quarantine=lambda path, payload, exc: b["quarantine_analysis_index"](
             path,
             payload,
@@ -228,18 +250,13 @@ def memory_promotion_ports(
     )
 
 
-def finalize_pipeline_telemetry(
+def _build_telemetry_record(
     bindings: Mapping[str, Any],
-    module: Any,
     *,
+    run_id: str,
     status: str,
-    error: str,
-    monitor_started: bool,
-    harness: Any,
-    resource_monitor: Any,
     started_at: Any,
     started_monotonic: float,
-    run_id: str,
     prompt_path: Any,
     prompt_package: dict[str, Any],
     settings: dict[str, Any],
@@ -247,38 +264,68 @@ def finalize_pipeline_telemetry(
     response: dict[str, Any] | None,
     json_path: Any,
     md_path: Any,
-    runtime_paths: Any,
+    resource_monitor: Any,
+    error: str,
     running_record: dict[str, Any],
-    active_record_path: Any,
+) -> dict[str, Any]:
+    b = bindings
+    return b["build_llm_log_record"](
+        run_id=run_id,
+        status=status,
+        started_at=started_at,
+        finished_at=b["project_now"](),
+        runtime_seconds=time.monotonic() - started_monotonic,
+        prompt_path=prompt_path,
+        prompt_package=prompt_package,
+        settings=settings or b["effective_ai_settings"](args),
+        response=response,
+        json_path=json_path,
+        md_path=md_path,
+        resource_monitor=resource_monitor,
+        error=error,
+        runtime_observation=running_record,
+    )
+
+
+def finalize_pipeline_telemetry(
+    bindings: Mapping[str, Any],
+    module: Any,
+    *,
+    status: str, error: str,
+    monitor_started: bool, harness: Any,
+    resource_monitor: Any, started_at: Any,
+    started_monotonic: float, run_id: str,
+    prompt_path: Any, prompt_package: dict[str, Any],
+    settings: dict[str, Any], args: Any,
+    response: dict[str, Any] | None, json_path: Any,
+    md_path: Any, runtime_paths: Any,
+    running_record: dict[str, Any], active_record_path: Any,
 ) -> None:
     """Finalize telemetry without changing the pipeline's terminal outcome."""
     b = bindings
     module.finalize(
         module.FinalizationInputs(
-            status,
-            error,
-            bool(prompt_path or prompt_package),
-            monitor_started,
-            harness,
-        ),
+            status, error, bool(prompt_path or prompt_package),
+            monitor_started, harness),
         module.FinalizationPorts(
             fail_harness=lambda reason: harness.fail(reason),
             stop_monitor=resource_monitor.stop,
-            build_record=lambda: b["build_llm_log_record"](
+            build_record=lambda: _build_telemetry_record(
+                b,
                 run_id=run_id,
                 status=status,
                 started_at=started_at,
-                finished_at=b["project_now"](),
-                runtime_seconds=time.monotonic() - started_monotonic,
+                started_monotonic=started_monotonic,
                 prompt_path=prompt_path,
                 prompt_package=prompt_package,
-                settings=settings or b["effective_ai_settings"](args),
+                settings=settings,
+                args=args,
                 response=response,
                 json_path=json_path,
                 md_path=md_path,
                 resource_monitor=resource_monitor,
                 error=error,
-                runtime_observation=running_record,
+                running_record=running_record,
             ),
             append_record=lambda record: b["append_jsonl"](
                 runtime_paths.log_file, record
@@ -352,24 +399,18 @@ def print_committed_outputs(
         )
 
 
-def prepare_runtime(
+def _preparation_inputs(
     bindings: Mapping[str, Any],
     module: Any,
-    context: Any,
-    *,
     args: Any,
     run_id: str,
-    prompt_path: Any,
     prompt_package: dict[str, Any],
     settings: dict[str, Any],
     agent_role: str,
     memory_frozen: bool,
-    started_at: Any,
-    active_record_path: Any,
-    resource_monitor: Any,
 ) -> Any:
     b = bindings
-    inputs = module.PreparationInputs(
+    return module.PreparationInputs(
         run_id, prompt_package, settings, agent_role, memory_frozen,
         args.reanalysis_attempt_id, args.investigation_harness_policy,
         args.investigation_harness_db, b["INVESTIGATION_QUERY_CONTRACT"],
@@ -377,6 +418,24 @@ def prepare_runtime(
         b["MAX_INVESTIGATION_QUERIES_TOTAL"],
         b["MAX_INVESTIGATION_QUERIES_PER_ROUND"], args.max_prompt_bytes,
         args.max_response_bytes,
+    )
+
+
+def prepare_runtime(
+    bindings: Mapping[str, Any],
+    module: Any,
+    context: Any,
+    *,
+    args: Any, run_id: str, prompt_path: Any,
+    prompt_package: dict[str, Any], settings: dict[str, Any],
+    agent_role: str, memory_frozen: bool, started_at: Any,
+    active_record_path: Any,
+    resource_monitor: Any,
+) -> Any:
+    b = bindings
+    inputs = _preparation_inputs(
+        b, module, args, run_id, prompt_package, settings, agent_role,
+        memory_frozen,
     )
     ports = module.PreparationPorts(
         enabled_routes=b["enabled_agent_model_routes"],
@@ -411,58 +470,106 @@ def prepare_runtime(
     return module.prepare(context, inputs, ports)
 
 
-def analysis_review_ports(
+def _analysis_evidence_paths(
+    bindings: Mapping[str, Any], args: Any,
+) -> tuple[Any, Any]:
+    evidence_config = getattr(
+        args, "incident_evidence_config",
+        bindings["DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE"])
+    pivot_dir = getattr(
+        args, "investigation_pivot_dir",
+        bindings["DEFAULT_INVESTIGATION_PIVOT_DIR"])
+    return evidence_config, pivot_dir
+
+
+def _run_primary_analysis(
     bindings: Mapping[str, Any],
-    module: Any,
     *,
-    args: Any,
     prompt_package: dict[str, Any],
-    settings: dict[str, Any],
+    args: Any,
     agent_role: str,
+    settings: dict[str, Any],
     live_osquery_config: dict[str, Any],
     enrichment_config: dict[str, Any],
-    controlled_identity: dict[str, Any] | None,
+    evidence_config: Any,
+    pivot_dir: Any,
+    update_phase: Callable[[str, str, str], None],
     harness_runtime: Any,
+) -> Any:
+    return bindings["analyze_with_config"](
+        prompt_package, args, agent_role=agent_role, settings=settings,
+        live_osquery_config=live_osquery_config,
+        enrichment_config=enrichment_config,
+        security_onion_config_path=evidence_config,
+        investigation_pivot_dir=pivot_dir, phase_callback=update_phase,
+        harness_runtime=harness_runtime,
+    )
+
+
+def _run_configured_review(
+    bindings: Mapping[str, Any],
+    candidate: dict[str, Any],
+    force_reason: str,
+    *,
+    prompt_package: dict[str, Any],
+    args: Any,
+    settings: dict[str, Any],
+    agent_role: str,
+    update_phase: Callable[[str, str, str], None],
+    harness_runtime: Any,
+    live_osquery_config: dict[str, Any],
+    enrichment_config: dict[str, Any],
+    evidence_config: Any,
+    pivot_dir: Any,
+) -> Any:
+    return bindings["apply_configured_second_opinion"](
+        prompt_package, candidate, args, settings, agent_role,
+        phase_callback=update_phase, harness_runtime=harness_runtime,
+        force_review_reason=force_reason,
+        live_osquery_config=live_osquery_config,
+        enrichment_config=enrichment_config,
+        security_onion_config_path=evidence_config,
+        investigation_pivot_dir=pivot_dir,
+    )
+
+
+def analysis_review_ports(
+    bindings: Mapping[str, Any], module: Any, *,
+    args: Any, prompt_package: dict[str, Any],
+    settings: dict[str, Any], agent_role: str,
+    live_osquery_config: dict[str, Any], enrichment_config: dict[str, Any],
+    controlled_identity: dict[str, Any] | None, harness_runtime: Any,
     observe_harness: Callable[[Callable[[], Any]], Any],
     update_phase: Callable[[str, str, str], None],
 ) -> Any:
     b = bindings
-    evidence_config = getattr(
-        args, "incident_evidence_config", b["DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE"])
-    pivot_dir = getattr(
-        args, "investigation_pivot_dir", b["DEFAULT_INVESTIGATION_PIVOT_DIR"])
+    evidence_config, pivot_dir = _analysis_evidence_paths(b, args)
     return module.AnalysisReviewPorts(
         load_saved_response=lambda: b["sanitize_saved_response_input"](
             b["load_json"](args.response_json, args.max_response_bytes)),
-        run_primary_analysis=lambda: b["analyze_with_config"](
-            prompt_package, args, agent_role=agent_role, settings=settings,
+        run_primary_analysis=lambda: _run_primary_analysis(
+            b, prompt_package=prompt_package, args=args, agent_role=agent_role,
+            settings=settings,
             live_osquery_config=live_osquery_config,
             enrichment_config=enrichment_config,
-            security_onion_config_path=evidence_config,
-            investigation_pivot_dir=pivot_dir, phase_callback=update_phase,
-            harness_runtime=harness_runtime),
-        validate_primary=lambda candidate: b["validate_response"](
-            candidate, prompt_package),
+            evidence_config=evidence_config, pivot_dir=pivot_dir,
+            update_phase=update_phase, harness_runtime=harness_runtime),
+        validate_primary=lambda candidate: b["validate_response"](candidate, prompt_package),
         observe_primary=lambda candidate: observe_harness(
             lambda: harness_runtime.record_response(
                 candidate, decision_id="primary",
                 decision_type="primary-analysis", hypothesis_revision=50)
             if harness_runtime is not None else None),
-        review_trigger=lambda candidate: b["second_opinion_trigger"](
-            candidate, prompt_package),
-        run_configured_review=lambda candidate, force_reason: (
-            b["apply_configured_second_opinion"](
-                prompt_package, candidate, args, settings, agent_role,
-                phase_callback=update_phase, harness_runtime=harness_runtime,
-                force_review_reason=force_reason,
-                live_osquery_config=live_osquery_config,
-                enrichment_config=enrichment_config,
-                security_onion_config_path=evidence_config,
-                investigation_pivot_dir=pivot_dir)),
-        apply_saved_review_gate=lambda candidate: b["apply_saved_response_review_gate"](
-            prompt_package, candidate),
-        notify_saved_post_processing=lambda: b["notify_analysis_phase"](
-            update_phase, "post_processing"),
+        review_trigger=lambda candidate: b["second_opinion_trigger"](candidate, prompt_package),
+        run_configured_review=lambda candidate, force_reason: _run_configured_review(
+            b, candidate, force_reason, prompt_package=prompt_package,
+            args=args, settings=settings, agent_role=agent_role,
+            update_phase=update_phase, harness_runtime=harness_runtime,
+            live_osquery_config=live_osquery_config,
+            enrichment_config=enrichment_config,
+            evidence_config=evidence_config, pivot_dir=pivot_dir),
+        apply_saved_review_gate=lambda candidate: b["apply_saved_response_review_gate"](prompt_package, candidate),
+        notify_saved_post_processing=lambda: b["notify_analysis_phase"](update_phase, "post_processing"),
         controlled_reviewer_gate=lambda candidate, trigger, frozen: (
             b["precommit_controlled_evaluation_reviewer_gate"](
                 prompt_package, candidate, settings, agent_role,

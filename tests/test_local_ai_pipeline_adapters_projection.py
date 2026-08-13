@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import importlib.util
 import io
@@ -22,6 +23,57 @@ SPEC = importlib.util.spec_from_file_location(
 adapters = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(adapters)
+
+
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+    class Complexity(ast.NodeVisitor):
+        def __init__(self):
+            self.value = 1
+
+        def visit_FunctionDef(self, node):
+            return
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_If(self, node):
+            self.value += 1
+            self.generic_visit(node)
+
+        visit_For = visit_If
+        visit_While = visit_If
+
+        def visit_Try(self, node):
+            self.value += len(node.handlers)
+            self.generic_visit(node)
+
+        def visit_BoolOp(self, node):
+            self.value += max(0, len(node.values) - 1)
+            self.generic_visit(node)
+
+        def visit_IfExp(self, node):
+            self.value += 1
+            self.generic_visit(node)
+
+        def visit_ListComp(self, node):
+            self.value += sum(
+                1 + len(generator.ifs) for generator in node.generators
+            )
+            self.generic_visit(node)
+
+        visit_SetComp = visit_ListComp
+        visit_GeneratorExp = visit_ListComp
+
+    visitor = Complexity()
+    for child in target.body:
+        visitor.visit(child)
+    return target.end_lineno - target.lineno + 1, visitor.value
 
 
 class Capture:
@@ -116,6 +168,26 @@ def observed(recorder: Recorder):
 
 
 class LocalAiPipelineAdaptersProjectionTests(unittest.TestCase):
+    def test_changed_phases_meet_architecture_contract(self):
+        names = (
+            "_queue_analysis_index",
+            "_submit_analysis_index",
+            "publication_ports",
+            "_build_telemetry_record",
+            "finalize_pipeline_telemetry",
+            "_preparation_inputs",
+            "prepare_runtime",
+            "_analysis_evidence_paths",
+            "_run_primary_analysis",
+            "_run_configured_review",
+            "analysis_review_ports",
+        )
+        for name in names:
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
+
     def test_publication_ports_preserve_lazy_bindings_and_controlled_routes(self):
         recorder = Recorder()
         bindings = TrackingBindings(
