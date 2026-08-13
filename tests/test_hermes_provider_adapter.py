@@ -27,6 +27,17 @@ class ProcessError(RuntimeError):
     pass
 
 
+class TrackingDict(dict):
+    def __init__(self, *args, trace, label, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.trace = trace
+        self.label = label
+
+    def get(self, key, default=None):
+        self.trace.append(("get", self.label, key))
+        return super().get(key, default)
+
+
 def read_json(path: Path, **_kwargs):
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -38,6 +49,73 @@ def read_json(path: Path, **_kwargs):
 
 
 class HermesProviderAdapterTests(unittest.TestCase):
+    def test_provider_credentials_preserve_access_order_identity_and_empty_admission(self) -> None:
+        trace: list[object] = []
+        provider_state = {"access_token": "dedicated"}
+        pool_entries = [{"provider": "openai-codex", "access_token": "pool"}]
+        raw = TrackingDict(
+            {
+                "providers": TrackingDict(
+                    {"openai-codex": provider_state}, trace=trace, label="providers"
+                ),
+                "credential_pool": TrackingDict(
+                    {"openai-codex": pool_entries}, trace=trace, label="pool"
+                ),
+            },
+            trace=trace,
+            label="raw",
+        )
+
+        observed_provider, observed_pool = hermes._provider_credentials(
+            raw, ArtifactError
+        )
+
+        self.assertIs(observed_provider, provider_state)
+        self.assertIs(observed_pool, pool_entries)
+        self.assertEqual(trace, [
+            ("get", "raw", "providers"),
+            ("get", "providers", "openai-codex"),
+            ("get", "raw", "credential_pool"),
+            ("get", "pool", "openai-codex"),
+        ])
+        self.assertEqual(
+            hermes._provider_credentials(
+                {"providers": {"openai-codex": {}},
+                 "credential_pool": {"openai-codex": []}},
+                ArtifactError,
+            ),
+            (None, None),
+        )
+
+    def test_provider_credentials_reject_malformed_or_foreign_pool_entries(self) -> None:
+        invalid_entries = [
+            None,
+            {"provider": "foreign", "access_token": "must-not-appear"},
+        ]
+        for entry in invalid_entries:
+            with self.subTest(entry_type=type(entry).__name__):
+                with self.assertRaisesRegex(
+                    ArtifactError,
+                    "dedicated Hermes openai-codex credential pool is invalid",
+                ) as raised:
+                    hermes._provider_credentials(
+                        {"credential_pool": {"openai-codex": [entry]}},
+                        ArtifactError,
+                    )
+            self.assertNotIn("must-not-appear", str(raised.exception))
+
+    def test_provider_credentials_accept_absent_none_and_exact_provider_markers(self) -> None:
+        entries = [
+            {"id": "absent"},
+            {"provider": None, "id": "none"},
+            {"provider": "openai-codex", "id": "exact"},
+            {"provider": " openai-codex ", "id": "trimmed"},
+        ]
+        _, observed = hermes._provider_credentials(
+            {"credential_pool": {"openai-codex": entries}}, ArtifactError
+        )
+        self.assertIs(observed, entries)
+
     def test_auth_filter_never_copies_foreign_providers(self) -> None:
         filtered = hermes.filtered_auth_store(
             {
