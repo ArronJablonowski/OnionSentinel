@@ -343,17 +343,8 @@ def validate_response(
     )
 
 
-def query_page(
-    config: Dict[str, Any],
-    source: str,
-    window: Dict[str, str],
-    page_size: int,
-    after: Optional[Dict[str, Any]],
-    timeout_seconds: float,
-) -> Dict[str, Any]:
-    """Read one fixed aggregation page through the forced SSH command."""
-    request = build_request(source, window, page_size, after)
-    command = [
+def _relay_ssh_command(config: Dict[str, Any]) -> List[str]:
+    return [
         "/usr/bin/ssh",
         "-T",
         "-o",
@@ -376,8 +367,20 @@ def query_page(
         str(config["port"]),
         f"{config['ssh_user']}@{config['host']}",
     ]
+
+
+def query_page(
+    config: Dict[str, Any],
+    source: str,
+    window: Dict[str, str],
+    page_size: int,
+    after: Optional[Dict[str, Any]],
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    """Read one fixed aggregation page through the forced SSH command."""
+    request = build_request(source, window, page_size, after)
     completed = run_bounded_command(
-        command,
+        _relay_ssh_command(config),
         stdin_text=json.dumps(request, separators=(",", ":"), sort_keys=True),
         timeout_seconds=max(1.0, float(timeout_seconds)),
         max_stdout_bytes=config["max_response_bytes"],
