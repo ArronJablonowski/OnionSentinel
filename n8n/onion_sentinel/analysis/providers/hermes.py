@@ -8,6 +8,13 @@ import tempfile
 from typing import Any, Callable
 
 
+def _valid_pool_entry(entry: Any) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    provider = entry.get("provider")
+    return provider is None or str(entry.get("provider")).strip() == "openai-codex"
+
+
 def _provider_credentials(
     raw: dict[str, Any],
     error_type: type[Exception],
@@ -20,13 +27,8 @@ def _provider_credentials(
         if isinstance(credential_pool, dict)
         else None
     )
-    if isinstance(pool_entries, list) and any(
-        not isinstance(entry, dict)
-        or (
-            entry.get("provider") is not None
-            and str(entry.get("provider")).strip() != "openai-codex"
-        )
-        for entry in pool_entries
+    if isinstance(pool_entries, list) and not all(
+        _valid_pool_entry(entry) for entry in pool_entries
     ):
         raise error_type("dedicated Hermes openai-codex credential pool is invalid")
     return (
