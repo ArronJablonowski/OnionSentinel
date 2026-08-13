@@ -364,6 +364,99 @@ def _command(
     ]
 
 
+def _selected_route(
+    settings: dict[str, Any],
+    model: str | None,
+    reasoning_effort: str | None,
+    model_pattern: Any,
+    reasoning_efforts: frozenset[str],
+) -> tuple[str, str]:
+    selected_model = str(model or settings.get("codex_cli_model") or "gpt-5.5").strip()
+    effort = str(
+        reasoning_effort or settings.get("codex_cli_reasoning_effort") or "medium"
+    ).strip().lower()
+    if not model_pattern.fullmatch(selected_model):
+        raise SystemExit("Codex CLI model name is invalid")
+    if effort not in reasoning_efforts:
+        raise SystemExit("Codex CLI reasoning effort is invalid")
+    return selected_model, effort
+
+
+def _run_command(
+    command: list[str],
+    serialized_stdin: str,
+    args: Any,
+    executable: str,
+    work_dir: Path,
+    *,
+    run_command: Callable[..., Any],
+    sanitized_env: Callable[[str], dict[str, str]],
+    process_error: type[BaseException],
+    summarize: Callable[[str, int], str],
+    max_stderr_bytes: int,
+) -> Any:
+    try:
+        proc = run_command(
+            command,
+            stdin_text=serialized_stdin,
+            timeout_seconds=args.timeout,
+            max_stdout_bytes=args.max_response_bytes,
+            max_stderr_bytes=max_stderr_bytes,
+            cwd=work_dir,
+            env=sanitized_env(executable),
+        )
+    except FileNotFoundError as exc:
+        raise SystemExit(f"Codex CLI executable was not found: {executable}") from exc
+    except process_error as exc:
+        raise SystemExit(f"Codex CLI analysis failed: {exc}") from exc
+    if proc.returncode != 0:
+        raise SystemExit(
+            f"Codex CLI analysis failed: {summarize(proc.stderr, proc.returncode)}"
+        )
+    return proc
+
+
+def _invoke_in_temp(
+    executable: str,
+    selected_model: str,
+    effort: str,
+    stdin_payload: dict[str, Any],
+    serialized_stdin: str,
+    args: Any,
+    independent_review: bool,
+    schema_builder: Callable[[dict[str, Any]], dict[str, Any]],
+    read_bytes: Callable[[Path, int], bytes],
+    controlled_tmpdir: Path | None,
+    run_options: dict[str, Any],
+) -> str:
+    with tempfile.TemporaryDirectory(
+        prefix="onion-sentinel-codex-",
+        dir=str(controlled_tmpdir) if controlled_tmpdir is not None else None,
+    ) as temp_name:
+        work_dir = Path(temp_name)
+        final_message = work_dir / "final-response.json"
+        output_schema = work_dir / "response-schema.json"
+        schema_template = (
+            stdin_payload["prompt_package"].get("response_schema")
+            if isinstance(stdin_payload["prompt_package"], dict)
+            else None
+        )
+        if independent_review:
+            _write_review_schema(output_schema, schema_template, schema_builder)
+        command = _command(
+            executable, selected_model, effort, work_dir, final_message,
+            output_schema, independent_review,
+        )
+        _run_command(
+            command, serialized_stdin, args, executable, work_dir, **run_options
+        )
+        if not final_message.is_file():
+            raise SystemExit("Codex CLI completed without a final response artifact")
+        return read_bytes(final_message, args.max_response_bytes).decode(
+            "utf-8", errors="strict"
+        )
+
+
 def chat(
     prompt_package: dict[str, Any],
     args: Any,
@@ -389,66 +482,26 @@ def chat(
 ) -> dict[str, Any]:
     """Run Codex through the fixed ephemeral read-only argv contract."""
     executable = resolve_executable(settings)
-    selected_model = str(model or settings.get("codex_cli_model") or "gpt-5.5").strip()
-    effort = str(
-        reasoning_effort or settings.get("codex_cli_reasoning_effort") or "medium"
-    ).strip().lower()
-    if not model_pattern.fullmatch(selected_model):
-        raise SystemExit("Codex CLI model name is invalid")
-    if effort not in reasoning_efforts:
-        raise SystemExit("Codex CLI reasoning effort is invalid")
+    selected_model, effort = _selected_route(
+        settings, model, reasoning_effort, model_pattern, reasoning_efforts
+    )
     stdin_payload, serialized_stdin = prepare(
         prompt_package,
         args,
         system_prompt_file=system_prompt_file,
         independent_review=independent_review,
     )
-    with tempfile.TemporaryDirectory(
-        prefix="onion-sentinel-codex-",
-        dir=str(controlled_tmpdir) if controlled_tmpdir is not None else None,
-    ) as temp_name:
-        work_dir = Path(temp_name)
-        final_message = work_dir / "final-response.json"
-        output_schema = work_dir / "response-schema.json"
-        schema_template = (
-            stdin_payload["prompt_package"].get("response_schema")
-            if isinstance(stdin_payload["prompt_package"], dict)
-            else None
-        )
-        if independent_review:
-            _write_review_schema(output_schema, schema_template, schema_builder)
-        command = _command(
-            executable,
-            selected_model,
-            effort,
-            work_dir,
-            final_message,
-            output_schema,
-            independent_review,
-        )
-        try:
-            proc = run_command(
-                command,
-                stdin_text=serialized_stdin,
-                timeout_seconds=args.timeout,
-                max_stdout_bytes=args.max_response_bytes,
-                max_stderr_bytes=max_stderr_bytes,
-                cwd=work_dir,
-                env=sanitized_env(executable),
-            )
-        except FileNotFoundError as exc:
-            raise SystemExit(f"Codex CLI executable was not found: {executable}") from exc
-        except process_error as exc:
-            raise SystemExit(f"Codex CLI analysis failed: {exc}") from exc
-        if proc.returncode != 0:
-            raise SystemExit(
-                f"Codex CLI analysis failed: {summarize(proc.stderr, proc.returncode)}"
-            )
-        if not final_message.is_file():
-            raise SystemExit("Codex CLI completed without a final response artifact")
-        final_text = read_bytes(final_message, args.max_response_bytes).decode(
-            "utf-8", errors="strict"
-        )
+    final_text = _invoke_in_temp(
+        executable, selected_model, effort, stdin_payload, serialized_stdin,
+        args, independent_review, schema_builder, read_bytes, controlled_tmpdir,
+        {
+            "run_command": run_command,
+            "sanitized_env": sanitized_env,
+            "process_error": process_error,
+            "summarize": summarize,
+            "max_stderr_bytes": max_stderr_bytes,
+        },
+    )
     response = extract_json(final_text)
     response["_analysis_model"] = selected_model
     response["_analysis_model_path"] = "frontier-codex-cli"
