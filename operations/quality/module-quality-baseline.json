@@ -16,13 +16,6 @@
     "n8n/bin/manage-agent-memory.py::main": {
       "max_lines": 102
     },
-    "n8n/bin/promote-dhcp-asset.py::promote": {
-      "max_complexity": 24,
-      "max_lines": 143
-    },
-    "n8n/bin/promote-dhcp-asset.py::reviewed_observation": {
-      "max_complexity": 17
-    },
     "n8n/bin/verify-agent-memory.py::verify_setup": {
       "max_complexity": 20
     },
@@ -105,5 +98,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "084a5d52559e993cbc2dcc1a2a1037aaffc08d09"
+  "source_release": "84cca5941723ca9cbcc88cfa16a906555e8122e3"
 }
