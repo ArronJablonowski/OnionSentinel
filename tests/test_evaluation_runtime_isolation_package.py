@@ -95,6 +95,52 @@ class EvaluationRuntimeIsolationPackageTests(unittest.TestCase):
                     origin, policy=self.policy, dependencies=self.dependencies
                 )
 
+    def test_alert_store_origin_accepts_only_exact_alternate_loopback_shape(self) -> None:
+        accepted = (
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:18787",
+            "http://127.0.0.1:65535/",
+        )
+        rejected = (
+            "",
+            "http://127.0.0.1",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:8787",
+            "http://127.0.0.1:18787/path",
+            "http://127.0.0.1:18787/?query=1",
+            "http://127.0.0.1:18787/#fragment",
+            "http://user@127.0.0.1:18787",
+            "http://user:password@127.0.0.1:18787",
+            "https://127.0.0.1:18787",
+            "http://localhost:18787",
+            "http://[::1]:18787",
+        )
+
+        for origin in accepted:
+            with self.subTest(origin=origin):
+                self.assertIsNone(
+                    runtime_isolation._validate_alert_store_origin(
+                        origin, self.policy
+                    )
+                )
+        for origin in rejected:
+            with self.subTest(origin=origin), self.assertRaisesRegex(
+                SystemExit, "alternate loopback"
+            ):
+                runtime_isolation._validate_alert_store_origin(origin, self.policy)
+
+    def test_alert_store_origin_reports_malformed_ports_as_unsafe_with_cause(self) -> None:
+        for origin in (
+            "http://127.0.0.1:not-a-port",
+            "http://127.0.0.1:65536",
+            "http://127.0.0.1:-1",
+        ):
+            with self.subTest(origin=origin), self.assertRaisesRegex(
+                SystemExit, "origin is unsafe"
+            ) as raised:
+                runtime_isolation._validate_alert_store_origin(origin, self.policy)
+            self.assertIsInstance(raised.exception.__cause__, ValueError)
+
     def test_valid_string_runtime_is_canonical_owner_private_and_pinned(self) -> None:
         result = runtime_isolation.resolve(
             "http://127.0.0.1:18787",
