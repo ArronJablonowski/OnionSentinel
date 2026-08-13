@@ -1,9 +1,6 @@
 {
   "files": {},
   "functions": {
-    "n8n/bin/verify-agent-memory.py::verify_setup": {
-      "max_complexity": 20
-    },
     "onion-sentinel-dashboard/scripts/dashboard_pcap_components.py::render_pcap_evidence_markdown": {
       "max_complexity": 22
     },
@@ -83,5 +80,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "ef0c91dcd6c158042bb99a11e69f0ca75f8708c2"
+  "source_release": "7798ef9fbdd3f73039aac597a4beaa01d58d55cf"
 }
