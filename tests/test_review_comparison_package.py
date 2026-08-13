@@ -95,6 +95,61 @@ class ReviewComparisonPackageTests(unittest.TestCase):
             item["field"] for item in result["disputed_fields"] if item["material"]
         })
 
+    def test_disputes_preserve_catalog_order_nested_values_and_snapshots(self) -> None:
+        primary = {
+            "detection_outcome": "true_positive_suspicious",
+            "handling": "investigate",
+            "confidence": "high",
+            "confidence_score": 0.9,
+            "correlation_assessment": {"correlation_found": True},
+            "unrelated": "primary-only",
+        }
+        reviewer = {
+            "detection_outcome": "inconclusive",
+            "handling": "investigate",
+            "confidence": "low",
+            "confidence_score": 0.3,
+            "correlation_assessment": {"correlation_found": False},
+            "unrelated": "reviewer-only",
+        }
+
+        result = compare(primary, reviewer)
+
+        self.assertEqual(
+            [item["field"] for item in result["disputed_fields"]],
+            [
+                "detection_outcome",
+                "correlation_assessment.correlation_found",
+                "confidence",
+                "confidence_score",
+            ],
+        )
+        self.assertEqual(
+            result["disputed_fields"][1],
+            {
+                "field": "correlation_assessment.correlation_found",
+                "primary": True,
+                "reviewer": False,
+                "material": False,
+            },
+        )
+        self.assertNotIn("unrelated", result["primary"])
+        self.assertNotIn("correlation_assessment", result["reviewer"])
+
+    def test_tuning_difference_is_material_only_when_a_control_value_is_present(self) -> None:
+        neutral = compare(
+            {"tuning_recommendation": "review"},
+            {"tuning_recommendation": "observe"},
+        )
+        controlled = compare(
+            {"tuning_recommendation": "SUPPRESS"},
+            {"tuning_recommendation": "observe"},
+        )
+
+        self.assertFalse(neutral["disputed_fields"][0]["material"])
+        self.assertTrue(controlled["disputed_fields"][0]["material"])
+        self.assertEqual(controlled["agreement"], "material_disagreement")
+
 
 if __name__ == "__main__":
     unittest.main()
