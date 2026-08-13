@@ -40,6 +40,81 @@ def attest_response(
     return response
 
 
+def _invoke_codex(
+    route: str, prompt_package: dict[str, Any], args: Any,
+    settings: dict[str, Any], common: dict[str, Any],
+    parse_codex: Callable[[str], tuple[str, str] | None],
+    codex_adapter: Callable[..., dict[str, Any]],
+) -> dict[str, Any]:
+    if route in {"gpt-cli", "codex-cli"}:
+        return codex_adapter(prompt_package, args, settings, **common)
+    parsed = parse_codex(route)
+    if not parsed:
+        raise SystemExit("Configured Codex CLI route is invalid")
+    return codex_adapter(
+        prompt_package, args, settings, model=parsed[0],
+        reasoning_effort=parsed[1], **common,
+    )
+
+
+def _invoke_harness(
+    route: str, provider: str, prompt_package: dict[str, Any], args: Any,
+    settings: dict[str, Any], common: dict[str, Any],
+    parse_harness: Callable[[str, str], tuple[str, str] | None],
+    adapter: Callable[..., dict[str, Any]],
+) -> dict[str, Any]:
+    parsed = parse_harness(route, provider)
+    if not parsed:
+        label = "Hermes Agent" if provider == "hermes-agent" else "OpenClaw"
+        raise SystemExit(f"Configured {label} route is invalid")
+    return adapter(
+        prompt_package, args, settings, model=parsed[0],
+        reasoning_effort=parsed[1], **common,
+    )
+
+
+def _invoke_ollama(
+    route: str, prompt_package: dict[str, Any], args: Any,
+    settings: dict[str, Any], common: dict[str, Any],
+    ollama_adapter: Callable[..., dict[str, Any]],
+) -> dict[str, Any]:
+    model = route.removeprefix("ollama:").strip()
+    if not model:
+        raise SystemExit("Configured Ollama route has an empty model name")
+    return ollama_adapter(prompt_package, args, settings, model, **common)
+
+
+def _invoke_selected_adapter(
+    route: str, prompt_package: dict[str, Any], args: Any,
+    settings: dict[str, Any], common: dict[str, Any],
+    parse_codex: Callable[[str], tuple[str, str] | None],
+    parse_harness: Callable[[str, str], tuple[str, str] | None],
+    codex_adapter: Callable[..., dict[str, Any]],
+    hermes_adapter: Callable[..., dict[str, Any]],
+    openclaw_adapter: Callable[..., dict[str, Any]],
+    ollama_adapter: Callable[..., dict[str, Any]],
+) -> dict[str, Any]:
+    if route in {"gpt-cli", "codex-cli"} or route.startswith("codex-cli:"):
+        return _invoke_codex(
+            route, prompt_package, args, settings, common, parse_codex, codex_adapter,
+        )
+    if route.startswith("hermes-agent:"):
+        return _invoke_harness(
+            route, "hermes-agent", prompt_package, args, settings, common,
+            parse_harness, hermes_adapter,
+        )
+    if route.startswith("openclaw:"):
+        return _invoke_harness(
+            route, "openclaw", prompt_package, args, settings, common,
+            parse_harness, openclaw_adapter,
+        )
+    if route.startswith("ollama:"):
+        return _invoke_ollama(
+            route, prompt_package, args, settings, common, ollama_adapter,
+        )
+    raise SystemExit(f"Unsupported or disabled analysis model route: {route or 'none'}")
+
+
 def dispatch(
     route: str,
     prompt_package: dict[str, Any],
@@ -74,57 +149,8 @@ def dispatch(
         "system_prompt_file": system_prompt_file,
         "independent_review": independent_review,
     }
-    if route in {"gpt-cli", "codex-cli"}:
-        response = codex_adapter(prompt_package, args, settings, **common)
-    elif route.startswith("codex-cli:"):
-        parsed = parse_codex(route)
-        if not parsed:
-            raise SystemExit("Configured Codex CLI route is invalid")
-        response = codex_adapter(
-            prompt_package,
-            args,
-            settings,
-            model=parsed[0],
-            reasoning_effort=parsed[1],
-            **common,
-        )
-    elif route.startswith("hermes-agent:"):
-        parsed = parse_harness(route, "hermes-agent")
-        if not parsed:
-            raise SystemExit("Configured Hermes Agent route is invalid")
-        response = hermes_adapter(
-            prompt_package,
-            args,
-            settings,
-            model=parsed[0],
-            reasoning_effort=parsed[1],
-            **common,
-        )
-    elif route.startswith("openclaw:"):
-        parsed = parse_harness(route, "openclaw")
-        if not parsed:
-            raise SystemExit("Configured OpenClaw route is invalid")
-        response = openclaw_adapter(
-            prompt_package,
-            args,
-            settings,
-            model=parsed[0],
-            reasoning_effort=parsed[1],
-            **common,
-        )
-    elif route.startswith("ollama:"):
-        model = route.removeprefix("ollama:").strip()
-        if not model:
-            raise SystemExit("Configured Ollama route has an empty model name")
-        response = ollama_adapter(
-            prompt_package,
-            args,
-            settings,
-            model,
-            **common,
-        )
-    else:
-        raise SystemExit(
-            f"Unsupported or disabled analysis model route: {route or 'none'}"
-        )
+    response = _invoke_selected_adapter(
+        route, prompt_package, args, settings, common, parse_codex, parse_harness,
+        codex_adapter, hermes_adapter, openclaw_adapter, ollama_adapter,
+    )
     return attest(settings, route, response)
