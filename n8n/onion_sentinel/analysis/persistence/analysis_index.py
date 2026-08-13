@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import re
 import time
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, NamedTuple
 import urllib.error
 import urllib.request
 
@@ -278,27 +278,61 @@ def quarantine(
     return rejected_path
 
 
-def flush(
+def _commit_replayed_result(
+    path: Path,
+    payload: dict[str, Any],
     alert_store_url: str,
     *,
-    queue_dir: Path,
-    quarantine_dir: Path,
     memory_pending_dir: Path,
     memory_committed_dir: Path,
     memory_receipt_dir: Path,
-    limit: int,
     memory_writeback_enabled: bool,
-    submission_error: type[Exception],
-    load_json: Callable[[Path], dict[str, Any]],
     post_result: Callable[[dict[str, Any], str], dict[str, Any]],
     canonical_digest: Callable[[Any], str],
     mark_memory_committed: Callable[..., Path | None],
     process_committed_memory: Callable[..., tuple[dict[str, Any], Path | None]],
-    resume_committed_memory: Callable[..., tuple[int, int]],
+) -> None:
+    post_result(payload, alert_store_url)
+    committed_task = mark_memory_committed(
+        str(payload.get("analysis_id") or ""),
+        expected_response_digest=canonical_digest(payload.get("response")),
+        pending_dir=memory_pending_dir,
+        committed_dir=memory_committed_dir,
+    )
+    path.unlink(missing_ok=True)
+    if committed_task is not None and memory_writeback_enabled:
+        try:
+            process_committed_memory(committed_task, receipt_dir=memory_receipt_dir)
+        except Exception:
+            pass
+
+
+def _quarantine_replayed_result(
+    path: Path,
+    payload: dict[str, Any],
+    error: Exception,
+    *,
+    quarantine_dir: Path,
+    memory_pending_dir: Path,
     quarantine_result: Callable[..., Path],
     discard_pending_memory: Callable[..., None],
-) -> tuple[int, int, int]:
-    """Replay the ordered spool, preserving index/memory commit ordering."""
+) -> None:
+    quarantine_result(path, payload, error, quarantine_dir=quarantine_dir)
+    discard_pending_memory(
+        str(payload.get("analysis_id") or ""),
+        pending_dir=memory_pending_dir,
+    )
+
+
+def _replay_paths(
+    queue_dir: Path,
+    *,
+    memory_committed_dir: Path,
+    memory_receipt_dir: Path,
+    limit: int,
+    memory_writeback_enabled: bool,
+    resume_committed_memory: Callable[..., tuple[int, int]],
+) -> list[Path]:
     if memory_writeback_enabled:
         resume_committed_memory(
             committed_dir=memory_committed_dir,
@@ -306,36 +340,90 @@ def flush(
             limit=limit,
         )
     if not queue_dir.exists():
-        return 0, 0, 0
+        return []
+    return sorted(queue_dir.glob("*.json"))[:limit]
+
+
+class _ReplayContext(NamedTuple):
+    quarantine_dir: Path
+    memory_pending_dir: Path
+    memory_committed_dir: Path
+    memory_receipt_dir: Path
+    memory_writeback_enabled: bool
+    submission_error: type[Exception]
+    load_json: Callable[[Path], dict[str, Any]]
+    post_result: Callable[[dict[str, Any], str], dict[str, Any]]
+    canonical_digest: Callable[[Any], str]
+    mark_memory_committed: Callable[..., Path | None]
+    process_committed_memory: Callable[..., tuple[dict[str, Any], Path | None]]
+    quarantine_result: Callable[..., Path]
+    discard_pending_memory: Callable[..., None]
+
+
+def _replay_result_paths(
+    alert_store_url: str,
+    paths: list[Path],
+    context: _ReplayContext,
+) -> tuple[int, int, int]:
     completed = failed = quarantined = 0
-    for path in sorted(queue_dir.glob("*.json"))[:limit]:
+    for path in paths:
         payload: dict[str, Any] = {}
         try:
-            payload = load_json(path)
-            post_result(payload, alert_store_url)
-            committed_task = mark_memory_committed(
-                str(payload.get("analysis_id") or ""),
-                expected_response_digest=canonical_digest(payload.get("response")),
-                pending_dir=memory_pending_dir,
-                committed_dir=memory_committed_dir,
+            payload = context.load_json(path)
+            _commit_replayed_result(
+                path, payload, alert_store_url,
+                memory_pending_dir=context.memory_pending_dir,
+                memory_committed_dir=context.memory_committed_dir,
+                memory_receipt_dir=context.memory_receipt_dir,
+                memory_writeback_enabled=context.memory_writeback_enabled,
+                post_result=context.post_result,
+                canonical_digest=context.canonical_digest,
+                mark_memory_committed=context.mark_memory_committed,
+                process_committed_memory=context.process_committed_memory,
             )
-            path.unlink(missing_ok=True)
-            completed += 1
-            if committed_task is not None and memory_writeback_enabled:
-                try:
-                    process_committed_memory(committed_task, receipt_dir=memory_receipt_dir)
-                except Exception:
-                    pass
-        except submission_error as exc:
+        except context.submission_error as exc:
             if bool(getattr(exc, "retryable", False)):
                 failed += 1
                 break
-            quarantine_result(path, payload, exc, quarantine_dir=quarantine_dir)
-            discard_pending_memory(
-                str(payload.get("analysis_id") or ""), pending_dir=memory_pending_dir
+            _quarantine_replayed_result(
+                path, payload, exc, quarantine_dir=context.quarantine_dir,
+                memory_pending_dir=context.memory_pending_dir,
+                quarantine_result=context.quarantine_result,
+                discard_pending_memory=context.discard_pending_memory,
             )
             quarantined += 1
         except Exception:
             failed += 1
             break
+        else:
+            completed += 1
     return completed, failed, quarantined
+
+
+def flush(
+    alert_store_url: str, *, queue_dir: Path, quarantine_dir: Path,
+    memory_pending_dir: Path, memory_committed_dir: Path,
+    memory_receipt_dir: Path, limit: int, memory_writeback_enabled: bool,
+    submission_error: type[Exception],
+    load_json: Callable[[Path], dict[str, Any]],
+    post_result: Callable[[dict[str, Any], str], dict[str, Any]],
+    canonical_digest: Callable[[Any], str],
+    mark_memory_committed: Callable[..., Path | None],
+    process_committed_memory: Callable[..., tuple[dict[str, Any], Path | None]],
+    resume_committed_memory: Callable[..., tuple[int, int]],
+    quarantine_result: Callable[..., Path], discard_pending_memory: Callable[..., None],
+) -> tuple[int, int, int]:
+    """Replay the ordered spool, preserving index/memory commit ordering."""
+    paths = _replay_paths(
+        queue_dir, memory_committed_dir=memory_committed_dir,
+        memory_receipt_dir=memory_receipt_dir, limit=limit,
+        memory_writeback_enabled=memory_writeback_enabled,
+        resume_committed_memory=resume_committed_memory,
+    )
+    context = _ReplayContext(
+        quarantine_dir, memory_pending_dir, memory_committed_dir,
+        memory_receipt_dir, memory_writeback_enabled, submission_error,
+        load_json, post_result, canonical_digest, mark_memory_committed,
+        process_committed_memory, quarantine_result, discard_pending_memory,
+    )
+    return _replay_result_paths(alert_store_url, paths, context)
