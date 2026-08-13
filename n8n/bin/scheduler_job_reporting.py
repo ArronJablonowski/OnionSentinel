@@ -289,6 +289,65 @@ def _raise_indeterminate(failure: _IndeterminateStatus) -> None:
     raise failure.error
 
 
+def _prepare_transition_request(
+    sources: SchedulerReportingSources,
+    *,
+    group_id: str,
+    status: str,
+    error: str,
+    lease_token: str,
+    job_type: str,
+    retryable: bool,
+    exact_claim: ExactClaim,
+) -> tuple[bytes, bool, int]:
+    payload = _request_payload(
+        sources,
+        group_id=group_id,
+        status=status,
+        error=error,
+        lease_token=lease_token,
+        job_type=job_type,
+        retryable=retryable,
+        exact_claim=exact_claim,
+    )
+    exact = exact_claim.complete
+    attempts = sources.exact_claim_attempts if exact else 1
+    return payload, exact, attempts
+
+
+def _run_transition_attempts(
+    sources: SchedulerReportingSources,
+    *,
+    base_url: str,
+    payload: bytes,
+    status: str,
+    group_id: str,
+    exact: bool,
+    attempts: int,
+) -> bool | ClaimedAiLease:
+    last_error: RuntimeError | None = None
+    for attempt_index in range(attempts):
+        if attempt_index:
+            sources.sleep(0.05 * attempt_index)
+        try:
+            return _transition_attempt(
+                sources,
+                base_url=base_url,
+                payload=payload,
+                status=status,
+                group_id=group_id,
+                exact=exact,
+            )
+        except _IndeterminateStatus as failure:
+            last_error = failure.error
+            if _has_retry(exact, attempt_index, attempts):
+                continue
+            _raise_indeterminate(failure)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("AI job status retry invariant failed")
+
+
 def transition_ai_job_status(
     sources: SchedulerReportingSources,
     base_url: str,
@@ -316,7 +375,7 @@ def transition_ai_job_status(
         expected_reviewer_route=expected_reviewer_route,
         reviewer_required=reviewer_required,
     )
-    payload = _request_payload(
+    payload, exact, attempts = _prepare_transition_request(
         sources,
         group_id=group_id,
         status=status,
@@ -326,26 +385,12 @@ def transition_ai_job_status(
         retryable=retryable,
         exact_claim=exact_claim,
     )
-    exact = exact_claim.complete
-    attempts = sources.exact_claim_attempts if exact else 1
-    last_error: RuntimeError | None = None
-    for attempt_index in range(attempts):
-        if attempt_index:
-            sources.sleep(0.05 * attempt_index)
-        try:
-            return _transition_attempt(
-                sources,
-                base_url=base_url,
-                payload=payload,
-                status=status,
-                group_id=group_id,
-                exact=exact,
-            )
-        except _IndeterminateStatus as failure:
-            last_error = failure.error
-            if _has_retry(exact, attempt_index, attempts):
-                continue
-            _raise_indeterminate(failure)
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("AI job status retry invariant failed")
+    return _run_transition_attempts(
+        sources,
+        base_url=base_url,
+        payload=payload,
+        status=status,
+        group_id=group_id,
+        exact=exact,
+        attempts=attempts,
+    )
