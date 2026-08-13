@@ -1,9 +1,6 @@
 {
   "files": {},
   "functions": {
-    "n8n/bin/manage-agent-memory.py::main": {
-      "max_lines": 102
-    },
     "n8n/bin/verify-agent-memory.py::verify_setup": {
       "max_complexity": 20
     },
@@ -86,5 +83,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "81eca0da4d66ec308aef4174613e33ebd379ab76"
+  "source_release": "9a326d87b2f838efc4306195d6a7647c87910b0d"
 }
