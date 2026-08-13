@@ -52,6 +52,16 @@ def _support_metadata_matches(
     )
 
 
+def _valid_support_row_index(rows: Any, row_index: Any) -> bool:
+    return (
+        isinstance(row_index, int)
+        and not isinstance(row_index, bool)
+        and row_index >= 0
+        and isinstance(rows, list)
+        and row_index < len(rows)
+    )
+
+
 def _support_row_value(
     support: dict[str, Any],
     result: dict[str, Any],
@@ -60,15 +70,8 @@ def _support_row_value(
     row_index = support.get("row_index")
     column = str(support.get("column") or "")
     kind = str(support.get("observable_kind") or "")
-    valid_index = (
-        isinstance(row_index, int)
-        and not isinstance(row_index, bool)
-        and row_index >= 0
-        and isinstance(rows, list)
-        and row_index < len(rows)
-    )
     if (
-        not valid_index
+        not _valid_support_row_index(rows, row_index)
         or not isinstance(rows[row_index], dict)
         or column not in rows[row_index]
         or kind not in {"ip", "port", "host", "domain", "user"}
