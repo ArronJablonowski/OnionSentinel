@@ -49,13 +49,21 @@ def legacy_factors(outcome: str, *, escalation_needed: bool = False) -> dict[str
     }
 
 
+def _factor_text(
+    factors: Mapping[str, Any],
+    key: str,
+    default: str,
+) -> str:
+    return str(factors.get(key) or default)
+
+
 def derive_outcome(factors: Mapping[str, Any]) -> str:
     """Derive the compatibility outcome from normalized dimensions."""
-    duplicate_of = str(factors.get("duplicate_of") or "").strip()
-    validity = str(factors.get("detection_validity") or "unknown")
-    event_status = str(factors.get("event_status") or "unknown")
-    disposition = str(factors.get("activity_disposition") or "unknown")
-    handling = str(factors.get("handling") or "investigate")
+    duplicate_of = _factor_text(factors, "duplicate_of", "").strip()
+    validity = _factor_text(factors, "detection_validity", "unknown")
+    event_status = _factor_text(factors, "event_status", "unknown")
+    disposition = _factor_text(factors, "activity_disposition", "unknown")
+    handling = _factor_text(factors, "handling", "investigate")
     if duplicate_of:
         return "duplicate"
     error_outcomes = {
