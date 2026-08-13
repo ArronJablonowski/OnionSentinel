@@ -245,6 +245,27 @@ def infer_unlocked(
     return _decode_inference_response(process, model, summarize_failure, extract_json)
 
 
+def _validate_locked_route(
+    settings: dict[str, Any], model: str, reasoning_effort: str,
+    boolean_setting: Callable[[Any], bool], model_pattern: Any,
+    reasoning_efforts: frozenset[str],
+    validate: Callable[[str, dict[str, Any]], None],
+) -> None:
+    if not boolean_setting(settings.get("openclaw_enabled")):
+        raise SystemExit("OpenClaw is disabled in AI Analysis Model Selection")
+    if (
+        model != str(settings.get("openclaw_model") or "")
+        or reasoning_effort
+        != str(settings.get("openclaw_reasoning_effort") or "").lower()
+    ):
+        raise SystemExit("OpenClaw route is not the enabled configured route")
+    if not model_pattern.fullmatch(model):
+        raise SystemExit("OpenClaw model is invalid")
+    if reasoning_effort not in reasoning_efforts:
+        raise SystemExit("OpenClaw reasoning effort is invalid")
+    validate(model, settings)
+
+
 def locked_chat(
     prompt_package: dict[str, Any],
     args: Any,
@@ -266,19 +287,10 @@ def locked_chat(
     unload: Callable[..., None],
 ) -> dict[str, Any]:
     """Validate assignment, serialize local inference, and always unload."""
-    if not boolean_setting(settings.get("openclaw_enabled")):
-        raise SystemExit("OpenClaw is disabled in AI Analysis Model Selection")
-    if (
-        model != str(settings.get("openclaw_model") or "")
-        or reasoning_effort
-        != str(settings.get("openclaw_reasoning_effort") or "").lower()
-    ):
-        raise SystemExit("OpenClaw route is not the enabled configured route")
-    if not model_pattern.fullmatch(model):
-        raise SystemExit("OpenClaw model is invalid")
-    if reasoning_effort not in reasoning_efforts:
-        raise SystemExit("OpenClaw reasoning effort is invalid")
-    validate(model, settings)
+    _validate_locked_route(
+        settings, model, reasoning_effort, boolean_setting, model_pattern,
+        reasoning_efforts, validate,
+    )
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with lock_path.open("a+", encoding="utf-8") as handle:
         lock_path.chmod(0o600)
