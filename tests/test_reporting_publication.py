@@ -79,6 +79,83 @@ class ReportingPublicationTests(unittest.TestCase):
         self.assertEqual(plan.enriched["response"]["summary"], "bounded")
         self.assertTrue(plan.json_text.endswith("\n"))
 
+    def test_plan_preserves_order_defaults_references_and_render_arguments(self) -> None:
+        events: list[object] = []
+        alert = {"alert_id": "alert/1", "rule_name": "Rule"}
+        response = {
+            "_analysis_input_mode": "saved_response",
+            "_analysis_model_path": "must-not-select",
+        }
+        prompt = {
+            "alert": alert,
+            "second_opinion_system_prompt_file": "/prompt/review.md",
+            "agent_memory_file": "/agent.md",
+        }
+        args = SimpleNamespace(
+            out_dir="~/synthetic-output",
+            system_prompt_file=Path("/system.md"),
+            second_opinion_prompt_file=Path("/args/review.md"),
+        )
+
+        def safe(value):
+            events.append(("safe", value))
+            return "safe-alert"
+
+        def timestamp(value):
+            events.append(("timestamp", value))
+            return "stamp"
+
+        def render(observed_prompt, observed_response, generated, json_path):
+            events.append((
+                "render", observed_prompt is prompt, observed_response is response,
+                generated, json_path,
+            ))
+            return "markdown"
+
+        plan = publication.build_plan(
+            Path("/prompt.json"), prompt, response, args, "analysis-id",
+            generated_at="generated", safe_filename=safe,
+            filename_timestamp=timestamp, render_markdown=render,
+            saved_response_input_mode="saved_response",
+            default_second_opinion_prompt_file=Path("/default/review.md"),
+        )
+
+        self.assertEqual(events, [
+            ("safe", "alert/1"), ("timestamp", "generated"),
+            ("render", True, True, "generated", plan.json_path),
+        ])
+        self.assertEqual(plan.root, Path("~/synthetic-output").expanduser())
+        self.assertEqual(plan.json_path.name, "stamp-safe-alert-local-ai-analysis.json")
+        self.assertEqual(plan.markdown_path.name, "stamp-safe-alert-local-ai-analysis.md")
+        self.assertIs(plan.enriched["response"], response)
+        self.assertEqual(plan.enriched["analysis_type"], "saved-response")
+        self.assertEqual(plan.enriched["analysis_input_mode"], "saved_response")
+        self.assertEqual(
+            plan.enriched["second_opinion_system_prompt_file"],
+            "/prompt/review.md",
+        )
+        self.assertEqual(plan.markdown, "markdown")
+
+    def test_plan_non_dict_alert_and_second_opinion_fallbacks_are_exact(self) -> None:
+        args = SimpleNamespace(
+            out_dir="/output", system_prompt_file=None,
+            second_opinion_prompt_file=None,
+        )
+        plan = publication.build_plan(
+            Path("prompt"), {"alert": "bad"}, {}, args, "id",
+            generated_at="now", safe_filename=lambda value: f"safe-{value}",
+            filename_timestamp=lambda value: f"stamp-{value}",
+            render_markdown=lambda *_args: "md",
+            saved_response_input_mode="saved",
+            default_second_opinion_prompt_file=Path("/default/review.md"),
+        )
+        self.assertEqual(plan.json_path.name, "stamp-now-safe-None-local-ai-analysis.json")
+        self.assertEqual(plan.enriched["analysis_type"], "unknown")
+        self.assertEqual(plan.enriched["analysis_input_mode"], "model_execution")
+        self.assertEqual(plan.enriched["alert_id"], None)
+        self.assertEqual(plan.enriched["system_prompt_file"], "None")
+        self.assertEqual(plan.enriched["second_opinion_system_prompt_file"], "None")
+
     def test_pair_is_private_atomic_and_has_no_temporary_debris(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             root = Path(name) / "output"
