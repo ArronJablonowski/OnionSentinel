@@ -70,6 +70,34 @@ def _exact_coverage(
     )
 
 
+def _covered_result_sources(
+    evidence: dict[str, Any],
+    nested: list[dict[str, Any]] | None,
+    trusted: list[dict[str, Any]] | None,
+    declared: list[str] | None,
+    result: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]] | None:
+    if nested is None or trusted is None or declared is None:
+        return None
+    if not _source_coverage_valid(nested, trusted, declared):
+        return None
+    if len(declared) > 1 and not trusted and not nested:
+        return None
+    return evidence, nested, trusted or nested or [result]
+
+
+def _source_coverage_valid(
+    nested: list[dict[str, Any]],
+    trusted: list[dict[str, Any]],
+    declared: list[str],
+) -> bool:
+    if trusted and not _exact_coverage(trusted, declared):
+        return False
+    if nested and not _exact_coverage(nested, declared):
+        return False
+    return True
+
+
 def _result_sources(
     result: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]] | None:
@@ -77,15 +105,7 @@ def _result_sources(
     nested = _dict_list(evidence.get("results", []))
     trusted = _dict_list(result.get("trusted_query_audit", []))
     declared = _declared_ids(result)
-    if nested is None or trusted is None or declared is None:
-        return None
-    if trusted and not _exact_coverage(trusted, declared):
-        return None
-    if nested and not _exact_coverage(nested, declared):
-        return None
-    if len(declared) > 1 and not trusted and not nested:
-        return None
-    return evidence, nested, trusted or nested or [result]
+    return _covered_result_sources(evidence, nested, trusted, declared, result)
 
 
 def _first_value(containers: tuple[dict[str, Any], ...], key: str) -> Any:
