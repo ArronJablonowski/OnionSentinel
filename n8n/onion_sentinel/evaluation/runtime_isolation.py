@@ -71,30 +71,53 @@ def _require_token(policy: Policy, dependencies: Dependencies) -> None:
 
 
 def _validate_alert_store_origin(value: str, policy: Policy) -> None:
+    origin, port = _parsed_alert_store_origin(value)
+    if not _is_alternate_loopback_origin(origin, port, policy):
+        raise SystemExit(
+            "controlled evaluation requires one alternate loopback alert-store origin"
+        )
+
+
+def _parsed_alert_store_origin(value: str) -> tuple[Any, int | None]:
     try:
         origin = urlparse(str(value or ""))
-        port = origin.port
+        return origin, origin.port
     except ValueError as exc:
         raise SystemExit(
             "controlled evaluation alert-store origin is unsafe"
         ) from exc
-    safe = (
+
+
+def _is_alternate_loopback_origin(
+    origin: Any, port: int | None, policy: Policy
+) -> bool:
+    return bool(
+        _is_alternate_loopback_endpoint(origin, port, policy)
+        and _has_bare_origin_shape(origin)
+    )
+
+
+def _is_alternate_loopback_endpoint(
+    origin: Any, port: int | None, policy: Policy
+) -> bool:
+    return bool(
         origin.scheme == "http"
         and origin.hostname == "127.0.0.1"
         and port is not None
         and port >= 1
         and port != policy.production_alert_store_port
-        and origin.username is None
+    )
+
+
+def _has_bare_origin_shape(origin: Any) -> bool:
+    return bool(
+        origin.username is None
         and origin.password is None
         and origin.path in {"", "/"}
         and not origin.params
         and not origin.query
         and not origin.fragment
     )
-    if not safe:
-        raise SystemExit(
-            "controlled evaluation requires one alternate loopback alert-store origin"
-        )
 
 
 def _runtime_root(policy: Policy, dependencies: Dependencies) -> Path:
