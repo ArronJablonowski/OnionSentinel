@@ -147,6 +147,61 @@ def _environment(
     )
 
 
+def _run_isolated_inference(
+    executable: str, model: str, reasoning_effort: str, serialized: str,
+    args: Any, atomic_write_json: Callable[[Path, Any], None],
+    run_command: Callable[..., Any], sanitized_env: Callable[..., dict[str, str]],
+    process_error: type[BaseException], max_stderr_bytes: int,
+) -> Any:
+    with tempfile.TemporaryDirectory(prefix="onion-sentinel-openclaw-") as name:
+        work_dir = Path(name)
+        paths = _isolated_paths(work_dir)
+        config_path = paths["state"] / "openclaw.json"
+        atomic_write_json(config_path, {})
+        config_path.chmod(0o600)
+        command = [
+            executable, "infer", "model", "run", "--local", "--model", model,
+            "--thinking", reasoning_effort, "--prompt", serialized, "--json",
+        ]
+        try:
+            return run_command(
+                command,
+                timeout_seconds=args.timeout,
+                max_stdout_bytes=args.max_response_bytes,
+                max_stderr_bytes=max_stderr_bytes,
+                cwd=work_dir,
+                env=_environment(executable, paths, config_path, sanitized_env),
+            )
+        except FileNotFoundError as exc:
+            raise SystemExit(f"OpenClaw executable was not found: {executable}") from exc
+        except process_error as exc:
+            raise SystemExit(f"OpenClaw analysis failed: {exc}") from exc
+
+
+def _decode_inference_response(
+    process: Any, model: str, summarize_failure: Callable[[str, str, int], str],
+    extract_json: Callable[[str], dict[str, Any]],
+) -> dict[str, Any]:
+    if process.returncode != 0:
+        detail = summarize_failure("OpenClaw", process.stderr, process.returncode)
+        raise SystemExit(f"OpenClaw analysis failed: {detail}")
+    try:
+        envelope = json.loads(process.stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit("OpenClaw returned an invalid JSON execution envelope") from exc
+    if not isinstance(envelope, dict) or envelope.get("ok") is not True:
+        raise SystemExit("OpenClaw reported an unsuccessful model invocation")
+    provider, observed_model = verified_observation(envelope, model)
+    response = extract_json(output_text(envelope))
+    response.update({
+        "_analysis_model": observed_model,
+        "_analysis_model_path": "openclaw",
+        "_analysis_provider": provider,
+        "_analysis_harness": "openclaw",
+    })
+    return response
+
+
 def infer_unlocked(
     prompt_package: dict[str, Any],
     args: Any,
@@ -183,47 +238,11 @@ def infer_unlocked(
         raise SystemExit(
             "OpenClaw analysis request exceeds the installed CLI's safe prompt argument limit"
         )
-    with tempfile.TemporaryDirectory(prefix="onion-sentinel-openclaw-") as name:
-        work_dir = Path(name)
-        paths = _isolated_paths(work_dir)
-        config_path = paths["state"] / "openclaw.json"
-        atomic_write_json(config_path, {})
-        config_path.chmod(0o600)
-        command = [
-            executable, "infer", "model", "run", "--local", "--model", model,
-            "--thinking", reasoning_effort, "--prompt", serialized, "--json",
-        ]
-        try:
-            process = run_command(
-                command,
-                timeout_seconds=args.timeout,
-                max_stdout_bytes=args.max_response_bytes,
-                max_stderr_bytes=max_stderr_bytes,
-                cwd=work_dir,
-                env=_environment(executable, paths, config_path, sanitized_env),
-            )
-        except FileNotFoundError as exc:
-            raise SystemExit(f"OpenClaw executable was not found: {executable}") from exc
-        except process_error as exc:
-            raise SystemExit(f"OpenClaw analysis failed: {exc}") from exc
-    if process.returncode != 0:
-        detail = summarize_failure("OpenClaw", process.stderr, process.returncode)
-        raise SystemExit(f"OpenClaw analysis failed: {detail}")
-    try:
-        envelope = json.loads(process.stdout)
-    except json.JSONDecodeError as exc:
-        raise SystemExit("OpenClaw returned an invalid JSON execution envelope") from exc
-    if not isinstance(envelope, dict) or envelope.get("ok") is not True:
-        raise SystemExit("OpenClaw reported an unsuccessful model invocation")
-    provider, observed_model = verified_observation(envelope, model)
-    response = extract_json(output_text(envelope))
-    response.update({
-        "_analysis_model": observed_model,
-        "_analysis_model_path": "openclaw",
-        "_analysis_provider": provider,
-        "_analysis_harness": "openclaw",
-    })
-    return response
+    process = _run_isolated_inference(
+        executable, model, reasoning_effort, serialized, args, atomic_write_json,
+        run_command, sanitized_env, process_error, max_stderr_bytes,
+    )
+    return _decode_inference_response(process, model, summarize_failure, extract_json)
 
 
 def locked_chat(
