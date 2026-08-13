@@ -184,7 +184,9 @@ def remove_validation_bytecode(package: Path) -> None:
         shutil.rmtree(cache)
 
 
-def install_package(source: Path, destination: Path) -> None:
+def _install_paths(
+    source: Path, destination: Path,
+) -> tuple[Path, Path, Path, Path, Path]:
     source = validate_source(source)
     destination = destination.expanduser()
     if destination.name != "onion_sentinel" or destination.is_symlink():
@@ -195,28 +197,51 @@ def install_package(source: Path, destination: Path) -> None:
     )
     staged = staging_root / "onion_sentinel"
     backup = destination.parent / f".onion-sentinel-package-backup.{os.getpid()}"
-    installed = False
+    return source, destination, staging_root, staged, backup
+
+
+def _prepare_staged_package(source: Path, staged: Path) -> None:
+    shutil.copytree(source, staged)
+    validate_staged_package(staged)
+    remove_validation_bytecode(staged)
+
+
+def _promote_staged_package(
+    staged: Path, destination: Path, backup: Path, state: dict[str, bool],
+) -> None:
+    if backup.exists():
+        raise RuntimeError("AI runtime package backup path already exists")
+    if destination.exists():
+        destination.rename(backup)
     try:
-        shutil.copytree(source, staged)
-        validate_staged_package(staged)
-        remove_validation_bytecode(staged)
-        if backup.exists():
-            raise RuntimeError("AI runtime package backup path already exists")
-        if destination.exists():
-            destination.rename(backup)
-        try:
-            staged.rename(destination)
-            installed = True
-        except Exception:
-            if backup.exists() and not destination.exists():
-                backup.rename(destination)
-            raise
-        if backup.exists():
-            shutil.rmtree(backup)
-    finally:
-        shutil.rmtree(staging_root, ignore_errors=True)
-        if not installed and backup.exists() and not destination.exists():
+        staged.rename(destination)
+        state["installed"] = True
+    except Exception:
+        if backup.exists() and not destination.exists():
             backup.rename(destination)
+        raise
+    if backup.exists():
+        shutil.rmtree(backup)
+
+
+def _cleanup_install(
+    staging_root: Path, destination: Path, backup: Path, installed: bool,
+) -> None:
+    shutil.rmtree(staging_root, ignore_errors=True)
+    if not installed and backup.exists() and not destination.exists():
+        backup.rename(destination)
+
+
+def install_package(source: Path, destination: Path) -> None:
+    source, destination, staging_root, staged, backup = _install_paths(
+        source, destination
+    )
+    state = {"installed": False}
+    try:
+        _prepare_staged_package(source, staged)
+        _promote_staged_package(staged, destination, backup, state)
+    finally:
+        _cleanup_install(staging_root, destination, backup, state["installed"])
 
 
 def main() -> int:

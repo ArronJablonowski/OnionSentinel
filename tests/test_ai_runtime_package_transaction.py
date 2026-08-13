@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import os
 from pathlib import Path
@@ -21,7 +22,58 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(installer)
 
 
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse(INSTALLER_PATH.read_text(encoding="utf-8"))
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+    class Complexity(ast.NodeVisitor):
+        def __init__(self):
+            self.value = 1
+
+        def visit_FunctionDef(self, node):
+            return
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_If(self, node):
+            self.value += 1
+            self.generic_visit(node)
+
+        visit_For = visit_If
+        visit_While = visit_If
+
+        def visit_Try(self, node):
+            self.value += len(node.handlers)
+            self.generic_visit(node)
+
+        def visit_BoolOp(self, node):
+            self.value += max(0, len(node.values) - 1)
+            self.generic_visit(node)
+
+    visitor = Complexity()
+    for child in target.body:
+        visitor.visit(child)
+    return target.end_lineno - target.lineno + 1, visitor.value
+
+
 class AiRuntimePackageTransactionTests(unittest.TestCase):
+    def test_install_phases_meet_architecture_contract(self) -> None:
+        for name in (
+            "_install_paths",
+            "_prepare_staged_package",
+            "_promote_staged_package",
+            "_cleanup_install",
+            "install_package",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
+
     def _tree(self, root: Path, *, destination_exists: bool = True):
         source = root / "source/onion_sentinel"
         source.mkdir(parents=True)
