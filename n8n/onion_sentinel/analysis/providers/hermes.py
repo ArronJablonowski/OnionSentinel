@@ -414,22 +414,136 @@ def _open_auth_lock(auth_file: Path) -> Any:
     return os.fdopen(descriptor, "a+", encoding="utf-8")
 
 
-def chat(
+def _locked_invoke(
+    auth_file: Path,
+    artifact_error: type[Exception],
+    load_dedicated_auth: Callable[[Path], dict[str, Any]],
+    invoke: Callable[[dict[str, Any]], tuple[dict[str, Any], dict[str, Any]]],
+    flock: Callable[[Any, int], Any],
+    lock_exclusive: int,
+    lock_unlock: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    with _open_auth_lock(auth_file) as handle:
+        flock(handle, lock_exclusive)
+        try:
+            try:
+                dedicated_auth = load_dedicated_auth(auth_file)
+            except artifact_error as exc:
+                raise SystemExit(
+                    "Hermes Agent dedicated authentication is unavailable at "
+                    f"{auth_file}; provision the isolated openai-codex login "
+                    "described in the runtime roadmap"
+                ) from exc
+            return invoke(dedicated_auth)
+        finally:
+            flock(handle, lock_unlock)
+
+
+def _attest_response(
+    response: dict[str, Any], usage: dict[str, Any]
+) -> dict[str, Any]:
+    response.update({
+        "_analysis_model": str(usage["model"]),
+        "_analysis_model_path": "hermes-agent",
+        "_analysis_provider": str(usage["provider"]),
+        "_analysis_harness": "hermes-agent",
+    })
+    return response
+
+
+def _execution_input(
     prompt_package: dict[str, Any],
     args: Any,
     settings: dict[str, Any],
-    *,
     model: str,
     reasoning_effort: str,
     system_prompt_file: Path | None,
+    independent_review: bool,
+    *,
+    boolean_setting: Callable[[Any], bool],
+    model_catalog: tuple[str, ...],
+    required_effort: str,
+    resolve_executable: Callable[[dict[str, Any]], str],
+    build_payload: Callable[..., dict[str, Any]],
+    max_prompt_bytes: int,
+) -> tuple[str, str]:
+    _validate_assignment(
+        settings, model, reasoning_effort,
+        boolean_setting=boolean_setting, model_catalog=model_catalog,
+        required_effort=required_effort,
+    )
+    executable = resolve_executable(settings)
+    serialized = _serialized_payload(
+        prompt_package, args, reasoning_effort,
+        system_prompt_file=system_prompt_file,
+        independent_review=independent_review,
+        build_payload=build_payload, max_prompt_bytes=max_prompt_bytes,
+    )
+    return executable, serialized
+
+
+def _isolated_invoker(
+    serialized: str,
+    args: Any,
+    model: str,
+    executable: str,
+    options: dict[str, Any],
+) -> Callable[[dict[str, Any]], tuple[dict[str, Any], dict[str, Any]]]:
+    def invoke(
+        dedicated_auth: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        return _invoke_isolated(
+            serialized, args, model, executable, dedicated_auth, **options
+        )
+    return invoke
+
+
+def _invoke_options(
+    *, atomic_write_json: Callable[[Path, Any], None], run_command: Callable[..., Any],
+    sanitized_env: Callable[..., dict[str, str]],
+    load_dedicated_auth: Callable[[Path], dict[str, Any]],
+    write_dedicated_auth: Callable[[Path, dict[str, Any]], None], auth_file: Path,
+    process_error: type[BaseException], artifact_error: type[Exception],
+    summarize_failure: Callable[[str, str, int], str],
+    verify_usage: Callable[..., dict[str, Any]],
+    extract_json: Callable[[str], dict[str, Any]], max_stderr_bytes: int,
+) -> dict[str, Any]:
+    return {
+        "atomic_write_json": atomic_write_json, "run_command": run_command,
+        "sanitized_env": sanitized_env, "load_dedicated_auth": load_dedicated_auth,
+        "write_dedicated_auth": write_dedicated_auth, "auth_file": auth_file,
+        "process_error": process_error, "artifact_error": artifact_error,
+        "summarize_failure": summarize_failure, "verify_usage": verify_usage,
+        "extract_json": extract_json, "max_stderr_bytes": max_stderr_bytes,
+    }
+
+
+def _locked_response(
+    serialized: str, args: Any, model: str, executable: str, auth_file: Path,
+    artifact_error: type[Exception],
+    load_dedicated_auth: Callable[[Path], dict[str, Any]],
+    options: dict[str, Any], flock: Callable[[Any, int], Any],
+    lock_exclusive: int, lock_unlock: int,
+) -> dict[str, Any]:
+    invoke = _isolated_invoker(serialized, args, model, executable, options)
+    response, usage = _locked_invoke(
+        auth_file, artifact_error, load_dedicated_auth, invoke,
+        flock, lock_exclusive, lock_unlock,
+    )
+    return _attest_response(response, usage)
+
+
+def chat(
+    prompt_package: dict[str, Any], args: Any, settings: dict[str, Any],
+    *,
+    model: str, reasoning_effort: str, system_prompt_file: Path | None,
     independent_review: bool,
     boolean_setting: Callable[[Any], bool],
     model_catalog: tuple[str, ...],
     required_effort: str,
     resolve_executable: Callable[[dict[str, Any]], str],
     build_payload: Callable[..., dict[str, Any]],
-    auth_file: Path,
-    load_dedicated_auth: Callable[[Path], dict[str, Any]],
+    auth_file: Path, load_dedicated_auth: Callable[[Path], dict[str, Any]],
     write_dedicated_auth: Callable[[Path, dict[str, Any]], None],
     atomic_write_json: Callable[[Path, Any], None],
     run_command: Callable[..., Any],
@@ -446,60 +560,25 @@ def chat(
     lock_unlock: int,
 ) -> dict[str, Any]:
     """Run Hermes as an isolated, tool-empty, one-shot Codex harness."""
-    _validate_assignment(
-        settings,
-        model,
-        reasoning_effort,
+    executable, serialized = _execution_input(
+        prompt_package, args, settings, model, reasoning_effort,
+        system_prompt_file, independent_review,
         boolean_setting=boolean_setting,
         model_catalog=model_catalog,
         required_effort=required_effort,
-    )
-    executable = resolve_executable(settings)
-    serialized = _serialized_payload(
-        prompt_package,
-        args,
-        reasoning_effort,
-        system_prompt_file=system_prompt_file,
-        independent_review=independent_review,
-        build_payload=build_payload,
+        resolve_executable=resolve_executable, build_payload=build_payload,
         max_prompt_bytes=max_prompt_bytes,
     )
-    with _open_auth_lock(auth_file) as handle:
-        flock(handle, lock_exclusive)
-        try:
-            try:
-                dedicated_auth = load_dedicated_auth(auth_file)
-            except artifact_error as exc:
-                raise SystemExit(
-                    "Hermes Agent dedicated authentication is unavailable at "
-                    f"{auth_file}; provision the isolated openai-codex login "
-                    "described in the runtime roadmap"
-                ) from exc
-            response, usage = _invoke_isolated(
-                serialized,
-                args,
-                model,
-                executable,
-                dedicated_auth,
-                atomic_write_json=atomic_write_json,
-                run_command=run_command,
-                sanitized_env=sanitized_env,
-                load_dedicated_auth=load_dedicated_auth,
-                write_dedicated_auth=write_dedicated_auth,
-                auth_file=auth_file,
-                process_error=process_error,
-                artifact_error=artifact_error,
-                summarize_failure=summarize_failure,
-                verify_usage=verify_usage,
-                extract_json=extract_json,
-                max_stderr_bytes=max_stderr_bytes,
-            )
-        finally:
-            flock(handle, lock_unlock)
-    response.update({
-        "_analysis_model": str(usage["model"]),
-        "_analysis_model_path": "hermes-agent",
-        "_analysis_provider": str(usage["provider"]),
-        "_analysis_harness": "hermes-agent",
-    })
-    return response
+    return _locked_response(
+        serialized, args, model, executable, auth_file, artifact_error,
+        load_dedicated_auth,
+        _invoke_options(
+            atomic_write_json=atomic_write_json, run_command=run_command,
+            sanitized_env=sanitized_env, load_dedicated_auth=load_dedicated_auth,
+            write_dedicated_auth=write_dedicated_auth, auth_file=auth_file,
+            process_error=process_error, artifact_error=artifact_error,
+            summarize_failure=summarize_failure, verify_usage=verify_usage,
+            extract_json=extract_json, max_stderr_bytes=max_stderr_bytes,
+        ),
+        flock, lock_exclusive, lock_unlock,
+    )
