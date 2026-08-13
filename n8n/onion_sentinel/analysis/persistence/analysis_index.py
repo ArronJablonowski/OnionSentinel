@@ -106,6 +106,50 @@ def build_payload(
     }
 
 
+def _http_submission_error(
+    exc: urllib.error.HTTPError,
+    *,
+    max_response_bytes: int,
+    submission_error: type[Exception],
+) -> Exception:
+    try:
+        response_body = exc.read(max_response_bytes + 1)
+        status_code = int(exc.code)
+    finally:
+        exc.close()
+    retryable = status_code >= 500 or status_code in {408, 425, 429}
+    return submission_error(
+        f"analysis index HTTP {status_code}",
+        retryable=retryable,
+        status_code=status_code,
+        response_sha256=hashlib.sha256(response_body).hexdigest(),
+    )
+
+
+def _read_submission_response(
+    request: urllib.request.Request,
+    *,
+    timeout: int,
+    max_response_bytes: int,
+    read_bounded_json: Callable[..., dict[str, Any]],
+    submission_error: type[Exception],
+) -> dict[str, Any]:
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return read_bounded_json(response, max_bytes=max_response_bytes)
+    except urllib.error.HTTPError as exc:
+        raise _http_submission_error(
+            exc,
+            max_response_bytes=max_response_bytes,
+            submission_error=submission_error,
+        ) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise submission_error(
+            "analysis index transport failed",
+            retryable=True,
+        ) from exc
+
+
 def post(
     payload: dict[str, Any],
     alert_store_url: str,
@@ -138,24 +182,13 @@ def post(
         headers=headers,
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            result = read_bounded_json(response, max_bytes=max_response_bytes)
-    except urllib.error.HTTPError as exc:
-        try:
-            response_body = exc.read(max_response_bytes + 1)
-            status_code = int(exc.code)
-        finally:
-            exc.close()
-        retryable = status_code >= 500 or status_code in {408, 425, 429}
-        raise submission_error(
-            f"analysis index HTTP {status_code}",
-            retryable=retryable,
-            status_code=status_code,
-            response_sha256=hashlib.sha256(response_body).hexdigest(),
-        ) from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise submission_error("analysis index transport failed", retryable=True) from exc
+    result = _read_submission_response(
+        request,
+        timeout=timeout,
+        max_response_bytes=max_response_bytes,
+        read_bounded_json=read_bounded_json,
+        submission_error=submission_error,
+    )
     return _validate_receipt(result, payload, submission_sha256, submission_error)
 
 
