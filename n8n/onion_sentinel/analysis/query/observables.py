@@ -291,6 +291,24 @@ def _pcap_zeek_rows(
     )
 
 
+def _trusted_result_rows(
+    result: dict[str, Any],
+    policy: ValidationPolicy,
+    dependencies: ValidationDependencies,
+) -> list[tuple[Any, str]]:
+    backend = result.get("backend")
+    status = result.get("status")
+    if status != "ok" and not (
+        backend == "security_onion" and status == "partial"
+    ):
+        return []
+    if backend == "security_onion":
+        return _security_onion_rows(result, policy, dependencies)
+    if backend == "pcap_zeek":
+        return _pcap_zeek_rows(result, policy, dependencies)
+    return []
+
+
 def validate(
     results: Any,
     *,
@@ -306,17 +324,9 @@ def validate(
     for result in results:
         if len(discovered) >= limit or not isinstance(result, dict):
             break
-        backend = result.get("backend")
-        status = result.get("status")
-        if status != "ok" and not (backend == "security_onion" and status == "partial"):
-            continue
-        if backend == "security_onion":
-            rows = _security_onion_rows(result, policy, dependencies)
-        elif backend == "pcap_zeek":
-            rows = _pcap_zeek_rows(result, policy, dependencies)
-        else:
-            continue
-        for row, evidence_base in rows:
+        for row, evidence_base in _trusted_result_rows(
+            result, policy, dependencies
+        ):
             _visit_values(
                 row, evidence_base, discovered, seen, limit, policy, dependencies
             )
