@@ -64,11 +64,15 @@ def _bounded_strings(value: Any, field: str, *, maximum: int = 64) -> list[str]:
     return list(value)
 
 
-def validate_manifest(raw: Any) -> dict[str, Any]:
+def _validate_manifest_contract(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict) or set(raw) != REQUIRED_FIELDS:
         raise ValueError("manifest fields do not match the v2 contract")
     if raw.get("schema") != SCHEMA:
         raise ValueError("unsupported manifest schema")
+    return raw
+
+
+def _validate_manifest_identity(raw: dict[str, Any]) -> None:
     if not IDENTIFIER_RE.fullmatch(str(raw.get("id") or "")):
         raise ValueError("manifest id is invalid")
     if not VERSION_RE.fullmatch(str(raw.get("version") or "")):
@@ -77,6 +81,8 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
     if not DIGEST_RE.fullmatch(claimed) or artifact_digest(raw) != claimed:
         raise ValueError("manifest artifact digest mismatch")
 
+
+def _validate_manifest_access(raw: dict[str, Any]) -> None:
     roles = _bounded_strings(raw.get("roles"), "roles", maximum=5)
     if not set(roles).issubset(SAFE_ROLES):
         raise ValueError("manifest role is unsupported")
@@ -84,6 +90,8 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
     if any(not IDENTIFIER_RE.fullmatch(item) for item in capabilities):
         raise ValueError("manifest capability is invalid")
 
+
+def _validate_manifest_safety(raw: dict[str, Any]) -> None:
     safety = raw.get("safety")
     if not isinstance(safety, dict) or set(safety) != {
         "read_only", "active_operation", "sensitivity", "requires_approval",
@@ -94,6 +102,8 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
     if safety.get("active_operation") is True and safety.get("requires_approval") is not True:
         raise ValueError("active operation must require approval")
 
+
+def _validate_manifest_budgets(raw: dict[str, Any]) -> None:
     budgets = raw.get("budgets")
     bounds = {
         "max_queries": (1, 12), "max_rows": (1, 5000),
@@ -105,6 +115,8 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
         if not isinstance(budgets[name], int) or not lower <= budgets[name] <= upper:
             raise ValueError(f"manifest {name} is outside its bound")
 
+
+def _validate_manifest_match(raw: dict[str, Any]) -> None:
     match = raw.get("match")
     if not isinstance(match, dict) or set(match) != {
         "tasks", "protocols", "alert_families", "data_sources",
@@ -113,24 +125,32 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
     for name, values in match.items():
         _bounded_strings(values, f"match.{name}")
 
+
+def _validate_query_template(template: Any, template_ids: set[str]) -> None:
+    if not isinstance(template, dict) or set(template) != {
+        "id", "backend", "language", "purpose", "parameters", "expected_fields",
+    }:
+        raise ValueError("query template contract is invalid")
+    template_id = str(template.get("id") or "")
+    if template_id in template_ids or not template_id:
+        raise ValueError("query template id is invalid or duplicated")
+    template_ids.add(template_id)
+    if template.get("backend") not in SAFE_BACKENDS or template.get("language") not in SAFE_LANGUAGES:
+        raise ValueError("query template backend or language is unsupported")
+    _bounded_strings(template.get("parameters"), f"{template_id}.parameters")
+    _bounded_strings(template.get("expected_fields"), f"{template_id}.expected_fields")
+
+
+def _validate_manifest_templates(raw: dict[str, Any]) -> None:
     templates = raw.get("query_templates")
     if not isinstance(templates, list) or not templates or len(templates) > 12:
         raise ValueError("query_templates must contain 1-12 templates")
     template_ids: set[str] = set()
     for template in templates:
-        if not isinstance(template, dict) or set(template) != {
-            "id", "backend", "language", "purpose", "parameters", "expected_fields",
-        }:
-            raise ValueError("query template contract is invalid")
-        template_id = str(template.get("id") or "")
-        if template_id in template_ids or not template_id:
-            raise ValueError("query template id is invalid or duplicated")
-        template_ids.add(template_id)
-        if template.get("backend") not in SAFE_BACKENDS or template.get("language") not in SAFE_LANGUAGES:
-            raise ValueError("query template backend or language is unsupported")
-        _bounded_strings(template.get("parameters"), f"{template_id}.parameters")
-        _bounded_strings(template.get("expected_fields"), f"{template_id}.expected_fields")
+        _validate_query_template(template, template_ids)
 
+
+def _validate_manifest_output(raw: dict[str, Any]) -> None:
     output = raw.get("output_contract")
     if output != {
         "schema": RESULT_SCHEMA,
@@ -144,6 +164,17 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
         "stop_conditions", "confidence_limiters", "known_false_positive_patterns",
     ):
         _bounded_strings(raw.get(name), name)
+
+
+def validate_manifest(raw: Any) -> dict[str, Any]:
+    manifest = _validate_manifest_contract(raw)
+    _validate_manifest_identity(manifest)
+    _validate_manifest_access(manifest)
+    _validate_manifest_safety(manifest)
+    _validate_manifest_budgets(manifest)
+    _validate_manifest_match(manifest)
+    _validate_manifest_templates(manifest)
+    _validate_manifest_output(manifest)
     return json.loads(json.dumps(raw))
 
 
@@ -154,28 +185,107 @@ def load_manifest(path: Path) -> dict[str, Any]:
     return validate_manifest(json.loads(raw.decode("utf-8")))
 
 
-def promotion_eligible(manifest: Mapping[str, Any], target_state: str) -> tuple[bool, list[str]]:
-    if target_state not in {"shadow", "active"}:
-        raise ValueError("promotion target must be shadow or active")
+def _verification_failures(verification: Mapping[str, Any]) -> list[str]:
     failures: list[str] = []
-    verification = manifest.get("verification")
-    if not isinstance(verification, dict):
-        return False, ["verification_missing"]
     for field in ("unit_tests", "independent_query_review", "adversarial_tests"):
         if verification.get(field) is not True:
             failures.append(field)
     if not isinstance(verification.get("replay_cases"), int) or verification.get("replay_cases", 0) < 1:
         failures.append("replay_cases")
+    return failures
+
+
+def _promotion_failures(
+    manifest: Mapping[str, Any], target_state: str,
+) -> list[str] | None:
+    verification = manifest.get("verification")
+    if not isinstance(verification, dict):
+        return None
+    failures = _verification_failures(verification)
     maintainer = manifest.get("maintainer")
     if not isinstance(maintainer, dict) or str(maintainer.get("reviewer") or "").strip().lower() in {"", "pending"}:
         failures.append("independent_reviewer")
     if target_state == "active" and verification.get("human_approved") is not True:
         failures.append("human_approved")
+    return failures
+
+
+def promotion_eligible(manifest: Mapping[str, Any], target_state: str) -> tuple[bool, list[str]]:
+    if target_state not in {"shadow", "active"}:
+        raise ValueError("promotion target must be shadow or active")
+    failures = _promotion_failures(manifest, target_state)
+    if failures is None:
+        return False, ["verification_missing"]
     try:
         validate_manifest(dict(manifest))
     except (TypeError, ValueError):
         failures.append("manifest_validation")
     return not failures, sorted(set(failures))
+
+
+def _record_identity(record: Mapping[str, Any]) -> tuple[str, Any, str]:
+    state = str(record.get("state") or "")
+    manifest = record.get("manifest")
+    identity = str(manifest.get("id") or "unknown") if isinstance(manifest, dict) else "unknown"
+    return state, manifest, identity
+
+
+def _context_dimensions(context: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        "tasks": str(context.get("task") or ""),
+        "protocols": str(context.get("protocol") or ""),
+        "alert_families": str(context.get("alert_family") or ""),
+        "data_sources": str(context.get("data_source") or ""),
+    }
+
+
+def _validated_record(
+    record: Mapping[str, Any], selectable_states: set[str],
+) -> tuple[dict[str, Any] | None, str, dict[str, str] | None]:
+    state, manifest, identity = _record_identity(record)
+    if state not in SAFE_STATES or state not in selectable_states:
+        rejection = {"id": identity, "reason": "lifecycle_state_unavailable"}
+        return None, state, rejection
+    try:
+        validated = validate_manifest(manifest)
+    except (TypeError, ValueError):
+        rejection = {"id": identity, "reason": "manifest_validation_failed"}
+        return None, state, rejection
+    return validated, state, None
+
+
+def _admission_rejection(
+    validated: dict[str, Any], state: str, context: Mapping[str, Any],
+    normalized_role: str, permitted: set[str], identity: str,
+) -> dict[str, str] | None:
+    eligible, _ = promotion_eligible(validated, state)
+    if not eligible:
+        return {"id": identity, "reason": "promotion_gates_incomplete"}
+    if normalized_role not in validated["roles"]:
+        return {"id": identity, "reason": "role_mismatch"}
+    dimensions = _context_dimensions(context)
+    if any(value and value not in validated["match"][name] for name, value in dimensions.items()):
+        return {"id": identity, "reason": "exact_match_failed"}
+    if not set(validated["capabilities"]).issubset(permitted):
+        return {"id": identity, "reason": "capability_not_permitted"}
+    return None
+
+
+def _resolve_record(
+    record: Mapping[str, Any], context: Mapping[str, Any],
+    normalized_role: str, permitted: set[str], selectable_states: set[str],
+) -> tuple[dict[str, str] | None, dict[str, str] | None]:
+    validated, state, rejection = _validated_record(record, selectable_states)
+    if rejection is not None or validated is None:
+        return None, rejection
+    identity = str(validated["id"])
+    rejection = _admission_rejection(
+        validated, state, context, normalized_role, permitted, identity,
+    )
+    if rejection is not None:
+        return None, rejection
+    selected = {key: validated[key] for key in ("id", "version", "artifact_digest")}
+    return selected, None
 
 
 def resolve_manifests(
@@ -193,43 +303,13 @@ def resolve_manifests(
     rejected: list[dict[str, str]] = []
     normalized_role = str(role or "").strip().lower()
     for record in records:
-        state = str(record.get("state") or "")
-        manifest = record.get("manifest")
-        identity = str(manifest.get("id") or "unknown") if isinstance(manifest, dict) else "unknown"
-        if state not in SAFE_STATES or state not in selectable_states:
-            rejected.append({"id": identity, "reason": "lifecycle_state_unavailable"})
-            continue
-        try:
-            validated = validate_manifest(manifest)
-        except (TypeError, ValueError):
-            rejected.append({"id": identity, "reason": "manifest_validation_failed"})
-            continue
-        eligible, _ = promotion_eligible(validated, state)
-        if not eligible:
-            rejected.append({"id": identity, "reason": "promotion_gates_incomplete"})
-            continue
-        if normalized_role not in validated["roles"]:
-            rejected.append({"id": identity, "reason": "role_mismatch"})
-            continue
-        match = validated["match"]
-        dimensions = {
-            "tasks": str(context.get("task") or ""),
-            "protocols": str(context.get("protocol") or ""),
-            "alert_families": str(context.get("alert_family") or ""),
-            "data_sources": str(context.get("data_source") or ""),
-        }
-        if any(value and value not in match[name] for name, value in dimensions.items()):
-            rejected.append({"id": identity, "reason": "exact_match_failed"})
-            continue
-        requested = set(validated["capabilities"])
-        if not requested.issubset(permitted):
-            rejected.append({"id": identity, "reason": "capability_not_permitted"})
-            continue
-        selected.append({
-            "id": validated["id"],
-            "version": validated["version"],
-            "artifact_digest": validated["artifact_digest"],
-        })
+        selection, rejection = _resolve_record(
+            record, context, normalized_role, permitted, selectable_states,
+        )
+        if rejection is not None:
+            rejected.append(rejection)
+        elif selection is not None:
+            selected.append(selection)
     selected.sort(key=lambda item: (item["id"], item["version"], item["artifact_digest"]))
     rejected.sort(key=lambda item: (item["id"], item["reason"]))
     return {
