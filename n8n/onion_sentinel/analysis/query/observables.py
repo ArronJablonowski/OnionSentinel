@@ -230,6 +230,32 @@ def _security_onion_rows(
     return rows
 
 
+def _pcap_zeek_record_rows(
+    records: list[Any],
+    maximum_rows: int,
+    source_ref: str,
+    query_id: str,
+    query_digest: str,
+    result_digest: str,
+    dependencies: ValidationDependencies,
+) -> list[tuple[Any, str]]:
+    rows: list[tuple[Any, str]] = []
+    for index, record in enumerate(records[:maximum_rows]):
+        if not isinstance(record, dict):
+            continue
+        record_digest = hashlib.sha256(json.dumps(
+            record, sort_keys=True, separators=(",", ":"), default=str,
+        ).encode("utf-8")).hexdigest()
+        base = (
+            f"pcap:{dependencies.evidence_ref_component(source_ref, 32)}:"
+            f"{dependencies.evidence_ref_component(query_id, 32)}:"
+            f"{query_digest[:16]}:{result_digest[:16]}:"
+            f"record-{index}-{record_digest[:16]}"
+        )
+        rows.append((record, base))
+    return rows
+
+
 def _pcap_zeek_rows(
     result: dict[str, Any],
     policy: ValidationPolicy,
@@ -254,21 +280,15 @@ def _pcap_zeek_rows(
         or not re.fullmatch(r"[a-f0-9]{64}", result_digest)
     ):
         return []
-    rows: list[tuple[Any, str]] = []
-    for index, record in enumerate(records[:policy.maximum_rows]):
-        if not isinstance(record, dict):
-            continue
-        record_digest = hashlib.sha256(json.dumps(
-            record, sort_keys=True, separators=(",", ":"), default=str,
-        ).encode("utf-8")).hexdigest()
-        base = (
-            f"pcap:{dependencies.evidence_ref_component(source_ref, 32)}:"
-            f"{dependencies.evidence_ref_component(query_id, 32)}:"
-            f"{query_digest[:16]}:{result_digest[:16]}:"
-            f"record-{index}-{record_digest[:16]}"
-        )
-        rows.append((record, base))
-    return rows
+    return _pcap_zeek_record_rows(
+        records,
+        policy.maximum_rows,
+        source_ref,
+        query_id,
+        query_digest,
+        result_digest,
+        dependencies,
+    )
 
 
 def validate(
