@@ -1,12 +1,6 @@
 {
   "files": {},
   "functions": {
-    "n8n/bin/investigation_skills_v2.py::resolve_manifests": {
-      "max_complexity": 20
-    },
-    "n8n/bin/investigation_skills_v2.py::validate_manifest": {
-      "max_complexity": 40
-    },
     "n8n/bin/manage-agent-memory.py::main": {
       "max_lines": 102
     },
@@ -92,5 +86,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "aefc292f4ef6f81e737391bfd7eef4a6835a3459"
+  "source_release": "6a7221d01a17c6d2cc55950cfc992d909129870f"
 }
