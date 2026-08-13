@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import copy
 import datetime as dt
 import importlib.machinery
@@ -35,6 +36,28 @@ def load_module():
 
 
 PROMOTER = load_module()
+
+
+def function_metrics(name: str) -> tuple[int, int]:
+    tree = ast.parse(PROMOTER_PATH.read_text(encoding="utf-8"))
+    target = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    complexity = 1
+    for node in ast.walk(target):
+        if node is target:
+            continue
+        if isinstance(node, (ast.If, ast.For, ast.While, ast.IfExp, ast.Assert)):
+            complexity += 1
+        elif isinstance(node, ast.Try):
+            complexity += len(node.handlers)
+        elif isinstance(node, ast.BoolOp):
+            complexity += max(0, len(node.values) - 1)
+        elif isinstance(node, ast.comprehension):
+            complexity += 1 + len(node.ifs)
+    return target.end_lineno - target.lineno + 1, complexity
 
 
 class TracedEnvironmentPath:
@@ -109,6 +132,38 @@ class DhcpAssetPromotionProjectionTests(unittest.TestCase):
             },
             expected,
         )
+
+    def test_decomposed_promotion_phases_stay_within_budget(self) -> None:
+        for name in (
+            "_validate_environment",
+            "_environment_values",
+            "_asset_store_write_token",
+            "env_token",
+            "_matched_observation",
+            "_observation_identity",
+            "_validate_observation_identity",
+            "_validate_observation_freshness",
+            "reviewed_observation",
+            "_normalized_discovery",
+            "_normalized_expected_mac",
+            "_promotion_identity",
+            "_open_legacy_lock",
+            "_validate_authoritative_overlap",
+            "_reviewed_legacy_inventory",
+            "_promoted_asset",
+            "_updated_inventory",
+            "_backup_inventory",
+            "_legacy_result",
+            "_legacy_promotion",
+            "_database_payload",
+            "_database_result",
+            "_database_promotion",
+            "promote",
+        ):
+            with self.subTest(name=name):
+                lines, complexity = function_metrics(name)
+                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(complexity, 10)
 
     def test_env_token_preserves_metadata_short_circuit_and_parse_order(self) -> None:
         calls = []

@@ -34,8 +34,7 @@ DEFAULT_EXPORT = (
 DEFAULT_API_URL = "http://127.0.0.1:8787"
 
 
-def env_token(path: Path) -> str:
-    info = path.lstat()
+def _validate_environment(path: Path, info: os.stat_result) -> None:
     if (
         not stat.S_ISREG(info.st_mode)
         or stat.S_ISLNK(info.st_mode)
@@ -44,6 +43,9 @@ def env_token(path: Path) -> str:
         or info.st_size > 1024 * 1024
     ):
         raise ValueError("runtime environment file is not owner-controlled")
+
+
+def _environment_values(path: Path) -> dict[str, str]:
     values = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
@@ -51,12 +53,22 @@ def env_token(path: Path) -> str:
             continue
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip()
+    return values
+
+
+def _asset_store_write_token(values: dict[str, str]) -> str:
     token = values.get("ASSET_STORE_WRITE_TOKEN") or values.get(
         "N8N_POST_COMMIT_TOKEN"
     )
     if not token or len(token) < 32:
         raise ValueError("asset-store write token is missing or too short")
     return token
+
+
+def env_token(path: Path) -> str:
+    info = path.lstat()
+    _validate_environment(path, info)
+    return _asset_store_write_token(_environment_values(path))
 
 
 def api_json(
@@ -135,15 +147,7 @@ def mac_scope(value: str) -> str:
     return "globally_administered"
 
 
-def reviewed_observation(
-    state: dict,
-    *,
-    discovery_id: str,
-    expected_ip: str,
-    expected_mac: str,
-    expected_hostname: str,
-    now: dt.datetime,
-) -> dict:
+def _matched_observation(state: dict, discovery_id: str) -> dict:
     if (
         state.get("schema") != "onion-sentinel-dhcp-asset-observations-v1"
         or not isinstance(state.get("observations"), list)
@@ -157,16 +161,34 @@ def reviewed_observation(
     ]
     if len(matches) != 1:
         raise ValueError("DHCP discovery identity is missing or ambiguous")
-    item = matches[0]
+    return matches[0]
+
+
+def _observation_identity(item: dict) -> tuple[str, str, str]:
     current_ip = str(ipaddress.ip_address(str(item.get("current_ip") or "")))
     mac = str(item.get("mac_address") or "").strip().lower()
     hostname = str(item.get("hostname") or "").strip().rstrip(".").lower()
+    return current_ip, mac, hostname
+
+
+def _validate_observation_identity(
+    identity: tuple[str, str, str],
+    expected: tuple[str, str, str],
+) -> None:
+    current_ip, mac, hostname = identity
+    expected_ip, expected_mac, expected_hostname = expected
     if (
         current_ip != expected_ip
         or mac != expected_mac
         or hostname != expected_hostname
     ):
         raise ValueError("DHCP identity changed after operator review")
+
+
+def _validate_observation_freshness(
+    item: dict,
+    now: dt.datetime,
+) -> None:
     last_seen = timestamp(item.get("last_seen"))
     lease_expires = (
         timestamp(item["lease_expires_at"])
@@ -175,6 +197,24 @@ def reviewed_observation(
     )
     if last_seen < now - dt.timedelta(hours=24) and lease_expires < now:
         raise ValueError("stale DHCP identity cannot be promoted")
+
+
+def reviewed_observation(
+    state: dict,
+    *,
+    discovery_id: str,
+    expected_ip: str,
+    expected_mac: str,
+    expected_hostname: str,
+    now: dt.datetime,
+) -> dict:
+    item = _matched_observation(state, discovery_id)
+    identity = _observation_identity(item)
+    _validate_observation_identity(
+        identity,
+        (expected_ip, expected_mac, expected_hostname),
+    )
+    _validate_observation_freshness(item, now)
     return item
 
 
@@ -202,13 +242,16 @@ def atomic_write(path: Path, payload: dict) -> None:
             temporary.unlink()
 
 
-def promote(args: argparse.Namespace, now: dt.datetime) -> tuple[dict, Path]:
+def _normalized_discovery(args: argparse.Namespace) -> str:
     discovery_id = str(args.discovery_id or "").strip().lower()
     if not DISCOVERY_ID_RE.fullmatch(discovery_id):
         raise ValueError("invalid DHCP discovery id")
     if args.confirm != f"PROMOTE:{discovery_id}":
         raise ValueError("explicit PROMOTE:<discovery-id> confirmation is required")
-    expected_ip = str(ipaddress.ip_address(str(args.expected_ip or "").strip()))
+    return discovery_id
+
+
+def _normalized_expected_mac(args: argparse.Namespace) -> tuple[str, str]:
     expected_mac = str(args.expected_mac or "").strip().lower().replace("-", ":")
     if not re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", expected_mac):
         raise ValueError("expected MAC address is invalid")
@@ -219,132 +262,227 @@ def promote(args: argparse.Namespace, now: dt.datetime) -> tuple[dict, Path]:
         raise ValueError(
             "locally administered MAC requires --accept-locally-administered-mac"
         )
-    expected_hostname = str(args.expected_hostname or "").strip().rstrip(".").lower()
+    return expected_mac, scope
 
+
+def _promotion_identity(args: argparse.Namespace) -> dict[str, str]:
+    discovery_id = _normalized_discovery(args)
+    expected_ip = str(ipaddress.ip_address(str(args.expected_ip or "").strip()))
+    expected_mac, scope = _normalized_expected_mac(args)
+    expected_hostname = str(args.expected_hostname or "").strip().rstrip(".").lower()
     hostname = str(args.hostname or expected_hostname).strip().rstrip(".").lower()
+    return {
+        "discovery_id": discovery_id,
+        "expected_ip": expected_ip,
+        "expected_mac": expected_mac,
+        "scope": scope,
+        "expected_hostname": expected_hostname,
+        "hostname": hostname,
+    }
+
+
+def _open_legacy_lock(inventory_path: Path) -> int:
+    lock_path = inventory_path.with_suffix(inventory_path.suffix + ".lock")
+    lock_flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        lock_flags |= os.O_NOFOLLOW
+    lock_descriptor = os.open(lock_path, lock_flags, 0o600)
+    os.fchmod(lock_descriptor, 0o600)
+    return lock_descriptor
+
+
+def _validate_authoritative_overlap(
+    validated: dict,
+    identity: dict[str, str],
+) -> None:
+    for asset in validated["assets"]:
+        identifiers = asset["identifiers"]
+        if (
+            identity["expected_ip"] in identifiers["ip"]
+            or identity["expected_mac"] in identifiers["mac"]
+            or (
+                identity["expected_hostname"]
+                and identity["expected_hostname"] in identifiers["hostname"]
+            )
+        ):
+            raise ValueError(
+                f"DHCP identity overlaps authoritative asset {asset['asset_id']}"
+            )
+
+
+def _reviewed_legacy_inventory(
+    args: argparse.Namespace,
+    identity: dict[str, str],
+    now: dt.datetime,
+) -> tuple[dict, dict]:
+    inventory = controlled_json(args.inventory, MAX_INVENTORY_BYTES)
+    state = controlled_json(args.state, MAX_STATE_BYTES)
+    item = reviewed_observation(
+        state,
+        discovery_id=identity["discovery_id"],
+        expected_ip=identity["expected_ip"],
+        expected_mac=identity["expected_mac"],
+        expected_hostname=identity["expected_hostname"],
+        now=now,
+    )
+    validated = validate_asset_inventory(inventory)
+    _validate_authoritative_overlap(validated, identity)
+    return inventory, item
+
+
+def _promoted_asset(
+    args: argparse.Namespace,
+    identity: dict[str, str],
+    now: dt.datetime,
+) -> dict:
+    return {
+        "asset_id": args.asset_id,
+        "valid_from": timestamp_text(now),
+        "valid_until": None,
+        "identifiers": {
+            "ip_addresses": [identity["expected_ip"]],
+            "mac_addresses": [identity["expected_mac"]],
+            "hostnames": [identity["hostname"]] if identity["hostname"] else [],
+        },
+        "role": args.role,
+        "platform": args.platform,
+        "owner_ref": args.owner_ref,
+        "criticality": args.criticality,
+        "expected_services": [],
+        "expected_behaviors": [],
+        "source_type": "operator-approved-dhcp",
+        "source_ref": (
+            f"DHCP discovery {identity['discovery_id']}; "
+            f"approved {timestamp_text(now)}"
+        ),
+        "confidence": "medium",
+        "share_with_hosted_models": False,
+    }
+
+
+def _updated_inventory(inventory: dict, asset: dict, now: dt.datetime) -> dict:
+    updated = dict(inventory)
+    updated["generated_at"] = timestamp_text(now)
+    updated["assets"] = list(inventory.get("assets") or []) + [asset]
+    validate_asset_inventory(updated)
+    return updated
+
+
+def _backup_inventory(inventory_path: Path, now: dt.datetime) -> Path:
+    backup = inventory_path.with_name(
+        f"{inventory_path.name}.pre-dhcp-promotion-{now.strftime('%Y%m%dT%H%M%SZ')}"
+    )
+    backup_descriptor = os.open(
+        backup,
+        os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        0o600,
+    )
+    with os.fdopen(backup_descriptor, "wb") as backup_file:
+        backup_file.write(inventory_path.read_bytes())
+        backup_file.flush()
+        os.fsync(backup_file.fileno())
+    return backup
+
+
+def _legacy_result(
+    args: argparse.Namespace,
+    identity: dict[str, str],
+    item: dict,
+) -> dict:
+    return {
+        "asset_id": args.asset_id,
+        "discovery_id": identity["discovery_id"],
+        "ip_address": identity["expected_ip"],
+        "mac_address": identity["expected_mac"],
+        "mac_address_scope": identity["scope"],
+        "hostname": identity["hostname"],
+        "observation_count": int(item.get("observation_count") or 0),
+    }
+
+
+def _legacy_promotion(
+    args: argparse.Namespace,
+    identity: dict[str, str],
+    now: dt.datetime,
+) -> tuple[dict, Path]:
+    lock_descriptor = _open_legacy_lock(args.inventory)
+    with os.fdopen(lock_descriptor, "r+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        inventory, item = _reviewed_legacy_inventory(args, identity, now)
+        new_asset = _promoted_asset(args, identity, now)
+        updated = _updated_inventory(inventory, new_asset, now)
+        backup = _backup_inventory(args.inventory, now)
+        atomic_write(args.inventory, updated)
+        return _legacy_result(args, identity, item), backup
+
+
+def _database_payload(
+    args: argparse.Namespace,
+    identity: dict[str, str],
+) -> dict:
+    return {
+        "discovery_id": identity["discovery_id"],
+        "expected_ip": identity["expected_ip"],
+        "expected_mac": identity["expected_mac"],
+        "expected_hostname": identity["expected_hostname"],
+        "asset_id": args.asset_id,
+        "hostname": identity["hostname"],
+        "role": args.role,
+        "platform": args.platform,
+        "owner_ref": args.owner_ref,
+        "operator_ref": args.owner_ref,
+        "criticality": args.criticality,
+        "reason": "operator-approved DHCP promotion",
+        "confirm": args.confirm,
+        "accept_locally_administered_mac": args.accept_locally_administered_mac,
+    }
+
+
+def _database_result(
+    args: argparse.Namespace,
+    identity: dict[str, str],
+    result: dict,
+) -> dict:
+    return {
+        "asset_id": args.asset_id,
+        "discovery_id": identity["discovery_id"],
+        "ip_address": identity["expected_ip"],
+        "mac_address": identity["expected_mac"],
+        "mac_address_scope": identity["scope"],
+        "hostname": identity["hostname"],
+        "observation_fingerprint": result.get("observation_fingerprint"),
+    }
+
+
+def _database_promotion(
+    args: argparse.Namespace,
+    identity: dict[str, str],
+) -> tuple[dict, Path]:
+    token = env_token(args.env)
+    result = api_json(
+        f"{args.api_url.rstrip('/')}/assets/promote-dhcp",
+        token=token,
+        payload=_database_payload(args, identity),
+    )
+    snapshot = api_json(f"{args.api_url.rstrip('/')}/assets/snapshot").get(
+        "inventory"
+    )
+    if not isinstance(snapshot, dict):
+        raise ValueError("asset database snapshot is unavailable after promotion")
+    validate_asset_inventory(snapshot)
+    atomic_write(args.export, snapshot)
+    return _database_result(args, identity, result), args.export
+
+
+def promote(args: argparse.Namespace, now: dt.datetime) -> tuple[dict, Path]:
+    identity = _promotion_identity(args)
     # Direct function callers from the offline DR/unit-test contract predate
     # the PostgreSQL CLI arguments. Keep that isolated path deterministic; the
     # installed command always receives env/export/api_url from argparse and
     # therefore cannot silently write the legacy JSON source of truth.
     if not all(hasattr(args, name) for name in ("env", "export", "api_url")):
-        lock_path = args.inventory.with_suffix(args.inventory.suffix + ".lock")
-        lock_flags = os.O_CREAT | os.O_RDWR
-        if hasattr(os, "O_NOFOLLOW"):
-            lock_flags |= os.O_NOFOLLOW
-        lock_descriptor = os.open(lock_path, lock_flags, 0o600)
-        os.fchmod(lock_descriptor, 0o600)
-        with os.fdopen(lock_descriptor, "r+", encoding="utf-8") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            inventory = controlled_json(args.inventory, MAX_INVENTORY_BYTES)
-            state = controlled_json(args.state, MAX_STATE_BYTES)
-            item = reviewed_observation(
-                state,
-                discovery_id=discovery_id,
-                expected_ip=expected_ip,
-                expected_mac=expected_mac,
-                expected_hostname=expected_hostname,
-                now=now,
-            )
-            validated = validate_asset_inventory(inventory)
-            for asset in validated["assets"]:
-                identifiers = asset["identifiers"]
-                if (
-                    expected_ip in identifiers["ip"]
-                    or expected_mac in identifiers["mac"]
-                    or (
-                        expected_hostname
-                        and expected_hostname in identifiers["hostname"]
-                    )
-                ):
-                    raise ValueError(
-                        f"DHCP identity overlaps authoritative asset {asset['asset_id']}"
-                    )
-            new_asset = {
-                "asset_id": args.asset_id,
-                "valid_from": timestamp_text(now),
-                "valid_until": None,
-                "identifiers": {
-                    "ip_addresses": [expected_ip],
-                    "mac_addresses": [expected_mac],
-                    "hostnames": [hostname] if hostname else [],
-                },
-                "role": args.role,
-                "platform": args.platform,
-                "owner_ref": args.owner_ref,
-                "criticality": args.criticality,
-                "expected_services": [],
-                "expected_behaviors": [],
-                "source_type": "operator-approved-dhcp",
-                "source_ref": f"DHCP discovery {discovery_id}; approved {timestamp_text(now)}",
-                "confidence": "medium",
-                "share_with_hosted_models": False,
-            }
-            updated = dict(inventory)
-            updated["generated_at"] = timestamp_text(now)
-            updated["assets"] = list(inventory.get("assets") or []) + [new_asset]
-            validate_asset_inventory(updated)
-            backup = args.inventory.with_name(
-                f"{args.inventory.name}.pre-dhcp-promotion-{now.strftime('%Y%m%dT%H%M%SZ')}"
-            )
-            backup_descriptor = os.open(
-                backup,
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                0o600,
-            )
-            with os.fdopen(backup_descriptor, "wb") as backup_file:
-                backup_file.write(args.inventory.read_bytes())
-                backup_file.flush()
-                os.fsync(backup_file.fileno())
-            atomic_write(args.inventory, updated)
-            return {
-                "asset_id": args.asset_id,
-                "discovery_id": discovery_id,
-                "ip_address": expected_ip,
-                "mac_address": expected_mac,
-                "mac_address_scope": scope,
-                "hostname": hostname,
-                "observation_count": int(item.get("observation_count") or 0),
-            }, backup
-
-    token = env_token(args.env)
-    result = api_json(
-        f"{args.api_url.rstrip('/')}/assets/promote-dhcp",
-        token=token,
-        payload={
-            "discovery_id": discovery_id,
-            "expected_ip": expected_ip,
-            "expected_mac": expected_mac,
-            "expected_hostname": expected_hostname,
-            "asset_id": args.asset_id,
-            "hostname": hostname,
-            "role": args.role,
-            "platform": args.platform,
-            "owner_ref": args.owner_ref,
-            "operator_ref": args.owner_ref,
-            "criticality": args.criticality,
-            "reason": "operator-approved DHCP promotion",
-            "confirm": args.confirm,
-            "accept_locally_administered_mac": (
-                args.accept_locally_administered_mac
-            ),
-        },
-    )
-    snapshot = api_json(
-        f"{args.api_url.rstrip('/')}/assets/snapshot"
-    ).get("inventory")
-    if not isinstance(snapshot, dict):
-        raise ValueError("asset database snapshot is unavailable after promotion")
-    validate_asset_inventory(snapshot)
-    atomic_write(args.export, snapshot)
-    return {
-        "asset_id": args.asset_id,
-        "discovery_id": discovery_id,
-        "ip_address": expected_ip,
-        "mac_address": expected_mac,
-        "mac_address_scope": scope,
-        "hostname": hostname,
-        "observation_fingerprint": result.get("observation_fingerprint"),
-    }, args.export
+        return _legacy_promotion(args, identity, now)
+    return _database_promotion(args, identity)
 
 
 def main() -> int:
