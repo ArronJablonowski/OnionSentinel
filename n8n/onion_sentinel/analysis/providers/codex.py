@@ -48,44 +48,65 @@ def response_schema(
     """Translate the bounded response template into a strict JSON schema."""
 
     def convert(value: Any, key: str = "") -> dict[str, Any]:
-        if key == "duplicate_of":
-            return {"type": ["string", "null"]}
-        if key in structured_enums:
-            return {"type": "string", "enum": structured_enums[key]}
-        if key in boolean_keys:
-            return {"type": "boolean"}
-        if key == "confidence_score":
-            return {"type": "number", "minimum": 0.0, "maximum": 1.0}
-        if key == "ttl_days":
-            return {"type": "integer", "minimum": 7, "maximum": 365}
-        if key == "review_evidence_hash":
-            return {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+        if specialized := _specialized_schema(
+            key, structured_enums, boolean_keys
+        ):
+            return specialized
         if isinstance(value, dict):
-            properties = {
-                str(child_key): convert(child, str(child_key))
-                for child_key, child in value.items()
-            }
-            return {
-                "type": "object",
-                "properties": properties,
-                "required": list(properties),
-                "additionalProperties": False,
-            }
+            return _object_schema(value, convert)
         if isinstance(value, list):
             item_schema = convert(value[0], key) if value else {"type": "string"}
             return {"type": "array", "items": item_schema}
-        if isinstance(value, bool):
-            return {"type": "boolean"}
-        if isinstance(value, int):
-            return {"type": "integer"}
-        if isinstance(value, float):
-            return {"type": "number"}
-        return {"type": "string"}
+        return _scalar_schema(value)
 
     root = convert(template)
     root["$schema"] = "https://json-schema.org/draft/2020-12/schema"
     root["title"] = "Onion Sentinel structured analysis response"
     return root
+
+
+def _specialized_schema(
+    key: str,
+    structured_enums: Mapping[str, list[str]],
+    boolean_keys: frozenset[str],
+) -> dict[str, Any]:
+    if key == "duplicate_of":
+        return {"type": ["string", "null"]}
+    if key in structured_enums:
+        return {"type": "string", "enum": structured_enums[key]}
+    if key in boolean_keys:
+        return {"type": "boolean"}
+    return {
+        "confidence_score": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "ttl_days": {"type": "integer", "minimum": 7, "maximum": 365},
+        "review_evidence_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    }.get(key, {})
+
+
+def _object_schema(
+    value: dict[Any, Any],
+    convert: Callable[[Any, str], dict[str, Any]],
+) -> dict[str, Any]:
+    properties = {
+        str(child_key): convert(child, str(child_key))
+        for child_key, child in value.items()
+    }
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties),
+        "additionalProperties": False,
+    }
+
+
+def _scalar_schema(value: Any) -> dict[str, str]:
+    if isinstance(value, bool):
+        return {"type": "boolean"}
+    if isinstance(value, int):
+        return {"type": "integer"}
+    if isinstance(value, float):
+        return {"type": "number"}
+    return {"type": "string"}
 
 
 def canonical_system_prompt_file(
