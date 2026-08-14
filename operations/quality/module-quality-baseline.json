@@ -43,10 +43,6 @@
     "relay/app/relay_health_sanitization.py::sanitized_child_result": {
       "max_complexity": 21
     },
-    "relay/app/relay_pcap_service.py::_process_pcap_requests_unlocked": {
-      "max_complexity": 44,
-      "max_lines": 273
-    },
     "relay/app/storage_health.py::main": {
       "max_complexity": 32
     }

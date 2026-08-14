@@ -3612,8 +3612,12 @@ compatible, and remains below the 600-line target.
 `relay_pcap_delivery.py` owns the bounded SSH/rsync handoff to the Mac Studio,
 remote verification/cleanup, broker completion callbacks, and retry scheduling.
 `relay_pcap_service.py` owns the single-flight, one-request-per-run PCAP state
-machine and outcome accounting. Dependencies flow from the leaf policies to
-transport, delivery, service, and the facade; they do not cycle.
+machine and outcome accounting. Its bounded phases separately own polling and
+capture-protection admission, claimed-request streaming/upload, retry and
+terminal cleanup accounting, completion recording, and the stable run-summary
+projection. The public lock wrapper and historical unlocked helper remain the
+compatibility surfaces. Dependencies flow from the leaf policies to transport,
+delivery, service, and the facade; they do not cycle.
 
 `relay_application.py` owns durable alert outbox delivery, quiet-cycle
 heartbeats, CLI parsing, and one-shot lifecycle composition. The Pi installer
