@@ -209,6 +209,29 @@ def set_resource_tags(
     return True, {"ok": True, "tags": cleaned, "queued": True}
 
 
+def _rekey_renamed_resource_metadata(
+    resource_id: str,
+    dest: Path,
+    load_metadata: Callable[[], dict],
+    save_metadata: Callable[[dict], None],
+) -> str:
+    data = load_metadata()
+    old_entry = data.pop(resource_id, None)
+    new_id = resource_library_id_for(dest)
+    if isinstance(old_entry, dict):
+        data[new_id] = old_entry
+    favorites = data.get("_favorites", [])
+    if isinstance(favorites, list) and resource_id in favorites:
+        data["_favorites"] = sorted(
+            {
+                new_id if item == resource_id else str(item)
+                for item in favorites
+            }
+        )
+    save_metadata(data)
+    return new_id
+
+
 def rename_resource_file(
     resource_id: str,
     source_path: str,
@@ -244,15 +267,12 @@ def rename_resource_file(
         return True, result
     except Exception as exc:
         return False, {"ok": False, "error": f"Rename failed: {exc}"}
-    data = load_metadata()
-    old_entry = data.pop(resource_id, None)
-    new_id = resource_library_id_for(dest)
-    if isinstance(old_entry, dict):
-        data[new_id] = old_entry
-    favorites = data.get("_favorites", [])
-    if isinstance(favorites, list) and resource_id in favorites:
-        data["_favorites"] = sorted({new_id if item == resource_id else str(item) for item in favorites})
-    save_metadata(data)
+    new_id = _rekey_renamed_resource_metadata(
+        resource_id,
+        dest,
+        load_metadata,
+        save_metadata,
+    )
     try:
         refresh_library()
     except Exception as exc:
