@@ -79,6 +79,16 @@ class AgentMemoryTests(unittest.TestCase):
         self.assertEqual(records[0]["reinforced_count"], 2)
         self.assertEqual(result["role"]["reinforced"], 1)
 
+    def test_reinforcement_advances_the_record_version(self) -> None:
+        self.persist([self.candidate()])
+        _, first = MEMORY.read_memory_file(self.role)
+
+        self.persist([self.candidate()], analysis_id="analysis-test-2")
+        _, second = MEMORY.read_memory_file(self.role)
+
+        self.assertEqual(first[0]["version"], 1)
+        self.assertEqual(second[0]["version"], 2)
+
     def test_replaying_same_analysis_is_idempotent(self) -> None:
         self.persist([self.candidate()])
         result = self.persist([self.candidate()])
