@@ -162,10 +162,10 @@ class InvestigationSkillRegistryV2Tests(unittest.TestCase):
         self.assertEqual(
             selected["aggregate_budget"],
             {
-                "max_queries": 24,
-                "max_rows": 10000,
-                "max_bytes": 16 * 1024 * 1024,
-                "timeout_seconds": 600,
+                "max_queries": 8,
+                "max_rows": 2000,
+                "max_bytes": 2 * 1024 * 1024,
+                "timeout_seconds": 180,
             },
         )
 
@@ -176,7 +176,7 @@ class InvestigationSkillRegistryV2Tests(unittest.TestCase):
             primary["capabilities"],
             provider="codex-cli",
             budget={
-                "max_queries": 23,
+                "max_queries": 7,
                 "max_rows": 10000,
                 "max_bytes": 16 * 1024 * 1024,
                 "timeout_seconds": 600,
