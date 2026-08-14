@@ -260,6 +260,49 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_relay_pcap_capture_policy_owns_telemetry_admission(self) -> None:
+        policy = ROOT / "relay" / "app" / "relay_pcap_capture_policy.py"
+        transport = ROOT / "relay" / "app" / "relay_pcap_transport.py"
+        installer = (ROOT / "relay" / "bin" / "install-pi-relay.sh").read_text(
+            encoding="utf-8"
+        )
+        expected = {
+            "capture_protection_decision",
+            "require_capture_safe",
+            "security_onion_storage_status",
+        }
+
+        self.assertTrue(policy.is_file())
+        self.assertTrue(expected <= top_level_symbols(policy))
+        self.assertTrue(expected.isdisjoint(top_level_symbols(transport)))
+        self.assertEqual(
+            undefined_global_names(policy.read_text(encoding="utf-8"), str(policy)),
+            set(),
+        )
+        self.assertLess(
+            installer.index("relay_pcap_capture_policy.py"),
+            installer.index("relay_pcap_transport.py"),
+        )
+
+        script = (
+            f"import sys;sys.path.insert(0,{str(policy.parent)!r});"
+            "import relay as r,relay_pcap_capture_policy as p;"
+            "import relay_pcap_transport as t;"
+            "names=" + repr(sorted(expected)) + ";"
+            "assert p in r._MODULES;"
+            "assert all(getattr(t,n) is getattr(p,n) for n in names);"
+            "assert all(r._CANONICAL[n] is getattr(p,n) for n in names)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_relay_health_wrapper_supports_isolated_file_loader_import(self) -> None:
         wrapper = ROOT / "relay" / "app" / "relay_health_wrapper.py"
         script = (
