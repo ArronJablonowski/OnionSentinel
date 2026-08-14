@@ -144,6 +144,52 @@ def _do_head(handler: Any, runtime: Any) -> None:
     handler.end_headers()
 
 
+def _send_post_intake_rejection(handler: Any, runtime: Any, intake: Any) -> Any:
+    if intake.view:
+        renderer = (
+            runtime.render_admin_dashboard
+            if intake.view == "dashboard"
+            else runtime.render_admin_login
+        )
+        return handler._send(intake.status, renderer(intake.message, True))
+    return handler._send(intake.status, intake.body, intake.content_type)
+
+
+def _send_json_write_result(handler: Any, runtime: Any, result: Any) -> Any:
+    return handler._send(
+        result.status,
+        runtime.json.dumps(result.payload, indent=2).encode(),
+        "application/json; charset=utf-8",
+    )
+
+
+def _admin_form_callbacks(handler: Any, runtime: Any) -> Any:
+    return runtime.AdminFormCallbacks(
+        runtime.ensure_admin_token,
+        runtime.admin_password_configured,
+        runtime.verify_admin_password,
+        runtime.create_admin_session,
+        runtime.admin_session_cookie_header,
+        handler._admin_session_id,
+        runtime.destroy_admin_session,
+        runtime.expired_admin_session_cookie_header,
+        runtime.start_admin_action,
+    )
+
+
+def _send_admin_form_result(handler: Any, runtime: Any, result: Any) -> Any:
+    if result.redirect:
+        return handler._redirect(
+            result.redirect, result.headers, status=result.status
+        )
+    renderer = (
+        runtime.render_admin_dashboard
+        if result.view == "dashboard"
+        else runtime.render_admin_login
+    )
+    return handler._send(result.status, renderer(result.message, result.error))
+
+
 def _do_post(handler: Any, runtime: Any) -> None:
     parsed = runtime.urlparse(handler.path)
     route = runtime.classify_post_route(
@@ -158,14 +204,7 @@ def _do_post(handler: Any, runtime: Any) -> None:
         admin_authenticated=lambda: handler._admin_authenticated(),
     )
     if not intake.ready:
-        if intake.view:
-            renderer = (
-                runtime.render_admin_dashboard
-                if intake.view == "dashboard"
-                else runtime.render_admin_login
-            )
-            return handler._send(intake.status, renderer(intake.message, True))
-        return handler._send(intake.status, intake.body, intake.content_type)
+        return _send_post_intake_rejection(handler, runtime, intake)
     raw = handler.rfile.read(intake.length).decode("utf-8", errors="replace")
     json_write = runtime.dispatch_json_write(
         route,
@@ -174,41 +213,16 @@ def _do_post(handler: Any, runtime: Any) -> None:
         callbacks=runtime.portal_json_write_callbacks(handler),
     )
     if json_write is not None:
-        return handler._send(
-            json_write.status,
-            runtime.json.dumps(json_write.payload, indent=2).encode(),
-            "application/json; charset=utf-8",
-        )
+        return _send_json_write_result(handler, runtime, json_write)
     admin_form = runtime.prepare_admin_form(
         route,
         raw,
         client_ip=handler.client_address[0],
         admin_authenticated=lambda: handler._admin_authenticated(),
-        callbacks=runtime.AdminFormCallbacks(
-            runtime.ensure_admin_token,
-            runtime.admin_password_configured,
-            runtime.verify_admin_password,
-            runtime.create_admin_session,
-            runtime.admin_session_cookie_header,
-            handler._admin_session_id,
-            runtime.destroy_admin_session,
-            runtime.expired_admin_session_cookie_header,
-            runtime.start_admin_action,
-        ),
+        callbacks=_admin_form_callbacks(handler, runtime),
     )
     assert admin_form is not None
-    if admin_form.redirect:
-        return handler._redirect(
-            admin_form.redirect, admin_form.headers, status=admin_form.status
-        )
-    renderer = (
-        runtime.render_admin_dashboard
-        if admin_form.view == "dashboard"
-        else runtime.render_admin_login
-    )
-    return handler._send(
-        admin_form.status, renderer(admin_form.message, admin_form.error)
-    )
+    return _send_admin_form_result(handler, runtime, admin_form)
 
 
 def _bind(method: Callable[..., Any], runtime_provider: RuntimeProvider):
