@@ -106,7 +106,13 @@ def _read_owner_private_json(path: Path, max_bytes: int) -> tuple[object, str]:
 def hermes_auth_readiness_error(path: Path, max_bytes: int) -> str:
     """Return a safe operator-facing error for the dedicated Hermes credential."""
     auth_store, error = _read_owner_private_json(path, max_bytes)
-    errors = {
+    if error:
+        return _hermes_auth_file_error(error)
+    return _hermes_auth_store_error(auth_store)
+
+
+def _hermes_auth_file_error(error: str) -> str:
+    return {
         "missing": (
             "Hermes Agent authentication is unavailable at "
             "~/n8n-local/private/hermes-agent/auth.json."
@@ -123,9 +129,10 @@ def hermes_auth_readiness_error(path: Path, max_bytes: int) -> str:
         ),
         "read_failed": "Hermes Agent authentication file is not safely readable.",
         "invalid_json": "Hermes Agent authentication file is not valid bounded JSON.",
-    }
-    if error:
-        return errors[error]
+    }[error]
+
+
+def _hermes_auth_store_error(auth_store: object) -> str:
     if not isinstance(auth_store, dict):
         return "Hermes Agent authentication JSON root must be an object."
     providers = auth_store.get("providers")
@@ -138,14 +145,7 @@ def hermes_auth_readiness_error(path: Path, max_bytes: int) -> str:
         if isinstance(credential_pool, dict)
         else None
     )
-    pool_is_valid = isinstance(pool_entries, list) and not any(
-        not isinstance(entry, dict)
-        or (
-            entry.get("provider") is not None
-            and str(entry.get("provider")).strip() != "openai-codex"
-        )
-        for entry in pool_entries
-    )
+    pool_is_valid = _hermes_pool_is_valid(pool_entries)
     if isinstance(pool_entries, list) and not pool_is_valid:
         return "Hermes Agent openai-codex credential pool is invalid."
     has_provider = isinstance(provider_state, dict) and bool(provider_state)
@@ -156,6 +156,17 @@ def hermes_auth_readiness_error(path: Path, max_bytes: int) -> str:
             "openai-codex credentials."
         )
     return ""
+
+
+def _hermes_pool_is_valid(pool_entries: object) -> bool:
+    return isinstance(pool_entries, list) and not any(
+        not isinstance(entry, dict)
+        or (
+            entry.get("provider") is not None
+            and str(entry.get("provider")).strip() != "openai-codex"
+        )
+        for entry in pool_entries
+    )
 
 
 def enabled_cli_harnesses_ready(
