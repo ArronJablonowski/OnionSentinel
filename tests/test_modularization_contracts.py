@@ -461,6 +461,33 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
             50,
         )
 
+    def test_live_osquery_broker_has_bounded_config_and_lifecycle_phases(self) -> None:
+        broker = ROOT / "relay" / "app" / "live_osquery_broker.py"
+        expected = {
+            "_config_snapshot",
+            "_validate_config_file",
+            "_decode_config",
+            "_validate_config",
+            "_config_path",
+            "_validated_request",
+            "_ssh_command",
+            "_run_query",
+            "_validated_response",
+            "_execute_request",
+            "_emit_failure",
+        }
+
+        self.assertTrue(expected <= top_level_function_names(broker))
+        for name in ("_load_config", "main"):
+            function = top_level_function(broker, name)
+            with self.subTest(name=name):
+                self.assertLessEqual(
+                    (function.end_lineno or function.lineno)
+                    - function.lineno
+                    + 1,
+                    50,
+                )
+
     def test_ac_hunter_broker_has_bounded_response_lifecycle_phases(self) -> None:
         broker = ROOT / "relay" / "app" / "ac_hunter_broker.py"
         expected = {

@@ -1848,6 +1848,89 @@ class LiveOsqueryDeploymentContractTests(unittest.TestCase):
             ):
                 broker._load_config(path)
 
+    def test_relay_broker_main_preserves_success_and_failure_envelopes(self):
+        broker = load_relay_broker()
+        config = {
+            "enabled": True,
+            "allowed_target_aliases": ["endpoint-a"],
+            "known_hosts": "/private/known-hosts",
+            "ssh_key": "/private/key",
+            "host": "relay.example",
+        }
+        request = {"case_id": "case-1", "requests": []}
+        artifact = {"case_id": "case-1", "results": []}
+        process = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(artifact).encode("utf-8"),
+            stderr=b"",
+        )
+        with (
+            mock.patch.dict(broker.os.environ, {}, clear=True),
+            mock.patch.object(broker, "_load_config", return_value=config),
+            mock.patch.object(broker, "_read_request", return_value={"raw": True}),
+            mock.patch.object(
+                broker,
+                "validate_transport_payload",
+                return_value=request,
+            ) as validate,
+            mock.patch.object(
+                broker,
+                "run_bounded_command",
+                return_value=process,
+            ) as run,
+            mock.patch.object(
+                broker,
+                "validate_result_artifact",
+                return_value=artifact,
+            ) as validate_artifact,
+            mock.patch.object(broker, "_emit", return_value=17) as emit,
+        ):
+            self.assertEqual(broker.main(), 17)
+        validate.assert_called_once_with(
+            {"raw": True},
+            allowed_aliases=["endpoint-a"],
+        )
+        self.assertEqual(run.call_args.args[0][0:5], [
+            "/usr/bin/ssh",
+            "-T",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+        ])
+        validate_artifact.assert_called_once_with(
+            artifact,
+            expected_requests=request["requests"],
+        )
+        emit.assert_called_once_with(artifact)
+
+        with (
+            mock.patch.dict(
+                broker.os.environ,
+                {"SSH_ORIGINAL_COMMAND": " id "},
+                clear=True,
+            ),
+            mock.patch.object(broker, "_load_config") as load,
+            mock.patch.object(broker, "_emit", return_value=23) as emit,
+        ):
+            self.assertEqual(broker.main(), 23)
+        load.assert_not_called()
+        emit.assert_called_once_with(
+            {"error": "commands are not accepted by this forced endpoint"},
+            2,
+        )
+
+        with (
+            mock.patch.dict(broker.os.environ, {}, clear=True),
+            mock.patch.object(
+                broker,
+                "_load_config",
+                side_effect=broker.BrokerError("bounded failure"),
+            ),
+            mock.patch.object(broker, "_emit", return_value=29) as emit,
+        ):
+            self.assertEqual(broker.main(), 29)
+        emit.assert_called_once_with({"error": "bounded failure"}, 3)
+
     def test_installer_validates_dedicated_live_osquery_sudoers_rule(self):
         installer = RELAY_INSTALLER.read_text(encoding="utf-8")
         self.assertIn(
