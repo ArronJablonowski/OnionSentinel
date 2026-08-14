@@ -3591,6 +3591,19 @@ deduplication, filtering, and Relay-root capacity policy. Its bounded policy
 phases separately own JSON-evidence retention admission/removal, existing-root
 anchor and disk-threshold projection, and wrapped webhook rejection parsing.
 
+`incident_evidence_broker.py` remains the forced-command compatibility facade
+for bounded, read-only Security Onion incident evidence. Its phases separately
+own transport admission, special-request classification and validation,
+configuration loading, fixed SSH command projection, bounded upstream
+execution, response decoding, receipt/contract validation, terminal auditing,
+and exit behavior. `incident_evidence_dhcp.py` owns the DHCP discovery request,
+window, and result-size contract. `incident_evidence_software.py` owns Software
+Inventory request, cursor, record, operating-system provenance, pagination,
+response, and query-audit validation. The broker re-exports both historical
+contract surfaces, and the Pi installer copies both inward owners before the
+executable facade. No module broadens query, credential, network, filesystem,
+or mutation authority.
+
 `process_io.py` is the leaf owner for bounded Relay control processes. It
 stages input in an anonymous file, starts a dedicated process group, registers
 nonblocking stdout/stderr channels, drains them under exact byte and time

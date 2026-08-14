@@ -544,6 +544,7 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
 
     def test_incident_evidence_broker_has_bounded_contract_phases(self) -> None:
         broker = ROOT / "relay" / "app" / "incident_evidence_broker.py"
+        dhcp = ROOT / "relay" / "app" / "incident_evidence_dhcp.py"
         software = ROOT / "relay" / "app" / "incident_evidence_software.py"
         broker_phases = {
             "_receipt_identity",
@@ -568,6 +569,7 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
         }
 
         self.assertTrue(broker_phases <= top_level_function_names(broker))
+        self.assertTrue(dhcp.is_file())
         self.assertTrue(software.is_file())
         self.assertTrue(software_phases <= top_level_function_names(software))
         for path, name in (
@@ -588,6 +590,10 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
         installer = (
             ROOT / "relay" / "bin" / "install-pi-relay.sh"
         ).read_text()
+        self.assertLess(
+            installer.index("incident_evidence_dhcp.py"),
+            installer.index("incident_evidence_broker.py"),
+        )
         self.assertLess(
             installer.index("incident_evidence_software.py"),
             installer.index("incident_evidence_broker.py"),

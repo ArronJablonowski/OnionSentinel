@@ -10,14 +10,21 @@ from __future__ import annotations
 import json
 import os
 import sys
-import datetime as dt
 import hashlib
-import ipaddress
 import re
 import syslog
 import uuid
 from pathlib import Path
 
+from incident_evidence_dhcp import *  # noqa: F401,F403
+from incident_evidence_dhcp import _parse_dhcp_timestamp
+from incident_evidence_software import *  # noqa: F401,F403
+from incident_evidence_software import (
+    HEX_24_RE,
+    UUID_RE,
+    _software_text,
+    _validate_software_record,
+)
 from process_io import BoundedProcessError, run_bounded_command
 
 
@@ -26,97 +33,7 @@ MAX_TRANSPORT_REQUEST_BYTES = 20 * 1024
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_ERROR_FIELD_BYTES = 500
 DEFAULT_CONFIG = Path("/etc/so-alert-relay/incident-evidence.json")
-DHCP_DISCOVERY_CONTRACT = "onion-sentinel-dhcp-asset-discovery-v1"
-DHCP_DISCOVERY_OPERATION = "dhcp_observations"
-SOFTWARE_INVENTORY_CONTRACT = "onion-sentinel-software-inventory-v1"
-SOFTWARE_INVENTORY_OPERATION = "software_observations"
-SOFTWARE_INVENTORY_SOURCES = {
-    "osquery_apps": {
-        "index": "logs-osquery_manager.result-default",
-        "dataset": "osquery_manager.result",
-        "tier": "installed",
-        "confidence": "high",
-        "asset_ref_type": "host",
-        "platform": "darwin",
-    },
-    "zeek_software": {
-        "index": "logs-zeek-so",
-        "dataset": "zeek.software",
-        "tier": "observed",
-        "confidence": "medium",
-        "asset_ref_type": "ip",
-        "platform": "",
-    },
-    "http_user_agent": {
-        "index": "logs-zeek-so",
-        "dataset": "zeek.http",
-        "tier": "inferred",
-        "confidence": "low",
-        "asset_ref_type": "ip",
-        "platform": "",
-    },
-}
-SOFTWARE_CURSOR_KEYS = {"asset", "product", "version"}
-SOFTWARE_RESPONSE_KEYS = {
-    "ok",
-    "contract",
-    "read_only",
-    "source",
-    "window",
-    "returned",
-    "complete",
-    "truncated",
-    "after",
-    "records",
-    "query_audit",
-}
-SOFTWARE_RECORD_KEYS = {
-    "evidence_id",
-    "source",
-    "source_dataset",
-    "tier",
-    "confidence",
-    "asset_ref_type",
-    "asset_ref",
-    "platform",
-    "product",
-    "version",
-    "category",
-    "first_seen",
-    "last_seen",
-    "observation_count",
-}
-SOFTWARE_OS_RECORD_KEYS = SOFTWARE_RECORD_KEYS | {
-    "operating_system_type",
-    "operating_system_version",
-    "operating_system_source",
-    "operating_system_confidence",
-}
-SOFTWARE_RECORD_KEY_SETS = {
-    frozenset(SOFTWARE_RECORD_KEYS),
-    frozenset(SOFTWARE_OS_RECORD_KEYS),
-}
-SOFTWARE_TEXT_LIMITS = {
-    "asset": 512,
-    "product": 4096,
-    "version": 1024,
-    "platform": 160,
-    "category": 256,
-    "operating_system_type": 160,
-    "operating_system_version": 512,
-    "operating_system_source": 128,
-    "operating_system_confidence": 16,
-}
-SOFTWARE_LAN_NETWORKS = tuple(
-    ipaddress.ip_network(cidr)
-    for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
-)
-HEX_24_RE = re.compile(r"[0-9a-f]{24}")
 HEX_64_RE = re.compile(r"[0-9a-f]{64}")
-UUID_RE = re.compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
-    re.IGNORECASE,
-)
 TRANSPORT_AUDIT_CONTRACT = "onion-sentinel-evidence-transport-v1"
 TRANSPORT_RECEIPT_CONTRACT = "onion-sentinel-evidence-receipt-v1"
 CORRELATION_ID_RE = re.compile(r"^[a-f0-9]{32}$")
@@ -190,7 +107,20 @@ def _transport_envelope(value: object) -> tuple[dict, dict]:
     return payload, {**audit, "payload": payload}
 
 
-def _validate_receipt(response: dict, audit: dict, request: dict) -> dict:
+def _receipt_counters_valid(receipt: dict) -> bool:
+    return not any(
+        not isinstance(receipt.get(field), int)
+        or isinstance(receipt.get(field), bool)
+        or receipt.get(field) < 0
+        for field in (
+            "elastic_search_count",
+            "osquery_query_count",
+            "helper_invocation_count",
+        )
+    )
+
+
+def _receipt_identity(response: dict, audit: dict) -> dict:
     receipt = response.get("audit_receipt")
     if not isinstance(receipt, dict) or set(receipt) != {
         "receipt_contract",
@@ -215,330 +145,86 @@ def _validate_receipt(response: dict, audit: dict, request: dict) -> dict:
         or receipt.get("read_only") is not True
         or receipt.get("terminal_status")
         != ("complete" if response.get("complete") is True else "partial")
-        or any(
-            not isinstance(receipt.get(field), int)
-            or isinstance(receipt.get(field), bool)
-            or receipt.get(field) < 0
-            for field in (
-                "elastic_search_count",
-                "osquery_query_count",
-                "helper_invocation_count",
-            )
-        )
+        or not _receipt_counters_valid(receipt)
     ):
         raise ValueError("Security Onion audit receipt failed validation")
-    if request.get("operation") == "investigation_pivots":
-        expected = len(request.get("queries") or []) + 2
-        if (
-            receipt.get("elastic_search_count") != expected
-            or receipt.get("osquery_query_count") != 0
-            or receipt.get("helper_invocation_count") != 0
-        ):
-            raise ValueError("Security Onion search accounting is inconsistent")
-    elif (
+    return receipt
+
+
+def _expected_control_searches(response: dict) -> int:
+    controls = (
+        response.get("controls")
+        if isinstance(response.get("controls"), dict)
+        else {}
+    )
+    return sum(
+        1
+        for name in ("positive_anchor", "negative_filter")
+        if isinstance(controls.get(name), dict)
+        and controls[name].get("status") != "not_requested"
+    )
+
+
+def _validate_pivot_accounting(
+    receipt: dict,
+    request: dict,
+) -> None:
+    expected = len(request.get("queries") or []) + 2
+    if (
+        receipt.get("elastic_search_count") != expected
+        or receipt.get("osquery_query_count") != 0
+        or receipt.get("helper_invocation_count") != 0
+    ):
+        raise ValueError("Security Onion search accounting is inconsistent")
+
+
+def _is_helper_request(request: dict) -> bool:
+    return (
         request.get("contract") == DHCP_DISCOVERY_CONTRACT
         or request.get("operation") == DHCP_DISCOVERY_OPERATION
         or request.get("contract") == SOFTWARE_INVENTORY_CONTRACT
         or request.get("operation") == SOFTWARE_INVENTORY_OPERATION
-    ):
-        if (
-            receipt.get("elastic_search_count") != 0
-            or receipt.get("osquery_query_count") != 0
-            or receipt.get("helper_invocation_count") != 1
-        ):
-            raise ValueError("Security Onion helper accounting is inconsistent")
-    else:
-        controls = response.get("controls") if isinstance(response.get("controls"), dict) else {}
-        expected_control_searches = sum(
-            1
-            for name in ("positive_anchor", "negative_filter")
-            if isinstance(controls.get(name), dict)
-            and controls[name].get("status") != "not_requested"
-        )
-        if (
-            receipt.get("elastic_search_count")
-            != len(response.get("results") or []) + expected_control_searches
-            or receipt.get("osquery_query_count")
-            != len(response.get("osquery_results") or [])
-            or receipt.get("helper_invocation_count") != 0
-        ):
-            raise ValueError("Security Onion evidence accounting is inconsistent")
-    return receipt
+    )
 
 
-def _parse_dhcp_timestamp(value: object) -> dt.datetime:
-    parsed = dt.datetime.fromisoformat(str(value or "").strip().replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        raise ValueError("timestamp lacks offset")
-    return parsed.astimezone(dt.timezone.utc)
-
-
-def validate_dhcp_request(request: object) -> None:
-    if not isinstance(request, dict) or set(request) != {"contract", "operation", "window", "size"}:
-        raise ValueError("request fields do not match the DHCP discovery contract")
-    if request["contract"] != DHCP_DISCOVERY_CONTRACT or request["operation"] != DHCP_DISCOVERY_OPERATION:
-        raise ValueError("unsupported DHCP discovery operation")
-    window = request["window"]
-    if not isinstance(window, dict) or set(window) != {"start", "end"}:
-        raise ValueError("invalid DHCP discovery window")
-    start = _parse_dhcp_timestamp(window["start"])
-    end = _parse_dhcp_timestamp(window["end"])
-    if start >= end or end - start > dt.timedelta(hours=24):
-        raise ValueError("DHCP discovery window must be positive and no longer than 24 hours")
-    size = request["size"]
-    if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= 1000:
-        raise ValueError("DHCP discovery size must be from 1 through 1000")
-
-
-def _software_text(
-    value: object,
-    maximum_bytes: int,
-    *,
-    field: str,
-    allow_empty: bool = False,
-) -> str:
-    if not isinstance(value, str):
-        raise ValueError(f"{field} must be a string")
-    if value != value.strip() or any(not character.isprintable() for character in value):
-        raise ValueError(f"{field} contains invalid whitespace or control characters")
-    if not value and not allow_empty:
-        raise ValueError(f"{field} must not be empty")
-    if len(value.encode("utf-8")) > maximum_bytes:
-        raise ValueError(f"{field} exceeds its byte limit")
-    return value
-
-
-def validate_software_cursor(
-    value: object,
-    source: str | None = None,
-) -> dict | None:
-    if value is None:
-        return None
-    if not isinstance(value, dict) or set(value) != SOFTWARE_CURSOR_KEYS:
-        raise ValueError(
-            "software cursor must be null or contain asset, product, and version"
-        )
-    cursor = {
-        "asset": _software_text(
-            value["asset"],
-            SOFTWARE_TEXT_LIMITS["asset"],
-            field="after.asset",
-        ),
-        "product": _software_text(
-            value["product"],
-            SOFTWARE_TEXT_LIMITS["product"],
-            field="after.product",
-        ),
-        "version": None,
-    }
-    if value["version"] is not None:
-        cursor["version"] = _software_text(
-            value["version"],
-            SOFTWARE_TEXT_LIMITS["version"],
-            field="after.version",
-            allow_empty=True,
-        )
-    if source == "osquery_apps":
-        if UUID_RE.fullmatch(cursor["asset"]):
-            raise ValueError("software cursor host must not be UUID-shaped")
-    return cursor
-
-
-def validate_software_request(request: object) -> None:
-    expected = {"contract", "operation", "source", "window", "page_size", "after"}
-    if not isinstance(request, dict) or set(request) != expected:
-        raise ValueError("request fields do not match the software inventory contract")
+def _validate_helper_accounting(receipt: dict) -> None:
     if (
-        request["contract"] != SOFTWARE_INVENTORY_CONTRACT
-        or request["operation"] != SOFTWARE_INVENTORY_OPERATION
+        receipt.get("elastic_search_count") != 0
+        or receipt.get("osquery_query_count") != 0
+        or receipt.get("helper_invocation_count") != 1
     ):
-        raise ValueError("unsupported software inventory operation")
-    if (
-        not isinstance(request["source"], str)
-        or request["source"] not in SOFTWARE_INVENTORY_SOURCES
-    ):
-        raise ValueError("software inventory source is not allowed")
-    window = request["window"]
-    if not isinstance(window, dict) or set(window) != {"start", "end"}:
-        raise ValueError("invalid software inventory window")
-    start = _parse_dhcp_timestamp(window["start"])
-    end = _parse_dhcp_timestamp(window["end"])
-    if start >= end or end - start > dt.timedelta(days=31):
-        raise ValueError(
-            "software inventory window must be positive and no longer than 31 days"
-        )
-    if end > dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5):
-        raise ValueError("software inventory window ends too far in the future")
-    page_size = request["page_size"]
-    if (
-        isinstance(page_size, bool)
-        or not isinstance(page_size, int)
-        or not 1 <= page_size <= 500
-    ):
-        raise ValueError("software inventory page_size must be from 1 through 500")
-    validate_software_cursor(request["after"], request["source"])
+        raise ValueError("Security Onion helper accounting is inconsistent")
 
 
-def _validate_software_record(
-    record: object,
-    *,
-    source: str,
-    start: dt.datetime,
-    end: dt.datetime,
+def _validate_evidence_accounting(receipt: dict, response: dict) -> None:
+    expected_control_searches = _expected_control_searches(response)
+    if (
+        receipt.get("elastic_search_count")
+        != len(response.get("results") or []) + expected_control_searches
+        or receipt.get("osquery_query_count")
+        != len(response.get("osquery_results") or [])
+        or receipt.get("helper_invocation_count") != 0
+    ):
+        raise ValueError("Security Onion evidence accounting is inconsistent")
+
+
+def _validate_receipt_accounting(
+    receipt: dict,
+    response: dict,
+    request: dict,
 ) -> None:
-    if (
-        not isinstance(record, dict)
-        or frozenset(record) not in SOFTWARE_RECORD_KEY_SETS
-    ):
-        raise ValueError("software inventory record fields failed validation")
-    expected = SOFTWARE_INVENTORY_SOURCES[source]
-    if (
-        record["source"] != source
-        or record["source_dataset"] != expected["dataset"]
-        or record["tier"] != expected["tier"]
-        or record["confidence"] != expected["confidence"]
-        or record["asset_ref_type"] != expected["asset_ref_type"]
-        or record["platform"] != expected["platform"]
-    ):
-        raise ValueError("software inventory record semantics failed validation")
-    if not isinstance(record["evidence_id"], str) or not HEX_24_RE.fullmatch(
-        record["evidence_id"]
-    ):
-        raise ValueError("software inventory evidence_id failed validation")
-    asset_ref = record["asset_ref"]
-    if expected["asset_ref_type"] == "host":
-        if not isinstance(asset_ref, str) or not HEX_24_RE.fullmatch(asset_ref):
-            raise ValueError("software inventory host reference failed validation")
+    if request.get("operation") == "investigation_pivots":
+        _validate_pivot_accounting(receipt, request)
+    elif _is_helper_request(request):
+        _validate_helper_accounting(receipt)
     else:
-        if not isinstance(asset_ref, str):
-            raise ValueError("software inventory IP reference failed validation")
-        try:
-            address = ipaddress.ip_address(asset_ref)
-        except ValueError as exc:
-            raise ValueError("software inventory IP reference failed validation") from exc
-        if (
-            str(address) != asset_ref
-            or not any(address in network for network in SOFTWARE_LAN_NETWORKS)
-        ):
-            raise ValueError("software inventory IP reference failed validation")
-    for field in ("product", "platform", "version", "category"):
-        _software_text(
-            record[field],
-            SOFTWARE_TEXT_LIMITS[field],
-            field=f"record.{field}",
-            allow_empty=field != "product",
-        )
-    if set(record) == SOFTWARE_OS_RECORD_KEYS:
-        for field in (
-            "operating_system_type",
-            "operating_system_version",
-            "operating_system_source",
-            "operating_system_confidence",
-        ):
-            _software_text(
-                record[field],
-                SOFTWARE_TEXT_LIMITS[field],
-                field=f"record.{field}",
-                allow_empty=True,
-            )
-        os_present = bool(
-            record["operating_system_type"]
-            or record["operating_system_version"]
-        )
-        if source == "osquery_apps":
-            if os_present and (
-                record["operating_system_source"]
-                != "osquery_manager.result:host.os"
-                or record["operating_system_confidence"] != "high"
-            ):
-                raise ValueError(
-                    "endpoint operating-system provenance failed validation"
-                )
-            if not os_present and (
-                record["operating_system_source"]
-                or record["operating_system_confidence"]
-            ):
-                raise ValueError(
-                    "empty endpoint operating-system evidence claims provenance"
-                )
-        elif any(
-            record[field]
-            for field in (
-                "operating_system_type",
-                "operating_system_version",
-                "operating_system_source",
-                "operating_system_confidence",
-            )
-        ):
-            raise ValueError(
-                "passive software evidence cannot assert an exact operating system"
-            )
-    first_seen = _parse_dhcp_timestamp(record["first_seen"])
-    last_seen = _parse_dhcp_timestamp(record["last_seen"])
-    if first_seen > last_seen or first_seen < start or last_seen >= end:
-        raise ValueError("software inventory record timestamps failed validation")
-    count = record["observation_count"]
-    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-        raise ValueError("software inventory observation_count failed validation")
+        _validate_evidence_accounting(receipt, response)
 
 
-def validate_software_response(response: object, request: dict) -> None:
-    if not isinstance(response, dict) or set(response) != SOFTWARE_RESPONSE_KEYS:
-        raise ValueError("software inventory response fields failed validation")
-    source = request["source"]
-    expected = SOFTWARE_INVENTORY_SOURCES[source]
-    if (
-        response["ok"] is not True
-        or response["contract"] != SOFTWARE_INVENTORY_CONTRACT
-        or response["read_only"] is not True
-        or response["source"] != source
-    ):
-        raise ValueError("software inventory response identity failed validation")
-    window = response["window"]
-    if not isinstance(window, dict) or set(window) != {"start", "end"}:
-        raise ValueError("software inventory response window failed validation")
-    start = _parse_dhcp_timestamp(window["start"])
-    end = _parse_dhcp_timestamp(window["end"])
-    request_start = _parse_dhcp_timestamp(request["window"]["start"])
-    request_end = _parse_dhcp_timestamp(request["window"]["end"])
-    if start != request_start or end != request_end:
-        raise ValueError("software inventory response window changed in transit")
-    records = response["records"]
-    returned = response["returned"]
-    if (
-        not isinstance(records, list)
-        or isinstance(returned, bool)
-        or not isinstance(returned, int)
-        or returned != len(records)
-        or not 0 <= returned <= request["page_size"]
-    ):
-        raise ValueError("software inventory response count failed validation")
-    if (
-        not isinstance(response["complete"], bool)
-        or not isinstance(response["truncated"], bool)
-        or response["complete"] == response["truncated"]
-    ):
-        raise ValueError("software inventory pagination state failed validation")
-    cursor = validate_software_cursor(response["after"], source)
-    if response["complete"] and cursor is not None:
-        raise ValueError("complete software inventory response retained a cursor")
-    if response["truncated"] and (cursor is None or returned < 1):
-        raise ValueError("truncated software inventory response omitted its cursor")
-    for record in records:
-        _validate_software_record(record, source=source, start=start, end=end)
-    audit = response["query_audit"]
-    if not isinstance(audit, dict) or set(audit) != {
-        "index",
-        "dataset",
-        "query_digest",
-    }:
-        raise ValueError("software inventory query audit fields failed validation")
-    if audit["index"] != expected["index"] or audit["dataset"] != expected["dataset"]:
-        raise ValueError("software inventory query audit scope failed validation")
-    if not isinstance(audit["query_digest"], str) or not HEX_64_RE.fullmatch(
-        audit["query_digest"]
-    ):
-        raise ValueError("software inventory query digest failed validation")
+def _validate_receipt(response: dict, audit: dict, request: dict) -> dict:
+    receipt = _receipt_identity(response, audit)
+    _validate_receipt_accounting(receipt, response, request)
+    return receipt
 
 
 def emit(payload: dict, code: int = 0) -> int:
@@ -620,25 +306,46 @@ def _failed_command_payload(
     return payload
 
 
-def main() -> int:
+def _admit_transport_request() -> tuple:
     if os.environ.get("SSH_ORIGINAL_COMMAND", "").strip():
-        return emit({"ok": False, "error": "commands are not accepted by this forced endpoint"}, 2)
+        code = emit(
+            {
+                "ok": False,
+                "error": "commands are not accepted by this forced endpoint",
+            },
+            2,
+        )
+        return None, None, None, code
     raw = sys.stdin.buffer.read(MAX_TRANSPORT_REQUEST_BYTES + 1)
     if len(raw) > MAX_TRANSPORT_REQUEST_BYTES:
-        return emit({"ok": False, "error": "request exceeds the transport byte limit"}, 2)
+        code = emit(
+            {"ok": False, "error": "request exceeds the transport byte limit"},
+            2,
+        )
+        return None, None, None, code
     try:
         received = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return emit({"ok": False, "error": f"invalid JSON request: {exc}"}, 2)
+        code = emit({"ok": False, "error": f"invalid JSON request: {exc}"}, 2)
+        return None, None, None, code
     try:
         request, envelope = _transport_envelope(received)
     except ValueError as exc:
-        return emit({"ok": False, "error": str(exc)}, 2)
+        code = emit({"ok": False, "error": str(exc)}, 2)
+        return None, None, None, code
     audit = {
         "correlation_id": envelope["correlation_id"],
         "request_digest": envelope["request_digest"],
     }
-    _audit_log("relay_start", audit, operation=request.get("operation", "incident_evidence"))
+    _audit_log(
+        "relay_start",
+        audit,
+        operation=request.get("operation", "incident_evidence"),
+    )
+    return request, envelope, audit, None
+
+
+def _request_kinds(request: dict) -> tuple:
     is_dhcp_request = (
         request.get("contract") == DHCP_DISCOVERY_CONTRACT
         or request.get("operation") == DHCP_DISCOVERY_OPERATION
@@ -647,12 +354,24 @@ def main() -> int:
         request.get("contract") == SOFTWARE_INVENTORY_CONTRACT
         or request.get("operation") == SOFTWARE_INVENTORY_OPERATION
     )
+    return is_dhcp_request, is_software_request
+
+
+def _validate_special_request(
+    request: dict,
+    audit: dict,
+    is_dhcp_request: bool,
+    is_software_request: bool,
+) -> object:
     if is_dhcp_request:
         try:
             validate_dhcp_request(request)
         except ValueError as exc:
             _audit_log("relay_terminal", audit, status="invalid_dhcp_request")
-            return emit({"ok": False, "error": f"invalid DHCP discovery request: {exc}"}, 2)
+            return emit(
+                {"ok": False, "error": f"invalid DHCP discovery request: {exc}"},
+                2,
+            )
     if is_software_request:
         try:
             validate_software_request(request)
@@ -662,23 +381,61 @@ def main() -> int:
                 {"ok": False, "error": f"invalid software inventory request: {exc}"},
                 2,
             )
-    config_path = Path(os.environ.get("ONION_SENTINEL_INCIDENT_EVIDENCE_CONFIG", DEFAULT_CONFIG))
+    return None
+
+
+def _load_broker_config(audit: dict) -> tuple:
+    config_path = Path(
+        os.environ.get("ONION_SENTINEL_INCIDENT_EVIDENCE_CONFIG", DEFAULT_CONFIG)
+    )
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         _audit_log("relay_terminal", audit, status="configuration_error")
-        return emit({"ok": False, "error": f"broker configuration unavailable: {exc}"}, 3)
-    command = [
-        "/usr/bin/ssh", "-T", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
-        "-o", f"ConnectTimeout={int(config.get('connect_timeout_seconds', 20))}",
-        "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={config['known_hosts']}",
-        "-i", str(config["ssh_key"]),
+        code = emit(
+            {"ok": False, "error": f"broker configuration unavailable: {exc}"},
+            3,
+        )
+        return None, code
+    return config, None
+
+
+def _upstream_command(config: dict) -> list:
+    return [
+        "/usr/bin/ssh",
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        f"ConnectTimeout={int(config.get('connect_timeout_seconds', 20))}",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={config['known_hosts']}",
+        "-i",
+        str(config["ssh_key"]),
         f"{config.get('ssh_user', 'so-ai-relay')}@{config['host']}",
     ]
+
+
+def _run_upstream(
+    command: list,
+    envelope: dict,
+    config: dict,
+    audit: dict,
+    is_dhcp_request: bool,
+    is_software_request: bool,
+) -> tuple:
     try:
         proc = run_bounded_command(
             command,
-            input_bytes=json.dumps(envelope, separators=(",", ":"), sort_keys=True).encode(),
+            input_bytes=json.dumps(
+                envelope,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode(),
             timeout_seconds=float(config.get("timeout_seconds", 400)),
             max_stdout_bytes=min(
                 int(config.get("max_response_bytes", MAX_RESPONSE_BYTES)),
@@ -692,26 +449,71 @@ def main() -> int:
         )
     except (BoundedProcessError, OSError, ValueError, KeyError) as exc:
         _audit_log("relay_terminal", audit, status="transport_error")
-        return emit({"ok": False, "error": f"restricted Security Onion evidence transport failed: {exc}"}, 4)
+        code = emit(
+            {
+                "ok": False,
+                "error": (
+                    "restricted Security Onion evidence transport failed: "
+                    f"{exc}"
+                ),
+            },
+            4,
+        )
+        return None, code
     if proc.returncode != 0:
         _audit_log("relay_terminal", audit, status="upstream_error")
-        return emit(_failed_command_payload(proc), 4)
+        return None, emit(_failed_command_payload(proc), 4)
+    return proc, None
+
+
+def _decode_upstream_response(proc: object, audit: dict) -> tuple:
     try:
         response = json.loads(proc.stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         _audit_log("relay_terminal", audit, status="invalid_json")
-        return emit({"ok": False, "error": f"invalid Security Onion evidence response: {exc}"}, 4)
+        code = emit(
+            {
+                "ok": False,
+                "error": f"invalid Security Onion evidence response: {exc}",
+            },
+            4,
+        )
+        return None, code
     if not isinstance(response, dict):
         _audit_log("relay_terminal", audit, status="invalid_root")
-        return emit({"ok": False, "error": "Security Onion evidence response root was not an object"}, 4)
+        code = emit(
+            {
+                "ok": False,
+                "error": "Security Onion evidence response root was not an object",
+            },
+            4,
+        )
+        return None, code
+    return response, None
+
+
+def _validate_upstream_response(
+    response: dict,
+    audit: dict,
+    request: dict,
+    is_dhcp_request: bool,
+    is_software_request: bool,
+) -> tuple:
     try:
         receipt = _validate_receipt(response, audit, request)
     except ValueError as exc:
         _audit_log("relay_terminal", audit, status="invalid_receipt")
-        return emit({"ok": False, "error": str(exc)}, 4)
+        return None, emit({"ok": False, "error": str(exc)}, 4)
     if is_dhcp_request and response.get("contract") != DHCP_DISCOVERY_CONTRACT:
         _audit_log("relay_terminal", audit, status="invalid_dhcp_contract")
-        return emit({"ok": False, "error": "Security Onion DHCP response failed contract validation"}, 4)
+        code = emit(
+            {
+                "ok": False,
+                "error": "Security Onion DHCP response failed contract validation",
+            },
+            4,
+        )
+        return None, code
     if is_software_request:
         try:
             validate_software_response(
@@ -724,13 +526,21 @@ def main() -> int:
             )
         except ValueError:
             _audit_log("relay_terminal", audit, status="invalid_software_contract")
-            return emit(
+            code = emit(
                 {
                     "ok": False,
-                    "error": "Security Onion software inventory response failed contract validation",
+                    "error": (
+                        "Security Onion software inventory response failed "
+                        "contract validation"
+                    ),
                 },
                 4,
             )
+            return None, code
+    return receipt, None
+
+
+def _emit_upstream_response(response: dict, receipt: dict, audit: dict) -> int:
     _audit_log(
         "relay_terminal",
         audit,
@@ -739,6 +549,47 @@ def main() -> int:
         response_payload_digest=receipt.get("response_payload_digest", ""),
     )
     return emit(response, 0 if response.get("ok") else 5)
+
+
+def main() -> int:
+    request, envelope, audit, code = _admit_transport_request()
+    if code is not None:
+        return code
+    is_dhcp_request, is_software_request = _request_kinds(request)
+    code = _validate_special_request(
+        request,
+        audit,
+        is_dhcp_request,
+        is_software_request,
+    )
+    if code is not None:
+        return code
+    config, code = _load_broker_config(audit)
+    if code is not None:
+        return code
+    proc, code = _run_upstream(
+        _upstream_command(config),
+        envelope,
+        config,
+        audit,
+        is_dhcp_request,
+        is_software_request,
+    )
+    if code is not None:
+        return code
+    response, code = _decode_upstream_response(proc, audit)
+    if code is not None:
+        return code
+    receipt, code = _validate_upstream_response(
+        response,
+        audit,
+        request,
+        is_dhcp_request,
+        is_software_request,
+    )
+    if code is not None:
+        return code
+    return _emit_upstream_response(response, receipt, audit)
 
 
 if __name__ == "__main__":
