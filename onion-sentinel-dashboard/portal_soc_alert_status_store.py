@@ -155,17 +155,11 @@ def load_active_soc_group_ids(
     manually_escalated_group_ids: set[str] | None = None,
 ) -> set[str]:
     """Return grouped detections visible in the default active view."""
-    current = statuses if isinstance(statuses, dict) else {}
-    hidden = {
-        group_id
-        for group_id, meta in current.items()
-        if isinstance(meta, dict)
-        and meta.get("status") in {"acknowledged", "suppressed"}
-    }
-    hidden.update(
-        manually_escalated_group_ids
-        if manually_escalated_group_ids is not None
-        else load_manually_escalated_group_ids(sources, conn)
+    hidden = _hidden_active_soc_group_ids(
+        sources,
+        conn,
+        statuses,
+        manually_escalated_group_ids,
     )
     if soc_alert_group_summary_available(sources, conn):
         try:
@@ -197,6 +191,27 @@ def load_active_soc_group_ids(
         for row in rows
         if (group_id := sources.group_id(row["group_key"])) not in hidden
     }
+
+
+def _hidden_active_soc_group_ids(
+    sources: SocAlertStatusStoreSources,
+    conn: sqlite3.Connection,
+    statuses: object,
+    manually_escalated_group_ids: set[str] | None,
+) -> set[str]:
+    current = statuses if isinstance(statuses, dict) else {}
+    hidden = {
+        group_id
+        for group_id, meta in current.items()
+        if isinstance(meta, dict)
+        and meta.get("status") in {"acknowledged", "suppressed"}
+    }
+    hidden.update(
+        manually_escalated_group_ids
+        if manually_escalated_group_ids is not None
+        else load_manually_escalated_group_ids(sources, conn)
+    )
+    return hidden
 
 
 def normalize_soc_alert_status_meta(
