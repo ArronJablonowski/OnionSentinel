@@ -10,6 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "n8n"))
+from onion_sentinel.analysis.conclusions import claim_evidence  # noqa: E402
 from onion_sentinel.analysis.review import text, validation  # noqa: E402
 
 
@@ -71,6 +72,37 @@ def response(**overrides) -> dict:
 
 
 class ReviewValidationPackageTests(unittest.TestCase):
+    def test_advertised_claim_graph_is_validated_before_reviewer_admission(self) -> None:
+        package = review_package()
+        package["response_schema"] = {"claim_evidence_graph": {}}
+        candidate = response(claim_evidence_graph={
+            "schema": claim_evidence.SCHEMA,
+            "claims": [{
+                "id": "unsupported-final", "claim_kind": "final_determination",
+                "statement": "The event is malicious.", "material": True,
+                "claim_scope": "activity_disposition", "report_fields": [],
+                "certainty": "confirmed", "supporting_evidence_refs": [],
+                "contradicting_evidence_refs": [],
+                "decisive_missing_evidence": [], "supersedes_claim_id": None,
+                "correction_reason": "",
+            }],
+        })
+        graph_deps = claim_evidence.Dependencies(
+            error_type=ReviewError,
+            bounded_reference=lambda value: str(value or "")[:300],
+        )
+
+        with self.assertRaisesRegex(ReviewError, "has no evidence edge"):
+            validation.validate(
+                candidate,
+                package,
+                dependencies(validate_claim_graph=lambda value, current: (
+                    claim_evidence.validate(
+                        value.get("claim_evidence_graph"), value, current, graph_deps,
+                    )
+                )),
+            )
+
     def test_derives_narrative_observable_and_records_audit(self) -> None:
         result = validation.validate(response(), review_package(), dependencies())
         self.assertEqual(

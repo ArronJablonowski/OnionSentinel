@@ -107,6 +107,25 @@ class IncidentReportRendererTests(unittest.TestCase):
             "_incident_live_osquery_audit": {
                 "queries": [{"target_alias": "host-1", "query": "select * from processes;"}],
             },
+            "claim_evidence_graph": {
+                "schema": "onion-sentinel-claim-evidence-graph-v1",
+                "validation": {"valid": True, "material_claim_count": 1},
+                "claims": [{
+                    "id": "hypothesis-one", "claim_kind": "hypothesis",
+                    "claim_scope": "attribution", "material": True,
+                    "certainty": "tentative", "statement": "Candidate <unsafe> attribution.",
+                    "report_fields": ["confidence"],
+                    "supporting_evidence_refs": ["alert:one"],
+                    "contradicting_evidence_refs": ["query:empty"],
+                    "decisive_missing_evidence": ["Process lineage <needed>"],
+                }],
+                "review_history": [{
+                    "original_claims": [{"id": "primary-final"}],
+                    "corrected_claims": [{"id": "reviewer-final"}],
+                    "correction_reason": "Bounded evidence <changed> certainty.",
+                    "adjudication_evidence_refs": ["query:empty"],
+                }],
+            },
         }
 
         rendered, query_count = render_incident_response_report(
@@ -122,6 +141,11 @@ class IncidentReportRendererTests(unittest.TestCase):
         self.assertIn("Observed &lt;payload&gt;", rendered)
         self.assertIn("&lt;unsafe&gt;", rendered)
         self.assertIn("data-query-finding=\"finding for digest-1\"", rendered)
+        self.assertIn("Claim-Evidence Graph", rendered)
+        self.assertIn("Candidate &lt;unsafe&gt; attribution.", rendered)
+        self.assertIn("Process lineage &lt;needed&gt;", rendered)
+        self.assertIn("primary-final", rendered)
+        self.assertIn("Bounded evidence &lt;changed&gt; certainty.", rendered)
         expected_order = (
             "review-panel",
             "Incident Response Investigation",

@@ -70,7 +70,7 @@ def _specialized_schema(
     structured_enums: Mapping[str, list[str]],
     boolean_keys: frozenset[str],
 ) -> dict[str, Any]:
-    if key == "duplicate_of":
+    if key in {"duplicate_of", "supersedes_claim_id"}:
         return {"type": ["string", "null"]}
     if key in structured_enums:
         return {"type": "string", "enum": structured_enums[key]}

@@ -59,6 +59,48 @@ class ReviewDecisionGatesPackageTests(unittest.TestCase):
         self.assertEqual(primary["handling"], "investigate")
         self.assertFalse(primary["_analytical_adjudication_projection"]["automation_authorized"])
 
+    def test_reviewer_projection_preserves_original_claims_and_correction_reason(self) -> None:
+        primary = {
+            "handling": "monitor", "activity_disposition": "unknown",
+            "evidence_used": ["alert:one"],
+            "claim_evidence_graph": self._graph("primary-final", "Unknown activity."),
+        }
+        reviewer = {
+            "handling": "investigate", "activity_disposition": "suspicious",
+            "evidence_used": ["query:two"],
+            "claim_evidence_graph": self._graph("reviewer-final", "Suspicious activity."),
+        }
+        applied = projection.apply(primary, reviewer, {
+            "status": "completed", "mode": "shadow", "automation_authorized": False,
+            "response": {
+                "decision": "reviewer_supported", "resolved_fields": ["handling"],
+                "remaining_disagreements": [],
+                "evidence_used": ["query:two"],
+                "rationale": "The bounded query result supports investigation.",
+                "_adjudication_contract_validation": {
+                    "valid": True, "automation_authorized": False,
+                },
+            },
+        })
+
+        self.assertTrue(applied)
+        history = primary["claim_evidence_graph"]["review_history"][0]
+        self.assertEqual(history["original_claims"][0]["id"], "primary-final")
+        self.assertEqual(history["corrected_claims"][0]["id"], "reviewer-final")
+        self.assertIn("bounded query", history["correction_reason"])
+        self.assertEqual(primary["evidence_used"], ["alert:one", "query:two"])
+
+    @staticmethod
+    def _graph(identifier: str, statement: str) -> dict:
+        return {
+            "schema": "onion-sentinel-claim-evidence-graph-v1",
+            "claims": [{
+                "id": identifier, "claim_kind": "final_determination",
+                "statement": statement, "material": True,
+            }],
+            "validation": {"valid": True},
+        }
+
     def test_unresolved_shadow_adjudication_is_not_projected(self) -> None:
         primary = {"handling": "monitor"}
         applied = projection.apply(primary, {"handling": "investigate"}, {

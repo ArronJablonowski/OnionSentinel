@@ -89,6 +89,36 @@ class AlertDetailAiTests(unittest.TestCase):
         self.assertLess(raw.index('"a": 2'), raw.index('"z": 1'))
         self.assertTrue(raw.endswith("```"))
 
+    def test_claim_graph_renders_hypotheses_gaps_and_review_history(self) -> None:
+        analysis = {"response": {"claim_evidence_graph": {
+            "schema": "onion-sentinel-claim-evidence-graph-v1",
+            "validation": {"valid": True, "material_claim_count": 1},
+            "claims": [{
+                "id": "alternative-1", "claim_kind": "hypothesis",
+                "claim_scope": "attribution", "material": True,
+                "certainty": "tentative", "report_fields": ["confidence"],
+                "statement": "A competing attribution remains possible.",
+                "supporting_evidence_refs": ["alert:one"],
+                "contradicting_evidence_refs": ["query:empty"],
+                "decisive_missing_evidence": ["A process-to-flow join."],
+                "supersedes_claim_id": None, "correction_reason": "",
+            }],
+            "review_history": [{
+                "original_claims": [{"id": "primary-final"}],
+                "corrected_claims": [{"id": "reviewer-final"}],
+                "correction_reason": "The bounded result contradicted certainty.",
+                "adjudication_evidence_refs": ["query:empty"],
+            }],
+        }}}
+
+        output = self.ai.ai_analysis_output_markdown(analysis)
+
+        self.assertIn("### Claim-Evidence Graph", output)
+        self.assertIn("A competing attribution remains possible.", output)
+        self.assertIn("A process-to-flow join.", output)
+        self.assertIn("Original claims retained:** primary-final", output)
+        self.assertIn("bounded result contradicted certainty", output)
+
     def test_module_is_bounded_pure_and_deployed_once(self) -> None:
         source = AI_PATH.read_text(encoding="utf-8")
         self.assertLessEqual(len(source.splitlines()), 220)
@@ -96,6 +126,7 @@ class AlertDetailAiTests(unittest.TestCase):
             self.assertNotIn(forbidden, source)
         installer = INSTALLER_PATH.read_text(encoding="utf-8")
         self.assertEqual(installer.count("dashboard_alert_detail_ai.py"), 2)
+        self.assertEqual(installer.count("dashboard_claim_evidence.py"), 2)
 
 
 if __name__ == "__main__":

@@ -175,6 +175,19 @@ STRUCTURED_ENUMS: dict[str, list[str]] = {
     "scope": ["agent", "shared"],
     "status": ["supported", "contradicted", "unresolved"],
     "kind": sorted(REVIEW_OBSERVABLE_KINDS),
+    "claim_kind": [
+        "observation", "inference", "hypothesis", "negative_evidence",
+        "unavailable_telemetry", "final_determination",
+    ],
+    "claim_scope": [
+        "event_occurrence", "detection_validity", "activity_disposition",
+        "handling", "correlation", "attribution", "malware_attribution",
+        "scope", "evidence_quality", "other",
+    ],
+    "certainty": [
+        "confirmed", "supported", "tentative", "unknown", "contradicted",
+        "unavailable",
+    ],
 }
 STRUCTURED_BOOLEAN_KEYS = frozenset(
     {
@@ -182,6 +195,7 @@ STRUCTURED_BOOLEAN_KEYS = frozenset(
         "hosted_second_opinion_recommended",
         "second_opinion_recommended",
         "correlation_found",
+        "material",
     }
 )
 

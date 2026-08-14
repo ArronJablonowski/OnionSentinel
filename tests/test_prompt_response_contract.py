@@ -17,6 +17,11 @@ from prompt_response_contract import (  # noqa: E402
     PromptContractRequest,
     build_prompt_contract,
 )
+from local_ai_analysis_contract import (  # noqa: E402
+    STRUCTURED_BOOLEAN_KEYS,
+    STRUCTURED_ENUMS,
+)
+from n8n.onion_sentinel.analysis.providers import codex  # noqa: E402
 
 
 def request(**changes):
@@ -46,6 +51,18 @@ class PromptResponseContractTests(unittest.TestCase):
             "for elastic/oql: alert_context|network_flow",
         )
         self.assertNotIn("|anchor_nearest", parameters["aggregation"])
+        graph = contract["response_schema"]["claim_evidence_graph"]
+        self.assertEqual(
+            graph["schema"], "onion-sentinel-claim-evidence-graph-v1",
+        )
+        claim_schema = graph["claims"][0]
+        self.assertIn("negative_evidence", claim_schema["claim_kind"])
+        self.assertIn("unavailable_telemetry", claim_schema["claim_kind"])
+        self.assertIn("supersedes_claim_id", claim_schema)
+        self.assertTrue(any(
+            "Behavioral or anomaly scores" in instruction
+            for instruction in contract["instructions"]["grounding"]
+        ))
 
     def test_v2_schema_advertises_anchor_nearest_without_other_drift(self):
         v1 = build_prompt_contract(request())
@@ -100,6 +117,25 @@ class PromptResponseContractTests(unittest.TestCase):
         self.assertNotEqual(
             second["response_schema"]["incident_response_report"]["scope"],
             "mutation",
+        )
+
+    def test_codex_strict_schema_preserves_claim_graph_types(self):
+        template = build_prompt_contract(request())["response_schema"]
+        schema = codex.response_schema(
+            template,
+            structured_enums=STRUCTURED_ENUMS,
+            boolean_keys=STRUCTURED_BOOLEAN_KEYS,
+        )
+        claim = schema["properties"]["claim_evidence_graph"]["properties"][
+            "claims"
+        ]["items"]["properties"]
+
+        self.assertEqual(
+            claim["claim_kind"]["enum"], STRUCTURED_ENUMS["claim_kind"],
+        )
+        self.assertEqual(claim["material"], {"type": "boolean"})
+        self.assertEqual(
+            claim["supersedes_claim_id"], {"type": ["string", "null"]},
         )
 
 

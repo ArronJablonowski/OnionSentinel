@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import html
 import json
 
+from portal_claim_evidence_renderer import render_claim_evidence
+
 
 @dataclass(frozen=True)
 class IncidentReportRenderCallbacks:
@@ -309,7 +311,8 @@ def render_incident_response_report(
     report_html = (
         '<section class="ir-investigation-report">'
         '<h3>Incident Response Investigation</h3>'
-        f'{metadata}{"".join(_report_sections(report, callbacks))}</section>'
+        f'{metadata}{"".join(_report_sections(report, callbacks))}'
+        f'{render_claim_evidence(response, callbacks)}</section>'
     )
     return (
         review_html + report_html + security_html + appliance_html

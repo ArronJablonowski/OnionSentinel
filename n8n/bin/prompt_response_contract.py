@@ -64,6 +64,10 @@ GROUNDING_AFTER_CONTEXT = [
     "Separate facts from hypotheses.",
     "For every important hypothesis, state supporting evidence, contradicting evidence, and the next discriminator that could resolve it.",
     "When evidence_reference_contract is present, every evidence_used entry must exactly match one listed ref. A zero-row result can document only the exact bounded absence and is not positive corroboration.",
+    "Build claim_evidence_graph as the authoritative traceability ledger for every material report decision. Cover each populated material report field with at least one material claim and use only exact evidence_reference_contract refs on supporting or contradicting edges.",
+    "Distinguish observations, inferences, hypotheses, exact negative evidence, unavailable telemetry, and final determinations with the closed claim kinds. A zero-row result supports only negative_evidence, and unavailable or failed collection supports only an unavailable_telemetry limitation.",
+    "Do not mark a claim confirmed without corroborating collector-owned evidence. Behavioral or anomaly scores alone never support malware attribution.",
+    "Keep competing hypotheses and their decisive missing evidence in claim_evidence_graph. When correcting an earlier claim, retain the original claim, set supersedes_claim_id, and give an evidence-based correction_reason.",
     "Return valid JSON only using the response_schema."
 ]
 BASE_RESPONSE_SCHEMA = {
@@ -112,6 +116,33 @@ BASE_RESPONSE_SCHEMA = {
     "evidence_gaps": [
         "string"
     ],
+    "claim_evidence_graph": {
+        "schema": "onion-sentinel-claim-evidence-graph-v1",
+        "claims": [
+            {
+                "id": "short stable claim identifier",
+                "claim_kind": "observation|inference|hypothesis|negative_evidence|unavailable_telemetry|final_determination",
+                "statement": "one bounded claim",
+                "material": "boolean; true when the claim affects a report decision or analyst action",
+                "claim_scope": "event_occurrence|detection_validity|activity_disposition|handling|correlation|attribution|malware_attribution|scope|evidence_quality|other",
+                "report_fields": [
+                    "event_status|detection_validity|activity_disposition|handling|duplicate_of|detection_outcome|confidence|confidence_score|escalation_needed|tuning_recommendation"
+                ],
+                "certainty": "confirmed|supported|tentative|unknown|contradicted|unavailable",
+                "supporting_evidence_refs": [
+                    "exact evidence_reference_contract ref"
+                ],
+                "contradicting_evidence_refs": [
+                    "exact evidence_reference_contract ref"
+                ],
+                "decisive_missing_evidence": [
+                    "specific evidence whose result could change this claim"
+                ],
+                "supersedes_claim_id": "retained original claim id or null",
+                "correction_reason": "evidence-based reason when superseding, otherwise empty string"
+            }
+        ]
+    },
     "confidence": "low|medium|high",
     "confidence_score": "number from 0.0 through 1.0 calibrated to the supplied evidence",
     "escalation_needed": "boolean",
@@ -169,10 +200,10 @@ BASE_RESPONSE_SCHEMA = {
             "statement": "one falsifiable hypothesis",
             "status": "supported|contradicted|unresolved",
             "supporting_evidence": [
-                "specific supplied evidence"
+                "exact supporting evidence_reference_contract ref"
             ],
             "contradicting_evidence": [
-                "specific supplied evidence"
+                "exact contradicting evidence_reference_contract ref"
             ],
             "next_discriminator": "bounded evidence needed to resolve the hypothesis"
         }

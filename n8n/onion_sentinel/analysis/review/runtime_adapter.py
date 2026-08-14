@@ -144,6 +144,9 @@ def validate_reviewer(
         observable_max=b["REVIEW_OBSERVABLE_MAX"],
         evidence_used_max=b["REVIEW_EVIDENCE_USED_MAX"],
         hypotheses_max=b["REVIEW_HYPOTHESES_MAX"],
+        validate_claim_graph=lambda response, package: b[
+            "validate_claim_evidence_graph"
+        ](response, package, b["ReviewerValidationError"]),
     )
     return module.validate(response, package, dependencies)
 

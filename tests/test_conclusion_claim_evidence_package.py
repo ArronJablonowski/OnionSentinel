@@ -74,7 +74,7 @@ def claim(
 ) -> dict:
     return {
         "id": identifier,
-        "kind": kind,
+        "claim_kind": kind,
         "statement": f"Statement for {identifier}.",
         "material": True,
         "claim_scope": scope,
@@ -140,7 +140,7 @@ class ClaimEvidencePackageTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            {item["kind"] for item in result["claims"]},
+            {item["claim_kind"] for item in result["claims"]},
             {
                 "observation", "negative_evidence", "unavailable_telemetry",
                 "hypothesis", "final_determination",
@@ -172,6 +172,17 @@ class ClaimEvidencePackageTests(unittest.TestCase):
         mismatch["claims"][0]["supporting_evidence_refs"] = ["query:empty"]
         with self.assertRaisesRegex(ClaimEvidenceError, "zero-row evidence"):
             claim_evidence.validate(mismatch, {}, package(), DEPS)
+
+    def test_negative_evidence_requires_an_exact_successful_result(self) -> None:
+        graph = valid_graph()
+        negative = graph["claims"][1]
+        negative["material"] = False
+        negative["supporting_evidence_refs"] = []
+
+        with self.assertRaisesRegex(
+            ClaimEvidenceError, "not bound to an exact successful zero-row result",
+        ):
+            claim_evidence.validate(graph, {}, package(), DEPS)
 
     def test_behavioral_score_alone_cannot_support_malware_attribution(self) -> None:
         graph = valid_graph()
@@ -208,6 +219,46 @@ class ClaimEvidencePackageTests(unittest.TestCase):
         reviewed = result["claims"][-1]
         self.assertEqual(reviewed["supersedes_claim_id"], "final")
         self.assertIn("reduces certainty", reviewed["correction_reason"])
+
+    def test_configured_missing_graph_fails_safe_and_blocks_automation(self) -> None:
+        response = {
+            "event_status": "observed", "detection_outcome": "true_positive_malicious",
+            "activity_disposition": "malicious", "handling": "contain",
+            "confidence": "high", "evidence_gaps": [],
+        }
+        prompt = package()
+        prompt["response_schema"] = {"claim_evidence_graph": {}}
+
+        result = claim_evidence.apply(response, prompt, DEPS)
+
+        self.assertFalse(result["_claim_evidence_validation"]["valid"])
+        self.assertEqual(result["claim_evidence_graph"]["claims"], [])
+        self.assertTrue(result["_verdict_validation"]["material_contradiction"])
+        self.assertTrue(result["_automation_controls"]["requires_human_review"])
+        self.assertIn("not bound", result["evidence_gaps"][-1])
+
+    def test_legacy_unadvertised_response_is_unchanged(self) -> None:
+        response = {"summary": "Legacy fixture."}
+        self.assertIs(claim_evidence.apply(response, package(), DEPS), response)
+        self.assertNotIn("claim_evidence_graph", response)
+
+    def test_hypothesis_projection_must_match_graph_statement_status_and_edges(self) -> None:
+        graph = valid_graph()
+        response = {
+            "hypotheses": [{
+                "id": "alternative", "statement": "Different statement.",
+                "status": "supported", "supporting_evidence": ["query:empty"],
+                "contradicting_evidence": [],
+                "next_discriminator": "A process-to-flow join.",
+            }],
+        }
+
+        with self.assertRaises(ClaimEvidenceError) as raised:
+            claim_evidence.validate(graph, response, package(), DEPS)
+
+        self.assertIn("statement does not match", str(raised.exception))
+        self.assertIn("status does not match graph certainty", str(raised.exception))
+        self.assertIn("supporting_evidence does not match graph evidence", str(raised.exception))
 
 
 if __name__ == "__main__":

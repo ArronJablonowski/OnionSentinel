@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 
+from dashboard_claim_evidence import claim_evidence_markdown
 from dashboard_alert_detail_values import markdown_cell
 from dashboard_time_format import normalize_iso_display_text
 
@@ -131,6 +132,7 @@ def ai_analysis_output_markdown(analysis: dict | None) -> str:
         "### Next Steps", "", markdown_bullets(response.get("recommended_next_steps")), "",
         "### Evidence Used", "", markdown_bullets(response.get("evidence_used")), "",
         "### Evidence Gaps", "", markdown_bullets(response.get("evidence_gaps")), "",
+        claim_evidence_markdown(response), "",
         "### SIEM Tuning", "",
         f"- **Recommendation:** {field(response, 'tuning_recommendation')}",
         f"- **Reason:** {field(response, 'tuning_reason')}", "",

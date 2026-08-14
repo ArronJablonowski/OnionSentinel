@@ -152,7 +152,7 @@ n8n/
       evidence/         # references, provenance, projection, admission
       queries/          # governed execution, pivots, repairs, audit
       review/            # independent review and adjudication
-      conclusions/       # confidence and deterministic evidence guards
+      conclusions/       # confidence, claim-evidence graph, deterministic guards
       persistence/       # unit of work, index, memory, artifacts
       reporting/         # pure structured/Markdown rendering
     scheduler/           # job selection, leases, recovery, reconciliation

@@ -30,6 +30,9 @@ class Dependencies:
     observable_max: int
     evidence_used_max: int
     hypotheses_max: int
+    validate_claim_graph: Callable[
+        [dict[str, Any], dict[str, Any]], dict[str, Any] | None
+    ] | None = None
 
 
 @dataclass(frozen=True)
@@ -472,6 +475,12 @@ def validate(
         raise deps.error_type("review contract is unavailable")
     errors = _contract_errors(response, review_package, contract, deps)
     state = _validation_state(response, review_package, contract, errors, deps)
+    claim_graph = None
+    if deps.validate_claim_graph is not None:
+        try:
+            claim_graph = deps.validate_claim_graph(response, review_package)
+        except deps.error_type as exc:
+            errors.append(str(exc))
     errors.extend(deps.repetition_reasons(response))
     if errors:
         raise deps.error_type("; ".join(errors)[:2000])
@@ -480,5 +489,7 @@ def validate(
     validated["observables_used"] = [
         {"kind": kind, "value": value} for kind, value in sorted(state.used)
     ]
+    if claim_graph is not None:
+        validated["claim_evidence_graph"] = claim_graph
     validated["_review_contract_validation"] = _validation_audit(contract, state)
     return validated

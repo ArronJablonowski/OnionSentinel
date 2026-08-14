@@ -13,6 +13,12 @@ def _conclusion_evidence_guard():
     return evidence_guard
 
 
+def _conclusion_claim_evidence():
+    _provider_routing()
+    from onion_sentinel.analysis.conclusions import claim_evidence
+    return claim_evidence
+
+
 def _conclusion_tuning():
     _provider_routing()
     from onion_sentinel.analysis.conclusions import tuning
@@ -106,11 +112,44 @@ def _conclusion_response_dependencies():
             apply_incident_evidence_completeness_guard,
             reconcile_supplied_endpoint_evidence_gaps,
             validate_evidence_references,
+            apply_claim_evidence_graph,
             apply_tuning_coherence_guard,
         ),
         normalize_scope=normalize_scope_dispositions,
         calibrate_confidence=calibrate_response_confidence,
         reconcile_report=reconcile_incident_response_report,
+    )
+
+
+def _claim_evidence_dependencies(error_type=ValueError):
+    module = _conclusion_claim_evidence()
+    return module.Dependencies(
+        error_type=error_type,
+        bounded_reference=_bounded_reference,
+    )
+
+
+def validate_claim_evidence_graph(
+    response: dict[str, Any],
+    prompt_package: dict[str, Any],
+    error_type=ValueError,
+) -> dict[str, Any] | None:
+    """Validate an advertised graph while preserving legacy package compatibility."""
+    module = _conclusion_claim_evidence()
+    if not module.required(response, prompt_package):
+        return None
+    return module.validate(
+        response.get("claim_evidence_graph"), response, prompt_package,
+        _claim_evidence_dependencies(error_type),
+    )
+
+
+def apply_claim_evidence_graph(
+    response: dict[str, Any], prompt_package: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Install a valid graph or force a safe human-review disposition."""
+    return _conclusion_claim_evidence().apply(
+        response, prompt_package, _claim_evidence_dependencies()
     )
 
 

@@ -114,6 +114,15 @@ line ranges below remain historical navigation aids for the extraction ledger.
   conclusion-guard, incident-report, and independent-review package loaders and
   dependency records. It contains no verdict, confidence, authorization,
   adjudication, or evidence policy beyond translating the historical bindings.
+- `onion_sentinel.analysis.conclusions.claim_evidence` owns the versioned,
+  closed claim-evidence graph. It validates claim classes, material report-field
+  coverage, exact supporting/contradicting reference edges, zero-row negative
+  evidence, unavailable telemetry, hypothesis projection consistency,
+  consequential certainty, behavioral-score-only malware attribution, and
+  reviewer correction lineage. The primary compatibility path converts an
+  invalid advertised graph into an explicit low-confidence human-review state;
+  the independent-review path rejects it before admission. Legacy packages that
+  never advertised the graph schema remain unchanged.
 - `n8n/bin/local_ai_evaluation_routing_compat.py` owns controlled-evaluation
   route/identity delegates, model-roster normalization, runtime attestation,
   phase publication, settings loading, and provider-output parsing facades. The
@@ -2289,6 +2298,12 @@ entry point and injects its shared text, list, linked-finding, analyst-review,
 and investigation-audit callbacks. The renderer has no persistence, HTTP,
 filesystem, process, or network access.
 
+`portal_claim_evidence_renderer.py` is the pure escaped Incident Response
+projection of the current validated claim graph and immutable reviewer
+correction history. It makes competing hypotheses, contradictions, decisive
+missing evidence, original claims, corrected claims, and adjudication evidence
+visible without gaining evidence access or mutation authority.
+
 `portal_investigation_audit_renderer.py` owns escaped presentation of the
 broker-authorized interactive pivot trail. It expands stable investigation
 purposes, bounds rounds and trusted queries, renders backend-specific OQL, KQL,
@@ -2519,6 +2534,11 @@ sequence remains available while canonical report composition is separated.
 correlation, model-provenance, and complete-response JSON sections. Explicit
 field helpers preserve false boolean findings while keeping fallback and
 legacy related-group handling out of the report composition function.
+
+`dashboard_claim_evidence.py` owns the dependency-free Markdown projection of
+validated SOC claim graphs and reviewer correction history. The AI renderer
+composes it as an analyst-facing section; invalid or absent graphs are explicit
+rather than silently omitted.
 
 `dashboard_alert_detail_enrichment.py` owns embedded-versus-stored enrichment
 selection, bounded evidence and limit tables, content detection, indicator
