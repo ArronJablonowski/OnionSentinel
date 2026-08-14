@@ -3620,10 +3620,13 @@ compatibility surfaces. Dependencies flow from the leaf policies to transport,
 delivery, service, and the facade; they do not cycle.
 
 `relay_application.py` owns durable alert outbox delivery, quiet-cycle
-heartbeats, CLI parsing, and one-shot lifecycle composition. The Pi installer
-copies every implementation module before the executable facade. External
-investigation systems remain read-only; allowlists, limits, timeouts,
-redaction, fail-closed behavior, HTTP schemas, and exit behavior are unchanged.
+heartbeats, CLI parsing, and one-shot lifecycle composition. Its bounded phases
+separate SSH batch claim/acknowledgement accounting, webhook outbox delivery,
+runtime preflight, PCAP dispatch, pull-cycle persistence, heartbeat decisions,
+and the stable JSON result projection. The Pi installer copies every
+implementation module before the executable facade. External investigation
+systems remain read-only; allowlists, limits, timeouts, redaction, fail-closed
+behavior, HTTP schemas, and exit behavior are unchanged.
 
 ### Relay health supervision
 

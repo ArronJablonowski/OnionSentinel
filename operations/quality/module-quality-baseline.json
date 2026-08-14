@@ -21,12 +21,6 @@
     "relay/app/process_io.py::run_bounded_command": {
       "max_complexity": 18
     },
-    "relay/app/relay_application.py::drain_alert_outbox": {
-      "max_complexity": 25
-    },
-    "relay/app/relay_application.py::main": {
-      "max_lines": 112
-    },
     "relay/app/relay_health_application.py::main": {
       "max_complexity": 43,
       "max_lines": 221
