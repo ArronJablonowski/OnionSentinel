@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +19,7 @@ BUILDER_PATH = SCRIPT_DIR / "build_soc_alerts_dashboard.py"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+import dashboard_executive_metrics as executive_metrics  # noqa: E402
 from dashboard_executive_metrics import (  # noqa: E402
     EnrichmentCacheMetrics,
     HourlyIntakeBucket,
@@ -96,6 +98,114 @@ class DashboardExecutiveMetricsTest(unittest.TestCase):
 
             self.assertEqual("alerts", metrics.source)
             self.assertEqual(2, sum(bucket.count for bucket in metrics.buckets))
+
+    def test_hourly_intake_preserves_query_close_and_observation_order(self) -> None:
+        now = dt.datetime(2026, 7, 21, 21, 35, tzinfo=dt.timezone.utc)
+        first_hour = dt.datetime(2026, 7, 21, 19, tzinfo=dt.timezone.utc)
+        rows = [
+            ("alert-a", "a-later"),
+            ("alert-a", "a-latest"),
+            ("alert-a", "a-earlier"),
+            (None, "missing-key"),
+            ("", "blank-key"),
+            ("before", "before"),
+            ("end", "end"),
+            ("invalid", "invalid"),
+        ]
+        parsed = {
+            "a-later": first_hour + dt.timedelta(hours=1, minutes=10),
+            "a-latest": first_hour + dt.timedelta(hours=2, minutes=10),
+            "a-earlier": first_hour + dt.timedelta(minutes=30),
+            "missing-key": first_hour + dt.timedelta(hours=2, minutes=20),
+            "blank-key": first_hour + dt.timedelta(hours=1, minutes=20),
+            "before": first_hour - dt.timedelta(seconds=1),
+            "end": first_hour + dt.timedelta(hours=3),
+            "invalid": None,
+        }
+        trace: list[tuple[object, ...]] = []
+
+        class ConnectionProbe:
+            def close(self) -> None:
+                trace.append(("close",))
+
+        connection = ConnectionProbe()
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "alerts.sqlite3"
+            database.touch()
+
+            def open_read_only(path: Path) -> ConnectionProbe:
+                trace.append(("open", path))
+                return connection
+
+            def hourly_rows(candidate: object, start: dt.datetime):
+                trace.append(("rows", candidate, start))
+                return rows, "synthetic", True, "Synthetic intake."
+
+            def parse_timestamp(value: object):
+                trace.append(("parse", value))
+                return parsed[value]
+
+            with (
+                mock.patch.object(
+                    executive_metrics,
+                    "_open_read_only",
+                    side_effect=open_read_only,
+                ),
+                mock.patch.object(
+                    executive_metrics,
+                    "_hourly_rows",
+                    side_effect=hourly_rows,
+                ),
+                mock.patch.object(
+                    executive_metrics,
+                    "_parse_timestamp",
+                    side_effect=parse_timestamp,
+                ),
+            ):
+                metrics = load_hourly_alert_intake(database, now=now, hours=3)
+
+        self.assertEqual([bucket.count for bucket in metrics.buckets], [1, 1, 1])
+        self.assertEqual(metrics.source, "synthetic")
+        self.assertTrue(metrics.exact)
+        self.assertEqual(trace[:3], [("open", database), ("rows", connection, first_hour), ("close",)])
+        self.assertEqual(
+            trace[3:],
+            [("parse", value) for _item_key, value in rows],
+        )
+
+    def test_hourly_intake_closes_and_falls_back_on_query_error(self) -> None:
+        trace: list[str] = []
+
+        class ConnectionProbe:
+            def close(self) -> None:
+                trace.append("close")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "alerts.sqlite3"
+            database.touch()
+            with (
+                mock.patch.object(
+                    executive_metrics,
+                    "_open_read_only",
+                    side_effect=lambda path: trace.append("open") or ConnectionProbe(),
+                ),
+                mock.patch.object(
+                    executive_metrics,
+                    "_hourly_rows",
+                    side_effect=sqlite3.OperationalError("synthetic"),
+                ),
+            ):
+                metrics = load_hourly_alert_intake(database, hours=2)
+
+        self.assertEqual(trace, ["open", "close"])
+        self.assertEqual(metrics.source, "unavailable")
+        self.assertEqual(metrics.note, "Alert intake could not be read safely.")
+        self.assertEqual([bucket.count for bucket in metrics.buckets], [0, 0])
+
+    def test_hourly_intake_preserves_hour_bounds_before_missing_path_fallback(self) -> None:
+        now = dt.datetime(2026, 7, 21, 21, 35, tzinfo=dt.timezone.utc)
+        self.assertEqual(len(load_hourly_alert_intake(Path("missing"), now, 0).buckets), 1)
+        self.assertEqual(len(load_hourly_alert_intake(Path("missing"), now, 100).buckets), 48)
 
     def test_cache_metrics_separate_durable_and_process_lifetimes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
