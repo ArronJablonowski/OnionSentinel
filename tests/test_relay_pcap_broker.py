@@ -66,6 +66,128 @@ class RelayPcapBrokerTest(unittest.TestCase):
         storage.start()
         self.addCleanup(storage.stop)
 
+    def test_broker_request_preserves_http_lifecycle_and_request_shape(self) -> None:
+        events = []
+
+        class Response:
+            def __enter__(self):
+                events.append("enter")
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                events.append(("exit", exc_type, exc, traceback))
+
+        response = Response()
+        config = {
+            "pcap_broker": {
+                "url": "https://broker.example/",
+                "token": "test-token",
+                "timeout_seconds": 17,
+                "response_max_bytes": 123,
+            }
+        }
+        with mock.patch.object(
+            self.relay.request,
+            "urlopen",
+            return_value=response,
+        ) as urlopen:
+            with mock.patch.object(
+                self.relay,
+                "read_bounded_http_body",
+                return_value=b'{"ok":true,"value":7}',
+            ) as read_body:
+                result = self.relay.broker_request(
+                    config,
+                    "POST",
+                    "/pcap/progress",
+                    {"z": 1, "a": 2},
+                )
+
+        self.assertEqual(result, {"ok": True, "value": 7})
+        request_value = urlopen.call_args.args[0]
+        self.assertEqual(request_value.full_url, "https://broker.example/pcap/progress")
+        self.assertEqual(request_value.method, "POST")
+        self.assertEqual(request_value.data, b'{"a": 2, "z": 1}')
+        self.assertEqual(request_value.get_header("Content-type"), "application/json")
+        self.assertEqual(request_value.get_header("User-agent"), "so-alert-relay-dev/0.1")
+        self.assertEqual(request_value.get_header("X-relay-token"), "test-token")
+        self.assertEqual(urlopen.call_args.kwargs, {"timeout": 17})
+        read_body.assert_called_once_with(response, 123)
+        self.assertEqual(events, ["enter", ("exit", None, None, None)])
+
+    def test_broker_request_preserves_error_and_rejection_boundaries(self) -> None:
+        config = {"pcap_broker": {"url": "https://broker.example"}}
+        with mock.patch.object(self.relay.request, "urlopen") as urlopen:
+            with self.assertRaisesRegex(RuntimeError, "pcap_broker.url is empty"):
+                self.relay.broker_request({"pcap_broker": {}}, "GET", "/pcap")
+        urlopen.assert_not_called()
+
+        http_error = self.relay.HTTPError(
+            "https://broker.example/pcap",
+            503,
+            "unavailable",
+            None,
+            None,
+        )
+        with mock.patch.object(
+            self.relay.request,
+            "urlopen",
+            side_effect=http_error,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "PCAP broker returned HTTP 503: unavailable",
+            ) as raised:
+                self.relay.broker_request(config, "GET", "/pcap")
+        self.assertIs(raised.exception.__cause__, http_error)
+
+        url_error = self.relay.URLError("offline")
+        with mock.patch.object(
+            self.relay.request,
+            "urlopen",
+            side_effect=url_error,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "PCAP broker request failed: offline",
+            ) as raised:
+                self.relay.broker_request(config, "GET", "/pcap")
+        self.assertIs(raised.exception.__cause__, url_error)
+
+        for body, expected in (
+            (b'{"ok":false,"reason":"reason","error":"error"}', "reason"),
+            (b'{"ok":false,"error":"error"}', "error"),
+            (b'{"ok":false}', "PCAP broker rejected request"),
+        ):
+            with self.subTest(body=body):
+                with mock.patch.object(self.relay.request, "urlopen", return_value=mock.MagicMock()):
+                    with mock.patch.object(
+                        self.relay,
+                        "read_bounded_http_body",
+                        return_value=body,
+                    ):
+                        with self.assertRaisesRegex(RuntimeError, expected):
+                            self.relay.broker_request(config, "GET", "/pcap")
+
+        with mock.patch.object(self.relay.request, "urlopen", return_value=mock.MagicMock()):
+            with mock.patch.object(
+                self.relay,
+                "read_bounded_http_body",
+                return_value=b"{",
+            ):
+                with self.assertRaisesRegex(RuntimeError, "PCAP broker returned invalid JSON") as raised:
+                    self.relay.broker_request(config, "GET", "/pcap")
+        self.assertIsInstance(raised.exception.__cause__, self.relay.json.JSONDecodeError)
+
+        with mock.patch.object(self.relay.request, "urlopen", return_value=mock.MagicMock()):
+            with mock.patch.object(
+                self.relay,
+                "read_bounded_http_body",
+                return_value=b"[]",
+            ):
+                with self.assertRaises(AttributeError):
+                    self.relay.broker_request(config, "GET", "/pcap")
+
     @staticmethod
     def streamed_result(request_id: str) -> dict:
         return {
