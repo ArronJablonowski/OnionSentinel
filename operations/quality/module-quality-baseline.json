@@ -19,19 +19,10 @@
       "max_complexity": 43,
       "max_lines": 221
     },
-    "relay/app/relay_health_sanitization.py::sanitize_pcap_summary": {
-      "max_complexity": 20
-    },
-    "relay/app/relay_health_sanitization.py::sanitize_storage_summary": {
-      "max_complexity": 18
-    },
-    "relay/app/relay_health_sanitization.py::sanitized_child_result": {
-      "max_complexity": 21
-    },
     "relay/app/storage_health.py::main": {
       "max_complexity": 32
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "52453e5f9490c7c78b5b243f54f17c39ed08a677"
+  "source_release": "dcf86e4ae51dc5b285cfec8eb74cb0f9d0a7b225"
 }
