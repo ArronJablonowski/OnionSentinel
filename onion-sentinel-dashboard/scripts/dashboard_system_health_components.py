@@ -7,8 +7,7 @@ reviewable, and less risky for future human and LLM maintainers.
 from __future__ import annotations
 
 
-def system_health_page_section() -> str:
-    return '''
+_SYSTEM_HEALTH_PAGE_SECTION = '''
     <section class="view-section active system-health-view" aria-label="System Health">
       <section class="system-health-hero">
         <div>
@@ -70,6 +69,10 @@ def system_health_page_section() -> str:
         </div>
       </section>
     </section>'''
+
+
+def system_health_page_section() -> str:
+    return _SYSTEM_HEALTH_PAGE_SECTION
 
 
 SYSTEM_HEALTH_CSS = '''
