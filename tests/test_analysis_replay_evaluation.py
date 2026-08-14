@@ -85,6 +85,45 @@ class DetectionModuleRecorder:
         return self.result
 
 
+class EvaluationRunnerRecorder:
+    calls = []
+    primary = None
+    reviewer = None
+    comparison = None
+
+    @classmethod
+    def reset(cls):
+        cls.calls = []
+        cls.primary = {
+            "event_status": "observed",
+            "detection_validity": "matched_intent",
+            "activity_disposition": "malicious",
+            "handling": "contain",
+            "duplicate_of": None,
+            "detection_outcome": "true_positive_malicious",
+            "confidence_score": 1.2,
+            "evidence_used": ["alert", 7, "fabricated", 7],
+            "_schema_repair": {"applied": True},
+            "_verdict_validation": {
+                "deterministic_evidence_guard": {"source": "validation"},
+            },
+            "_deterministic_evidence_guard": {"source": "fallback"},
+            "final_disposition_status": "confirmed",
+        }
+        cls.reviewer = {"review": "normalized"}
+        cls.comparison = {"material_disagreement": False}
+
+    @classmethod
+    def validate_response(cls, response, prompt_package):
+        cls.calls.append(("validate_response", response, prompt_package))
+        return cls.reviewer if response.get("kind") == "reviewer" else cls.primary
+
+    @classmethod
+    def compare_analysis_results(cls, primary, reviewer):
+        cls.calls.append(("compare_analysis_results", primary, reviewer))
+        return cls.comparison
+
+
 class AnalysisReplayEvaluationTests(unittest.TestCase):
     def valid_case(self, case_id="case-1"):
         return {
@@ -420,6 +459,208 @@ class AnalysisReplayEvaluationTests(unittest.TestCase):
                     "resolve_detection_playbook",
                 ],
             )
+
+    def test_evaluate_case_preserves_projection_calls_identity_and_copy_isolation(self):
+        EvaluationRunnerRecorder.reset()
+        rebuilt = {"rule_intent_match": "match"}
+        case = {
+            "case_id": "full-case",
+            "label_source": "analyst_adjudication",
+            "label_provenance": {"adjudication_id": "adj-1"},
+            "prompt_package": {"nested": {"values": [1]}},
+            "expected": {
+                "event_status": "observed",
+                "detection_validity": "matched_intent",
+                "activity_disposition": "malicious",
+                "handling": "contain",
+                "duplicate_of": None,
+                "detection_outcome": "true_positive_malicious",
+            },
+            "primary_response": {"kind": "primary"},
+            "reviewer_response": {"kind": "reviewer"},
+            "allowed_evidence_refs": ["alert"],
+        }
+        original = copy.deepcopy(case)
+
+        with mock.patch.object(
+            evaluator,
+            "rebuild_detection_validation",
+            return_value=rebuilt,
+        ) as rebuild:
+            result = evaluator.evaluate_case(EvaluationRunnerRecorder, case)
+
+        self.assertEqual(case, original)
+        rebuild.assert_called_once_with(case, None)
+        self.assertEqual(
+            [call[0] for call in EvaluationRunnerRecorder.calls],
+            ["validate_response", "validate_response", "compare_analysis_results"],
+        )
+        primary_call, reviewer_call, comparison_call = EvaluationRunnerRecorder.calls
+        self.assertEqual(primary_call[1], {"kind": "primary"})
+        self.assertEqual(reviewer_call[1], {"kind": "reviewer"})
+        self.assertIsNot(primary_call[1], case["primary_response"])
+        self.assertIsNot(reviewer_call[1], case["reviewer_response"])
+        for call in (primary_call, reviewer_call):
+            self.assertEqual(
+                call[2],
+                {
+                    "nested": {"values": [1]},
+                    "detection_validation": rebuilt,
+                },
+            )
+            self.assertIsNot(call[2], case["prompt_package"])
+            self.assertIsNot(call[2]["nested"], case["prompt_package"]["nested"])
+        self.assertIsNot(primary_call[2], reviewer_call[2])
+        self.assertIs(comparison_call[1], EvaluationRunnerRecorder.primary)
+        self.assertIs(comparison_call[2], EvaluationRunnerRecorder.reviewer)
+        self.assertEqual(
+            list(result),
+            [
+                "case_id",
+                "label_source",
+                "label_provenance",
+                "fields",
+                "exact_factored_verdict",
+                "dangerous_dismissal",
+                "over_escalation",
+                "confidence_score",
+                "confidence_brier",
+                "schema_repaired",
+                "unsupported_evidence_refs",
+                "deterministic_guard",
+                "final_disposition_status",
+                "detection_validation_rebuilt",
+                "rebuilt_detection_validation",
+                "primary",
+                "reviewer",
+                "review_comparison",
+            ],
+        )
+        self.assertEqual(
+            list(result["fields"]),
+            [*evaluator.FACTORED_FIELDS, "detection_outcome"],
+        )
+        self.assertTrue(result["exact_factored_verdict"])
+        self.assertFalse(result["dangerous_dismissal"])
+        self.assertFalse(result["over_escalation"])
+        self.assertEqual(result["confidence_score"], 1.0)
+        self.assertEqual(result["confidence_brier"], 0.0)
+        self.assertTrue(result["schema_repaired"])
+        self.assertEqual(
+            result["unsupported_evidence_refs"],
+            ["7", "fabricated", "7"],
+        )
+        self.assertIs(
+            result["deterministic_guard"],
+            EvaluationRunnerRecorder.primary["_verdict_validation"][
+                "deterministic_evidence_guard"
+            ],
+        )
+        self.assertEqual(result["final_disposition_status"], "confirmed")
+        self.assertTrue(result["detection_validation_rebuilt"])
+        self.assertIs(result["rebuilt_detection_validation"], rebuilt)
+        self.assertIs(result["primary"], EvaluationRunnerRecorder.primary)
+        self.assertIs(result["reviewer"], EvaluationRunnerRecorder.reviewer)
+        self.assertIs(result["review_comparison"], EvaluationRunnerRecorder.comparison)
+
+    def test_evaluate_case_preserves_fallbacks_risk_and_confidence_bounds(self):
+        class Runner:
+            compare_analysis_results = None
+
+            @staticmethod
+            def validate_response(response, _prompt_package):
+                return dict(response)
+
+        base = {
+            "case_id": "fallback-case",
+            "prompt_package": {},
+            "primary_response": {
+                "handling": "no_action",
+                "activity_disposition": "benign",
+                "confidence_score": "not-a-number",
+                "evidence_used": "not-a-list",
+                "_deterministic_evidence_guard": {"source": "fallback"},
+            },
+            "reviewer_response": [],
+            "allowed_evidence_refs": "not-a-list",
+            "expected": {
+                "handling": "contain",
+                "activity_disposition": "benign",
+            },
+        }
+        result = evaluator.evaluate_case(Runner, copy.deepcopy(base))
+        self.assertEqual(list(result["fields"]), ["activity_disposition", "handling"])
+        self.assertFalse(result["exact_factored_verdict"])
+        self.assertTrue(result["dangerous_dismissal"])
+        self.assertFalse(result["over_escalation"])
+        self.assertEqual(result["confidence_score"], 0.0)
+        self.assertEqual(result["confidence_brier"], 0.0)
+        self.assertEqual(result["unsupported_evidence_refs"], [])
+        self.assertIsNone(result["reviewer"])
+        self.assertIsNone(result["review_comparison"])
+        self.assertEqual(result["deterministic_guard"], {"source": "fallback"})
+
+        cases = (
+            ({}, {}, False, 0.0),
+            ({"detection_outcome": "same"}, {"detection_outcome": "same"}, True, 0.0),
+            ({"detection_outcome": "same"}, {"detection_outcome": "other"}, False, 0.0),
+            ({"handling": "no_action"}, {"handling": "contain", "activity_disposition": "benign", "confidence_score": float("inf")}, False, 1.0),
+            ({"handling": "contain"}, {"handling": "contain", "confidence_score": -1}, True, 0.0),
+        )
+        for expected, primary, exact, confidence in cases:
+            case = {
+                "case_id": "bounds",
+                "prompt_package": {},
+                "primary_response": primary,
+                "expected": expected,
+            }
+            with self.subTest(expected=expected, primary=primary):
+                result = evaluator.evaluate_case(Runner, case)
+                self.assertIs(result["exact_factored_verdict"], exact)
+                self.assertEqual(result["confidence_score"], confidence)
+
+        escalation = copy.deepcopy(base)
+        escalation["expected"]["handling"] = "no_action"
+        escalation["primary_response"]["handling"] = "escalate"
+        result = evaluator.evaluate_case(Runner, escalation)
+        self.assertFalse(result["dangerous_dismissal"])
+        self.assertTrue(result["over_escalation"])
+
+    def test_evaluate_case_preserves_failure_boundaries(self):
+        case = {
+            "case_id": "failure-case",
+            "prompt_package": {},
+            "primary_response": {},
+            "expected": {},
+        }
+        with mock.patch.object(evaluator.copy, "deepcopy", side_effect=OSError("copy-stop")), \
+             mock.patch.object(evaluator, "rebuild_detection_validation") as rebuild:
+            with self.assertRaisesRegex(OSError, "copy-stop"):
+                evaluator.evaluate_case(FakeRunner, case)
+        rebuild.assert_not_called()
+
+        with mock.patch.object(
+            evaluator,
+            "rebuild_detection_validation",
+            side_effect=RuntimeError("rebuild-stop"),
+        ), mock.patch.object(evaluator, "normalize_with_runtime") as normalize:
+            with self.assertRaisesRegex(RuntimeError, "rebuild-stop"):
+                evaluator.evaluate_case(FakeRunner, case)
+        normalize.assert_not_called()
+
+        reviewer_case = {
+            **case,
+            "reviewer_response": {},
+        }
+        with mock.patch.object(evaluator, "rebuild_detection_validation", return_value=None), \
+             mock.patch.object(
+                 evaluator,
+                 "normalize_with_runtime",
+                 side_effect=[{}, LookupError("reviewer-stop")],
+             ) as normalize:
+            with self.assertRaisesRegex(LookupError, "reviewer-stop"):
+                evaluator.evaluate_case(FakeRunner, reviewer_case)
+        self.assertEqual(normalize.call_count, 2)
 
     def test_checked_in_replays_are_exact_with_deterministic_guard(self):
         suite = evaluator.load_suite(FIXTURE_PATH)
