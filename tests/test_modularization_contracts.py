@@ -312,6 +312,53 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_relay_pcap_streaming_owns_chunk_and_artifact_workflow(self) -> None:
+        streaming = ROOT / "relay" / "app" / "relay_pcap_streaming.py"
+        transport = ROOT / "relay" / "app" / "relay_pcap_transport.py"
+        installer = (ROOT / "relay" / "bin" / "install-pi-relay.sh").read_text(
+            encoding="utf-8"
+        )
+        expected = {
+            "stream_chunk_idle_timeout",
+            "stream_one_security_onion_chunk",
+            "streamed_spool_artifact",
+            "wait_for_stream_progress",
+        }
+
+        self.assertTrue(streaming.is_file())
+        self.assertTrue(expected <= top_level_symbols(streaming))
+        self.assertTrue(expected.isdisjoint(top_level_function_names(transport)))
+        self.assertEqual(
+            undefined_global_names(
+                streaming.read_text(encoding="utf-8"),
+                str(streaming),
+            ),
+            set(),
+        )
+        self.assertLess(
+            installer.index("relay_pcap_streaming.py"),
+            installer.index("relay_pcap_transport.py"),
+        )
+
+        script = (
+            f"import sys;sys.path.insert(0,{str(streaming.parent)!r});"
+            "import relay as r,relay_pcap_streaming as s;"
+            "import relay_pcap_transport as t;"
+            "names=" + repr(sorted(expected)) + ";"
+            "assert s in r._MODULES;"
+            "assert all(getattr(t,n) is getattr(s,n) for n in names);"
+            "assert all(r._CANONICAL[n] is getattr(s,n) for n in names)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_relay_health_wrapper_supports_isolated_file_loader_import(self) -> None:
         wrapper = ROOT / "relay" / "app" / "relay_health_wrapper.py"
         script = (
