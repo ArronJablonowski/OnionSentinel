@@ -266,5 +266,240 @@ class PortalResourceLibraryContractTests(unittest.TestCase):
                 self.assertIn('"reason": "tags"', queued[1])
 
 
+class RenameResourceFileTests(unittest.TestCase):
+    def callbacks(
+        self,
+        events,
+        *,
+        found=True,
+        metadata=None,
+        move_error=None,
+        refresh_error=None,
+        queue_result=None,
+    ):
+        src = Path("/library/Old_Name.pdf")
+        data = metadata if metadata is not None else {}
+        queued = queue_result if queue_result is not None else {"ok": True}
+
+        def find_pdf(resource_id, source_path):
+            events.append(("find", resource_id, source_path))
+            return (src, "Docs", Path("Old_Name.pdf")) if found else None
+
+        def move(source, destination):
+            events.append(("move", source, destination))
+            if move_error is not None:
+                raise move_error
+
+        def load_metadata():
+            events.append(("load",))
+            return data
+
+        def save_metadata(value):
+            events.append(("save", value))
+
+        def queue_action(payload):
+            events.append(("queue", payload))
+            return queued
+
+        def trigger_worker():
+            events.append(("trigger",))
+
+        def refresh_library():
+            events.append(("refresh",))
+            if refresh_error is not None:
+                raise refresh_error
+
+        return {
+            "src": src,
+            "data": data,
+            "queued": queued,
+            "find_pdf": find_pdf,
+            "move": move,
+            "load_metadata": load_metadata,
+            "save_metadata": save_metadata,
+            "queue_action": queue_action,
+            "trigger_worker": trigger_worker,
+            "refresh_library": refresh_library,
+        }
+
+    def invoke(self, bound, new_name="New_Name"):
+        with (
+            mock.patch.object(store.shutil, "move", side_effect=bound["move"]),
+            mock.patch.object(
+                store,
+                "resource_library_id_for",
+                return_value="fedcba987654",
+            ),
+        ):
+            return store.rename_resource_file(
+                "0123456789ab",
+                "/requested/source.pdf",
+                new_name,
+                find_pdf=bound["find_pdf"],
+                load_metadata=bound["load_metadata"],
+                save_metadata=bound["save_metadata"],
+                queue_action=bound["queue_action"],
+                trigger_worker=bound["trigger_worker"],
+                refresh_library=bound["refresh_library"],
+            )
+
+    def test_rename_preflight_short_circuits_preserve_exact_diagnostics(self):
+        events = []
+        missing = self.callbacks(events, found=False)
+        self.assertEqual(
+            self.invoke(missing),
+            (False, {"ok": False, "error": "Resource not found"}),
+        )
+        self.assertEqual(events, [
+            ("find", "0123456789ab", "/requested/source.pdf"),
+        ])
+
+        events = []
+        invalid = self.callbacks(events)
+        self.assertEqual(
+            self.invoke(invalid, "..."),
+            (False, {"ok": False, "error": "New filename is empty"}),
+        )
+        self.assertEqual(events, [
+            ("find", "0123456789ab", "/requested/source.pdf"),
+        ])
+
+        events = []
+        same = self.callbacks(events)
+        self.assertEqual(
+            self.invoke(same, "Old_Name"),
+            (
+                False,
+                {
+                    "ok": False,
+                    "error": "Rename aborted: the file is already named "
+                    "'Old_Name.pdf'. No files were changed.",
+                },
+            ),
+        )
+        self.assertEqual(events, [
+            ("find", "0123456789ab", "/requested/source.pdf"),
+        ])
+
+    def test_permission_failure_queues_and_mutates_returned_result_in_place(self):
+        events = []
+        queued = {"ok": True, "queued": True}
+        bound = self.callbacks(
+            events,
+            move_error=PermissionError("read-only"),
+            queue_result=queued,
+        )
+
+        ok, result = self.invoke(bound)
+
+        self.assertTrue(ok)
+        self.assertIs(result, queued)
+        self.assertEqual(
+            result,
+            {
+                "ok": True,
+                "queued": True,
+                "display_title": "New Name",
+                "source": "/library/Old_Name.pdf",
+                "target_source": "/library/New_Name.pdf",
+                "refresh_after_ms": 65000,
+            },
+        )
+        self.assertEqual(
+            events,
+            [
+                ("find", "0123456789ab", "/requested/source.pdf"),
+                ("move", "/library/Old_Name.pdf", "/library/New_Name.pdf"),
+                (
+                    "queue",
+                    {
+                        "action": "rename",
+                        "id": "0123456789ab",
+                        "source": "/library/Old_Name.pdf",
+                        "new_name": "New_Name.pdf",
+                        "portal_error": "read-only",
+                    },
+                ),
+                ("trigger",),
+            ],
+        )
+
+    def test_success_rekeys_metadata_favorites_and_refreshes_in_order(self):
+        events = []
+        old_entry = {"custom_tags": ["IR"]}
+        metadata = {
+            "0123456789ab": old_entry,
+            "_favorites": ["ffffffffffff", "0123456789ab", "0123456789ab"],
+            "other": "preserved",
+        }
+        bound = self.callbacks(events, metadata=metadata)
+
+        result = self.invoke(bound)
+
+        self.assertEqual(
+            result,
+            (
+                True,
+                {
+                    "ok": True,
+                    "new_id": "fedcba987654",
+                    "source": "/library/New_Name.pdf",
+                    "display_title": "New Name",
+                    "renamed_on_disk": True,
+                    "refresh_after_ms": 1200,
+                },
+            ),
+        )
+        self.assertNotIn("0123456789ab", metadata)
+        self.assertIs(metadata["fedcba987654"], old_entry)
+        self.assertEqual(
+            metadata["_favorites"],
+            ["fedcba987654", "ffffffffffff"],
+        )
+        self.assertEqual(
+            [event[0] for event in events],
+            ["find", "move", "load", "save", "refresh"],
+        )
+        self.assertIs(events[3][1], metadata)
+
+    def test_move_and_refresh_failures_keep_distinct_transaction_results(self):
+        events = []
+        failed_move = self.callbacks(
+            events, move_error=RuntimeError("disk unavailable")
+        )
+        self.assertEqual(
+            self.invoke(failed_move),
+            (
+                False,
+                {"ok": False, "error": "Rename failed: disk unavailable"},
+            ),
+        )
+        self.assertEqual([event[0] for event in events], ["find", "move"])
+
+        events = []
+        failed_refresh = self.callbacks(
+            events, refresh_error=RuntimeError("refresh unavailable")
+        )
+        self.assertEqual(
+            self.invoke(failed_refresh),
+            (
+                True,
+                {
+                    "ok": True,
+                    "warning": "Renamed file on disk, but Resource Library refresh "
+                    "failed: refresh unavailable",
+                    "new_id": "fedcba987654",
+                    "source": "/library/New_Name.pdf",
+                    "display_title": "New Name",
+                    "renamed_on_disk": True,
+                },
+            ),
+        )
+        self.assertEqual(
+            [event[0] for event in events],
+            ["find", "move", "load", "save", "refresh"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
