@@ -115,6 +115,52 @@ class AgentContentStoreTest(unittest.TestCase):
         self.assertEqual(status, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
         self.assertEqual(response["bytes"], 5)
 
+    def test_memory_read_replaces_invalid_utf8_and_preserves_configured_path(self) -> None:
+        memory_dir = self.root / "memory"
+        memory_dir.mkdir()
+        memory = memory_dir / "memory.md"
+        memory.write_bytes(b"fact:\xff")
+        configured = memory_dir / "." / "memory.md"
+        sources = AgentMemorySources(
+            directory=memory_dir,
+            files={"shared": ("Shared Memory", configured)},
+            max_bytes=100,
+        )
+
+        status, response = read_agent_memory(sources, "ShArEd")
+
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertEqual(response["content"], "fact:\ufffd")
+        self.assertEqual(response["path"], str(configured))
+        self.assertEqual(response["bytes"], 6)
+        self.assertEqual(response["key"], "shared")
+        self.assertEqual(response["label"], "Shared Memory")
+
+    def test_memory_directory_target_and_missing_root_retain_not_found_boundary(self) -> None:
+        memory_dir = self.root / "memory"
+        memory_dir.mkdir()
+        nested = memory_dir / "nested"
+        nested.mkdir()
+        sources = AgentMemorySources(
+            directory=memory_dir,
+            files={"nested": ("Nested", nested)},
+            max_bytes=100,
+        )
+        self.assertEqual(
+            read_agent_memory(sources, "nested"),
+            (HTTPStatus.NOT_FOUND, {"ok": False, "error": "Nested does not exist."}),
+        )
+
+        missing_sources = AgentMemorySources(
+            directory=self.root / "missing-root",
+            files={"nested": ("Nested", nested)},
+            max_bytes=100,
+        )
+        self.assertEqual(
+            read_agent_memory(missing_sources, "nested"),
+            (HTTPStatus.NOT_FOUND, {"ok": False, "error": "Nested does not exist."}),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
