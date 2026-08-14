@@ -251,6 +251,128 @@ class CohortExecutionAttestationBoundaryTests(unittest.TestCase):
         self.assertFalse(valid)
         self.assertEqual(summary["selected"], [])
 
+    def test_v2_skill_projection_preserves_governed_selection_facts(self):
+        policy = cohort_execution_skills.SkillAttestationPolicy(
+            skill_id_pattern=re.compile(r"[a-z-]+"),
+            sha256_pattern=re.compile(r"[a-f0-9]{64}"),
+            maximum_selected=4,
+        )
+        attestation = {
+            "present": True,
+            "legacy": False,
+            "valid": True,
+            "available": True,
+            "job_digest_bound": True,
+            "mandatory_ready": True,
+            "error_count": 0,
+            "errors": [],
+            "framework_version": 2,
+            "registry_version": 8,
+            "registry_sha256": "a" * 64,
+            "provider": "codex-cli",
+            "provider_compatible": True,
+            "selected": [
+                {
+                    "id": "dns-triage",
+                    "version": "2.3.1",
+                    "skill_sha256": "b" * 64,
+                    "selection_reason": (
+                        "exact_match_capability_and_promotion_gates_satisfied"
+                    ),
+                }
+            ],
+            "selected_count": 1,
+            "truncated": False,
+            "rejected": [
+                {"id": "legacy-dns", "reason": "artifact_revoked"},
+            ],
+            "aggregate_budget": {
+                "max_queries": 4,
+                "max_rows": 400,
+                "max_bytes": 4000,
+                "timeout_seconds": 40,
+            },
+            "advisory_mode": "identity_only_no_execution",
+        }
+
+        summary, valid = cohort_execution_skills.validate_skill_attestation(
+            attestation, policy
+        )
+
+        self.assertTrue(valid)
+        self.assertEqual(summary["framework_version"], 2)
+        self.assertEqual(summary["provider"], "codex-cli")
+        self.assertEqual(
+            summary["selected"][0]["selection_reason"],
+            "exact_match_capability_and_promotion_gates_satisfied",
+        )
+        self.assertEqual(
+            summary["rejected"],
+            [{"id": "legacy-dns", "reason": "artifact_revoked"}],
+        )
+        self.assertEqual(summary["aggregate_budget"]["max_queries"], 4)
+
+    def test_v2_exported_skill_summary_is_strict_and_content_free(self):
+        policy = cohort_execution_skills.SkillAttestationPolicy(
+            skill_id_pattern=re.compile(r"[a-z-]+"),
+            sha256_pattern=re.compile(r"[a-f0-9]{64}"),
+            maximum_selected=4,
+        )
+        summary = {
+            "framework_version": 2,
+            "registry_version": 8,
+            "registry_sha256": "a" * 64,
+            "provider": "codex-cli",
+            "provider_compatible": True,
+            "selected": [
+                {
+                    "id": "dns-triage",
+                    "version": "2.3.1",
+                    "skill_sha256": "b" * 64,
+                    "selection_reason": (
+                        "exact_match_capability_and_promotion_gates_satisfied"
+                    ),
+                }
+            ],
+            "selected_count": 1,
+            "truncated": False,
+            "rejected": [],
+            "aggregate_budget": {
+                "max_queries": 4,
+                "max_rows": 400,
+                "max_bytes": 4000,
+                "timeout_seconds": 40,
+            },
+            "advisory_mode": "identity_only_no_execution",
+        }
+        harness_proof = {
+            "skill_selection_attestation_validated": True,
+            "skill_selection_attestation": summary,
+        }
+
+        projected = (
+            cohort_execution_skills.validate_exported_skill_summary(
+                harness_proof,
+                "fixture",
+                policy,
+                RuntimeError,
+            )
+        )
+
+        self.assertEqual(projected, summary)
+        tampered = dict(summary)
+        tampered["selected"] = [
+            {**summary["selected"][0], "selection_reason": "free-form"}
+        ]
+        harness_proof["skill_selection_attestation"] = tampered
+        with self.assertRaisesRegex(RuntimeError, "identity"):
+            cohort_execution_skills.validate_exported_skill_summary(
+                harness_proof,
+                "fixture",
+                policy,
+                RuntimeError,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

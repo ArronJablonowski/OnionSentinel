@@ -421,13 +421,14 @@ def create_terminal_harness_database(
     path: Path,
     *,
     skill_registry_version: int = 1,
+    skill_selection: dict | None = None,
 ) -> str:
     prompt = {
         "alert": {
             "alert_id": "alert-ledger-1",
             "rule_name": "Terminal ledger evaluator fixture",
         },
-        "investigation_skills": {
+        "investigation_skills": skill_selection or {
             "schema": "onion-sentinel-investigation-skill-selection-v1",
             "mode": "shadow",
             "registry_version": skill_registry_version,
@@ -499,6 +500,39 @@ def create_terminal_harness_database(
     run.catalogue_prompt_evidence(prompt)
     run.complete()
     return run.run_id
+
+
+def v2_skill_selection() -> dict:
+    return {
+        "schema": "onion-sentinel-investigation-skill-selection-v2",
+        "mode": "active",
+        "registry_version": 8,
+        "registry_digest": "c" * 64,
+        "provider": "codex-cli",
+        "provider_compatible": True,
+        "selected": [
+            {
+                "id": "dns-triage",
+                "version": "2.3.1",
+                "artifact_digest": "d" * 64,
+                "selection_reason": (
+                    "exact_match_capability_and_promotion_gates_satisfied"
+                ),
+            }
+        ],
+        "selected_count": 1,
+        "truncated": False,
+        "rejected": [
+            {"id": "legacy-dns", "reason": "artifact_revoked"},
+        ],
+        "aggregate_budget": {
+            "max_queries": 4,
+            "max_rows": 400,
+            "max_bytes": 4000,
+            "timeout_seconds": 40,
+        },
+        "enforcement": "identity_only_no_execution",
+    }
 
 
 def replace_terminal_manifest(
@@ -915,6 +949,102 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
             self.assertNotIn(
                 "This skill content must not enter the trace",
                 serialized,
+            )
+
+    def test_validates_digest_bound_v2_skill_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "harness.sqlite3"
+            run_id = create_terminal_harness_database(
+                database,
+                skill_selection=v2_skill_selection(),
+            )
+
+            report = evaluator.evaluate_database(database, run_id)
+
+            attestation = report["runs"][0][
+                "skill_selection_attestation"
+            ]
+            self.assertEqual(
+                attestation,
+                {
+                    "present": True,
+                    "legacy": False,
+                    "valid": True,
+                    "available": True,
+                    "job_digest_bound": True,
+                    "mandatory_ready": True,
+                    "framework_version": 2,
+                    "registry_version": 8,
+                    "registry_sha256": "c" * 64,
+                    "provider": "codex-cli",
+                    "provider_compatible": True,
+                    "selected": [
+                        {
+                            "id": "dns-triage",
+                            "version": "2.3.1",
+                            "skill_sha256": "d" * 64,
+                            "selection_reason": (
+                                "exact_match_capability_and_promotion_gates_satisfied"
+                            ),
+                        }
+                    ],
+                    "selected_count": 1,
+                    "truncated": False,
+                    "rejected": [
+                        {"id": "legacy-dns", "reason": "artifact_revoked"},
+                    ],
+                    "aggregate_budget": {
+                        "max_queries": 4,
+                        "max_rows": 400,
+                        "max_bytes": 4000,
+                        "timeout_seconds": 40,
+                    },
+                    "advisory_mode": "identity_only_no_execution",
+                    "error_count": 0,
+                    "errors": [],
+                },
+            )
+
+    def test_rejects_tampered_v2_skill_selection_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "harness.sqlite3"
+            run_id = create_terminal_harness_database(
+                database,
+                skill_selection=v2_skill_selection(),
+            )
+            with harness._connect(database) as connection:
+                row = connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM harness_events
+                    WHERE run_id = ? AND event_type = 'run.started'
+                    """,
+                    (run_id,),
+                ).fetchone()
+                payload = json.loads(row["payload_json"])
+                payload["skill_selection_attestation"]["selected"][0][
+                    "selection_reason"
+                ] = "untrusted-free-form-reason"
+                connection.execute(
+                    """
+                    UPDATE harness_events
+                    SET payload_json = ?
+                    WHERE run_id = ? AND event_type = 'run.started'
+                    """,
+                    (harness.canonical_json(payload), run_id),
+                )
+                connection.commit()
+
+            report = evaluator.evaluate_database(database, run_id)
+
+            attestation = report["runs"][0][
+                "skill_selection_attestation"
+            ]
+            self.assertFalse(attestation["valid"])
+            self.assertFalse(attestation["mandatory_ready"])
+            self.assertIn(
+                "selected skill selection reason is invalid",
+                attestation["errors"],
             )
 
     def test_version_zero_skill_registry_is_never_evaluation_ready(self):
