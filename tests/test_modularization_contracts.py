@@ -461,6 +461,21 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
             50,
         )
 
+    def test_relay_health_contract_has_bounded_diagnostic_phases(self) -> None:
+        contract = ROOT / "relay" / "app" / "relay_health_contract.py"
+        expected = {
+            "_validated_child_diagnostic",
+            "_classified_diagnostic_category",
+            "_diagnostic_projection",
+        }
+
+        self.assertTrue(expected <= top_level_function_names(contract))
+        function = top_level_function(contract, "classify_child_diagnostic")
+        self.assertLessEqual(
+            (function.end_lineno or function.lineno) - function.lineno + 1,
+            50,
+        )
+
     def test_relay_health_wrapper_supports_isolated_file_loader_import(self) -> None:
         wrapper = ROOT / "relay" / "app" / "relay_health_wrapper.py"
         script = (
