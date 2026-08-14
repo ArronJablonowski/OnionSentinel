@@ -443,6 +443,24 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
             50,
         )
 
+    def test_ac_hunter_broker_has_bounded_config_admission_phases(self) -> None:
+        broker = ROOT / "relay" / "app" / "ac_hunter_broker.py"
+        expected = {
+            "_read_config_snapshot",
+            "_validate_config_shape",
+            "_validate_upstream_identity",
+            "_validated_ca_bundle",
+            "_validate_config_limits",
+            "_validated_lock_file",
+        }
+
+        self.assertTrue(expected <= top_level_function_names(broker))
+        function = top_level_function(broker, "_load_config")
+        self.assertLessEqual(
+            (function.end_lineno or function.lineno) - function.lineno + 1,
+            50,
+        )
+
     def test_relay_health_wrapper_supports_isolated_file_loader_import(self) -> None:
         wrapper = ROOT / "relay" / "app" / "relay_health_wrapper.py"
         script = (
