@@ -3661,7 +3661,9 @@ text-pattern matching, and the fixed category/HTTP projection while retaining
 the public classifier and its exact precedence.
 `relay_health_sanitization.py` owns secret-safe child-result projection,
 PCAP/storage summary validation, persisted-state cleansing, and bounded
-human-readable summaries.
+human-readable summaries. Its bounded phases separate PCAP scalar admission
+from outcome/spool/capture details, storage sections from SMART and failure
+categories, and child diagnostic selection from safe stdout/stderr rendering.
 
 `relay_health_application.py` owns bounded component subprocess probes,
 capture-protection recovery proof, failure debounce/recovery transitions, safe

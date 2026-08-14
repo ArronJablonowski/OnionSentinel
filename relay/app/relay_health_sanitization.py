@@ -11,20 +11,20 @@ def sanitize_alert_summary(payload: object) -> dict | None:
     return summary if "alert_count" in summary else None
 
 
-def sanitize_pcap_summary(payload: object) -> dict | None:
-    if not isinstance(payload, dict) or "processed" not in payload:
-        return None
-    if "enabled" not in payload and "operational_failures" not in payload:
-        return None
-    summary = {}
-    invalid_fields = []
+def _prior_pcap_invalid_fields(payload: dict) -> list[str]:
     prior_invalid_fields = payload.get("invalid_fields")
-    if isinstance(prior_invalid_fields, list):
-        valid_field_names = set(PCAP_BOOLEAN_FIELDS + PCAP_COUNTER_FIELDS)
-        invalid_fields.extend(
-            field for field in prior_invalid_fields
-            if isinstance(field, str) and field in valid_field_names
-        )
+    if not isinstance(prior_invalid_fields, list):
+        return []
+    valid_field_names = set(PCAP_BOOLEAN_FIELDS + PCAP_COUNTER_FIELDS)
+    return [
+        field for field in prior_invalid_fields
+        if isinstance(field, str) and field in valid_field_names
+    ]
+
+
+def _sanitize_pcap_scalar_fields(payload: dict) -> tuple[dict, list[str]]:
+    summary = {}
+    invalid_fields = _prior_pcap_invalid_fields(payload)
     for field in PCAP_BOOLEAN_FIELDS:
         value = payload.get(field)
         if isinstance(value, bool):
@@ -32,20 +32,36 @@ def sanitize_pcap_summary(payload: object) -> dict | None:
         elif field in payload:
             invalid_fields.append(field)
     summary.update(sanitize_counter_fields(payload, PCAP_COUNTER_FIELDS))
-    for field in PCAP_COUNTER_FIELDS:
-        if field in payload and field not in summary:
-            invalid_fields.append(field)
+    invalid_fields.extend(
+        field for field in PCAP_COUNTER_FIELDS
+        if field in payload and field not in summary
+    )
+    return summary, invalid_fields
+
+
+def _pcap_detail_projection(payload: dict) -> dict:
+    details = {}
     outcomes = sanitize_outcomes(payload.get("outcomes"))
     if outcomes:
-        summary["outcomes"] = outcomes
+        details["outcomes"] = outcomes
     spool = sanitize_spool(payload.get("spool"))
     if spool:
-        summary["spool"] = spool
+        details["spool"] = spool
     if (
         payload.get("deferred") is True
         or isinstance(payload.get("capture_protection"), dict)
     ):
-        summary["capture_protection"] = sanitize_capture_protection(payload)
+        details["capture_protection"] = sanitize_capture_protection(payload)
+    return details
+
+
+def sanitize_pcap_summary(payload: object) -> dict | None:
+    if not isinstance(payload, dict) or "processed" not in payload:
+        return None
+    if "enabled" not in payload and "operational_failures" not in payload:
+        return None
+    summary, invalid_fields = _sanitize_pcap_scalar_fields(payload)
+    summary.update(_pcap_detail_projection(payload))
     if invalid_fields:
         summary["invalid_fields"] = sorted(set(invalid_fields))
     return summary
@@ -68,55 +84,68 @@ def storage_failure_category(value: object) -> str:
     return "health_check_failed"
 
 
+def _sanitize_storage_section(raw_section: object) -> dict:
+    if not isinstance(raw_section, dict):
+        return {}
+    section = {}
+    for field in ("total_bytes", "used_bytes", "free_bytes"):
+        number = validated_int(
+            raw_section.get(field),
+            maximum=MAX_STORAGE_BYTES,
+        )
+        if number is not None:
+            section[field] = number
+    for field in ("used_percent", "warning_percent", "hard_percent"):
+        number = validated_number(
+            raw_section.get(field),
+            minimum=0.0,
+            maximum=100.0,
+        )
+        if number is not None:
+            section[field] = number
+    return section
+
+
+def _sanitize_smart_summary(raw_smart: object) -> dict:
+    if not isinstance(raw_smart, dict):
+        return {}
+    smart = {}
+    if isinstance(raw_smart.get("passed"), bool):
+        smart["passed"] = raw_smart["passed"]
+    temperature = validated_number(
+        raw_smart.get("temperature_c"),
+        minimum=-100.0,
+        maximum=200.0,
+    )
+    if temperature is not None:
+        smart["temperature_c"] = temperature
+    for field in ("critical_warning", "media_errors", "unsafe_shutdowns"):
+        number = validated_int(raw_smart.get(field))
+        if number is not None:
+            smart[field] = number
+    return smart
+
+
+def _storage_failure_categories(failures: object) -> list[str] | None:
+    if not isinstance(failures, list):
+        return None
+    return sorted({storage_failure_category(item) for item in failures})
+
+
 def sanitize_storage_summary(payload: object) -> dict | None:
     if not isinstance(payload, dict) or not isinstance(payload.get("ok"), bool):
         return None
     summary = {"ok": payload["ok"]}
     for section_name in ("root_storage", "storage"):
-        raw_section = payload.get(section_name)
-        if not isinstance(raw_section, dict):
-            continue
-        section = {}
-        for field in ("total_bytes", "used_bytes", "free_bytes"):
-            number = validated_int(
-                raw_section.get(field),
-                maximum=MAX_STORAGE_BYTES,
-            )
-            if number is not None:
-                section[field] = number
-        for field in ("used_percent", "warning_percent", "hard_percent"):
-            number = validated_number(
-                raw_section.get(field),
-                minimum=0.0,
-                maximum=100.0,
-            )
-            if number is not None:
-                section[field] = number
+        section = _sanitize_storage_section(payload.get(section_name))
         if section:
             summary[section_name] = section
-    raw_smart = payload.get("smart")
-    if isinstance(raw_smart, dict):
-        smart = {}
-        if isinstance(raw_smart.get("passed"), bool):
-            smart["passed"] = raw_smart["passed"]
-        temperature = validated_number(
-            raw_smart.get("temperature_c"),
-            minimum=-100.0,
-            maximum=200.0,
-        )
-        if temperature is not None:
-            smart["temperature_c"] = temperature
-        for field in ("critical_warning", "media_errors", "unsafe_shutdowns"):
-            number = validated_int(raw_smart.get(field))
-            if number is not None:
-                smart[field] = number
-        if smart:
-            summary["smart"] = smart
-    failures = payload.get("failures")
-    if isinstance(failures, list):
-        summary["failure_categories"] = sorted({
-            storage_failure_category(item) for item in failures
-        })
+    smart = _sanitize_smart_summary(payload.get("smart"))
+    if smart:
+        summary["smart"] = smart
+    failure_categories = _storage_failure_categories(payload.get("failures"))
+    if failure_categories is not None:
+        summary["failure_categories"] = failure_categories
     return summary
 
 
@@ -148,6 +177,53 @@ def pcap_outcome_diagnostic(summary: dict) -> str | None:
     return None
 
 
+def _child_fallback_diagnostic(
+    component: str,
+    summary: dict | None,
+    summary_valid: bool,
+    raw_stdout: str,
+    returncode: int,
+    fallback: str | None,
+) -> str | None:
+    if not summary_valid and (raw_stdout.strip() or returncode == 0):
+        fallback = fallback or "invalid_output"
+    if component == "pcap" and summary:
+        fallback = pcap_outcome_diagnostic(summary) or fallback
+    if returncode != 0:
+        fallback = fallback or "child_failure"
+    return fallback
+
+
+def _child_diagnostic_values(
+    raw_stderr: str,
+    raw_stdout: str,
+    returncode: int,
+    summary_valid: bool,
+) -> list[str]:
+    values = [raw_stderr]
+    if returncode != 0 or not summary_valid:
+        values.append(raw_stdout)
+    return values
+
+
+def _safe_child_stderr(
+    component: str,
+    summary: dict | None,
+    diagnostic: dict,
+) -> str:
+    if not diagnostic:
+        return ""
+    diagnostic_payload = dict(diagnostic)
+    if component == "pcap" and summary:
+        for field in ("operational_failures", "outcomes", "spool"):
+            if field in summary:
+                diagnostic_payload[field] = summary[field]
+    return json.dumps(
+        {"child_diagnostic": diagnostic_payload},
+        sort_keys=True,
+    ) + "\n"
+
+
 def sanitized_child_result(
     result: subprocess.CompletedProcess,
     component: str,
@@ -164,18 +240,20 @@ def sanitized_child_result(
         if forced_returncode is not None
         else result.returncode,
     )
-    if not summary_valid and (raw_stdout.strip() or returncode == 0):
-        fallback_diagnostic = fallback_diagnostic or "invalid_output"
-    if component == "pcap" and summary:
-        fallback_diagnostic = (
-            pcap_outcome_diagnostic(summary)
-            or fallback_diagnostic
-        )
-    if returncode != 0:
-        fallback_diagnostic = fallback_diagnostic or "child_failure"
-    diagnostic_values = [raw_stderr]
-    if returncode != 0 or not summary_valid:
-        diagnostic_values.append(raw_stdout)
+    fallback_diagnostic = _child_fallback_diagnostic(
+        component,
+        summary,
+        summary_valid,
+        raw_stdout,
+        returncode,
+        fallback_diagnostic,
+    )
+    diagnostic_values = _child_diagnostic_values(
+        raw_stderr,
+        raw_stdout,
+        returncode,
+        summary_valid,
+    )
     diagnostic = classify_child_diagnostic(
         *diagnostic_values,
         fallback=fallback_diagnostic,
@@ -185,17 +263,7 @@ def sanitized_child_result(
         if summary
         else ""
     )
-    safe_stderr = ""
-    if diagnostic:
-        diagnostic_payload = dict(diagnostic)
-        if component == "pcap" and summary:
-            for field in ("operational_failures", "outcomes", "spool"):
-                if field in summary:
-                    diagnostic_payload[field] = summary[field]
-        safe_stderr = json.dumps(
-            {"child_diagnostic": diagnostic_payload},
-            sort_keys=True,
-        ) + "\n"
+    safe_stderr = _safe_child_stderr(component, summary, diagnostic)
     return subprocess.CompletedProcess(
         result.args,
         returncode,

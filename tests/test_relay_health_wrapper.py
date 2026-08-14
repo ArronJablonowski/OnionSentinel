@@ -370,6 +370,73 @@ class RelayHealthWrapperTest(unittest.TestCase):
             "deferred=true broker_contacted=false",
         )
 
+    def test_pcap_sanitizer_preserves_invalid_and_detail_projection(self) -> None:
+        summary = self.wrapper.sanitize_pcap_summary({
+            "enabled": True,
+            "locked": 1,
+            "processed": True,
+            "operational_failures": 2,
+            "invalid_fields": ["enabled", "processed", "unknown"],
+            "outcomes": {"timeout": 1, "unknown": 9},
+            "spool": {
+                "available": False,
+                "free_bytes": 4096,
+                "path": "/must-not-survive",
+            },
+        })
+
+        self.assertEqual(summary, {
+            "enabled": True,
+            "operational_failures": 2,
+            "outcomes": {"timeout": 1},
+            "spool": {"available": False, "free_bytes": 4096},
+            "invalid_fields": ["enabled", "locked", "processed"],
+        })
+
+    def test_storage_sanitizer_preserves_bounded_section_order(self) -> None:
+        summary = self.wrapper.sanitize_storage_summary({
+            "ok": False,
+            "root_storage": {
+                "total_bytes": 1000,
+                "free_bytes": 600,
+                "used_percent": 40.5,
+                "path": "/must-not-survive",
+            },
+            "storage": {"total_bytes": True, "used_percent": 101},
+            "smart": {
+                "passed": False,
+                "temperature_c": 51.5,
+                "critical_warning": 1,
+                "serial": "must-not-survive",
+            },
+            "failures": [
+                "root free space low",
+                "SMART overall failed",
+                "root usage high",
+            ],
+        })
+
+        self.assertEqual(summary, {
+            "ok": False,
+            "root_storage": {
+                "total_bytes": 1000,
+                "free_bytes": 600,
+                "used_percent": 40.5,
+            },
+            "smart": {
+                "passed": False,
+                "temperature_c": 51.5,
+                "critical_warning": 1,
+            },
+            "failure_categories": ["root_capacity", "smart_health"],
+        })
+        self.assertEqual(list(summary), [
+            "ok",
+            "root_storage",
+            "smart",
+            "failure_categories",
+        ])
+
     def test_capture_protection_hold_is_reported_as_safe_degraded_state(self) -> None:
         result = completed(
             0,
