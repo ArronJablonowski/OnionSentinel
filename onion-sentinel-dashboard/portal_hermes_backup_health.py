@@ -162,37 +162,53 @@ def _attempt_warning(
     )
 
 
-def compose_latest_hermes_backup_metric(
+def _missing_success_metric(
     sources: HermesBackupSources,
+    incomplete: list[dict],
+    log: _BackupLog,
 ) -> tuple[str, str, bool]:
-    """Return display value, detail, and warning state for the newest valid set."""
-    rows, log = _catalog(sources)
-    complete = [row for row in rows if row["ok"]]
-    incomplete = [row for row in rows if not row["ok"]]
-    if not complete:
-        details = [
-            f"WARNING: No successful full Hermes backup sets found in {sources.backup_dir}"
-        ]
-        if incomplete:
-            descriptions = [_incomplete_description(row) for row in incomplete[-3:]]
-            details.append("Incomplete artifacts: " + "; ".join(descriptions))
-        if log.warning:
-            details.append(log.warning)
-        return "⚠ None", " · ".join(details), True
+    details = [
+        f"WARNING: No successful full Hermes backup sets found in {sources.backup_dir}"
+    ]
+    if incomplete:
+        descriptions = [_incomplete_description(row) for row in incomplete[-3:]]
+        details.append("Incomplete artifacts: " + "; ".join(descriptions))
+    if log.warning:
+        details.append(log.warning)
+    return "⚠ None", " · ".join(details), True
 
-    newest = complete[-1]
-    success_utc = backup_timestamp_from_name(newest["archive"])
+
+def _successful_backup_warnings(
+    rows: list[dict],
+    newest: dict,
+    log: _BackupLog,
+    success_utc: dt.datetime,
+    format_timestamp: Callable[[dt.datetime], str],
+) -> list[str]:
     warnings = []
     if rows[-1]["created"] > newest["created"] and not rows[-1]["ok"]:
         warnings.append(
             "Newer backup artifact is incomplete/not confirmed successful: "
             + _incomplete_description(rows[-1])
         )
-    attempt_warning = _attempt_warning(log, success_utc, sources.format_timestamp)
+    attempt_warning = _attempt_warning(log, success_utc, format_timestamp)
     if attempt_warning:
         warnings.append(attempt_warning)
     if log.warning:
         warnings.append(log.warning)
+    return warnings
+
+
+def _successful_backup_metric(
+    sources: HermesBackupSources,
+    rows: list[dict],
+    log: _BackupLog,
+    newest: dict,
+) -> tuple[str, str, bool]:
+    success_utc = backup_timestamp_from_name(newest["archive"])
+    warnings = _successful_backup_warnings(
+        rows, newest, log, success_utc, sources.format_timestamp
+    )
     value = ("⚠ " if warnings else "") + sources.relative_time_label(
         newest["created"].timestamp()
     )
@@ -205,6 +221,18 @@ def compose_latest_hermes_backup_metric(
     if warnings:
         details.insert(0, "WARNING: " + " | ".join(warnings))
     return value, " · ".join(details), bool(warnings)
+
+
+def compose_latest_hermes_backup_metric(
+    sources: HermesBackupSources,
+) -> tuple[str, str, bool]:
+    """Return display value, detail, and warning state for the newest valid set."""
+    rows, log = _catalog(sources)
+    complete = [row for row in rows if row["ok"]]
+    incomplete = [row for row in rows if not row["ok"]]
+    if not complete:
+        return _missing_success_metric(sources, incomplete, log)
+    return _successful_backup_metric(sources, rows, log, complete[-1])
 
 
 def compose_backup_inventory(sources: HermesBackupSources) -> tuple[list[dict], dict]:
