@@ -3604,7 +3604,10 @@ broker retains thin compatibility wrappers for its historical private seams.
 root/field, fixed-operation, window-shape, timestamp/range, and result-size
 admission phases. `incident_evidence_software.py` owns Software
 Inventory request, cursor, record, operating-system provenance, pagination,
-response, and query-audit validation. The broker re-exports both historical
+response, and query-audit validation. Its bounded OS phases separate field-text
+admission, endpoint provenance, and passive-source denial; its page phases
+separate count admission, pagination flags, cursor consistency, and ordered
+record validation. The broker re-exports both historical
 contract surfaces, and the Pi installer copies both inward owners before the
 executable facade. No module broadens query, credential, network, filesystem,
 or mutation authority.

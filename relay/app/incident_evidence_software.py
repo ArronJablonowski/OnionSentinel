@@ -298,46 +298,63 @@ def _validate_record_text(record: dict) -> None:
         )
 
 
-def _validate_operating_system(record: dict, source: str) -> None:
-    if set(record) != SOFTWARE_OS_RECORD_KEYS:
-        return
-    fields = (
+def _validate_operating_system_fields(record: dict) -> None:
+    for field in (
         "operating_system_type",
         "operating_system_version",
         "operating_system_source",
         "operating_system_confidence",
-    )
-    for field in fields:
+    ):
         _software_text(
             record[field],
             SOFTWARE_TEXT_LIMITS[field],
             field=f"record.{field}",
             allow_empty=True,
         )
+
+
+def _validate_endpoint_operating_system(record: dict) -> None:
     os_present = bool(
         record["operating_system_type"]
         or record["operating_system_version"]
     )
-    if source == "osquery_apps":
-        if os_present and (
-            record["operating_system_source"]
-            != "osquery_manager.result:host.os"
-            or record["operating_system_confidence"] != "high"
-        ):
-            raise ValueError(
-                "endpoint operating-system provenance failed validation"
-            )
-        if not os_present and (
-            record["operating_system_source"]
-            or record["operating_system_confidence"]
-        ):
-            raise ValueError(
-                "empty endpoint operating-system evidence claims provenance"
-            )
-    elif any(record[field] for field in fields):
+    if os_present and (
+        record["operating_system_source"]
+        != "osquery_manager.result:host.os"
+        or record["operating_system_confidence"] != "high"
+    ):
+        raise ValueError(
+            "endpoint operating-system provenance failed validation"
+        )
+    if not os_present and (
+        record["operating_system_source"]
+        or record["operating_system_confidence"]
+    ):
+        raise ValueError(
+            "empty endpoint operating-system evidence claims provenance"
+        )
+
+
+def _validate_passive_operating_system(record: dict) -> None:
+    if any(record[field] for field in (
+        "operating_system_type",
+        "operating_system_version",
+        "operating_system_source",
+        "operating_system_confidence",
+    )):
         raise ValueError(
             "passive software evidence cannot assert an exact operating system"
         )
+
+
+def _validate_operating_system(record: dict, source: str) -> None:
+    if set(record) != SOFTWARE_OS_RECORD_KEYS:
+        return
+    _validate_operating_system_fields(record)
+    if source == "osquery_apps":
+        _validate_endpoint_operating_system(record)
+    else:
+        _validate_passive_operating_system(record)
 
 
 def _validate_record_observations(
@@ -419,13 +436,10 @@ def _validate_response_window(
     return start, end
 
 
-def _validate_response_page(
+def _response_records(
     response: dict,
     request: dict,
-    source: str,
-    start: dt.datetime,
-    end: dt.datetime,
-) -> None:
+) -> tuple[list, int]:
     records = response["records"]
     returned = response["returned"]
     if (
@@ -438,6 +452,10 @@ def _validate_response_page(
         raise ValueError(
             "software inventory response count failed validation"
         )
+    return records, returned
+
+
+def _validate_pagination_state(response: dict) -> None:
     if (
         not isinstance(response["complete"], bool)
         or not isinstance(response["truncated"], bool)
@@ -446,6 +464,13 @@ def _validate_response_page(
         raise ValueError(
             "software inventory pagination state failed validation"
         )
+
+
+def _validate_response_cursor(
+    response: dict,
+    source: str,
+    returned: int,
+) -> None:
     cursor = validate_software_cursor(response["after"], source)
     if response["complete"] and cursor is not None:
         raise ValueError(
@@ -455,6 +480,14 @@ def _validate_response_page(
         raise ValueError(
             "truncated software inventory response omitted its cursor"
         )
+
+
+def _validate_response_records(
+    records: list,
+    source: str,
+    start: dt.datetime,
+    end: dt.datetime,
+) -> None:
     for record in records:
         _validate_software_record(
             record,
@@ -462,6 +495,19 @@ def _validate_response_page(
             start=start,
             end=end,
         )
+
+
+def _validate_response_page(
+    response: dict,
+    request: dict,
+    source: str,
+    start: dt.datetime,
+    end: dt.datetime,
+) -> None:
+    records, returned = _response_records(response, request)
+    _validate_pagination_state(response)
+    _validate_response_cursor(response, source, returned)
+    _validate_response_records(records, source, start, end)
 
 
 def _validate_query_audit(audit: object, expected: dict) -> None:
