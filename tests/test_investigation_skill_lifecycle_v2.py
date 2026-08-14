@@ -20,6 +20,7 @@ if str(BIN) not in sys.path:
 
 import investigation_skill_lifecycle_v2 as lifecycle  # noqa: E402
 import investigation_skill_registry_v2 as registry  # noqa: E402
+import investigation_skill_runtime_v2 as runtime  # noqa: E402
 import investigation_skill_signing_v2 as signing  # noqa: E402
 import investigation_skills_v2 as skills  # noqa: E402
 
@@ -28,6 +29,7 @@ CANDIDATE = (
     ROOT
     / "n8n/config/investigation-skills-v2-candidates/dns-triage-v2.candidate.json"
 )
+MANAGER = BIN / "manage-investigation-skill-registry-v2.py"
 
 
 def promoted_manifest(identifier: str) -> dict[str, object]:
@@ -213,6 +215,86 @@ class InvestigationSkillLifecycleV2Tests(unittest.TestCase):
                 verifier=self.verifier,
             )
         self.assertEqual(list(target.iterdir()), [])
+
+    def test_runtime_adapter_selects_verified_active_registry_only(self) -> None:
+        value = self.snapshot("network.dns.primary", revision=1)
+        lifecycle.activate_snapshot(
+            self.registry_root,
+            value,
+            expected_current_digest="",
+            verifier=self.verifier,
+        )
+
+        selected = runtime.select_active_registry(
+            self.registry_root,
+            trusted_keys={"operator-release-key": self.public_key},
+            context={
+                "task": "alert-triage",
+                "protocol": "dns",
+                "alert_family": "dns",
+                "data_source": "elastic",
+            },
+            role="soc-analyst",
+            permitted_capabilities=value["records"][0]["manifest"]["capabilities"],
+            provider="codex-cli",
+            budget={
+                "max_queries": 24,
+                "max_rows": 10000,
+                "max_bytes": 16 * 1024 * 1024,
+                "timeout_seconds": 600,
+            },
+        )
+        self.assertEqual(selected["selected_count"], 1)
+        self.assertEqual(selected["registry_digest"], value["registry_digest"])
+
+    def test_manager_cli_activates_and_reports_content_free_status(self) -> None:
+        value = self.snapshot("network.dns.primary", revision=1)
+        snapshot_path = self.root / "signed-registry.json"
+        snapshot_path.write_text(json.dumps(value), encoding="utf-8")
+        snapshot_path.chmod(0o600)
+
+        activated = subprocess.run(
+            [
+                sys.executable,
+                str(MANAGER),
+                "--root", str(self.registry_root),
+                "--public-key", str(self.public_key),
+                "--key-id", "operator-release-key",
+                "activate",
+                "--snapshot", str(snapshot_path),
+                "--expected-current-digest", "",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        self.assertEqual(activated.returncode, 0, activated.stderr)
+        receipt = json.loads(activated.stdout)
+        self.assertEqual(receipt["registry_digest"], value["registry_digest"])
+        self.assertNotIn("manifest", activated.stdout)
+
+        status = subprocess.run(
+            [
+                sys.executable,
+                str(MANAGER),
+                "--root", str(self.registry_root),
+                "--public-key", str(self.public_key),
+                "--key-id", "operator-release-key",
+                "status",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(
+            json.loads(status.stdout)["registry_digest"],
+            value["registry_digest"],
+        )
 
 
 if __name__ == "__main__":
