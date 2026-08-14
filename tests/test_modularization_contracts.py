@@ -476,6 +476,33 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
             50,
         )
 
+    def test_relay_health_sanitization_has_bounded_projection_phases(self) -> None:
+        sanitization = ROOT / "relay" / "app" / "relay_health_sanitization.py"
+        expected = {
+            "_sanitize_pcap_scalar_fields",
+            "_pcap_detail_projection",
+            "_sanitize_storage_section",
+            "_sanitize_smart_summary",
+            "_storage_failure_categories",
+            "_child_fallback_diagnostic",
+            "_safe_child_stderr",
+        }
+
+        self.assertTrue(expected <= top_level_function_names(sanitization))
+        for name in (
+            "sanitize_pcap_summary",
+            "sanitize_storage_summary",
+            "sanitized_child_result",
+        ):
+            function = top_level_function(sanitization, name)
+            with self.subTest(name=name):
+                self.assertLessEqual(
+                    (function.end_lineno or function.lineno)
+                    - function.lineno
+                    + 1,
+                    50,
+                )
+
     def test_relay_health_wrapper_supports_isolated_file_loader_import(self) -> None:
         wrapper = ROOT / "relay" / "app" / "relay_health_wrapper.py"
         script = (
