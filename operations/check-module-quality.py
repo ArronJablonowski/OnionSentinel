@@ -291,6 +291,22 @@ def issue(kind: str, name: str, measured: int, allowed: int) -> dict[str, Any]:
     }
 
 
+def _append_function_metric_issue(
+    failures: list[dict[str, Any]],
+    warnings: list[dict[str, Any]],
+    kind: str,
+    name: str,
+    values: dict[str, int],
+    metric: str,
+    allowed: int,
+    target: int,
+) -> None:
+    if values[metric] > allowed:
+        failures.append(issue(kind, name, values[metric], allowed))
+    elif values[metric] > target:
+        warnings.append(issue(kind, name, values[metric], target))
+
+
 def metric_issues(
     metrics: dict[str, Any],
     policy: dict[str, Any],
@@ -317,32 +333,26 @@ def metric_issues(
         debt = debt if isinstance(debt, dict) else {}
         allowed_lines = debt.get("max_lines", function_limit)
         allowed_complexity = debt.get("max_complexity", complexity_limit)
-        if values["lines"] > allowed_lines:
-            failures.append(
-                issue("function_lines", name, values["lines"], allowed_lines)
-            )
-        elif values["lines"] > function_target:
-            warnings.append(
-                issue("function_lines", name, values["lines"], function_target)
-            )
-        if values["complexity"] > allowed_complexity:
-            failures.append(
-                issue(
-                    "function_complexity",
-                    name,
-                    values["complexity"],
-                    allowed_complexity,
-                )
-            )
-        elif values["complexity"] > complexity_target:
-            warnings.append(
-                issue(
-                    "function_complexity",
-                    name,
-                    values["complexity"],
-                    complexity_target,
-                )
-            )
+        _append_function_metric_issue(
+            failures,
+            warnings,
+            "function_lines",
+            name,
+            values,
+            "lines",
+            allowed_lines,
+            function_target,
+        )
+        _append_function_metric_issue(
+            failures,
+            warnings,
+            "function_complexity",
+            name,
+            values,
+            "complexity",
+            allowed_complexity,
+            complexity_target,
+        )
     return failures, warnings
 
 
