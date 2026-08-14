@@ -34,6 +34,33 @@ class IncidentReadServiceSources:
     compose_detail_payload: Callable[..., dict]
 
 
+def _incident_list_payload(
+    request: object,
+    records: object,
+    incidents: list[dict],
+    inventory: dict,
+    inventory_error: object,
+) -> dict:
+    return {
+        "ok": True,
+        "incidents": incidents,
+        "page": records.page,
+        "per_page": request.per_page,
+        "total": records.total,
+        "pages": records.pages,
+        "status_counts": records.status_counts,
+        "agent_status_counts": records.agent_status_counts,
+        "schema_ready": True,
+        "sort": request.sort,
+        "direction": request.direction,
+        "asset_inventory_status": (
+            "invalid"
+            if inventory_error
+            else str(inventory.get("inventory_status") or "loaded")
+        ),
+    }
+
+
 def incident_list_response(
     sources: IncidentReadServiceSources,
     query: dict[str, list[str]],
@@ -68,24 +95,13 @@ def incident_list_response(
             f"Incident Response data unavailable: {exc}", 503
         )
 
-    return 200, {
-        "ok": True,
-        "incidents": incidents,
-        "page": records.page,
-        "per_page": request.per_page,
-        "total": records.total,
-        "pages": records.pages,
-        "status_counts": records.status_counts,
-        "agent_status_counts": records.agent_status_counts,
-        "schema_ready": True,
-        "sort": request.sort,
-        "direction": request.direction,
-        "asset_inventory_status": (
-            "invalid"
-            if inventory_error
-            else str(inventory.get("inventory_status") or "loaded")
-        ),
-    }
+    return 200, _incident_list_payload(
+        request,
+        records,
+        incidents,
+        inventory,
+        inventory_error,
+    )
 
 
 def incident_detail_response(
