@@ -105,6 +105,103 @@ class RelayStorageHealthTest(unittest.TestCase):
         self.assertEqual(reloaded.MAX_USED_PERCENT, 75)
         self.assertEqual(reloaded.ROOT_HARD_USED_PERCENT, 80)
 
+    def test_probe_order_and_malformed_json_fail_closed(self) -> None:
+        findmnt = subprocess.CompletedProcess("findmnt", 0, "not-json", "")
+        smartctl = subprocess.CompletedProcess("smartctl", 0, "not-json", "")
+        root_usage = type("Usage", (), {
+            "total": 32 * 1024**3,
+            "used": 4 * 1024**3,
+            "free": 28 * 1024**3,
+        })()
+        ssd_usage = type("Usage", (), {
+            "total": 1024**4,
+            "used": 100 * 1024**3,
+            "free": 924 * 1024**3,
+        })()
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                self.module,
+                "run",
+                side_effect=[findmnt, smartctl],
+            ) as run,
+            mock.patch.object(
+                self.module.shutil,
+                "disk_usage",
+                side_effect=[root_usage, ssd_usage],
+            ) as disk_usage,
+            contextlib.redirect_stdout(output),
+        ):
+            rc = self.module.main()
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                ["/usr/bin/findmnt", "-J", "-T", str(self.module.MOUNT)],
+                [
+                    "/usr/bin/sudo",
+                    "-n",
+                    self.module.SMARTCTL,
+                    "-a",
+                    "-j",
+                    self.module.DEVICE,
+                ],
+            ],
+        )
+        self.assertEqual(
+            [call.args[0] for call in disk_usage.call_args_list],
+            [self.module.ROOT_MOUNT, self.module.MOUNT],
+        )
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["failures"], [
+            "relay SSD mount resolved to the SD card or an unknown source",
+            "SMART query returned invalid JSON",
+            "SMART overall health did not pass",
+        ])
+
+    def test_probe_errors_preserve_failure_order(self) -> None:
+        findmnt = subprocess.CompletedProcess(
+            "findmnt",
+            0,
+            '{"filesystems":[{"source":"/dev/sda1"}]}',
+            "",
+        )
+        smartctl = subprocess.CompletedProcess("smartctl", 4, "", "")
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                self.module,
+                "run",
+                side_effect=[findmnt, smartctl],
+            ),
+            mock.patch.object(
+                self.module.shutil,
+                "disk_usage",
+                side_effect=[
+                    OSError("root unavailable"),
+                    OSError("ssd unavailable"),
+                ],
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = self.module.main()
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads(output.getvalue())["failures"], [
+            "relay root usage check failed: root unavailable",
+            "relay SSD usage check failed: ssd unavailable",
+            "SMART query failed with exit 4",
+        ])
+
+    def test_invalid_smart_counter_retains_value_error(self) -> None:
+        smart = {
+            "smart_status": {"passed": True},
+            "nvme_smart_health_information_log": {"media_errors": "bad"},
+        }
+        with self.assertRaisesRegex(ValueError, "invalid literal"):
+            self.run_check(smart)
+
 
 if __name__ == "__main__":
     unittest.main()

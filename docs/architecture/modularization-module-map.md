@@ -3674,6 +3674,10 @@ configuration values are forwarded only for the duration of a call, preserving
 test and recovery overrides without cross-import state leakage. The Pi installer
 copies all three implementation modules before the wrapper.
 
+`storage_health.py` remains the read-only storage probe executable. Its bounded
+root-capacity, mount/SSD-capacity, and SMART phases retain the original probe
+order, failure ordering, JSON contract, and 0/1 exit semantics.
+
 ## Local Ollama Benchmark
 
 `benchmark-ollama-cybersecurity.py` is the repository-only executable and
