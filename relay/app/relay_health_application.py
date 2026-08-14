@@ -35,22 +35,22 @@ def parse_pcap_summary(stdout: str) -> dict | None:
     return candidate
 
 
-def build_pcap_status_event(result: subprocess.CompletedProcess) -> dict:
-    """Build safe relay telemetry that distinguishes a hold from a failure.
-
-    Capture-loss protection intentionally returns success because the broker is
-    healthy and refusing optional evidence work to protect Security Onion. The
-    Mac needs this explicit state to avoid interpreting the quiet queue as a
-    crashed worker. Only bounded counters and capture telemetry are published;
-    command lines, credentials, paths, and raw stderr are never included.
-    """
+def _pcap_status_summaries(
+    result: subprocess.CompletedProcess,
+) -> tuple[dict, dict, dict]:
     raw_summary = parse_pcap_summary(
         result.stdout if isinstance(result.stdout, str) else ""
     ) or {}
     summary = sanitize_pcap_summary(raw_summary) or {}
     protection = summary.get("capture_protection")
     protection = protection if isinstance(protection, dict) else {}
-    deferred = raw_summary.get("deferred") is True
+    return raw_summary, summary, protection
+
+
+def _pcap_status_counters(
+    raw_summary: dict,
+    summary: dict,
+) -> tuple[bool, int, int]:
     counters_valid = (
         strict_nonnegative_counter(raw_summary.get("processed"))
         and strict_nonnegative_counter(
@@ -60,16 +60,39 @@ def build_pcap_status_event(result: subprocess.CompletedProcess) -> dict:
     operational_failures = bounded_nonnegative_int(
         raw_summary.get("operational_failures")
     )
-    returncode = safe_returncode(result.returncode)
-    state = (
-        "operational_failure"
-        if returncode or operational_failures or not counters_valid
-        else "capture_protection_hold"
-        if deferred
-        else "healthy"
+    processed = bounded_nonnegative_int(summary.get("processed"))
+    return counters_valid, processed, operational_failures
+
+
+def _pcap_workflow_state(
+    returncode: int,
+    operational_failures: int,
+    counters_valid: bool,
+    deferred: bool,
+) -> str:
+    if returncode or operational_failures or not counters_valid:
+        return "operational_failure"
+    return "capture_protection_hold" if deferred else "healthy"
+
+
+def _pcap_workflow(
+    raw_summary: dict,
+    summary: dict,
+    protection: dict,
+    returncode: int,
+) -> dict:
+    deferred = raw_summary.get("deferred") is True
+    counters_valid, processed, operational_failures = _pcap_status_counters(
+        raw_summary,
+        summary,
     )
-    workflow = {
-        "state": state,
+    return {
+        "state": _pcap_workflow_state(
+            returncode,
+            operational_failures,
+            counters_valid,
+            deferred,
+        ),
         "deferred": deferred,
         "reason": protection.get(
             "reason_category",
@@ -79,10 +102,21 @@ def build_pcap_status_event(result: subprocess.CompletedProcess) -> dict:
         "observed_percent": protection.get("observed_percent"),
         "threshold_percent": protection.get("threshold_percent"),
         "telemetry_age_seconds": protection.get("age_seconds"),
-        "processed": bounded_nonnegative_int(summary.get("processed")),
+        "processed": processed,
         "operational_failures": operational_failures or (1 if returncode else 0),
         "broker_contacted": summary.get("broker_contacted") is True,
     }
+
+
+def build_pcap_status_event(result: subprocess.CompletedProcess) -> dict:
+    """Build bounded telemetry distinguishing a safety hold from failure."""
+    raw_summary, summary, protection = _pcap_status_summaries(result)
+    workflow = _pcap_workflow(
+        raw_summary,
+        summary,
+        protection,
+        safe_returncode(result.returncode),
+    )
     return {
         "message_type": "relay_heartbeat",
         "component": "pcap_broker",
@@ -160,18 +194,20 @@ def pcap_result_is_capture_protection_hold(result: subprocess.CompletedProcess) 
     )
 
 
-def pcap_result_proves_broker_recovery(
+def _pcap_recovery_summary(
     result: subprocess.CompletedProcess,
-) -> bool:
-    """Require a successful HTTP broker exchange before clearing a failure."""
+) -> dict | None:
     if result.returncode != 0:
-        return False
-    summary = parse_pcap_summary(result.stdout)
-    if not summary:
-        return False
+        return None
+    return parse_pcap_summary(result.stdout)
+
+
+def _pcap_recovery_has_invalid_fields(summary: dict) -> bool:
     invalid_fields = summary.get("invalid_fields")
-    if isinstance(invalid_fields, list) and invalid_fields:
-        return False
+    return isinstance(invalid_fields, list) and bool(invalid_fields)
+
+
+def _pcap_recovery_contract_valid(summary: dict) -> bool:
     return bool(
         summary.get("ok") is True
         and summary.get("enabled") is True
@@ -183,6 +219,18 @@ def pcap_result_proves_broker_recovery(
             summary.get("operational_failures")
         )
         and summary.get("operational_failures") == 0
+    )
+
+
+def pcap_result_proves_broker_recovery(
+    result: subprocess.CompletedProcess,
+) -> bool:
+    """Require a successful HTTP broker exchange before clearing a failure."""
+    summary = _pcap_recovery_summary(result)
+    return bool(
+        summary
+        and not _pcap_recovery_has_invalid_fields(summary)
+        and _pcap_recovery_contract_valid(summary)
     )
 
 
