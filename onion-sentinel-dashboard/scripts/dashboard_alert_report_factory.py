@@ -94,21 +94,27 @@ def endpoint_label(ip: str | None, port: str | None) -> str:
     return "—"
 
 
+def _summary_markdown_line(raw: str, in_code: bool) -> tuple[bool, object, bool]:
+    """Parse one Markdown line and report whether it reached prose cleanup."""
+    line = raw.strip()
+    if line.startswith("```"):
+        return not in_code, line, False
+    if in_code or not line or line.startswith("#") or re.match(r"^[-*_]{3,}$", line):
+        return in_code, line, False
+    line = re.sub(r"[`*_>#\[\]()]+", " ", line)
+    return in_code, normalize_iso_display_text(re.sub(r"\s+", " ", line).strip()), True
+
+
 def summarize_markdown(text: str, max_len: int = 220) -> str:
     """Return bounded prose from Markdown while excluding headings and code."""
     lines: list[str] = []
     in_code = False
     for raw in text.splitlines():
-        line = raw.strip()
-        if line.startswith("```"):
-            in_code = not in_code
+        in_code, line, admitted = _summary_markdown_line(raw, in_code)
+        if not admitted:
             continue
-        if in_code or not line or line.startswith("#") or re.match(r"^[-*_]{3,}$", line):
-            continue
-        line = re.sub(r"[`*_>#\[\]()]+", " ", line)
-        line = normalize_iso_display_text(re.sub(r"\s+", " ", line).strip())
         if line:
-            lines.append(line)
+            lines.append(line)  # type: ignore[arg-type]
         if sum(len(item) for item in lines) > max_len:
             break
     summary = normalize_iso_display_text(" ".join(lines).strip())
