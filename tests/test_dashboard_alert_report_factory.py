@@ -8,6 +8,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -128,6 +129,118 @@ class DashboardAlertReportFactoryTests(unittest.TestCase):
 
         self.assertEqual(report.title, "[MEDIUM] Security Onion Alert")
         self.assertEqual(report.rule_name, report.title)
+
+    def test_markdown_summary_excludes_structure_and_fenced_code(self) -> None:
+        text = "\n".join([
+            "# Heading",
+            "```json",
+            '{"secret":"not prose"}',
+            "```",
+            "---",
+            "> [Visible] (**alpha**)",
+            "Second line",
+        ])
+
+        self.assertEqual(
+            self.factory.summarize_markdown(text),
+            "Visible alpha Second line",
+        )
+
+    def test_markdown_summary_preserves_regex_and_normalizer_order(self) -> None:
+        trace: list[tuple[object, ...]] = []
+        original_match = self.factory.re.match
+        original_sub = self.factory.re.sub
+
+        def traced_match(pattern: str, text: str):
+            trace.append(("match", pattern, text))
+            return original_match(pattern, text)
+
+        def traced_sub(pattern: str, replacement: str, text: str) -> str:
+            trace.append(("sub", pattern, replacement, text))
+            return original_sub(pattern, replacement, text)
+
+        def traced_normalize(value: str) -> str:
+            trace.append(("normalize", value))
+            return value
+
+        text = "\n".join([
+            "# Heading", "```", "hidden", "```", "---",
+            "> [Visible] (**alpha**)", "[_]()", "Second",
+        ])
+        with (
+            mock.patch.object(self.factory.re, "match", side_effect=traced_match),
+            mock.patch.object(self.factory.re, "sub", side_effect=traced_sub),
+            mock.patch.object(
+                self.factory,
+                "normalize_iso_display_text",
+                side_effect=traced_normalize,
+            ),
+        ):
+            summary = self.factory.summarize_markdown(text)
+
+        self.assertEqual(summary, "Visible alpha Second")
+        self.assertEqual(
+            trace,
+            [
+                ("match", r"^[-*_]{3,}$", "---"),
+                ("match", r"^[-*_]{3,}$", "> [Visible] (**alpha**)"),
+                ("sub", r"[`*_>#\[\]()]+", " ", "> [Visible] (**alpha**)"),
+                ("sub", r"\s+", " ", "   Visible   alpha "),
+                ("normalize", "Visible alpha"),
+                ("match", r"^[-*_]{3,}$", "[_]()"),
+                ("sub", r"[`*_>#\[\]()]+", " ", "[_]()"),
+                ("sub", r"\s+", " ", " "),
+                ("normalize", ""),
+                ("match", r"^[-*_]{3,}$", "Second"),
+                ("sub", r"[`*_>#\[\]()]+", " ", "Second"),
+                ("sub", r"\s+", " ", "Second"),
+                ("normalize", "Second"),
+                ("normalize", "Visible alpha Second"),
+            ],
+        )
+
+    def test_markdown_summary_calls_split_strip_and_prefixes_in_order(self) -> None:
+        trace: list[tuple[object, ...]] = []
+
+        class LineProbe(str):
+            def startswith(self, prefix: str, *args: object) -> bool:
+                trace.append(("startswith", prefix))
+                return super().startswith(prefix, *args)
+
+        class RawProbe:
+            def strip(self) -> LineProbe:
+                trace.append(("strip",))
+                return LineProbe("visible")
+
+        class TextProbe:
+            def splitlines(self) -> list[RawProbe]:
+                trace.append(("splitlines",))
+                return [RawProbe()]
+
+        with mock.patch.object(
+            self.factory.re,
+            "match",
+            side_effect=lambda pattern, text: trace.append(("match", pattern, text)),
+        ):
+            summary = self.factory.summarize_markdown(TextProbe())  # type: ignore[arg-type]
+
+        self.assertEqual(summary, "visible")
+        self.assertEqual(
+            trace,
+            [
+                ("splitlines",), ("strip",), ("startswith", "```"),
+                ("startswith", "#"), ("match", r"^[-*_]{3,}$", "visible"),
+            ],
+        )
+
+    def test_markdown_summary_preserves_strict_bounds_and_fallback(self) -> None:
+        self.assertEqual(self.factory.summarize_markdown("abc\ndef", 5), "abc …")
+        self.assertEqual(self.factory.summarize_markdown("abc", 0), "ab…")
+        self.assertEqual(self.factory.summarize_markdown("abc", -1), "a…")
+        self.assertEqual(
+            self.factory.summarize_markdown("# heading\n```\nhidden\n```"),
+            "No summary text available yet.",
+        )
 
     def test_builder_reexports_factory_and_value_helpers(self) -> None:
         self.assertIs(self.builder.build_alert_report, self.factory.build_alert_report)
