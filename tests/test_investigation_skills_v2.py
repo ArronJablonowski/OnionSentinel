@@ -154,6 +154,8 @@ class InvestigationSkillsV2Tests(unittest.TestCase):
         self.assertTrue(result["passed"])
         self.assertEqual(result["candidate_count"], 20)
         self.assertEqual(result["passed_count"], 21)
+        self.assertEqual(result["evidence_case_count"], 12)
+        self.assertEqual(result["evidence_passed_count"], 12)
         self.assertFalse(result["query_execution"])
         self.assertFalse(result["candidate_activation"])
 
@@ -251,6 +253,37 @@ class InvestigationSkillsV2Tests(unittest.TestCase):
             (CANDIDATE.parent / "offline-replay-fixtures.json").read_text(
                 encoding="utf-8"
             )
+        )
+
+    def test_evidence_fixtures_cover_benign_adversarial_and_failure_semantics(self):
+        fixtures = json.loads(
+            (CANDIDATE.parent / "offline-replay-fixtures.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        evidence_cases = fixtures["evidence_cases"]
+        categories = {item["category"] for item in evidence_cases}
+        fact_states = {item["expected_fact_state"] for item in evidence_cases}
+        scenario_ids = {item["id"] for item in evidence_cases}
+        self.assertEqual(
+            categories,
+            {
+                "adversarial", "benign", "failed", "malformed",
+                "mapping-drift", "partial", "unsupported-source",
+            },
+        )
+        self.assertEqual(
+            fact_states,
+            {"observed", "inferred", "unverified", "unavailable"},
+        )
+        self.assertTrue(
+            {
+                "benign-dns-cdn", "benign-ssh-administration",
+                "benign-stun-conferencing", "benign-beacon-telemetry",
+                "benign-long-connection-vpn", "adversarial-evidence-instruction",
+                "malformed-row-container", "mapping-drift-result",
+                "unsupported-source-result", "complete-empty-scope",
+            }.issubset(scenario_ids)
         )
         case_ids = {item["id"] for item in fixtures["cases"]}
         self.assertTrue(
