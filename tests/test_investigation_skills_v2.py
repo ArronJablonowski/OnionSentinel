@@ -52,11 +52,16 @@ class InvestigationSkillsV2Tests(unittest.TestCase):
             {item["id"] for item in manifests},
             {
                 "foundation.alert-context.validation",
+                "network.beaconing.triage",
                 "network.flow.window-expansion",
+                "network.doh.triage",
                 "network.dns.triage",
                 "network.http.triage",
                 "network.icmp.triage",
+                "network.long-connection.triage",
+                "network.scan.triage",
                 "network.ssh.triage",
+                "network.stun.triage",
                 "network.tls.triage",
                 "source.suricata.rule-intent",
                 "source.zeek.correlation",
@@ -141,8 +146,8 @@ class InvestigationSkillsV2Tests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         result = json.loads(completed.stdout)
         self.assertTrue(result["passed"])
-        self.assertEqual(result["candidate_count"], 9)
-        self.assertEqual(result["passed_count"], 10)
+        self.assertEqual(result["candidate_count"], 14)
+        self.assertEqual(result["passed_count"], 15)
         self.assertFalse(result["query_execution"])
         self.assertFalse(result["candidate_activation"])
 
@@ -155,6 +160,11 @@ class InvestigationSkillsV2Tests(unittest.TestCase):
         case_ids = {item["id"] for item in fixtures["cases"]}
         self.assertTrue(
             {
+                "beaconing-flow-soc",
+                "doh-correlation-ir",
+                "long-connection-flow-ir",
+                "scan-flow-soc",
+                "stun-zeek-ir",
                 "grouped-alert-context-soc",
                 "flow-window-expansion-ir",
             }.issubset(case_ids)
