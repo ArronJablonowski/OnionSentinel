@@ -843,6 +843,19 @@ database lifecycle, network, model, query-execution, credential, or
 evidence-mutation authority. The skill-attestation and job-envelope allowances
 are retired.
 
+The v2 skill-governance dependency direction is similarly inward-only.
+`investigation_skills_v2.py` owns manifest validation and pure exact-match
+resolution; `investigation_skill_registry_v2.py` owns signed registry,
+evaluation, lifecycle, dependency/conflict, revocation, and aggregate-budget
+contracts; `investigation_skill_signing_v2.py` owns the bounded external
+OpenSSL Ed25519 adapter; `investigation_skill_lifecycle_v2.py` owns owner-only
+atomic registry storage and rollback; and `investigation_skill_runtime_v2.py`
+composes verified loading with identity-only selection. The operator CLI is a
+thin compatibility entry point. None of these owners imports the prompt builder
+or harness facade, and none has query, model, evidence, credential, or network
+authority. Production v1 remains the default until an explicit controlled
+configuration selects the v2 adapter.
+
 `n8n/bin/harness_query_contract.py` is the stable facade for query-result
 observation and exact per-query status resolution from a Security Onion batch.
 `harness_query_observation.py` owns bounded returned-count and recursive

@@ -1,6 +1,7 @@
 # ARR-18: Versioned investigation skill framework v2
 
-Status: non-production proposal; v1 remains authoritative in the frozen source.
+Status: governed source implementation; v1 remains authoritative in production
+until an independently reviewed, signed registry is explicitly activated.
 
 ## Purpose
 
@@ -12,7 +13,8 @@ an arbitrary query, or a permission grant.
 ## Registry model
 
 Each immutable manifest conforms to
-`schemas/investigation-skill-manifest-v2.schema.json` and is content-addressed.
+`n8n/config/investigation-skills-v2-candidates/investigation-skill-manifest-v2.schema.json`
+and is content-addressed.
 The artifact digest is SHA-256 of canonical JSON after replacing the
 `artifact_digest` value with 64 ASCII zeroes; this avoids a self-referential
 digest while keeping the entire remaining manifest bound.
@@ -30,6 +32,14 @@ Required lineage includes skill ID, semantic version, predecessor digest,
 compatible harness/policy/evidence-contract versions, source revision,
 maintainer, review record, and promotion evidence. Registry and selected-skill
 digests are pinned into every job envelope and trace.
+
+`n8n/bin/investigation_skill_registry_v2.py` owns immutable registry revisions.
+Every shadow or active record also carries a signed, digest-bound evaluation
+attestation. It binds the exact manifest and source revision to the independent
+reviewer, distinct human approver, evaluation-report digest, test/replay counts,
+review and adversarial-test outcomes, and timezone-aware evaluation time. A
+boolean promotion claim without this evidence cannot enter a signed active
+registry.
 
 ## Selection
 
@@ -76,6 +86,61 @@ Start candidate-only, then shadow. Active use requires measured improvement
 without safety or resource regression. Rollback revokes the exact digest and
 pins the previous approved registry; existing traces retain their original
 artifact identities.
+
+The lifecycle implementation is deliberately separate from selection:
+
+- `investigation_skill_signing_v2.py` invokes the installed OpenSSL Ed25519
+  primitive and admits only exact owner-controlled private/trusted-public key
+  files. Private bytes are never returned or logged.
+- `investigation_skill_lifecycle_v2.py` validates the signature before any
+  write, stores immutable digest-named snapshots under an owner-only directory,
+  serializes mutations with an exclusive lock, and atomically replaces only
+  `current.json` after a compare-and-swap predecessor check.
+- `manage-investigation-skill-registry-v2.py` exposes `validate`, `activate`,
+  `status`, and `rollback`. Its JSON receipts contain only registry identity,
+  mode, revision, record count, and predecessor identity—never manifests,
+  guidance, templates, evidence, or keys.
+- `investigation_skill_runtime_v2.py` loads the verified active snapshot and
+  returns the identity-only selector result. It has no query, model, network,
+  credential, prompt, or persistence authority.
+
+An operator must supply an externally signed snapshot, a protected public trust
+key, the exact expected current digest, provider identity, capability set, and
+job budget. There is no shipped active registry, trust key, feature flag, or
+implicit v1-to-v2 cutover. A typical validation and activation sequence is:
+
+```bash
+python3 n8n/bin/manage-investigation-skill-registry-v2.py \
+  --root /owner-controlled/registry \
+  --public-key /owner-controlled/trust/operator-release-key.pem \
+  --key-id operator-release-key \
+  validate --snapshot /owner-controlled/candidate/signed-registry.json
+
+python3 n8n/bin/manage-investigation-skill-registry-v2.py \
+  --root /owner-controlled/registry \
+  --public-key /owner-controlled/trust/operator-release-key.pem \
+  --key-id operator-release-key \
+  activate --snapshot /owner-controlled/candidate/signed-registry.json \
+  --expected-current-digest PREVIOUS_DIGEST_OR_EMPTY
+```
+
+Rollback uses the exact currently observed digest and restores only its signed,
+verified predecessor:
+
+```bash
+python3 n8n/bin/manage-investigation-skill-registry-v2.py \
+  --root /owner-controlled/registry \
+  --public-key /owner-controlled/trust/operator-release-key.pem \
+  --key-id operator-release-key \
+  rollback --expected-current-digest CURRENT_DIGEST
+```
+
+Activation still does not change prompt composition. A separate controlled
+configuration change must select the v2 runtime adapter, and the resulting v2
+decision must match the assigned native provider before the harness admits the
+job. Provider incompatibility, lifecycle rejection, revocation, dependency or
+conflict failure, and aggregate-budget rejection remain visible in the durable
+job attestation and `onion-sentinel-harness-execution-contract-v2`.
 
 ## Initial pack boundaries (ARR-19)
 

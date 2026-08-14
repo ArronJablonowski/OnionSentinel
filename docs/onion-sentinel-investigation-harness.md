@@ -225,6 +225,16 @@ Hermes and OpenClaw routes bypass the native harness before this boundary. The
 canonical contract and its SHA-256 digest are stored on the run row and in the
 `run.started` event, and the job digest covers both fields.
 
+The additive `onion-sentinel-harness-execution-contract-v2` is selected only
+when the prompt package carries a validated v2 skill-selection decision. It
+preserves the v1 native route and source/policy identities while adding semantic
+skill versions, exact artifact digests, bounded selection reasons, visible
+rejection reasons, aggregate skill budgets, and the selector's native provider.
+The selector provider must equal the assigned primary route provider; an
+unsupported or incompatible provider fails before durable run admission. V1
+contracts remain byte-for-byte compatible, and no active v2 registry is shipped
+or selected by default.
+
 New trace databases use SQLite schema version 5 and terminal ledger manifest
 version 3. Read-only verification remains compatible with legacy manifest
 versions 1 and 2, while rejecting a downgraded manifest when newer identity

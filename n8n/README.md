@@ -69,6 +69,8 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `config/detection_playbooks.json` | Versioned, code-owned exact-ID validation playbooks for signature-specific discriminators and rule-drift checks. |
 | `config/investigation_skills.json` | Versioned shadow-mode procedural skill registry with deterministic triggers, evidence requirements, bounded pivot plans, alternative hypotheses, stopping rules, and digest-bound selections. |
 | `config/investigation_skills.schema.json` | Strict JSON Schema for the investigation skill registry and its non-bypassable learning/promotion gates. |
+| `config/investigation-skills-v2-candidates/` | Digest-bound, deliberately unpromotable v2 candidate manifests plus offline replay fixtures; no active registry or trust key is shipped. |
+| `bin/manage-investigation-skill-registry-v2.py` | Content-free operator CLI for signature validation, compare-and-swap activation, status, and exact predecessor rollback of an externally approved v2 registry. |
 | `config/asset_inventory.example.json` | Empty sanitized template for the operator-owned runtime asset inventory. |
 | `config/software-inventory.example.json` | Disabled-by-default configuration for the restricted Software Inventory collector. |
 | `config/ac-hunter.example.json` | Disabled, non-secret Mac client configuration for AC Hunter Deep Review. Live credentials remain in a separate owner-only runtime file. |

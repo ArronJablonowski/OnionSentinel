@@ -2702,11 +2702,70 @@
       "runtime_path": "$STACK_DIR/bin/harness_execution_contract.py",
       "required_symbols": [
         "EXECUTION_CONTRACT_SCHEMA",
+        "EXECUTION_CONTRACT_SCHEMA_V2",
         "build_execution_contract",
         "execution_contract_digest",
         "execution_contract_json",
         "parse_execution_contract",
         "validate_execution_contract"
+      ]
+    },
+    {
+      "path": "n8n/bin/investigation_skills_v2.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/investigation_skills_v2.py",
+      "required_symbols": [
+        "artifact_digest",
+        "load_manifest",
+        "promotion_eligible",
+        "resolve_manifests",
+        "validate_manifest"
+      ]
+    },
+    {
+      "path": "n8n/bin/investigation_skill_registry_v2.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/investigation_skill_registry_v2.py",
+      "required_symbols": [
+        "rollback_snapshot",
+        "seal_registry",
+        "select_registry",
+        "validate_registry"
+      ]
+    },
+    {
+      "path": "n8n/bin/investigation_skill_signing_v2.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/investigation_skill_signing_v2.py",
+      "required_symbols": [
+        "openssl_ed25519_signer",
+        "openssl_ed25519_verifier"
+      ]
+    },
+    {
+      "path": "n8n/bin/investigation_skill_lifecycle_v2.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/investigation_skill_lifecycle_v2.py",
+      "required_symbols": [
+        "activate_snapshot",
+        "load_current",
+        "rollback_active"
+      ]
+    },
+    {
+      "path": "n8n/bin/investigation_skill_runtime_v2.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/investigation_skill_runtime_v2.py",
+      "required_symbols": [
+        "select_active_registry"
+      ]
+    },
+    {
+      "path": "n8n/bin/manage-investigation-skill-registry-v2.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/manage-investigation-skill-registry-v2.py",
+      "required_symbols": [
+        "main"
       ]
     },
     {
