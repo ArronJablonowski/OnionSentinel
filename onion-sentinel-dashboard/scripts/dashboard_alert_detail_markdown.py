@@ -48,18 +48,7 @@ def is_table_separator(line: str) -> bool:
     return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in cells)
 
 
-def render_table(lines: list[str]) -> str:
-    rows = [[cell.strip() for cell in line.strip().strip("|").split("|")] for line in lines]
-    if len(rows) < 2:
-        return ""
-    header = rows[0]
-    body = rows[2:] if len(rows) > 2 and is_table_separator(lines[1]) else rows[1:]
-    head_html = "".join(f"<th>{inline_markdown(cell)}</th>" for cell in header)
-    body_html = "".join(
-        "<tr>" + "".join(f"<td>{inline_markdown(cell)}</td>" for cell in row) + "</tr>"
-        for row in body
-    )
-    normalized_header = [re.sub(r"[^a-z0-9]+", "_", cell.lower()).strip("_") for cell in header]
+def _table_presentation(normalized_header: list[str]) -> tuple[str, str]:
     table_classes = ["table-wrap"]
     colgroup_html = ""
     if normalized_header == ["source", "indicator", "type", "verdict", "confidence", "tags", "cached"]:
@@ -72,7 +61,22 @@ def render_table(lines: list[str]) -> str:
         )
     elif normalized_header == ["source", "indicator", "reason", "limit_note"]:
         table_classes.extend(("public-enrichment-table", "public-enrichment-skipped-table"))
-    classes = " ".join(table_classes)
+    return " ".join(table_classes), colgroup_html
+
+
+def render_table(lines: list[str]) -> str:
+    rows = [[cell.strip() for cell in line.strip().strip("|").split("|")] for line in lines]
+    if len(rows) < 2:
+        return ""
+    header = rows[0]
+    body = rows[2:] if len(rows) > 2 and is_table_separator(lines[1]) else rows[1:]
+    head_html = "".join(f"<th>{inline_markdown(cell)}</th>" for cell in header)
+    body_html = "".join(
+        "<tr>" + "".join(f"<td>{inline_markdown(cell)}</td>" for cell in row) + "</tr>"
+        for row in body
+    )
+    normalized_header = [re.sub(r"[^a-z0-9]+", "_", cell.lower()).strip("_") for cell in header]
+    classes, colgroup_html = _table_presentation(normalized_header)
     return f'<div class="{classes}"><table>{colgroup_html}<thead><tr>{head_html}</tr></thead><tbody>{body_html}</tbody></table></div>'
 
 
