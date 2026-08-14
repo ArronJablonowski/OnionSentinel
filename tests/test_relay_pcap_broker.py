@@ -127,7 +127,7 @@ class RelayPcapBrokerTest(unittest.TestCase):
             503,
             "unavailable",
             None,
-            None,
+            io.BytesIO(b"bounded error body"),
         )
         with mock.patch.object(
             self.relay.request,
@@ -140,6 +140,7 @@ class RelayPcapBrokerTest(unittest.TestCase):
             ) as raised:
                 self.relay.broker_request(config, "GET", "/pcap")
         self.assertIs(raised.exception.__cause__, http_error)
+        self.assertTrue(http_error.closed)
 
         url_error = self.relay.URLError("offline")
         with mock.patch.object(
