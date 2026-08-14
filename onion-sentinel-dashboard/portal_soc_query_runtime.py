@@ -222,18 +222,11 @@ def soc_alert_detail_fragment_response(r: Any, group_id: str) -> tuple[int, dict
         detail_html = target.read_text(encoding="utf-8")
     except OSError as exc:
         return r.soc_alert_api_error(str(exc), 503)
-    review = r._soc_review_defaults()
-    try:
-        with r.soc_alert_db_connect() as conn:
-            review = r.soc_alert_review_state_for_group(conn, group_id)
-    except (FileNotFoundError, r.sqlite3.Error):
-        pass
+    review = _soc_alert_fragment_review(r, group_id)
     detail_html = r.soc_alert_append_live_pcap_detail(group_id, detail_html)
     detail_html = r.soc_alert_collapse_detail_sections(detail_html)
     detail_html = r.render_analyst_review_panel(review, group_id=group_id) + detail_html
-    layout_issues = r.soc_alert_validate_detail_layout_html(detail_html)
-    if layout_issues and "detail-layout-error" not in detail_html:
-        detail_html = r.soc_alert_layout_error_html(layout_issues) + detail_html
+    detail_html, layout_issues = _soc_alert_fragment_layout(r, detail_html)
     return 200, {
         "ok": True,
         "source": "detail-fragment",
@@ -244,6 +237,23 @@ def soc_alert_detail_fragment_response(r: Any, group_id: str) -> tuple[int, dict
         "review": review,
         "detail_html": detail_html,
     }
+
+
+def _soc_alert_fragment_review(r: Any, group_id: str) -> dict:
+    review = r._soc_review_defaults()
+    try:
+        with r.soc_alert_db_connect() as conn:
+            review = r.soc_alert_review_state_for_group(conn, group_id)
+    except (FileNotFoundError, r.sqlite3.Error):
+        pass
+    return review
+
+
+def _soc_alert_fragment_layout(r: Any, detail_html: str) -> tuple[str, list[str]]:
+    layout_issues = r.soc_alert_validate_detail_layout_html(detail_html)
+    if layout_issues and "detail-layout-error" not in detail_html:
+        detail_html = r.soc_alert_layout_error_html(layout_issues) + detail_html
+    return detail_html, layout_issues
 
 
 def soc_alert_detail_response(r: Any, alert_id: str) -> tuple[int, dict]:
