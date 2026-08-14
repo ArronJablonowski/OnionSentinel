@@ -113,6 +113,82 @@ class IncidentReadServiceTests(unittest.TestCase):
         self.assertEqual(response["asset_inventory_status"], "fresh")
         self.assertTrue(response["schema_ready"])
 
+    def test_list_preserves_successful_owner_order_and_payload_order(self) -> None:
+        trace = []
+
+        @contextmanager
+        def connect():
+            trace.append(("connect-enter",))
+            yield self.conn
+            trace.append(("connect-exit",))
+
+        sources = self.replace(
+            connect=connect,
+            parse_list_request=lambda query, **kwargs: (
+                trace.append(("parse", query, kwargs)) or self.request
+            ),
+            schema_ready=lambda conn: trace.append(("schema", conn)) or True,
+            load_list_records=lambda conn, request: (
+                trace.append(("records", conn, request)) or self.list_records
+            ),
+            load_inventory=lambda: (
+                trace.append(("inventory",)) or ({"inventory_status": "fresh"}, None)
+            ),
+            review_defaults=lambda: (
+                trace.append(("review-defaults",)) or {"reviewer_status": "none"}
+            ),
+            compose_list_rows=lambda *args: (
+                trace.append(("compose", args)) or [{"case_id": "ir-unit"}]
+            ),
+        )
+
+        status, response = incident_list_response(
+            sources, {"page": ["1"]}, max_per_page=100,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            tuple(response),
+            (
+                "ok", "incidents", "page", "per_page", "total", "pages",
+                "status_counts", "agent_status_counts", "schema_ready", "sort",
+                "direction", "asset_inventory_status",
+            ),
+        )
+        self.assertEqual(
+            [event[0] for event in trace],
+            [
+                "parse", "connect-enter", "schema", "records", "inventory",
+                "review-defaults", "compose", "connect-exit",
+            ],
+        )
+        compose_args = trace[-2][1]
+        self.assertIs(compose_args[0], self.conn)
+        self.assertIs(compose_args[1], self.list_records)
+        self.assertEqual(compose_args[2:5], (
+            {"inventory_status": "fresh"}, None, {"reviewer_status": "none"},
+        ))
+        self.assertIs(compose_args[5], self.sources.row_callbacks)
+
+    def test_list_inventory_status_precedence_is_exact(self) -> None:
+        for inventory, error, expected in (
+            ({"inventory_status": "fresh"}, "failed", "invalid"),
+            ({"inventory_status": ""}, None, "loaded"),
+            ({}, 0, "loaded"),
+            ({"inventory_status": 7}, None, "7"),
+        ):
+            with self.subTest(inventory=inventory, error=error):
+                sources = self.replace(
+                    load_inventory=lambda: (inventory, error),
+                )
+
+                status, response = incident_list_response(
+                    sources, {}, max_per_page=100,
+                )
+
+                self.assertEqual(status, 200)
+                self.assertEqual(response["asset_inventory_status"], expected)
+
     def test_list_returns_empty_page_before_inventory_access_when_schema_absent(self) -> None:
         sources = self.replace(
             schema_ready=lambda conn: False,
