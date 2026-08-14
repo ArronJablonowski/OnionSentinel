@@ -3599,10 +3599,15 @@ capture-loss and sensor-loss threshold admission, freshness decisions, and the
 retryable capture-protection deferral. The facade includes this module in its
 late-bound override set so recovery and characterization hooks remain exact.
 
-`relay_pcap_transport.py` owns broker HTTP calls, claim-progress reporting,
-bounded Security Onion streaming, and transfer timeout/bandwidth policy. It
-imports and re-exports the capture- and spool-policy surfaces so the original
-flat Relay API remains compatible, and remains below the 600-line target.
+`relay_pcap_streaming.py` owns bounded Security Onion chunk execution,
+no-progress termination, resumable checkpoints, verified artifact reuse, and
+atomic relay-spool tar publication. It depends inward on core request helpers
+and the capture/spool policies, but has no broker or Mac-delivery authority.
+
+`relay_pcap_transport.py` owns broker HTTP calls, claim-progress reporting, and
+transfer timeout/bandwidth policy. It imports and re-exports the capture-,
+spool-, and streaming-policy surfaces so the original flat Relay API remains
+compatible, and remains below the 600-line target.
 
 `relay_pcap_delivery.py` owns the bounded SSH/rsync handoff to the Mac Studio,
 remote verification/cleanup, broker completion callbacks, and retry scheduling.
@@ -3612,7 +3617,7 @@ transport, delivery, service, and the facade; they do not cycle.
 
 `relay_application.py` owns durable alert outbox delivery, quiet-cycle
 heartbeats, CLI parsing, and one-shot lifecycle composition. The Pi installer
-copies all five implementation modules before the executable facade. External
+copies every implementation module before the executable facade. External
 investigation systems remain read-only; allowlists, limits, timeouts,
 redaction, fail-closed behavior, HTTP schemas, and exit behavior are unchanged.
 
