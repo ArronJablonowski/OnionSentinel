@@ -40,11 +40,14 @@ def _emit(payload: dict[str, Any], code: int = 0) -> int:
     return code
 
 
-def _load_config(path: Path) -> dict[str, Any]:
+def _config_snapshot(path: Path) -> os.stat_result:
     try:
-        info = path.lstat()
+        return path.lstat()
     except OSError as exc:
         raise BrokerError("live OSQuery broker configuration is unavailable") from exc
+
+
+def _validate_config_file(info: os.stat_result) -> None:
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise BrokerError("live OSQuery broker configuration must be a regular file")
     if (
@@ -58,15 +61,26 @@ def _load_config(path: Path) -> dict[str, Any]:
         )
     if info.st_size > MAX_REQUEST_BYTES:
         raise BrokerError("live OSQuery broker configuration exceeds its byte limit")
+
+
+def _decode_config(path: Path) -> object:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise BrokerError("live OSQuery broker configuration is invalid") from exc
+
+
+def _validate_config(value: object) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise BrokerError("live OSQuery broker configuration root must be an object")
     if value.get("enabled") is not True:
         raise BrokerError("live-host OSQuery is disabled on the relay")
     return value
+
+
+def _load_config(path: Path) -> dict[str, Any]:
+    _validate_config_file(_config_snapshot(path))
+    return _validate_config(_decode_config(path))
 
 
 def _read_request() -> dict[str, Any]:
@@ -82,65 +96,88 @@ def _read_request() -> dict[str, Any]:
     return value
 
 
-def main() -> int:
-    if os.environ.get("SSH_ORIGINAL_COMMAND", "").strip():
-        return _emit({"error": "commands are not accepted by this forced endpoint"}, 2)
-    try:
-        config_path = Path(
-            os.environ.get("ONION_SENTINEL_LIVE_OSQUERY_CONFIG", DEFAULT_CONFIG)
-        ).expanduser()
-        config = _load_config(config_path)
-        request = validate_transport_payload(
-            _read_request(),
-            allowed_aliases=config.get("allowed_target_aliases") or [],
-        )
-        command = [
-            "/usr/bin/ssh",
-            "-T",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "IdentitiesOnly=yes",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            f"UserKnownHostsFile={config['known_hosts']}",
-            "-o",
-            f"ConnectTimeout={int(config.get('connect_timeout_seconds', 20))}",
-            "-o",
-            "ServerAliveInterval=15",
-            "-o",
-            "ServerAliveCountMax=3",
-            "-i",
-            str(config["ssh_key"]),
-            "-p",
-            str(int(config.get("port", 22))),
-            f"{config.get('ssh_user', 'so-ai-relay')}@{config['host']}",
-        ]
-        proc = run_bounded_command(
-            command,
-            input_bytes=bounded_json_bytes(request),
-            timeout_seconds=float(config.get("timeout_seconds", 180)),
-            max_stdout_bytes=min(
-                int(config.get("max_response_bytes", MAX_RESPONSE_BYTES)),
-                MAX_RESPONSE_BYTES,
-            ),
-            max_stderr_bytes=min(
-                int(config.get("max_stderr_bytes", MAX_STDERR_BYTES)),
-                MAX_STDERR_BYTES,
-            ),
-        )
-        if proc.returncode != 0:
-            raise BrokerError("restricted Security Onion live-query command failed")
-        response = json.loads(proc.stdout.decode("utf-8"))
-        artifact = validate_result_artifact(
-            response,
-            expected_requests=request["requests"],
-        )
-        if artifact["case_id"] != request["case_id"]:
-            raise BrokerError("live OSQuery response case_id did not match the request")
-        return _emit(artifact)
-    except (
+def _config_path() -> Path:
+    return Path(
+        os.environ.get("ONION_SENTINEL_LIVE_OSQUERY_CONFIG", DEFAULT_CONFIG)
+    ).expanduser()
+
+
+def _validated_request(config: dict[str, Any]) -> dict[str, Any]:
+    return validate_transport_payload(
+        _read_request(),
+        allowed_aliases=config.get("allowed_target_aliases") or [],
+    )
+
+
+def _ssh_command(config: dict[str, Any]) -> list[str]:
+    return [
+        "/usr/bin/ssh",
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={config['known_hosts']}",
+        "-o",
+        f"ConnectTimeout={int(config.get('connect_timeout_seconds', 20))}",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-i",
+        str(config["ssh_key"]),
+        "-p",
+        str(int(config.get("port", 22))),
+        f"{config.get('ssh_user', 'so-ai-relay')}@{config['host']}",
+    ]
+
+
+def _run_query(config: dict[str, Any], request: dict[str, Any]) -> object:
+    proc = run_bounded_command(
+        _ssh_command(config),
+        input_bytes=bounded_json_bytes(request),
+        timeout_seconds=float(config.get("timeout_seconds", 180)),
+        max_stdout_bytes=min(
+            int(config.get("max_response_bytes", MAX_RESPONSE_BYTES)),
+            MAX_RESPONSE_BYTES,
+        ),
+        max_stderr_bytes=min(
+            int(config.get("max_stderr_bytes", MAX_STDERR_BYTES)),
+            MAX_STDERR_BYTES,
+        ),
+    )
+    if proc.returncode != 0:
+        raise BrokerError("restricted Security Onion live-query command failed")
+    return proc
+
+
+def _validated_response(proc: object, request: dict[str, Any]) -> dict[str, Any]:
+    response = json.loads(proc.stdout.decode("utf-8"))
+    artifact = validate_result_artifact(
+        response,
+        expected_requests=request["requests"],
+    )
+    if artifact["case_id"] != request["case_id"]:
+        raise BrokerError("live OSQuery response case_id did not match the request")
+    return artifact
+
+
+def _execute_request() -> dict[str, Any]:
+    config = _load_config(_config_path())
+    request = _validated_request(config)
+    return _validated_response(_run_query(config, request), request)
+
+
+def _emit_failure(exc: Exception) -> int:
+    # Error text is intentionally bounded and excludes remote response bodies,
+    # agent IDs, paths supplied by callers, and authorization material.
+    return _emit({"error": str(exc)[:1000]}, 3)
+
+
+BROKER_FAILURES = (
         BrokerError,
         BoundedProcessError,
         LiveOsqueryContractError,
@@ -150,10 +187,16 @@ def main() -> int:
         json.JSONDecodeError,
         TypeError,
         ValueError,
-    ) as exc:
-        # Error text is intentionally bounded and excludes remote response bodies,
-        # agent IDs, paths supplied by callers, and authorization material.
-        return _emit({"error": str(exc)[:1000]}, 3)
+)
+
+
+def main() -> int:
+    if os.environ.get("SSH_ORIGINAL_COMMAND", "").strip():
+        return _emit({"error": "commands are not accepted by this forced endpoint"}, 2)
+    try:
+        return _emit(_execute_request())
+    except BROKER_FAILURES as exc:
+        return _emit_failure(exc)
 
 
 if __name__ == "__main__":

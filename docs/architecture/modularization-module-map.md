@@ -3618,6 +3618,15 @@ nonblocking stdout/stderr channels, drains them under exact byte and time
 ceilings, and owns process-group termination, reaping, and stream cleanup.
 PCAP artifact bytes remain on the separate streaming path.
 
+`live_osquery_broker.py` remains the forced-command compatibility executable
+for bounded read-only endpoint queries. Its configuration phases separately
+own filesystem snapshot, root/service-group/mode/size admission, JSON decoding,
+and enabled-object admission. Its lifecycle phases own environment/config path,
+transport request validation, fixed SSH argv projection, bounded execution,
+response artifact/case binding, and sanitized failure emission. No phase can
+widen target aliases, command options, response ceilings, or credential/query
+authority.
+
 `ac_hunter_broker.py` owns the source-restricted, pinned-TLS AC Hunter request
 boundary. Its configuration phases separately own stable file opening and
 decoding, exact schema/field admission, fixed upstream identity and certificate
