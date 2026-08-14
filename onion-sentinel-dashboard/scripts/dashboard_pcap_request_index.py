@@ -21,6 +21,22 @@ EMPTY_REQUEST_INDEX: dict[str, dict[str, dict[str, Any]]] = {
 }
 
 
+def _pcap_request_select_query(columns: set[str]) -> str:
+    """Compose the schema-compatible newest-first request query."""
+    def expression(name: str, fallback: str = "''") -> str:
+        return name if name in columns else f"{fallback} AS {name}"
+
+    timestamps = [name for name in ("completed_at", "updated_at", "created_at") if name in columns]
+    newest = f"COALESCE({', '.join(timestamps)})" if timestamps else "request_id"
+    return f"""
+        SELECT request_id, {expression('group_id')}, {expression('alert_id')},
+               {expression('status')}, {expression('error')}, {expression('request_json', "'{}'")},
+               {expression('completed_at')}, {expression('updated_at')}, {expression('created_at')}
+        FROM pcap_requests
+        ORDER BY {newest} DESC, request_id DESC
+        """
+
+
 def build_pcap_request_index(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, Any]]]:
     """Read newest-first request state once from an existing connection."""
     exists = conn.execute(
@@ -32,21 +48,8 @@ def build_pcap_request_index(conn: sqlite3.Connection) -> dict[str, dict[str, di
     if "request_id" not in columns:
         return _empty_index()
 
-    def expression(name: str, fallback: str = "''") -> str:
-        return name if name in columns else f"{fallback} AS {name}"
-
-    timestamps = [name for name in ("completed_at", "updated_at", "created_at") if name in columns]
-    newest = f"COALESCE({', '.join(timestamps)})" if timestamps else "request_id"
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        f"""
-        SELECT request_id, {expression('group_id')}, {expression('alert_id')},
-               {expression('status')}, {expression('error')}, {expression('request_json', "'{}'")},
-               {expression('completed_at')}, {expression('updated_at')}, {expression('created_at')}
-        FROM pcap_requests
-        ORDER BY {newest} DESC, request_id DESC
-        """
-    ).fetchall()
+    rows = conn.execute(_pcap_request_select_query(columns)).fetchall()
     index = _empty_index()
     for row in rows:
         record = _record_from_row(row)
