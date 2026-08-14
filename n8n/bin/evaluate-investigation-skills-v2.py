@@ -372,10 +372,83 @@ def _evaluate_cases(
     return results, passed
 
 
+def _valid_evidence_result(result: dict[str, Any]) -> bool:
+    refs = result.get("evidence_refs")
+    return (
+        result.get("source_supported") is True
+        and result.get("mapping_compatible") is True
+        and isinstance(result.get("complete"), bool)
+        and isinstance(result.get("truncated"), bool)
+        and isinstance(refs, list)
+        and all(isinstance(ref, str) and ref for ref in refs)
+        and isinstance(result.get("rows"), list)
+        and result.get("claim_kind") in {"observation", "inference"}
+    )
+
+
+def _evidence_unavailable(result: dict[str, Any]) -> bool:
+    return (
+        result.get("source_supported") is False
+        or result.get("mapping_compatible") is False
+        or result.get("status") in {"failed", "rejected", "unavailable"}
+    )
+
+
+def _fact_state(result: Any) -> str:
+    if not isinstance(result, dict):
+        return "unverified"
+    if _evidence_unavailable(result):
+        return "unavailable"
+    if result.get("status") != "success" or not _valid_evidence_result(result):
+        return "unverified"
+    if not result["complete"] or result["truncated"] or not result["evidence_refs"]:
+        return "unverified"
+    return "inferred" if result["claim_kind"] == "inference" else "observed"
+
+
+def _negative_evidence_allowed(result: Any, fact_state: str) -> bool:
+    return (
+        fact_state == "observed"
+        and isinstance(result, dict)
+        and result.get("rows") == []
+    )
+
+
+def _evaluate_evidence_case(case: Any) -> dict[str, Any]:
+    if not isinstance(case, dict):
+        raise ValueError("evidence replay case must be an object")
+    result = case.get("result")
+    fact_state = _fact_state(result)
+    negative_allowed = _negative_evidence_allowed(result, fact_state)
+    expected_state = str(case.get("expected_fact_state") or "")
+    expected_negative = case.get("expected_negative_evidence_allowed")
+    return {
+        "id": str(case.get("id") or ""),
+        "category": str(case.get("category") or ""),
+        "fact_state": fact_state,
+        "negative_evidence_allowed": negative_allowed,
+        "passed": (
+            fact_state == expected_state
+            and negative_allowed is expected_negative
+        ),
+    }
+
+
+def _evaluate_evidence_cases(cases: Any) -> tuple[list[dict[str, Any]], int]:
+    if cases is None:
+        return [], 0
+    if not isinstance(cases, list):
+        raise ValueError("evidence_cases must be a list")
+    results = [_evaluate_evidence_case(case) for case in cases]
+    return results, sum(int(result["passed"]) for result in results)
+
+
 def _evaluation_result(
     manifests: dict[str, dict[str, Any]],
     results: list[dict[str, Any]],
     passed: int,
+    evidence_results: list[dict[str, Any]],
+    evidence_passed: int,
 ) -> dict[str, Any]:
     return {
         "schema": "onion-sentinel-skill-offline-replay-result-v1",
@@ -391,8 +464,16 @@ def _evaluation_result(
         "case_count": len(results),
         "passed_count": passed,
         "failed_count": len(results) - passed,
-        "passed": passed == len(results) and len(results) > 0,
+        "evidence_case_count": len(evidence_results),
+        "evidence_passed_count": evidence_passed,
+        "evidence_failed_count": len(evidence_results) - evidence_passed,
+        "passed": (
+            passed == len(results)
+            and len(results) > 0
+            and evidence_passed == len(evidence_results)
+        ),
         "results": results,
+        "evidence_results": evidence_results,
     }
 
 
@@ -416,7 +497,16 @@ def evaluate(
         pcap_catalog,
         ac_hunter_catalog,
     )
-    return _evaluation_result(manifests, results, passed)
+    evidence_results, evidence_passed = _evaluate_evidence_cases(
+        fixture.get("evidence_cases")
+    )
+    return _evaluation_result(
+        manifests,
+        results,
+        passed,
+        evidence_results,
+        evidence_passed,
+    )
 
 
 def parse_args() -> argparse.Namespace:

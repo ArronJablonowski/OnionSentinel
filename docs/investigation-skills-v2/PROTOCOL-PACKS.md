@@ -121,6 +121,17 @@ normalized local snapshot through `reports.read`; its scores and correlations
 prioritize review and never prove malware, compromise, or malicious intent.
 All remain inactive and unpromotable.
 
+The same offline corpus includes sanitized evidence-state cases for common
+benign CDN DNS, approved SSH administration, conferencing STUN, periodic
+telemetry, and long-lived VPN traffic, plus injection-like evidence,
+malformed rows, partial/truncated results, mapping drift, failed sources,
+unsupported sources, and a complete exact-scope empty result. The evaluator
+projects only case identity, category, fact state, and negative-evidence
+eligibility; it never echoes fixture rows or consumes their text as guidance.
+Only the successful, complete, non-truncated, evidence-referenced empty case
+permits scoped negative evidence. Every other gap remains `unverified` or
+`unavailable`, while interpretation cases remain explicitly `inferred`.
+
 `skill-packs/dns-triage-v2.example.json` demonstrates the v2 boundary. Its
 verification flags are deliberately false because this package has not passed
 the required replay, review, or human promotion gates. It is structurally
