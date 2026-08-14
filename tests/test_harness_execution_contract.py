@@ -147,6 +147,86 @@ class HarnessExecutionContractTests(unittest.TestCase):
             ):
                 CONTRACT.validate_execution_contract(candidate)
 
+    def test_v2_contract_pins_explainable_selection_and_native_provider(self) -> None:
+        attestation = {
+            "framework_version": 2,
+            "registry_version": 8,
+            "registry_sha256": "a" * 64,
+            "provider": "codex-cli",
+            "provider_compatible": True,
+            "selected": [
+                {
+                    "id": "dns-triage",
+                    "version": "2.3.1",
+                    "skill_sha256": "b" * 64,
+                    "selection_reason": "exact_match_capability_and_promotion_gates_satisfied",
+                },
+            ],
+            "selected_count": 1,
+            "truncated": False,
+            "rejected": [
+                {"id": "legacy-dns", "reason": "artifact_revoked"},
+            ],
+            "aggregate_budget": {
+                "max_queries": 4,
+                "max_rows": 400,
+                "max_bytes": 4000,
+                "timeout_seconds": 40,
+            },
+            "advisory_mode": "identity_only_no_execution",
+        }
+        value = CONTRACT.build_execution_contract(
+            source_revision="5" * 40,
+            assigned_route="codex-cli:gpt-5.6-sol:high",
+            reviewer_route="",
+            policy_version="v5",
+            skill_attestation=attestation,
+        )
+        self.assertEqual(
+            value["schema"],
+            "onion-sentinel-harness-execution-contract-v2",
+        )
+        self.assertEqual(
+            value["skill_versions"],
+            [{
+                "id": "dns-triage",
+                "version": "2.3.1",
+                "sha256": "b" * 64,
+                "selection_reason": "exact_match_capability_and_promotion_gates_satisfied",
+            }],
+        )
+        self.assertEqual(
+            value["skill_selection"],
+            {
+                "provider": "codex-cli",
+                "provider_compatible": True,
+                "selected_count": 1,
+                "truncated": False,
+                "rejected": [
+                    {"id": "legacy-dns", "reason": "artifact_revoked"},
+                ],
+                "aggregate_budget": {
+                    "max_queries": 4,
+                    "max_rows": 400,
+                    "max_bytes": 4000,
+                    "timeout_seconds": 40,
+                },
+                "enforcement": "identity_only_no_execution",
+            },
+        )
+        self.assertEqual(CONTRACT.validate_execution_contract(value), value)
+
+        incompatible = dict(attestation)
+        incompatible.update({"provider": "openclaw", "provider_compatible": False})
+        with self.assertRaisesRegex(ValueError, "compatible native provider"):
+            CONTRACT.build_execution_contract(
+                source_revision="5" * 40,
+                assigned_route="codex-cli:gpt-5.6-sol:high",
+                reviewer_route="",
+                policy_version="v5",
+                skill_attestation=incompatible,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

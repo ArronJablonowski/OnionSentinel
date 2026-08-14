@@ -169,6 +169,89 @@ class HarnessContractsArchitectureTests(unittest.TestCase):
                     {"investigation_skills": raw}
                 )
 
+    def test_v2_skill_attestation_preserves_explainable_identity_only_decision(self) -> None:
+        raw = {
+            "schema": "onion-sentinel-investigation-skill-selection-v2",
+            "mode": "active",
+            "registry_version": 8,
+            "registry_digest": "a" * 64,
+            "provider": "codex-cli",
+            "provider_compatible": True,
+            "selected": [
+                {
+                    "id": "z-skill",
+                    "version": "2.1.0",
+                    "artifact_digest": "c" * 64,
+                    "selection_reason": "exact_match_capability_and_promotion_gates_satisfied",
+                    "guidance": "must not enter durable state",
+                },
+                {
+                    "id": "a-skill",
+                    "version": "1.4.2",
+                    "artifact_digest": "b" * 64,
+                    "selection_reason": "exact_match_capability_and_promotion_gates_satisfied",
+                },
+            ],
+            "selected_count": 2,
+            "truncated": False,
+            "rejected": [
+                {"id": "old-skill", "reason": "artifact_revoked"},
+            ],
+            "aggregate_budget": {
+                "max_queries": 6,
+                "max_rows": 600,
+                "max_bytes": 6000,
+                "timeout_seconds": 60,
+            },
+            "enforcement": "identity_only_no_execution",
+        }
+        self.assertEqual(
+            CONTRACTS.investigation_skill_selection_attestation(
+                {"investigation_skills": raw}
+            ),
+            {
+                "framework_version": 2,
+                "registry_version": 8,
+                "registry_sha256": "a" * 64,
+                "provider": "codex-cli",
+                "provider_compatible": True,
+                "selected": [
+                    {
+                        "id": "a-skill",
+                        "version": "1.4.2",
+                        "skill_sha256": "b" * 64,
+                        "selection_reason": "exact_match_capability_and_promotion_gates_satisfied",
+                    },
+                    {
+                        "id": "z-skill",
+                        "version": "2.1.0",
+                        "skill_sha256": "c" * 64,
+                        "selection_reason": "exact_match_capability_and_promotion_gates_satisfied",
+                    },
+                ],
+                "selected_count": 2,
+                "truncated": False,
+                "rejected": [
+                    {"id": "old-skill", "reason": "artifact_revoked"},
+                ],
+                "aggregate_budget": {
+                    "max_queries": 6,
+                    "max_rows": 600,
+                    "max_bytes": 6000,
+                    "timeout_seconds": 60,
+                },
+                "advisory_mode": "identity_only_no_execution",
+            },
+        )
+        raw["selected"][0]["selection_reason"] = "untrusted free form"
+        with self.assertRaisesRegex(
+            CONTRACTS.HarnessIntegrityError,
+            "selection reason",
+        ):
+            CONTRACTS.investigation_skill_selection_attestation(
+                {"investigation_skills": raw}
+            )
+
     def test_manifest_and_evidence_accounting_outputs_are_stable(self) -> None:
         rows = [
             {
