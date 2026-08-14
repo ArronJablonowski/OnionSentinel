@@ -18,6 +18,7 @@ CANDIDATE = (
     ROOT
     / "n8n/config/investigation-skills-v2-candidates/dns-triage-v2.candidate.json"
 )
+CANDIDATE_DIR = CANDIDATE.parent
 SPEC = importlib.util.spec_from_file_location(
     "investigation_skills_v2_projection", MODULE_PATH
 )
@@ -210,6 +211,26 @@ class InvestigationSkillsV2ProjectionTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as raised:
                     skills.validate_manifest(raw)
                 self.assertEqual(str(raised.exception), message)
+
+    def test_every_candidate_requires_explicit_fact_states(self) -> None:
+        expected = ["observed", "inferred", "unverified", "unavailable"]
+        paths = sorted(CANDIDATE_DIR.glob("*.candidate.json"))
+        self.assertEqual(len(paths), 7)
+        for path in paths:
+            with self.subTest(path=path.name):
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(raw["output_contract"]["fact_states"], expected)
+                self.assertEqual(skills.validate_manifest(raw), raw)
+
+        raw = candidate()
+        raw["output_contract"]["fact_states"] = [
+            "observed",
+            "inferred",
+            "unavailable",
+        ]
+        raw["artifact_digest"] = skills.artifact_digest(raw)
+        with self.assertRaisesRegex(ValueError, "skill output contract is unsafe"):
+            skills.validate_manifest(raw)
 
     def test_lineage_compatibility_maintainer_verification_and_references_fail_closed(self) -> None:
         mutations = (
