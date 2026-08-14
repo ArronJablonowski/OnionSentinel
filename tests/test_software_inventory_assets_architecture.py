@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -16,6 +17,7 @@ if str(DASHBOARD) not in sys.path:
 
 import software_inventory_assets as inventory_assets
 import software_inventory_asset_labels as asset_labels
+import software_inventory_os_correlation as os_correlation
 
 
 NOW = dt.datetime(2026, 8, 12, 12, 0, tzinfo=dt.timezone.utc)
@@ -233,6 +235,173 @@ class SoftwareInventoryAssetsArchitectureTests(unittest.TestCase):
                 ("set", "item", "operating_system_confidence", "high"),
             ],
         )
+
+    def test_trusted_asset_direct_contract_and_identity_are_exact(self) -> None:
+        self.assertEqual(
+            str(inspect.signature(os_correlation._trusted_asset)),
+            "(assets: 'dict[str, dict]', asset_label: 'str', when: 'dt.datetime') -> 'dict | None'",
+        )
+        asset = {
+            "state": " CURRENT ",
+            "confidence": " HIGH ",
+            "source_type": " manual-inventory ",
+            "current_ip_source": " manual ",
+        }
+        before = copy.deepcopy(asset)
+        with mock.patch.object(
+            os_correlation, "_valid_at", return_value=True
+        ) as valid_at:
+            result = os_correlation._trusted_asset(
+                {"studio": asset}, "studio", NOW
+            )
+
+        self.assertIs(result, asset)
+        self.assertEqual(asset, before)
+        valid_at.assert_called_once_with(asset, NOW)
+
+        with mock.patch.object(os_correlation, "_valid_at") as valid_at:
+            self.assertIsNone(
+                os_correlation._trusted_asset({}, "missing", NOW)
+            )
+        valid_at.assert_not_called()
+
+    def test_trusted_asset_short_circuit_and_validation_order_is_exact(self) -> None:
+        events: list[tuple[object, ...]] = []
+
+        class TracedDict(dict):
+            def __init__(self, name: str, value: dict[str, object]) -> None:
+                self.name = name
+                super().__init__(value)
+
+            def get(self, key: object, default: object = None) -> object:
+                events.append(("get", self.name, key, default))
+                return super().get(key, default)
+
+        def trusted_fields(**updates: object) -> dict[str, object]:
+            value: dict[str, object] = {
+                "state": "current",
+                "confidence": "high",
+                "source_type": "manual-inventory",
+                "current_ip_source": "manual",
+            }
+            value.update(updates)
+            return value
+
+        cases = (
+            ("not-a-dict", [], False),
+            (
+                trusted_fields(state="retired"),
+                ["state"],
+                False,
+            ),
+            (
+                trusted_fields(confidence="medium"),
+                ["state", "confidence"],
+                False,
+            ),
+            (
+                trusted_fields(source_type="zeek-dhcp-observation"),
+                ["state", "confidence", "source_type"],
+                False,
+            ),
+            (
+                trusted_fields(current_ip_source="zeek-dhcp"),
+                [
+                    "state",
+                    "confidence",
+                    "source_type",
+                    "current_ip_source",
+                ],
+                False,
+            ),
+            (
+                trusted_fields(),
+                [
+                    "state",
+                    "confidence",
+                    "source_type",
+                    "current_ip_source",
+                ],
+                True,
+            ),
+        )
+        for asset_value, accessed_keys, reaches_validation in cases:
+            with self.subTest(asset=asset_value):
+                events.clear()
+                asset = (
+                    TracedDict("asset", asset_value)
+                    if isinstance(asset_value, dict)
+                    else asset_value
+                )
+                assets = TracedDict("assets", {"studio": asset})
+
+                def valid_at(candidate: dict, when: dt.datetime) -> bool:
+                    events.append(("valid_at", candidate, when))
+                    return False
+
+                with mock.patch.object(
+                    os_correlation, "_valid_at", side_effect=valid_at
+                ) as validation:
+                    self.assertIsNone(
+                        os_correlation._trusted_asset(
+                            assets, "studio", NOW
+                        )
+                    )
+
+                expected = [("get", "assets", "studio", None)]
+                expected.extend(
+                    ("get", "asset", key, None) for key in accessed_keys
+                )
+                if reaches_validation:
+                    expected.append(("valid_at", asset, NOW))
+                    validation.assert_called_once_with(asset, NOW)
+                else:
+                    validation.assert_not_called()
+                self.assertEqual(events, expected)
+
+    def test_trusted_asset_dependency_failures_propagate_in_order(self) -> None:
+        class ExplodingLookup(dict):
+            def get(self, key: object, default: object = None) -> object:
+                raise LookupError(f"lookup:{key}")
+
+        with self.assertRaisesRegex(LookupError, "lookup:studio"):
+            os_correlation._trusted_asset(
+                ExplodingLookup(), "studio", NOW
+            )
+
+        class ExplodingString:
+            def __bool__(self) -> bool:
+                return True
+
+            def __str__(self) -> str:
+                raise RuntimeError("state conversion")
+
+        with mock.patch.object(os_correlation, "_valid_at") as valid_at:
+            with self.assertRaisesRegex(RuntimeError, "state conversion"):
+                os_correlation._trusted_asset(
+                    {"studio": {"state": ExplodingString()}},
+                    "studio",
+                    NOW,
+                )
+        valid_at.assert_not_called()
+
+        asset = {
+            "state": "current",
+            "confidence": "high",
+            "source_type": "manual",
+            "current_ip_source": "manual",
+        }
+        with mock.patch.object(
+            os_correlation,
+            "_valid_at",
+            side_effect=RuntimeError("temporal validation"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "temporal validation"
+            ):
+                os_correlation._trusted_asset(
+                    {"studio": asset}, "studio", NOW
+                )
         self.assertEqual(
             str(
                 inspect.signature(
