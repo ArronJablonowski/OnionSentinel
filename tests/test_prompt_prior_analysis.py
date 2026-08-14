@@ -89,6 +89,86 @@ class PromptPriorAnalysisTests(unittest.TestCase):
         self.assertIn("ORDER BY generated_at DESC", query.call_args.args[1])
         loader.assert_not_called()
 
+    def test_indexed_summary_retains_provenance_uncertainty_and_conflicts(self):
+        indexed = {
+            "analysis_id": "analysis-rich-1",
+            "agent_role": "threat-hunter",
+            "artifact_path": "/runtime/analysis-rich-1.json",
+            "generated_at": "2026-08-08T12:00:00Z",
+            "model": "provider:model",
+            "model_path": "native-api",
+            "detection_outcome": "inconclusive",
+            "bluf": "Inconclusive pending endpoint evidence.",
+            "summary": "A bounded prior case summary.",
+            "confidence": "medium",
+            "response_json": json.dumps({
+                "confidence_score": 0.52,
+                "evidence_used": ["alert:alert-1", "query:tls-1"],
+                "evidence_gaps": ["Endpoint process lineage unavailable."],
+                "hypotheses": [{
+                    "id": "hypothesis-1",
+                    "statement": "The connection belongs to expected software.",
+                    "status": "unresolved",
+                    "supporting_evidence": ["query:tls-1"],
+                    "contradicting_evidence": ["alert:alert-1"],
+                    "next_discriminator": "Collect endpoint process lineage.",
+                }],
+                "correlation_assessment": {
+                    "contradicting_evidence": ["No exact process join exists."],
+                },
+            }),
+        }
+        query = mock.Mock(return_value=[indexed])
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = build_prior_analysis_context(
+                source_bundle(query=query),
+                request(Path(directory)),
+            )
+
+        summary = result[0]
+        self.assertEqual(summary["case_memory_schema"], "onion-sentinel-case-summary-v1")
+        self.assertEqual(summary["agent_role"], "threat-hunter")
+        self.assertEqual(summary["confidence_score"], 0.52)
+        self.assertEqual(summary["evidence_used"], ["alert:alert-1", "query:tls-1"])
+        self.assertEqual(summary["evidence_gaps"], ["Endpoint process lineage unavailable."])
+        self.assertEqual(
+            summary["hypotheses"][0]["contradicting_evidence"],
+            ["alert:alert-1"],
+        )
+        self.assertEqual(
+            summary["correlation_contradictions"],
+            ["No exact process join exists."],
+        )
+        self.assertEqual(summary["projection"]["truncated_fields"], [])
+
+    def test_legacy_case_isolation_uses_exact_identity_not_substring_search(self):
+        query = mock.Mock(side_effect=sqlite3.OperationalError("missing table"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "z-local-ai-analysis.json").write_text(
+                json.dumps({
+                    "alert_id": "unrelated-alert",
+                    "summary": "The string alert-1 appears only in narrative text.",
+                }),
+                encoding="utf-8",
+            )
+            matching = root / "y-local-ai-analysis.json"
+            matching.write_text(
+                json.dumps({
+                    "alert_id": "alert-1",
+                    "analysis": {"summary": "Exact case match."},
+                }),
+                encoding="utf-8",
+            )
+
+            result = build_prior_analysis_context(
+                source_bundle(query=query),
+                request(root, result_limit=2),
+            )
+
+        self.assertEqual([item["artifact"] for item in result], [str(matching)])
+
     def test_missing_index_schema_falls_back_to_matching_legacy_artifact(self):
         query = mock.Mock(side_effect=sqlite3.OperationalError("missing table"))
         with tempfile.TemporaryDirectory() as directory:

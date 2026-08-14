@@ -108,6 +108,41 @@ class AgentMemoryTests(unittest.TestCase):
         self.assertIn("TLS SNI", records[0]["finding"])
         self.assertIn("Preserve this note", context["role_memory"]["manual_notes"])
 
+    def test_retrieval_exposes_content_free_version_and_bound_receipts(self) -> None:
+        self.persist([self.candidate()])
+
+        context = MEMORY.build_agent_memory_context(
+            agent_role="soc-analyst",
+            role_memory_file=self.role,
+            shared_memory_file=self.shared,
+            evidence={"protocol": "tls", "field": "sni"},
+            limit_bytes=4000,
+        )
+
+        snapshot = context["role_memory"]["snapshot"]
+        self.assertEqual(
+            snapshot["schema"],
+            "onion-sentinel-agent-memory-snapshot-v1",
+        )
+        self.assertRegex(snapshot["source_digest"], r"^[a-f0-9]{64}$")
+        self.assertRegex(
+            snapshot["selected_records_digest"],
+            r"^[a-f0-9]{64}$",
+        )
+        self.assertEqual(snapshot["source_bytes"], self.role.stat().st_size)
+        self.assertLessEqual(snapshot["selected_records_bytes"], 4000)
+        self.assertEqual(
+            snapshot["selected_record_versions"],
+            [{
+                "id": context["role_memory"]["records"][0]["id"],
+                "version": context["role_memory"]["records"][0]["version"],
+            }],
+        )
+        self.assertIn(
+            "source_artifact_hash",
+            context["role_memory"]["records"][0],
+        )
+
     def test_rejects_low_confidence_shared_and_secret_like_candidates(self) -> None:
         low_shared = self.candidate(scope="shared")
         low_shared["confidence"] = "medium"
