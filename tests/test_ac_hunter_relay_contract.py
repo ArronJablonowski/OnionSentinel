@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import inspect
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -502,6 +504,173 @@ class AcHunterRelayContractTests(unittest.TestCase):
                     self.broker._load_config(config_path)
 
         self.assertEqual(calls, [config_path, ca_bundle])
+
+    def test_broker_response_header_projection_is_bounded_and_fail_closed(
+        self,
+    ) -> None:
+        class Headers:
+            def __init__(self, location, cookies):
+                self.location = location
+                self.cookies = cookies
+                self.trace = []
+
+            def get(self, name, default=None):
+                self.trace.append(["get", name, default])
+                return self.location if name == "Location" else default
+
+            def get_all(self, name):
+                self.trace.append(["get_all", name])
+                return self.cookies
+
+        headers = Headers(
+            "/jwt/json",
+            ["session=one", "", "bad\nvalue", 7, "session=two"] + ["x"] * 8,
+        )
+        result = self.broker._response_headers(SimpleNamespace(headers=headers))
+        self.assertEqual(
+            result,
+            {
+                "location": "/jwt/json",
+                "set_cookie": ["session=one", "session=two", "x", "x", "x"],
+            },
+        )
+        self.assertEqual(
+            headers.trace,
+            [["get", "Location", ""], ["get_all", "Set-Cookie"]],
+        )
+        for location in (7, "bad\rvalue", "x" * 2049):
+            with self.subTest(location=repr(location)):
+                projected = self.broker._response_headers(
+                    SimpleNamespace(headers=Headers(location, None))
+                )
+                self.assertEqual(projected, {"location": "", "set_cookie": []})
+
+    def test_broker_response_decoding_preserves_kind_and_errors(self) -> None:
+        class Headers:
+            def __init__(self, content_type="application/json", length=None):
+                self.content_type = content_type
+                self.length = length
+
+            def get(self, name, default=None):
+                if name == "Content-Type":
+                    return self.content_type
+                if name == "Content-Length":
+                    return self.length
+                return default
+
+        def request(kind):
+            return self.contract.UpstreamRequest(
+                method="GET",
+                path="/fixed",
+                headers={},
+                body=b"",
+                response_kind=kind,
+                allowed_statuses=(200,),
+            )
+
+        response = SimpleNamespace(
+            headers=Headers("application/json; charset=utf-8", "11"),
+            status=200,
+            read=mock.Mock(return_value=b'{"ok":true}'),
+        )
+        self.assertEqual(
+            self.broker._read_response(response, request("json"), 64),
+            ("application/json", {"ok": True}),
+        )
+        response.read.assert_called_once_with(65)
+
+        response = SimpleNamespace(
+            headers=Headers("text/html"),
+            status=200,
+            read=mock.Mock(return_value=b"<html>ok</html>"),
+        )
+        self.assertEqual(
+            self.broker._read_response(response, request("html"), 64),
+            ("text/html", "<html>ok</html>"),
+        )
+        response = SimpleNamespace(
+            headers=Headers(length="invalid"),
+            status=200,
+            read=mock.Mock(return_value=b"{}"),
+        )
+        with self.assertRaisesRegex(
+            self.broker.BrokerError,
+            "response length was invalid",
+        ):
+            self.broker._read_response(response, request("json"), 64)
+        response.read.assert_not_called()
+
+        response = SimpleNamespace(
+            headers=Headers(),
+            status=302,
+            read=mock.Mock(return_value=b"not-json"),
+        )
+        self.assertEqual(
+            self.broker._read_response(response, request("json"), 64),
+            ("application/json", None),
+        )
+
+    def test_broker_main_preserves_success_and_failure_envelopes(self) -> None:
+        payload = self.envelope(
+            "database",
+            headers={"authorization": "Bearer " + "x" * 32},
+        )
+        lock = mock.MagicMock()
+        lock.__enter__.return_value = object()
+        lock.__exit__.return_value = False
+
+        def invoke(raw, *, perform=None, load=None, clock=(10.0, 10.015)):
+            stdin = SimpleNamespace(buffer=io.BytesIO(raw))
+            stdout = io.StringIO()
+            patches = (
+                mock.patch.object(self.broker.sys, "argv", ["broker"]),
+                mock.patch.object(self.broker.sys, "stdin", stdin),
+                mock.patch.object(self.broker.sys, "stdout", stdout),
+                mock.patch.dict(self.broker.os.environ, {}, clear=True),
+                mock.patch.object(
+                    self.broker.time,
+                    "monotonic",
+                    side_effect=list(clock),
+                ),
+                mock.patch.object(
+                    self.broker,
+                    "_load_config",
+                    side_effect=load,
+                    return_value={"lock_file": Path("/fixed/lock")},
+                ),
+                mock.patch.object(
+                    self.broker,
+                    "_acquire_lock",
+                    return_value=lock,
+                ),
+                mock.patch.object(
+                    self.broker,
+                    "_perform",
+                    side_effect=perform,
+                    return_value=(200, "application/json", {"location": "", "set_cookie": []}, {"data": []}),
+                ),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
+                code = self.broker.main()
+            return code, json.loads(stdout.getvalue())
+
+        code, result = invoke(json.dumps(payload).encode("utf-8"))
+        self.assertEqual(code, 0)
+        self.assertEqual(result["request_id"], "a" * 32)
+        self.assertEqual(result["duration_ms"], 15)
+        self.assertTrue(result["ok"])
+
+        code, result = invoke(b"{", clock=(20.0, 20.001))
+        self.assertEqual((code, result["request_id"]), (2, "0" * 32))
+        self.assertEqual(result["error"], "invalid AC Hunter relay request")
+
+        code, result = invoke(
+            json.dumps(payload).encode("utf-8"),
+            load=self.broker.BrokerError("bounded failure"),
+            clock=(30.0, 30.002),
+        )
+        self.assertEqual((code, result["request_id"]), (4, "a" * 32))
+        self.assertEqual(result["error"], "bounded failure")
 
     def test_contract_and_broker_compile_under_current_python(self) -> None:
         subprocess.run(

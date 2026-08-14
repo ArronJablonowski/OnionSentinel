@@ -461,6 +461,34 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
             50,
         )
 
+    def test_ac_hunter_broker_has_bounded_response_lifecycle_phases(self) -> None:
+        broker = ROOT / "relay" / "app" / "ac_hunter_broker.py"
+        expected = {
+            "_safe_location",
+            "_safe_cookies",
+            "_validate_declared_length",
+            "_read_bounded_body",
+            "_decode_response_body",
+            "_admit_request_bytes",
+            "_candidate_request_id",
+            "_execute_request",
+            "_emit_success",
+            "_emit_invalid_request",
+            "_emit_broker_failure",
+            "_emit_internal_failure",
+        }
+
+        self.assertTrue(expected <= top_level_function_names(broker))
+        for name in ("_response_headers", "_read_response", "main"):
+            function = top_level_function(broker, name)
+            with self.subTest(name=name):
+                self.assertLessEqual(
+                    (function.end_lineno or function.lineno)
+                    - function.lineno
+                    + 1,
+                    50,
+                )
+
     def test_relay_health_contract_has_bounded_diagnostic_phases(self) -> None:
         contract = ROOT / "relay" / "app" / "relay_health_contract.py"
         expected = {
