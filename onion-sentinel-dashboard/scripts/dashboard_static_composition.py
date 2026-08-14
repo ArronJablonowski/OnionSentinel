@@ -59,13 +59,9 @@ def replace_main_page_content(text: str, replacement: str) -> str:
     return text[:content_start] + replacement + text[footer_start:]
 
 
-def compose_static_page(shell_html: str, plan: StaticPagePlan) -> str:
-    """Apply a deterministic, side-effect-free page plan to a shell."""
-    data_view = 'alerts' if plan.page_key == 'alerts' else 'overview'
-    rendered = shell_html.replace(
-        "dashboard-metrics.css?v=20260712-responsive-qa",
-        "dashboard-metrics.css?v=20260717-pre-soak-qa",
-    )
+def _static_page_shell(shell_html: str, plan: StaticPagePlan, data_view: str) -> str:
+    """Apply the common deterministic transformations to a page shell."""
+    rendered = shell_html.replace("dashboard-metrics.css?v=20260712-responsive-qa", "dashboard-metrics.css?v=20260717-pre-soak-qa")
     rendered = re.sub(
         r'<title>.*?</title>',
         f'<title>{html.escape(plan.title)} - Onion Sentinel</title>',
@@ -112,6 +108,13 @@ def compose_static_page(shell_html: str, plan: StaticPagePlan) -> str:
         "setView(appShell?.dataset.view||'overview');",
         '/* static page navigation is rendered server-side */',
     )
+    return rendered
+
+
+def compose_static_page(shell_html: str, plan: StaticPagePlan) -> str:
+    """Apply a deterministic, side-effect-free page plan to a shell."""
+    data_view = 'alerts' if plan.page_key == 'alerts' else 'overview'
+    rendered = _static_page_shell(shell_html, plan, data_view)
 
     if plan.page_key == 'alerts':
         rendered = remove_between_markers(
