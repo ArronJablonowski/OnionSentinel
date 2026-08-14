@@ -12,21 +12,31 @@ PHASE_LABELS = {
 }
 
 
+def _normalized_field(current: dict, key: str, fallback: str = "") -> str:
+    return str(current.get(key) or fallback).strip()
+
+
+def _normalized_lower_field(
+    current: dict, key: str, fallback: str = ""
+) -> str:
+    return _normalized_field(current, key, fallback).lower()
+
+
 def _execution_fields(current: dict) -> tuple[str, str, str, str, str]:
     if "active_phase" in current:
         return (
-            str(current.get("active_phase") or "primary_analysis").strip().lower(),
-            str(current.get("active_model_route") or "").strip(),
-            str(current.get("active_model") or "").strip(),
-            str(current.get("active_provider") or "").strip().lower(),
-            str(current.get("active_model_path") or "").strip().lower(),
+            _normalized_lower_field(current, "active_phase", "primary_analysis"),
+            _normalized_field(current, "active_model_route"),
+            _normalized_field(current, "active_model"),
+            _normalized_lower_field(current, "active_provider"),
+            _normalized_lower_field(current, "active_model_path"),
         )
     return (
         "primary_analysis",
-        str(current.get("model_route") or "").strip(),
-        str(current.get("model") or "").strip(),
-        str(current.get("mode") or "").strip().lower(),
-        str(current.get("model_path") or "").strip().lower(),
+        _normalized_field(current, "model_route"),
+        _normalized_field(current, "model"),
+        _normalized_lower_field(current, "mode"),
+        _normalized_lower_field(current, "model_path"),
     )
 
 
