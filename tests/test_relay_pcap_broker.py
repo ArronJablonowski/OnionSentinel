@@ -1054,6 +1054,70 @@ class RelayPcapBrokerTest(unittest.TestCase):
         self.assertEqual(decision["metric"], "suricata_packet_loss")
         self.assertIn("0.1500% exceeds 0.1000%", decision["reason"])
 
+    def test_capture_protection_unavailable_and_stale_shapes_are_exact(self) -> None:
+        optional = self.relay.capture_protection_decision(
+            {"pcap_broker": {"capture_protection_require_telemetry": False}},
+            None,
+        )
+        stale = self.relay.capture_protection_decision(
+            {
+                "pcap_broker": {
+                    "capture_loss_threshold_percent": 2.5,
+                    "capture_loss_freshness_seconds": 60,
+                }
+            },
+            {
+                "zeek_capture_loss_available": True,
+                "zeek_capture_loss_age_seconds": 61,
+                "zeek_capture_loss_max_percent": 1.25,
+            },
+        )
+
+        self.assertEqual(
+            optional,
+            {
+                "deferred": False,
+                "reason": "Zeek capture-loss telemetry is unavailable",
+                "threshold_percent": 5.0,
+            },
+        )
+        self.assertEqual(
+            stale,
+            {
+                "deferred": True,
+                "reason": "Zeek capture-loss telemetry is stale (61s)",
+                "observed_percent": 1.25,
+                "threshold_percent": 2.5,
+                "age_seconds": 61,
+            },
+        )
+
+    def test_capture_protection_disabled_precedes_invalid_telemetry(self) -> None:
+        decision = self.relay.capture_protection_decision(
+            {
+                "pcap_broker": {
+                    "capture_protection_enabled": False,
+                    "sensor_packet_loss_threshold_percent": "invalid",
+                }
+            },
+            {"zeek_packet_loss_percent": "invalid"},
+        )
+
+        self.assertEqual(decision, {"deferred": False, "reason": "disabled"})
+
+    def test_require_capture_safe_preserves_retryable_diagnostics(self) -> None:
+        status = {
+            **self.healthy_capture_status,
+            "zeek_capture_loss_max_percent": 6.0,
+        }
+
+        with self.assertRaises(self.relay.PcapCaptureProtectionDeferred) as raised:
+            self.relay.require_capture_safe({"pcap_broker": {}}, status)
+
+        self.assertEqual(str(raised.exception), "Zeek capture loss 6.0000% exceeds 5.0000%")
+        self.assertEqual(raised.exception.diagnostics["observed_percent"], 6.0)
+        self.assertEqual(raised.exception.diagnostics["threshold_percent"], 5.0)
+
 
 if __name__ == "__main__":
     unittest.main()
