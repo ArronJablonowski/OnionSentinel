@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +84,24 @@ class AiSettingsStoreTest(unittest.TestCase):
         self.assertFalse(saved)
         self.assertEqual(response["error"], "not ready")
         self.assertEqual(self.path.read_text(), before)
+
+    def test_failed_atomic_replace_preserves_original_and_cleans_staged_document(self) -> None:
+        original = '{"original": true}\n'
+        self.path.write_text(original, encoding="utf-8")
+
+        with mock.patch(
+            "portal_ai_settings_store.Path.replace",
+            side_effect=OSError("synthetic replace failure"),
+        ):
+            saved, response = save_soc_ai_settings(self.sources, {})
+
+        self.assertFalse(saved)
+        self.assertIn("Could not save", response["error"])
+        self.assertEqual(self.path.read_text(encoding="utf-8"), original)
+        self.assertEqual(
+            sorted(path.name for path in self.path.parent.iterdir()),
+            [self.path.name],
+        )
 
     def test_agent_save_updates_only_requested_role_and_all_three_routes(self) -> None:
         save_soc_ai_settings(self.sources, {})

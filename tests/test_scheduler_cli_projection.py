@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -182,6 +184,27 @@ class SchedulerCliProjectionTests(unittest.TestCase):
             "dry_run": False,
         }
         self.assertEqual(vars(args), expected)
+
+    def test_scheduler_defaults_ignore_legacy_environment_model(self) -> None:
+        script = """
+import sys
+sys.path.insert(0, sys.argv[1])
+import scheduler_facade
+print(repr(scheduler_facade.DEFAULT_MODEL))
+"""
+        environment = os.environ.copy()
+        environment["SOC_AI_MODEL"] = "stale-environment-model"
+
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", script, str(BIN)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "''")
 
     def test_every_option_parses_and_controlled_identity_normalizes(self) -> None:
         path_options = [

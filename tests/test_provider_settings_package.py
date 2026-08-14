@@ -153,6 +153,59 @@ class ProviderSettingsPackageTests(unittest.TestCase):
                 policy=POLICY, dependencies=dependencies(),
             )
 
+    def test_roster_gives_reviewer_normalizer_the_current_settings_identity(self) -> None:
+        target = base_settings() | {
+            "codex_cli_models": [
+                {
+                    "model": "gpt-5.6-sol",
+                    "reasoning_effort": "high",
+                    "enabled": True,
+                }
+            ],
+            "hermes_agent_enabled": True,
+            "hermes_agent_model": "gpt-5.6-sol",
+            "openclaw_enabled": False,
+        }
+        observed = []
+
+        def normalize_reviewer(value, routes, primary, current):
+            observed.append(current)
+            requested = routing.canonical_model_route(
+                (value or {}).get("soc-analyst"), routes
+            )
+            same_identity = routing.model_route_identity(
+                requested, current
+            ) == routing.model_route_identity(primary["soc-analyst"], current)
+            return {"soc-analyst": "" if same_identity else requested}
+
+        configured = dependencies()
+        configured = settings.Dependencies(
+            **{
+                **configured.__dict__,
+                "normalize_primary": lambda _value, routes: {
+                    "soc-analyst": next(
+                        route for route in routes if route.startswith("codex-cli:")
+                    )
+                },
+                "normalize_reviewer": normalize_reviewer,
+            }
+        )
+
+        settings.apply_roster(
+            target,
+            {
+                "enabled_ollama_models": [],
+                "agent_second_opinion_models": {
+                    "soc-analyst": "hermes-agent:gpt-5.6-sol:medium"
+                },
+            },
+            policy=POLICY,
+            dependencies=configured,
+        )
+
+        self.assertEqual(observed, [target])
+        self.assertEqual(target["agent_second_opinion_models"]["soc-analyst"], "")
+
     def test_merge_protects_structured_fields_and_runs_normalizers_in_order(self) -> None:
         target = {
             "mode": "ollama", "enabled_ollama_models": ["existing"],
