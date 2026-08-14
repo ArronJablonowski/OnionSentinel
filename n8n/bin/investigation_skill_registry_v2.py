@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import datetime as dt
 import hashlib
 import json
 import re
@@ -32,7 +33,16 @@ _UNSEALED_FIELDS = frozenset({
 })
 _SEALED_FIELDS = _UNSEALED_FIELDS | {"signature", "registry_digest"}
 _RECORD_FIELDS = frozenset({"state", "manifest", "dependencies", "conflicts"})
+_RECORD_FIELDS = _RECORD_FIELDS | {"evaluation"}
 _SIGNATURE_FIELDS = frozenset({"algorithm", "key_id", "value"})
+_EVALUATION_SCHEMA = "onion-sentinel-investigation-skill-evaluation-v1"
+_EVALUATION_FIELDS = frozenset({
+    "schema", "manifest_digest", "evaluation_digest", "source_revision",
+    "reviewer", "approver", "evaluated_at", "unit_test_count",
+    "replay_case_count", "independent_query_review", "adversarial_tests",
+    "human_approved", "outcome",
+})
+_PERSON = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{2,127}")
 
 
 Signer = Callable[[bytes], Mapping[str, str]]
@@ -123,12 +133,92 @@ def _validate_record(raw: Any, *, mode: str) -> dict[str, Any]:
     )
     _validate_record_relations(dependencies, conflicts)
     _validate_record_promotion(manifest, state)
+    evaluation = _validate_evaluation(raw.get("evaluation"), manifest, state)
     return {
         "state": state,
         "manifest": manifest,
         "dependencies": dependencies,
         "conflicts": conflicts,
+        "evaluation": evaluation,
     }
+
+
+def _evaluated_at(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) > 40:
+        return False
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+def _evaluation_identity(
+    raw: Mapping[str, Any], manifest: Mapping[str, Any], state: str,
+) -> None:
+    maintainer = manifest["maintainer"]
+    lineage = manifest["lineage"]
+    reviewer = raw.get("reviewer")
+    approver = raw.get("approver")
+    checks = (
+        raw.get("manifest_digest") == manifest["artifact_digest"],
+        raw.get("source_revision") == lineage["source_revision"],
+        reviewer == maintainer["reviewer"],
+        _valid_person(reviewer, required=True),
+        _valid_person(approver, required=state == "active"),
+        not approver or approver != reviewer,
+    )
+    if not all(checks):
+        raise ValueError("registry evaluation attestation identity is invalid")
+
+
+def _valid_person(value: Any, *, required: bool) -> bool:
+    if not isinstance(value, str):
+        return False
+    return bool(_PERSON.fullmatch(value)) if required or value else True
+
+
+def _evaluation_results(
+    raw: Mapping[str, Any], manifest: Mapping[str, Any], state: str,
+) -> None:
+    verification = manifest["verification"]
+    unit_count = raw.get("unit_test_count")
+    replay_count = raw.get("replay_case_count")
+    checks = (
+        isinstance(unit_count, int) and not isinstance(unit_count, bool),
+        isinstance(unit_count, int) and 1 <= unit_count <= 1_000_000,
+        isinstance(replay_count, int) and not isinstance(replay_count, bool),
+        replay_count == verification["replay_cases"],
+        raw.get("independent_query_review")
+        is verification["independent_query_review"],
+        raw.get("adversarial_tests") is verification["adversarial_tests"],
+        raw.get("human_approved") is verification["human_approved"],
+        state != "active" or raw.get("human_approved") is True,
+        raw.get("outcome") == "pass",
+    )
+    if not all(checks):
+        raise ValueError("registry evaluation attestation results are invalid")
+
+
+def _validate_evaluation(
+    value: Any, manifest: Mapping[str, Any], state: str,
+) -> dict[str, Any] | None:
+    required = state in {"shadow", "active"}
+    if value is None and not required:
+        return None
+    if (
+        not isinstance(value, Mapping)
+        or frozenset(value) != _EVALUATION_FIELDS
+        or value.get("schema") != _EVALUATION_SCHEMA
+        or not isinstance(value.get("evaluation_digest"), str)
+        or not _DIGEST.fullmatch(value["evaluation_digest"])
+        or value["evaluation_digest"] == manifest["artifact_digest"]
+        or not _evaluated_at(value.get("evaluated_at"))
+    ):
+        raise ValueError("registry evaluation attestation is invalid")
+    _evaluation_identity(value, manifest, state)
+    _evaluation_results(value, manifest, state)
+    return copy.deepcopy(dict(value))
 
 
 def _record_state(value: Any, mode: str) -> str:

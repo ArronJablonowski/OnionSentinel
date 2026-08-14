@@ -60,6 +60,21 @@ def raw_snapshot(
             "manifest": manifest,
             "dependencies": [],
             "conflicts": [],
+            "evaluation": {
+                "schema": "onion-sentinel-investigation-skill-evaluation-v1",
+                "manifest_digest": manifest["artifact_digest"],
+                "evaluation_digest": "e" * 64,
+                "source_revision": manifest["lineage"]["source_revision"],
+                "reviewer": manifest["maintainer"]["reviewer"],
+                "approver": "soc-platform-owner",
+                "evaluated_at": "2026-08-14T18:00:00Z",
+                "unit_test_count": 12,
+                "replay_case_count": manifest["verification"]["replay_cases"],
+                "independent_query_review": True,
+                "adversarial_tests": True,
+                "human_approved": True,
+                "outcome": "pass",
+            },
         }],
     }
 

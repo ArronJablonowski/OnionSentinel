@@ -62,6 +62,7 @@ def record(
         "manifest": value,
         "dependencies": dependencies or [],
         "conflicts": conflicts or [],
+        "evaluation": evaluation(value) if state in {"active", "shadow"} else None,
     }
 
 
@@ -136,6 +137,7 @@ class InvestigationSkillRegistryV2Tests(unittest.TestCase):
         )
 
         missing = record(value)
+        missing["evaluation"] = None
         with self.assertRaisesRegex(ValueError, "evaluation attestation"):
             snapshot([missing])
 
