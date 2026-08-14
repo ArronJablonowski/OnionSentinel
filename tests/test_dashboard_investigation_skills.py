@@ -129,6 +129,117 @@ class DashboardInvestigationSkillsTests(unittest.TestCase):
         self.assertIn("blocked &lt;safely&gt;", rendered)
         self.assertNotIn("data-investigation-skill=", rendered)
 
+    def test_pivot_html_preserves_positions_lookup_and_escape_order(self) -> None:
+        trace: list[tuple[object, ...]] = []
+
+        class TextProbe:
+            def __init__(self, label: str, value: str) -> None:
+                self.label = label
+                self.value = value
+
+            def __str__(self) -> str:
+                trace.append(("str", self.label))
+                return self.value
+
+        class PivotProbe(dict[str, object]):
+            def get(self, key: str, default: object = None) -> object:
+                trace.append(("get", self["name"], key, default))
+                return super().get(key, default)
+
+        first = PivotProbe(
+            name="first",
+            required=True,
+            step=TextProbe("first-step", "Step <one>"),
+            backend=None,
+            pack=TextProbe("first-pack", "dns&pack"),
+            purpose=TextProbe("first-purpose", "establish_timeline"),
+            discriminator=False,
+        )
+        second = PivotProbe(
+            name="second",
+            required=1,
+            step="Second",
+            backend="elastic",
+            pack="dns",
+            purpose="confirm_scope",
+            discriminator="Compare > baseline",
+        )
+
+        def escape(value: object, quote: bool = True) -> str:
+            trace.append(("escape", value, quote))
+            return f"E[{value}]"
+
+        with mock.patch.object(self.catalog.html, "escape", side_effect=escape):
+            rendered = self.catalog._pivot_html(["skip", first, second])
+
+        self.assertIn('<span class="settings-skill-step">2</span>', rendered)
+        self.assertIn('<span class="settings-skill-step">3</span>', rendered)
+        self.assertIn(
+            '<span class="settings-skill-requirement required">Required</span>',
+            rendered,
+        )
+        self.assertIn(
+            '<span class="settings-skill-requirement advisory">Advisory</span>',
+            rendered,
+        )
+        self.assertEqual(
+            trace,
+            [
+                ("get", "first", "required", None),
+                ("get", "first", "step", None),
+                ("str", "first-step"),
+                ("escape", "Step <one>", True),
+                ("get", "first", "backend", None),
+                ("escape", "unknown", True),
+                ("get", "first", "pack", None),
+                ("str", "first-pack"),
+                ("escape", "dns&pack", True),
+                ("get", "first", "purpose", None),
+                ("str", "first-purpose"),
+                ("escape", "establish timeline", True),
+                ("get", "first", "discriminator", None),
+                ("escape", "No discriminator recorded.", True),
+                ("get", "second", "required", None),
+                ("get", "second", "step", None),
+                ("escape", "Second", True),
+                ("get", "second", "backend", None),
+                ("escape", "elastic", True),
+                ("get", "second", "pack", None),
+                ("escape", "dns", True),
+                ("get", "second", "purpose", None),
+                ("escape", "confirm scope", True),
+                ("get", "second", "discriminator", None),
+                ("escape", "Compare > baseline", True),
+            ],
+        )
+
+    def test_pivot_html_rejects_non_list_without_iteration(self) -> None:
+        class IterableProbe:
+            def __iter__(self):
+                raise AssertionError("non-list input must remain uniterated")
+
+        self.assertEqual(self.catalog._pivot_html(IterableProbe()), "")
+
+    def test_pivot_html_propagates_mapping_failure_before_rendering(self) -> None:
+        trace: list[str] = []
+
+        class PivotProbe(dict[str, object]):
+            def get(self, key: str, default: object = None) -> object:
+                trace.append(key)
+                raise RuntimeError("synthetic pivot failure")
+
+        with (
+            mock.patch.object(
+                self.catalog.html,
+                "escape",
+                side_effect=AssertionError("escaping must remain skipped"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "synthetic pivot failure"),
+        ):
+            self.catalog._pivot_html([PivotProbe()])
+
+        self.assertEqual(trace, ["required"])
+
     def test_builder_wrappers_honor_runtime_path_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
