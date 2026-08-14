@@ -841,6 +841,104 @@ class InstallerDependencyTests(unittest.TestCase):
                 completed.stdout,
             )
 
+    def test_installer_rejects_unknown_argument_before_staging(self) -> None:
+        installer = BIN_DIR / "install-macstudio-stack.zsh"
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp) / "runtime"
+            completed = subprocess.run(
+                ["/bin/zsh", str(installer), "--not-an-installer-option"],
+                env={
+                    **os.environ,
+                    "STACK_DIR": str(runtime),
+                    "ONION_SENTINEL_RELEASE_ID": "arr-70-unknown-argument",
+                    "ONION_SENTINEL_VALIDATE_ONLY": "1",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn(
+                "Unknown installer argument: --not-an-installer-option",
+                completed.stderr,
+            )
+            self.assertFalse(runtime.exists())
+
+    def test_installer_explicit_validation_option_is_preflight_only(self) -> None:
+        installer = BIN_DIR / "install-macstudio-stack.zsh"
+        source = installer.read_text(encoding="utf-8")
+        argument_parser = 'parse_installer_arguments "$@"'
+        release_validation = (
+            '/usr/bin/python3 "$REPO_DIR/n8n/bin/set-runtime-release-id.py"'
+        )
+        staging = "prepare_alert_store_stage\nvalidate_production_python_sources"
+        self.assertLess(source.index(argument_parser), source.index(release_validation))
+        self.assertLess(source.index(argument_parser), source.index(staging))
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp) / "runtime"
+            completed = subprocess.run(
+                ["/bin/zsh", str(installer), "--validate-only"],
+                env={
+                    **os.environ,
+                    "STACK_DIR": str(runtime),
+                    "ONION_SENTINEL_RELEASE_ID": "arr-70-explicit-validation",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                completed.stderr or completed.stdout,
+            )
+            self.assertIn(
+                "Mac Studio installer preflight validation passed.",
+                completed.stdout,
+            )
+            self.assertFalse((runtime / ".env").exists())
+
+    def test_installer_help_and_invalid_validation_environment_are_safe(self) -> None:
+        installer = BIN_DIR / "install-macstudio-stack.zsh"
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp) / "runtime"
+            environment = {
+                **os.environ,
+                "STACK_DIR": str(runtime),
+            }
+            environment.pop("ONION_SENTINEL_RELEASE_ID", None)
+            help_result = subprocess.run(
+                ["/bin/zsh", str(installer), "--help"],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(help_result.returncode, 0)
+            self.assertIn("[--validate-only]", help_result.stdout)
+            self.assertFalse(runtime.exists())
+
+            invalid_result = subprocess.run(
+                ["/bin/zsh", str(installer)],
+                env={
+                    **environment,
+                    "ONION_SENTINEL_VALIDATE_ONLY": "invalid",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(invalid_result.returncode, 2)
+            self.assertIn(
+                "ONION_SENTINEL_VALIDATE_ONLY must be 0 or 1.",
+                invalid_result.stderr,
+            )
+            self.assertFalse(runtime.exists())
+
     def test_pi_installer_copies_bounded_process_helper(self) -> None:
         installer = (ROOT / "relay" / "bin" / "install-pi-relay.sh").read_text(encoding="utf-8")
         self.assertIn('relay/app/process_io.py" /opt/so-alert-relay/app/process_io.py', installer)

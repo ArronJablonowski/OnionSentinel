@@ -82,6 +82,15 @@ release_id="$(git rev-parse --verify HEAD)"
 ONION_SENTINEL_RELEASE_ID="$release_id" n8n/bin/install-macstudio-stack.zsh
 ```
 
+Run the same production-source validation without deployment by adding
+
+```bash
+ONION_SENTINEL_RELEASE_ID="$release_id" n8n/bin/install-macstudio-stack.zsh --validate-only
+```
+
+The legacy `ONION_SENTINEL_VALIDATE_ONLY=1` environment switch remains
+supported. Unknown installer arguments fail before staging or runtime changes.
+
 The host-native alert-store requires Node.js 20.17 and npm 11 or newer. The
 installer copies the committed lockfile and runs `npm ci --omit=dev`; do not
 replace this with an unlocked production install. The locked `sqlite3` runtime
