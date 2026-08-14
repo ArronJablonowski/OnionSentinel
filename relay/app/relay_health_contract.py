@@ -101,6 +101,35 @@ DIAGNOSTIC_CATEGORIES = frozenset({
     "timeout",
     "transport_error",
 })
+PRIMARY_DIAGNOSTIC_PATTERNS = (
+    ("connection_reset", r"\b(?:connection[_ ]reset|econnreset)\b"),
+    ("connection_refused", r"\b(?:connection[_ ]refused|econnrefused)\b"),
+    ("configuration_error", r"relay webhook token mismatch"),
+    ("timeout", r"\b(?:timed[_ ]out|timeout|time-out)\b"),
+)
+SECONDARY_DIAGNOSTIC_PATTERNS = (
+    (
+        "name_resolution_failure",
+        r"\b(?:name or service not known|temporary failure in name resolution|"
+        r"nodename nor servname provided|dns failure)\b",
+    ),
+    ("checksum_failure", r"\b(?:checksum|sha256)\b"),
+    (
+        "storage_unavailable",
+        r"\b(?:spool|filesystem|disk|mount)\b.*"
+        r"\b(?:unavailable|not mounted|insufficient|full|exceeded)\b",
+    ),
+    (
+        "transport_error",
+        r"\b(?:rsync|ssh|socket|transport|artifact upload|connection)\b",
+    ),
+    ("service_unavailable", r"\b(?:unavailable|unreachable)\b"),
+    (
+        "invalid_output",
+        r"\b(?:invalid[_ ]output|no valid final json summary|"
+        r"emitted no valid final json summary)\b",
+    ),
+)
 PCAP_BOOLEAN_FIELDS = (
     "ok",
     "enabled",
@@ -368,84 +397,84 @@ def diagnostic_scan_text(*values: object) -> str:
     return "\n".join(chunks)
 
 
+def _validated_child_diagnostic(value: object) -> dict | None:
+    candidate = final_json_object(value)
+    nested = (
+        candidate.get("child_diagnostic")
+        if isinstance(candidate, dict)
+        else None
+    )
+    if not isinstance(nested, dict):
+        return None
+    category = nested.get("category")
+    if not isinstance(category, str) or category not in DIAGNOSTIC_CATEGORIES:
+        return None
+    diagnostic = {"category": category}
+    http_status = validated_int(
+        nested.get("http_status"),
+        minimum=100,
+        maximum=599,
+    )
+    if http_status is not None:
+        diagnostic["http_status"] = http_status
+    return diagnostic
+
+
+def _first_diagnostic_pattern_category(
+    lowered: str,
+    patterns: tuple[tuple[str, str], ...],
+) -> str | None:
+    for category, pattern in patterns:
+        if re.search(pattern, lowered):
+            return category
+    return None
+
+
+def _classified_diagnostic_category(
+    lowered: str,
+    http_status: int | None,
+) -> str | None:
+    category = _first_diagnostic_pattern_category(
+        lowered,
+        PRIMARY_DIAGNOSTIC_PATTERNS,
+    )
+    if category is not None:
+        return category
+    if http_status is not None:
+        return "http_error"
+    return _first_diagnostic_pattern_category(
+        lowered,
+        SECONDARY_DIAGNOSTIC_PATTERNS,
+    )
+
+
+def _diagnostic_projection(
+    category: str | None,
+    http_status: int | None,
+) -> dict:
+    diagnostic = {"category": category} if category else {}
+    if http_status is not None:
+        diagnostic["http_status"] = http_status
+    return diagnostic
+
+
 def classify_child_diagnostic(
     *values: object,
     fallback: str | None = None,
 ) -> dict:
     """Map untrusted diagnostics to a fixed category plus a validated HTTP code."""
     for value in values:
-        candidate = final_json_object(value)
-        nested = (
-            candidate.get("child_diagnostic")
-            if isinstance(candidate, dict)
-            else None
-        )
-        if not isinstance(nested, dict):
-            continue
-        category = nested.get("category")
-        if (
-            not isinstance(category, str)
-            or category not in DIAGNOSTIC_CATEGORIES
-        ):
-            continue
-        diagnostic = {"category": category}
-        http_status = validated_int(
-            nested.get("http_status"),
-            minimum=100,
-            maximum=599,
-        )
-        if http_status is not None:
-            diagnostic["http_status"] = http_status
-        return diagnostic
+        diagnostic = _validated_child_diagnostic(value)
+        if diagnostic is not None:
+            return diagnostic
 
     text = diagnostic_scan_text(*values)
     lowered = text.lower()
     http_status = parse_http_status(text)
-    category = None
-    if re.search(r"\b(?:connection[_ ]reset|econnreset)\b", lowered):
-        category = "connection_reset"
-    elif re.search(r"\b(?:connection[_ ]refused|econnrefused)\b", lowered):
-        category = "connection_refused"
-    elif "relay webhook token mismatch" in lowered:
-        category = "configuration_error"
-    elif re.search(r"\b(?:timed[_ ]out|timeout|time-out)\b", lowered):
-        category = "timeout"
-    elif http_status is not None:
-        category = "http_error"
-    elif re.search(
-        r"\b(?:name or service not known|temporary failure in name resolution|"
-        r"nodename nor servname provided|dns failure)\b",
-        lowered,
-    ):
-        category = "name_resolution_failure"
-    elif re.search(r"\b(?:checksum|sha256)\b", lowered):
-        category = "checksum_failure"
-    elif re.search(
-        r"\b(?:spool|filesystem|disk|mount)\b.*"
-        r"\b(?:unavailable|not mounted|insufficient|full|exceeded)\b",
-        lowered,
-    ):
-        category = "storage_unavailable"
-    elif re.search(
-        r"\b(?:rsync|ssh|socket|transport|artifact upload|connection)\b",
-        lowered,
-    ):
-        category = "transport_error"
-    elif re.search(r"\b(?:unavailable|unreachable)\b", lowered):
-        category = "service_unavailable"
-    elif re.search(
-        r"\b(?:invalid[_ ]output|no valid final json summary|"
-        r"emitted no valid final json summary)\b",
-        lowered,
-    ):
-        category = "invalid_output"
-
+    category = _classified_diagnostic_category(lowered, http_status)
     if category is None and fallback in DIAGNOSTIC_CATEGORIES:
         category = fallback
-    diagnostic = {"category": category} if category else {}
-    if http_status is not None:
-        diagnostic["http_status"] = http_status
-    return diagnostic
+    return _diagnostic_projection(category, http_status)
 
 
 def sanitize_counter_fields(payload: dict, fields: tuple[str, ...]) -> dict:

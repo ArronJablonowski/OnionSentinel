@@ -3655,7 +3655,10 @@ behavior, HTTP schemas, and exit behavior are unchanged.
 
 `relay_health_contract.py` owns environment/configuration defaults, persisted
 component-state compatibility, bounded Telegram/webhook notification delivery,
-numeric validation, and allowlisted diagnostic classification.
+numeric validation, and allowlisted diagnostic classification. Diagnostic
+classification separates validated final-JSON child admission, ordered bounded
+text-pattern matching, and the fixed category/HTTP projection while retaining
+the public classifier and its exact precedence.
 `relay_health_sanitization.py` owns secret-safe child-result projection,
 PCAP/storage summary validation, persisted-state cleansing, and bounded
 human-readable summaries.

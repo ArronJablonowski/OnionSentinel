@@ -852,6 +852,56 @@ class RelayHealthWrapperTest(unittest.TestCase):
                         http_status,
                     )
 
+    def test_child_diagnostic_classification_preserves_precedence(self) -> None:
+        cases = (
+            ("connection reset and HTTP 503", "connection_reset", 503),
+            ("connection refused after timeout", "connection_refused", None),
+            ("relay webhook token mismatch timeout", "configuration_error", None),
+            ("request timed_out with HTTP 504", "timeout", 504),
+            ("HTTP Error: 429 name or service not known", "http_error", 429),
+            ("temporary failure in name resolution", "name_resolution_failure", None),
+            ("sha256 did not match", "checksum_failure", None),
+            ("relay spool is full", "storage_unavailable", None),
+            ("artifact upload failed", "transport_error", None),
+            ("upstream unavailable", "service_unavailable", None),
+            ("emitted no valid final json summary", "invalid_output", None),
+        )
+        for text, category, http_status in cases:
+            with self.subTest(category=category):
+                diagnostic = self.wrapper.classify_child_diagnostic(text)
+                self.assertEqual(diagnostic["category"], category)
+                if http_status is None:
+                    self.assertNotIn("http_status", diagnostic)
+                else:
+                    self.assertEqual(diagnostic["http_status"], http_status)
+
+    def test_valid_nested_child_diagnostic_precedes_text_classification(self) -> None:
+        nested = json.dumps({
+            "child_diagnostic": {
+                "category": "operational_failure",
+                "http_status": 418,
+            },
+        })
+        diagnostic = self.wrapper.classify_child_diagnostic(
+            "connection reset",
+            nested,
+            fallback="child_failure",
+        )
+        self.assertEqual(
+            diagnostic,
+            {"category": "operational_failure", "http_status": 418},
+        )
+        bool_status = json.dumps({
+            "child_diagnostic": {
+                "category": "child_failure",
+                "http_status": True,
+            },
+        })
+        self.assertEqual(
+            self.wrapper.classify_child_diagnostic(bool_status),
+            {"category": "child_failure"},
+        )
+
     def test_sentinel_never_reaches_state_notifications_events_or_journal(
         self,
     ) -> None:
