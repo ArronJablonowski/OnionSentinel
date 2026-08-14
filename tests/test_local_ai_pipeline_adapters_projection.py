@@ -409,7 +409,13 @@ class LocalAiPipelineAdaptersProjectionTests(unittest.TestCase):
             max_response_bytes=2000,
         )
         monitor = ResourceMonitor(recorder)
-        with mock.patch.object(adapters.os, "getpid", return_value=267):
+        with (
+            mock.patch.object(adapters.os, "getpid", return_value=267),
+            mock.patch.dict(
+                adapters.os.environ,
+                {"ONION_SENTINEL_RELEASE_ID": "1" * 40},
+            ),
+        ):
             result = adapters.prepare_runtime(
                 bindings,
                 module,
@@ -432,6 +438,7 @@ class LocalAiPipelineAdaptersProjectionTests(unittest.TestCase):
             inputs.args,
             (
                 "run-267",
+                "1" * 40,
                 {"case": 267},
                 {"route": "primary"},
                 "soc-analyst",
@@ -478,6 +485,7 @@ class LocalAiPipelineAdaptersProjectionTests(unittest.TestCase):
         ports.harness_activation(True, "primary", "reviewer")
         request = SimpleNamespace(
             run_id="run-267",
+            source_revision="1" * 40,
             prompt_package={"case": 267},
             role="soc-analyst",
             assigned_route="primary",

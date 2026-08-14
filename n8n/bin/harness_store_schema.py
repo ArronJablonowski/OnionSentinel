@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS harness_runs (
     prompt_digest TEXT NOT NULL,
     evidence_manifest_digest TEXT NOT NULL,
     configuration_digest TEXT NOT NULL,
+    execution_contract_json TEXT NOT NULL,
+    execution_contract_digest TEXT NOT NULL,
     policy_version TEXT NOT NULL,
     policy_digest TEXT NOT NULL,
     policy_mode TEXT NOT NULL,
@@ -222,6 +224,20 @@ def _add_compatibility_columns(connection: Any) -> None:
             """
             ALTER TABLE harness_runs
             ADD COLUMN assigned_reviewer_route TEXT NOT NULL DEFAULT ''
+            """
+        )
+    if "execution_contract_json" not in run_columns:
+        connection.execute(
+            """
+            ALTER TABLE harness_runs
+            ADD COLUMN execution_contract_json TEXT NOT NULL DEFAULT ''
+            """
+        )
+    if "execution_contract_digest" not in run_columns:
+        connection.execute(
+            """
+            ALTER TABLE harness_runs
+            ADD COLUMN execution_contract_digest TEXT NOT NULL DEFAULT ''
             """
         )
 

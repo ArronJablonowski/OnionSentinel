@@ -51,6 +51,7 @@ from harness_policy import (
     POLICY_SCHEMA,
     TRACE_SCHEMA,
     LEDGER_MANIFEST_SCHEMA_V1,
+    LEDGER_MANIFEST_SCHEMA_V2,
     LEDGER_MANIFEST_SCHEMA,
     SQL_SCHEMA_VERSION,
     DEFAULT_POLICY_PATH,
@@ -174,6 +175,7 @@ class HarnessRun(HarnessRunCompletion, HarnessRunExecution, HarnessRunFoundation
 def start_harness_run(
     *,
     run_id: str,
+    source_revision: str = "",
     prompt_package: Mapping[str, Any],
     role: str,
     assigned_route: str,
@@ -197,6 +199,8 @@ def start_harness_run(
         role=role,
         assigned_route=assigned_route,
         configuration=configuration,
+        source_revision=source_revision,
+        policy_version=effective_policy.version,
         reanalysis_attempt_id=reanalysis_attempt_id,
     )
     run = HarnessRun(HarnessStore(db_path), envelope, effective_policy)

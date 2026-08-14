@@ -2697,6 +2697,19 @@
       ]
     },
     {
+      "path": "n8n/bin/harness_execution_contract.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/harness_execution_contract.py",
+      "required_symbols": [
+        "EXECUTION_CONTRACT_SCHEMA",
+        "build_execution_contract",
+        "execution_contract_digest",
+        "execution_contract_json",
+        "parse_execution_contract",
+        "validate_execution_contract"
+      ]
+    },
+    {
       "path": "n8n/bin/harness_memory.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/harness_memory.py",

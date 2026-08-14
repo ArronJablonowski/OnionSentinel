@@ -13,8 +13,9 @@ from typing import Any
 
 REPORT_SCHEMA = "onion-sentinel-harness-trace-evaluation-v1"
 LEDGER_MANIFEST_SCHEMA_V1 = "onion-sentinel-harness-ledger-manifest-v1"
-LEDGER_MANIFEST_SCHEMA = "onion-sentinel-harness-ledger-manifest-v2"
-CURRENT_SQL_SCHEMA_VERSION = 4
+LEDGER_MANIFEST_SCHEMA_V2 = "onion-sentinel-harness-ledger-manifest-v2"
+LEDGER_MANIFEST_SCHEMA = "onion-sentinel-harness-ledger-manifest-v3"
+CURRENT_SQL_SCHEMA_VERSION = 5
 DEFAULT_DB = (
     Path.home()
     / "n8n-local"
@@ -103,6 +104,8 @@ JOB_ENVELOPE_DIGEST_FIELDS = (
     "prompt_digest",
     "evidence_manifest_digest",
     "configuration_digest",
+    "execution_contract_json",
+    "execution_contract_digest",
     "parent_run_id",
 )
 RUN_IDENTITY_COLUMNS = (
@@ -118,6 +121,8 @@ RUN_IDENTITY_COLUMNS = (
     "prompt_digest",
     "evidence_manifest_digest",
     "configuration_digest",
+    "execution_contract_json",
+    "execution_contract_digest",
     "policy_version",
     "policy_digest",
     "policy_mode",
@@ -125,13 +130,22 @@ RUN_IDENTITY_COLUMNS = (
     "job_digest",
     "started_at",
 )
-LEGACY_RUN_IDENTITY_COLUMNS_V1 = tuple(
+LEGACY_RUN_IDENTITY_COLUMNS_V2 = tuple(
     column
     for column in RUN_IDENTITY_COLUMNS
+    if column not in {"execution_contract_json", "execution_contract_digest"}
+)
+LEGACY_RUN_IDENTITY_COLUMNS_V1 = tuple(
+    column
+    for column in LEGACY_RUN_IDENTITY_COLUMNS_V2
     if column != "assigned_reviewer_route"
 )
 SUPPORTED_LEDGER_MANIFEST_SCHEMAS = frozenset(
-    {LEDGER_MANIFEST_SCHEMA_V1, LEDGER_MANIFEST_SCHEMA}
+    {
+        LEDGER_MANIFEST_SCHEMA_V1,
+        LEDGER_MANIFEST_SCHEMA_V2,
+        LEDGER_MANIFEST_SCHEMA,
+    }
 )
 
 

@@ -10,6 +10,7 @@ from .pipeline import RuntimeContext, Stage
 @dataclass(frozen=True)
 class PreparationInputs:
     run_id: str
+    source_revision: str
     prompt_package: Mapping[str, Any]
     settings: Mapping[str, Any]
     agent_role: str
@@ -28,6 +29,7 @@ class PreparationInputs:
 @dataclass(frozen=True)
 class HarnessStartRequest:
     run_id: str
+    source_revision: str
     prompt_package: Mapping[str, Any]
     role: str
     assigned_route: str
@@ -148,6 +150,7 @@ def _start_harness(
     if allowed:
         request = HarnessStartRequest(
             inputs.run_id,
+            inputs.source_revision,
             inputs.prompt_package,
             inputs.agent_role,
             assigned_route,

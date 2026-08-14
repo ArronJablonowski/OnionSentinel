@@ -27,7 +27,9 @@ class HarnessContractsArchitectureTests(unittest.TestCase):
             "INVESTIGATION_SKILL_ADVISORY_MODE",
             "INVESTIGATION_SKILL_UNAVAILABLE_MODE",
             "LEDGER_MANIFEST_SCHEMA", "LEDGER_MANIFEST_SCHEMA_V1",
+            "LEDGER_MANIFEST_SCHEMA_V2",
             "LEDGER_TABLE_ORDERS", "LEGACY_RUN_IDENTITY_COLUMNS_V1",
+            "LEGACY_RUN_IDENTITY_COLUMNS_V2",
             "MAX_ATTESTED_INVESTIGATION_SKILLS", "MAX_EVENT_ITEMS",
             "MAX_EVENT_PAYLOAD_BYTES", "MAX_EVENT_STRING",
             "RUN_IDENTITY_COLUMNS", "SECRET_KEY_RE", "SECRET_VALUE_PATTERNS",
@@ -35,6 +37,7 @@ class HarnessContractsArchitectureTests(unittest.TestCase):
             "_model_route", "_redacted_string", "_valid_identifier",
             "approximate_evidence_rows", "bounded_metadata", "canonical_json",
             "digest_json", "hypothesis_manifest_digest",
+            "parse_execution_contract",
             "investigation_skill_selection_attestation", "ledger_manifest",
             "sanitize_metadata", "task_kind_for_role", "utc_now",
         }
@@ -45,9 +48,9 @@ class HarnessContractsArchitectureTests(unittest.TestCase):
             "bounded_metadata": "(value: 'Any') -> 'dict[str, Any]'",
             "investigation_skill_selection_attestation": "(prompt_package: 'Mapping[str, Any]') -> 'dict[str, Any]'",
             "hypothesis_manifest_digest": "(rows: 'Iterable[Mapping[str, Any]]') -> 'str'",
-            "ledger_manifest": "(connection: 'sqlite3.Connection', run_id: 'str', *, schema: 'str' = 'onion-sentinel-harness-ledger-manifest-v2') -> 'dict[str, Any]'",
+            "ledger_manifest": "(connection: 'sqlite3.Connection', run_id: 'str', *, schema: 'str' = 'onion-sentinel-harness-ledger-manifest-v3') -> 'dict[str, Any]'",
             "approximate_evidence_rows": "(value: 'Any', *, depth: 'int' = 0) -> 'int'",
-            "JobEnvelope.from_prompt": "(*, run_id: 'str', prompt_package: 'Mapping[str, Any]', role: 'str', assigned_route: 'str', configuration: 'Mapping[str, Any]', reanalysis_attempt_id: 'str' = '') -> \"'JobEnvelope'\"",
+            "JobEnvelope.from_prompt": "(*, run_id: 'str', prompt_package: 'Mapping[str, Any]', role: 'str', assigned_route: 'str', configuration: 'Mapping[str, Any]', source_revision: 'str', policy_version: 'str', reanalysis_attempt_id: 'str' = '') -> \"'JobEnvelope'\"",
         }
         for name, expected in expected_signatures.items():
             target = (
@@ -69,6 +72,7 @@ class HarnessContractsArchitectureTests(unittest.TestCase):
                 "alert_id", "role", "task_kind", "assigned_route",
                 "assigned_reviewer_route", "prompt_digest",
                 "evidence_manifest_digest", "configuration_digest",
+                "execution_contract_json", "execution_contract_digest",
                 "skill_selection_attestation", "parent_run_id", "created_at",
             ],
         )
@@ -222,6 +226,8 @@ class HarnessContractsArchitectureTests(unittest.TestCase):
                 role="soc-analyst",
                 assigned_route="codex-cli:gpt-5.6-sol:high",
                 configuration=configuration,
+                source_revision="1" * 40,
+                policy_version="v4",
             )
         self.assertEqual(envelope.trace_id, "1d454ca1b5d8aa845269a123d2e925b0")
         self.assertEqual(envelope.task_kind, "alert-triage")
@@ -230,7 +236,7 @@ class HarnessContractsArchitectureTests(unittest.TestCase):
         self.assertEqual(envelope.parent_run_id, "parent-1")
         self.assertEqual(
             envelope.job_digest,
-            "7aebc23185a781f3f8ed8f970125694f495f8668475292659f5d26bd449443e3",
+            "f33e1058f9e62ed3d506b2468135fa85b8dcda05bfb3463be9cc4c032cd4f2f4",
         )
         invalid = dict(
             run_id="bad id",
@@ -238,6 +244,8 @@ class HarnessContractsArchitectureTests(unittest.TestCase):
             role="not-a-role",
             assigned_route="bad route",
             configuration={},
+            source_revision="1" * 40,
+            policy_version="v4",
         )
         with self.assertRaisesRegex(
             CONTRACTS.HarnessPolicyError,

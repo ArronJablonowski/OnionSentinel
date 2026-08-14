@@ -82,6 +82,8 @@ class HarnessDecisionRepositoryArchitectureTests(unittest.TestCase):
                 "max_rounds": 3,
                 "reviewer_route": "codex-cli:gpt-5.6-terra:high",
             },
+            source_revision="1" * 40,
+            policy_version="arr-192-characterization",
         )
 
     def make_run(self, run_id="decision-run", store_type=harness.HarnessStore):

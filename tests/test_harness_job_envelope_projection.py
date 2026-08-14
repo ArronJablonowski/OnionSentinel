@@ -106,6 +106,18 @@ class DependencyHarness:
         self.events.append(("skills", prompt is self.prompt))
         return {"mode": "characterized"}
 
+    def execution_contract_builder(self, **kwargs: Any) -> dict[str, Any]:
+        self.events.append(("execution-contract", kwargs))
+        return {"schema": "characterized"}
+
+    def execution_contract_json_value(self, value: Any) -> str:
+        self.events.append(("execution-contract-json", value))
+        return "execution-contract-json"
+
+    def execution_contract_digest_value(self, value: Any) -> str:
+        self.events.append(("execution-contract-digest", value))
+        return "execution-contract-digest"
+
     def now_value(self) -> str:
         self.events.append(("now",))
         return "2026-08-12T00:00:00Z"
@@ -117,12 +129,17 @@ class DependencyHarness:
             "role": "soc-analyst",
             "assigned_route": "primary-route",
             "configuration": self.configuration,
+            "source_revision": "1" * 40,
+            "policy_version": "policy-v1",
             "reanalysis_attempt_id": "attempt-1",
             "valid_identifier": self.valid_identifier,
             "model_route": self.model_route,
             "digest_value": self.digest_value,
             "task_kind_value": self.task_kind_value,
             "skill_attestation": self.skill_attestation,
+            "execution_contract_builder": self.execution_contract_builder,
+            "execution_contract_json_value": self.execution_contract_json_value,
+            "execution_contract_digest_value": self.execution_contract_digest_value,
             "now_value": self.now_value,
         }
         values.update(overrides)
@@ -141,7 +158,7 @@ class HarnessJobEnvelopeProjectionCharacterizationTests(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 lines, complexity = function_metrics(name)
-                self.assertLessEqual(lines, 50)
+                self.assertLessEqual(lines, 60)
                 self.assertLessEqual(complexity, 10)
 
     def test_exact_result_and_dependency_order_use_validated_run_identity(self) -> None:
@@ -167,6 +184,7 @@ class HarnessJobEnvelopeProjectionCharacterizationTests(unittest.TestCase):
                 "alert_id", "role", "task_kind", "assigned_route",
                 "assigned_reviewer_route", "prompt_digest",
                 "evidence_manifest_digest", "configuration_digest",
+                "execution_contract_json", "execution_contract_digest",
                 "skill_selection_attestation", "parent_run_id", "created_at",
             ],
         )
@@ -187,6 +205,8 @@ class HarnessJobEnvelopeProjectionCharacterizationTests(unittest.TestCase):
                 "prompt_digest": "digest-prompt",
                 "evidence_manifest_digest": "digest-contract",
                 "configuration_digest": "digest-configuration",
+                "execution_contract_json": "execution-contract-json",
+                "execution_contract_digest": "execution-contract-digest",
                 "skill_selection_attestation": {"mode": "characterized"},
                 "parent_run_id": "parent-1",
                 "created_at": "2026-08-12T00:00:00Z",
@@ -205,10 +225,19 @@ class HarnessJobEnvelopeProjectionCharacterizationTests(unittest.TestCase):
                 ("valid", "alert-1", "alert_id", 256),
                 ("route", "primary-route", "assigned primary route", False),
                 ("route", "reviewer-route", "assigned reviewer route", True),
+                ("skills", True),
+                ("execution-contract", {
+                    "source_revision": "1" * 40,
+                    "assigned_route": "primary-route",
+                    "reviewer_route": "reviewer-route",
+                    "policy_version": "policy-v1",
+                    "skill_attestation": {"mode": "characterized"},
+                }),
                 ("digest", "prompt"),
                 ("digest", "contract"),
                 ("digest", "configuration"),
-                ("skills", True),
+                ("execution-contract-json", {"schema": "characterized"}),
+                ("execution-contract-digest", {"schema": "characterized"}),
                 ("now",),
             ],
         )

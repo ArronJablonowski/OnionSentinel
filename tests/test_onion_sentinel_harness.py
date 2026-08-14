@@ -82,7 +82,8 @@ class OnionSentinelHarnessTests(unittest.TestCase):
     def test_harness_policy_compatibility_surface_and_signatures_are_stable(self) -> None:
         expected_names = {
             "HARNESS_SCHEMA", "POLICY_SCHEMA", "TRACE_SCHEMA",
-            "LEDGER_MANIFEST_SCHEMA_V1", "LEDGER_MANIFEST_SCHEMA",
+            "LEDGER_MANIFEST_SCHEMA_V1", "LEDGER_MANIFEST_SCHEMA_V2",
+            "LEDGER_MANIFEST_SCHEMA",
             "SQL_SCHEMA_VERSION", "DEFAULT_POLICY_PATH", "DEFAULT_DB_PATH",
             "DEFAULT_HARNESS_LOG_PATH", "MAX_POLICY_BYTES",
             "MAX_EVENT_PAYLOAD_BYTES", "MAX_EVENT_STRING", "MAX_EVENT_ITEMS",
@@ -292,6 +293,8 @@ class OnionSentinelHarnessTests(unittest.TestCase):
                 "max_rounds": 3,
                 "reviewer_route": "codex-cli:gpt-5.6-terra:high",
             },
+            source_revision="1" * 40,
+            policy_version="1.2.3",
         )
 
     def make_run(
@@ -395,6 +398,8 @@ class OnionSentinelHarnessTests(unittest.TestCase):
                     and row["event_type"] == "run.started"
                 ):
                     payload.pop("assigned_reviewer_route", None)
+                    payload.pop("execution_contract", None)
+                    payload.pop("execution_contract_digest", None)
                 if row["event_type"] == "run.succeeded":
                     if manifest is None:
                         payload.pop("ledger_manifest", None)
@@ -695,6 +700,20 @@ class OnionSentinelHarnessTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertFalse(self.db_path.exists())
 
+    def test_enabled_native_harness_requires_exact_source_revision(self) -> None:
+        policy = HARNESS.HarnessPolicy.from_dict(self.policy_document())
+        with self.assertRaisesRegex(ValueError, "source revision"):
+            HARNESS.start_harness_run(
+                run_id="missing-source-revision",
+                prompt_package=self.prompt_package(),
+                role=HARNESS.AgentRole.SOC_ANALYST.value,
+                assigned_route="codex-cli:gpt-5.6-sol:high",
+                configuration={"mode": "read-only"},
+                policy=policy,
+                db_path=self.db_path,
+            )
+        self.assertFalse(self.db_path.exists())
+
     def test_prompt_execution_lineage_drives_soc_manual_and_automatic_tasks(
         self,
     ) -> None:
@@ -792,6 +811,84 @@ class OnionSentinelHarnessTests(unittest.TestCase):
         self.assertNotIn("Do not copy this skill body", serialized)
         self.assertNotIn("192.0.2.10", serialized)
         self.assertNotIn("never-export-this-selection-secret", serialized)
+
+    def test_execution_contract_is_first_class_durable_and_fail_closed(
+        self,
+    ) -> None:
+        prompt = self.prompt_package()
+        prompt["investigation_skills"] = self.investigation_skill_selection()
+        envelope = self.envelope("execution-contract-run", prompt_package=prompt)
+        policy = HARNESS.HarnessPolicy.from_dict(self.policy_document())
+        store = HARNESS.HarnessStore(self.db_path)
+
+        row = store.start_run(envelope, policy)
+        contract = json.loads(row["execution_contract_json"])
+        self.assertEqual(contract["source_revision"], "1" * 40)
+        self.assertEqual(contract["harness_version"], HARNESS.HARNESS_SCHEMA)
+        self.assertEqual(contract["policy_version"], policy.version)
+        self.assertEqual(
+            contract["primary"],
+            {
+                "route": "codex-cli:gpt-5.6-sol:high",
+                "provider": "codex-cli",
+                "model": "gpt-5.6-sol",
+                "reasoning_level": "high",
+            },
+        )
+        self.assertEqual(
+            contract["reviewer"],
+            {
+                "route": "codex-cli:gpt-5.6-terra:high",
+                "provider": "codex-cli",
+                "model": "gpt-5.6-terra",
+                "reasoning_level": "high",
+            },
+        )
+        self.assertEqual(
+            contract["skill_versions"],
+            [
+                {"id": "dns-activity-investigation", "version": 2, "sha256": "b" * 64},
+                {"id": "suricata-detection-validation", "version": 3, "sha256": "c" * 64},
+            ],
+        )
+        self.assertEqual(
+            row["execution_contract_digest"],
+            envelope.execution_contract_digest,
+        )
+        started = next(
+            event
+            for event in store.export_trace(envelope.run_id)["events"]
+            if event["event_type"] == "run.started"
+        )
+        started_payload = json.loads(started["payload_json"])
+        self.assertEqual(started_payload["execution_contract"], contract)
+        self.assertEqual(
+            started_payload["execution_contract_digest"],
+            envelope.execution_contract_digest,
+        )
+
+        tampered = dataclasses.replace(
+            envelope,
+            execution_contract_digest="0" * 64,
+        )
+        with self.assertRaisesRegex(
+            HARNESS.HarnessIntegrityError,
+            "execution contract does not match",
+        ):
+            store.start_run(tampered, policy)
+
+        different_policy_document = self.policy_document()
+        different_policy_document["version"] = "different-policy"
+        with self.assertRaisesRegex(
+            HARNESS.HarnessIntegrityError,
+            "execution contract does not match",
+        ):
+            HARNESS.HarnessStore(
+                self.root / "different-policy.sqlite3"
+            ).start_run(
+                envelope,
+                HARNESS.HarnessPolicy.from_dict(different_policy_document),
+            )
 
     def test_skill_selection_attestation_rejects_inconsistent_count(
         self,
@@ -997,6 +1094,7 @@ class OnionSentinelHarnessTests(unittest.TestCase):
         self.write_policy(enabled=True)
         run = HARNESS.start_harness_run(
             run_id="lifecycle-run",
+            source_revision="1" * 40,
             prompt_package=self.prompt_package(),
             role=HARNESS.AgentRole.SOC_ANALYST.value,
             assigned_route="codex-cli:gpt-5.6-sol:high",
@@ -1191,8 +1289,8 @@ class OnionSentinelHarnessTests(unittest.TestCase):
             verification["errors"],
         )
 
-    def test_current_terminal_manifest_is_v2_and_required(self) -> None:
-        run = self.make_run("terminal-manifest-v2")
+    def test_current_terminal_manifest_is_v3_and_required(self) -> None:
+        run = self.make_run("terminal-manifest-v3")
         run.complete()
 
         verification = run.store.verify_chain(run.run_id)
@@ -1203,7 +1301,7 @@ class OnionSentinelHarnessTests(unittest.TestCase):
         )
         self.assertEqual(
             HARNESS.LEDGER_MANIFEST_SCHEMA,
-            "onion-sentinel-harness-ledger-manifest-v2",
+            "onion-sentinel-harness-ledger-manifest-v3",
         )
 
         self.replace_terminal_manifest(run, None)
@@ -1215,7 +1313,7 @@ class OnionSentinelHarnessTests(unittest.TestCase):
             verification["errors"],
         )
 
-    def test_legacy_v1_terminal_manifest_survives_v4_projection(self) -> None:
+    def test_legacy_v1_terminal_manifest_survives_v5_projection(self) -> None:
         run = self.make_run("terminal-manifest-v1")
         run.complete()
         with HARNESS._connect(run.store.path) as connection:

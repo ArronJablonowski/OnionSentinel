@@ -11,10 +11,9 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 @dataclass(frozen=True)
 class TraceIntegrityPolicy:
     current_manifest_schema: str
-    legacy_manifest_schema: str
     supported_manifest_schemas: frozenset[str]
-    current_run_identity_columns: Sequence[str]
-    legacy_run_identity_columns: Sequence[str]
+    run_identity_columns_by_schema: Mapping[str, Sequence[str]]
+    legacy_absent_started_fields: Mapping[str, Sequence[str]]
     terminal_statuses: frozenset[str]
     maximum_reported_errors: int
     digest_value: Callable[[Any], str]
@@ -80,10 +79,9 @@ def ledger_manifest(
 def _run_identity_columns(
     schema: str, policy: TraceIntegrityPolicy
 ) -> Sequence[str]:
-    if schema == policy.current_manifest_schema:
-        return policy.current_run_identity_columns
-    if schema == policy.legacy_manifest_schema:
-        return policy.legacy_run_identity_columns
+    columns = policy.run_identity_columns_by_schema.get(schema)
+    if columns is not None:
+        return columns
     raise policy.error(f"unsupported ledger manifest schema: {schema}")
 
 
@@ -203,28 +201,26 @@ def _terminal_event(
 
 def _manifest_schema_valid(
     schema: str,
-    legacy_eligible: bool,
+    started_payload: Mapping[str, Any],
     errors: _Errors,
     policy: TraceIntegrityPolicy,
 ) -> bool:
     if schema not in policy.supported_manifest_schemas:
         errors.add("unsupported terminal ledger manifest schema")
         return False
-    if schema == policy.legacy_manifest_schema and not legacy_eligible:
+    absent_fields = policy.legacy_absent_started_fields.get(schema, ())
+    if any(field in started_payload for field in absent_fields):
         errors.add("terminal ledger manifest schema downgrade")
         return False
     return True
 
 
-def _legacy_manifest_eligible(events: Sequence[Mapping[str, Any]]) -> bool:
+def _started_payload(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     started = next(
         (row for row in events if row.get("event_type") == "run.started"),
         None,
     )
-    return bool(
-        started is not None
-        and "assigned_reviewer_route" not in _payload(started)
-    )
+    return _payload(started)
 
 
 def _verify_terminal_manifest(
@@ -248,8 +244,12 @@ def _verify_terminal_manifest(
             errors.add("terminal ledger manifest is missing or malformed")
         return False, ""
     schema = str(expected.get("schema") or "")
-    legacy_eligible = _legacy_manifest_eligible(events)
-    if not _manifest_schema_valid(schema, legacy_eligible, errors, policy):
+    if not _manifest_schema_valid(
+        schema,
+        _started_payload(events),
+        errors,
+        policy,
+    ):
         return False, schema
     actual = ledger_manifest(ledgers, schema=schema, policy=policy)
     if policy.digest_value(expected) != policy.digest_value(actual):

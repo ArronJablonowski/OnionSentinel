@@ -951,6 +951,7 @@ cp "$REPO_DIR/n8n/bin/collect-live-osquery.py" "$STACK_DIR/bin/collect-live-osqu
 cp "$REPO_DIR/n8n/bin/ac_hunter_contract.py" "$STACK_DIR/bin/ac_hunter_contract.py"
 cp "$REPO_DIR/n8n/bin/onion_sentinel_harness.py" "$STACK_DIR/bin/onion_sentinel_harness.py"
 cp "$REPO_DIR/n8n/bin/harness_contract_job.py" "$STACK_DIR/bin/harness_contract_job.py"
+cp "$REPO_DIR/n8n/bin/harness_execution_contract.py" "$STACK_DIR/bin/harness_execution_contract.py"
 cp "$REPO_DIR/n8n/bin/harness_contract_ledger.py" "$STACK_DIR/bin/harness_contract_ledger.py"
 cp "$REPO_DIR/n8n/bin/harness_contract_metadata.py" "$STACK_DIR/bin/harness_contract_metadata.py"
 cp "$REPO_DIR/n8n/bin/harness_contract_skill_attestation.py" "$STACK_DIR/bin/harness_contract_skill_attestation.py"

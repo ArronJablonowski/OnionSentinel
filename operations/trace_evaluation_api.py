@@ -89,7 +89,9 @@ from trace_evaluation_contract import (
     JOB_ENVELOPE_DIGEST_FIELDS,
     LEDGER_MANIFEST_SCHEMA,
     LEDGER_MANIFEST_SCHEMA_V1,
+    LEDGER_MANIFEST_SCHEMA_V2,
     LEGACY_RUN_IDENTITY_COLUMNS_V1,
+    LEGACY_RUN_IDENTITY_COLUMNS_V2,
     MATERIAL_REVIEW_FIELDS,
     MAX_ATTESTED_INVESTIGATION_SKILLS,
     MAX_REPORTED_IDS,
@@ -214,10 +216,23 @@ def rows_for_run(
 def _trace_integrity_policy() -> TraceIntegrityPolicy:
     return TraceIntegrityPolicy(
         current_manifest_schema=LEDGER_MANIFEST_SCHEMA,
-        legacy_manifest_schema=LEDGER_MANIFEST_SCHEMA_V1,
         supported_manifest_schemas=SUPPORTED_LEDGER_MANIFEST_SCHEMAS,
-        current_run_identity_columns=RUN_IDENTITY_COLUMNS,
-        legacy_run_identity_columns=LEGACY_RUN_IDENTITY_COLUMNS_V1,
+        run_identity_columns_by_schema={
+            LEDGER_MANIFEST_SCHEMA: RUN_IDENTITY_COLUMNS,
+            LEDGER_MANIFEST_SCHEMA_V2: LEGACY_RUN_IDENTITY_COLUMNS_V2,
+            LEDGER_MANIFEST_SCHEMA_V1: LEGACY_RUN_IDENTITY_COLUMNS_V1,
+        },
+        legacy_absent_started_fields={
+            LEDGER_MANIFEST_SCHEMA_V2: (
+                "execution_contract",
+                "execution_contract_digest",
+            ),
+            LEDGER_MANIFEST_SCHEMA_V1: (
+                "assigned_reviewer_route",
+                "execution_contract",
+                "execution_contract_digest",
+            ),
+        },
         terminal_statuses=TERMINAL_STATUSES,
         maximum_reported_errors=MAX_REPORTED_IDS,
         digest_value=digest_json,

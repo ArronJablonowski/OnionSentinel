@@ -3,7 +3,12 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from harness_contracts import JobEnvelope, bounded_metadata
+from harness_contracts import (
+    JobEnvelope,
+    bounded_metadata,
+    execution_contract_digest,
+    parse_execution_contract,
+)
 from harness_policy import (
     HARNESS_SCHEMA,
     HarnessIntegrityError,
@@ -28,9 +33,10 @@ _INSERT_RUN_SQL = """
         task_kind, status, stage, assigned_route,
         assigned_reviewer_route, prompt_digest,
         evidence_manifest_digest, configuration_digest,
+        execution_contract_json, execution_contract_digest,
         policy_version, policy_digest, policy_mode, parent_run_id,
         job_digest, started_at, updated_at
-    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 _SELECT_EVIDENCE_SQL = """
     SELECT evidence_digest FROM harness_evidence
@@ -59,6 +65,28 @@ def _validate_existing_run(
         )
 
 
+def _validate_execution_contract_binding(
+    envelope: JobEnvelope,
+    policy: HarnessPolicy,
+) -> None:
+    try:
+        contract = parse_execution_contract(envelope.execution_contract_json)
+        digest = execution_contract_digest(contract)
+    except ValueError as exc:
+        raise HarnessIntegrityError("job execution contract is invalid") from exc
+    reviewer = contract["reviewer"]
+    reviewer_route = reviewer["route"] if reviewer is not None else ""
+    if (
+        digest != envelope.execution_contract_digest
+        or contract["policy_version"] != policy.version
+        or contract["primary"]["route"] != envelope.assigned_route
+        or reviewer_route != envelope.assigned_reviewer_route
+    ):
+        raise HarnessIntegrityError(
+            "job execution contract does not match the durable run identity"
+        )
+
+
 def _run_insert_values(
     envelope: JobEnvelope,
     policy: HarnessPolicy,
@@ -69,7 +97,8 @@ def _run_insert_values(
         envelope.task_kind, RunStatus.RUNNING.value, Stage.INTAKE.value,
         envelope.assigned_route, envelope.assigned_reviewer_route,
         envelope.prompt_digest, envelope.evidence_manifest_digest,
-        envelope.configuration_digest, policy.version, policy.digest,
+        envelope.configuration_digest, envelope.execution_contract_json,
+        envelope.execution_contract_digest, policy.version, policy.digest,
         policy.mode, envelope.parent_run_id, envelope.job_digest,
         envelope.created_at, envelope.created_at,
     )
@@ -92,6 +121,10 @@ def _run_started_payload(
         "prompt_digest": envelope.prompt_digest,
         "evidence_manifest_digest": envelope.evidence_manifest_digest,
         "configuration_digest": envelope.configuration_digest,
+        "execution_contract": parse_execution_contract(
+            envelope.execution_contract_json
+        ),
+        "execution_contract_digest": envelope.execution_contract_digest,
         "skill_selection_attestation": envelope.skill_selection_attestation,
         "job_digest": envelope.job_digest,
         "policy_version": policy.version,
@@ -297,6 +330,7 @@ class HarnessStoreRunRepository:
         envelope: JobEnvelope,
         policy: HarnessPolicy,
     ) -> dict[str, Any]:
+        _validate_execution_contract_binding(envelope, policy)
         with _connect(self.path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(

@@ -831,10 +831,16 @@ SQLite and run execution depend inward on this policy unit. The former
 identity validation; `harness_contract_ledger.py` owns hypothesis and terminal
 ledger manifests plus conservative evidence-row accounting; and
 `harness_contract_job.py` owns prompt-to-envelope field validation and
-projection. Dependencies flow from the facade to these owners and inward to
-`harness_policy.py`; owners never import the facade. The unit has no database
-lifecycle, network, model, query-execution, credential, or evidence-mutation
-authority. The skill-attestation and job-envelope allowances are retired.
+projection. `harness_execution_contract.py` owns the versioned, content-free
+execution identity pinned before durable admission: source revision, harness
+and policy versions, exact native provider/model/reasoning routes, and selected
+skill registry/version digests. Dependencies flow from the facade to these
+owners and inward to `harness_policy.py`; owners never import the facade. The
+execution identity fails closed for incomplete or external-provider routes and
+is digest-bound into both the run row and `run.started` event. The unit has no
+database lifecycle, network, model, query-execution, credential, or
+evidence-mutation authority. The skill-attestation and job-envelope allowances
+are retired.
 
 `n8n/bin/harness_query_contract.py` is the stable facade for query-result
 observation and exact per-query status resolution from a Security Onion batch.

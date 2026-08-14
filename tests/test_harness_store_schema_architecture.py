@@ -85,7 +85,8 @@ class HarnessStoreSchemaArchitectureTests(unittest.TestCase):
                     "alert_id", "role", "task_kind", "status", "stage",
                     "assigned_route", "assigned_reviewer_route", "active_route",
                     "prompt_digest", "evidence_manifest_digest",
-                    "configuration_digest", "policy_version", "policy_digest",
+                    "configuration_digest", "execution_contract_json",
+                    "execution_contract_digest", "policy_version", "policy_digest",
                     "policy_mode", "parent_run_id", "job_digest", "revision",
                     "started_at", "updated_at", "completed_at",
                     "terminal_reason", "summary_json",
@@ -183,6 +184,8 @@ class HarnessStoreSchemaArchitectureTests(unittest.TestCase):
             }
             self.assertEqual(columns["policy_digest"], "''")
             self.assertEqual(columns["assigned_reviewer_route"], "''")
+            self.assertEqual(columns["execution_contract_json"], "''")
+            self.assertEqual(columns["execution_contract_digest"], "''")
             reservations = [
                 tuple(row)
                 for row in connection.execute(

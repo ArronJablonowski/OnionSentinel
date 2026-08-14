@@ -14,8 +14,9 @@ HARNESS_SCHEMA = "onion-sentinel-investigation-harness-v1"
 POLICY_SCHEMA = "onion-sentinel-investigation-harness-policy-v1"
 TRACE_SCHEMA = "onion-sentinel-investigation-trace-v1"
 LEDGER_MANIFEST_SCHEMA_V1 = "onion-sentinel-harness-ledger-manifest-v1"
-LEDGER_MANIFEST_SCHEMA = "onion-sentinel-harness-ledger-manifest-v2"
-SQL_SCHEMA_VERSION = 4
+LEDGER_MANIFEST_SCHEMA_V2 = "onion-sentinel-harness-ledger-manifest-v2"
+LEDGER_MANIFEST_SCHEMA = "onion-sentinel-harness-ledger-manifest-v3"
+SQL_SCHEMA_VERSION = 5
 DEFAULT_POLICY_PATH = (
     Path.home() / "n8n-local" / "config" / "investigation_harness_policy.json"
 )

@@ -22,6 +22,7 @@ import harness_store_trace_verification as trace_verification
 from harness_contracts import JobEnvelope, ledger_manifest
 from harness_policy import (
     LEDGER_MANIFEST_SCHEMA_V1,
+    LEDGER_MANIFEST_SCHEMA_V2,
     HarnessIntegrityError,
     HarnessPolicy,
     RunStatus,
@@ -68,6 +69,8 @@ class HarnessTraceVerificationArchitectureTests(unittest.TestCase):
                 "query_mode": "read-only",
                 "reviewer_route": "codex-cli:gpt-5.6-terra:high",
             },
+            source_revision="1" * 40,
+            policy_version="1.0.0",
         )
         self.store.start_run(envelope, HarnessPolicy.disabled_default())
 
@@ -132,12 +135,18 @@ class HarnessTraceVerificationArchitectureTests(unittest.TestCase):
         run_id: str,
         manifest: object,
         *,
-        legacy_identity: bool = False,
+        legacy_identity: bool | str = False,
     ) -> None:
         def rewrite(row, payload_json: str) -> str:
             payload = json.loads(payload_json)
             if legacy_identity and row["event_type"] == "run.started":
-                payload.pop("assigned_reviewer_route", None)
+                if legacy_identity == "reviewer-only":
+                    payload.pop("assigned_reviewer_route", None)
+                else:
+                    payload.pop("execution_contract", None)
+                    payload.pop("execution_contract_digest", None)
+                    if legacy_identity is True or legacy_identity == "v1":
+                        payload.pop("assigned_reviewer_route", None)
             if row["event_type"] == "run.succeeded":
                 payload["ledger_manifest"] = manifest
             return canonical_json(payload)
@@ -299,7 +308,7 @@ class HarnessTraceVerificationArchitectureTests(unittest.TestCase):
         self.assertTrue(current["ledger_manifest_bound"])
         self.assertEqual(
             current["ledger_manifest_schema"],
-            "onion-sentinel-harness-ledger-manifest-v2",
+            "onion-sentinel-harness-ledger-manifest-v3",
         )
 
         cases = (
@@ -320,9 +329,25 @@ class HarnessTraceVerificationArchitectureTests(unittest.TestCase):
                 False,
             ),
             (
-                "downgrade",
+                "v1-downgrade",
                 {"schema": LEDGER_MANIFEST_SCHEMA_V1},
                 False,
+                ["terminal ledger manifest schema downgrade"],
+                LEDGER_MANIFEST_SCHEMA_V1,
+                False,
+            ),
+            (
+                "v2-downgrade",
+                {"schema": LEDGER_MANIFEST_SCHEMA_V2},
+                False,
+                ["terminal ledger manifest schema downgrade"],
+                LEDGER_MANIFEST_SCHEMA_V2,
+                False,
+            ),
+            (
+                "v1-partial-downgrade",
+                {"schema": LEDGER_MANIFEST_SCHEMA_V1},
+                "reviewer-only",
                 ["terminal ledger manifest schema downgrade"],
                 LEDGER_MANIFEST_SCHEMA_V1,
                 False,
@@ -351,6 +376,24 @@ class HarnessTraceVerificationArchitectureTests(unittest.TestCase):
         self.assertTrue(accepted["valid"])
         self.assertTrue(accepted["ledger_manifest_bound"])
         self.assertEqual(accepted["ledger_manifest_schema"], LEDGER_MANIFEST_SCHEMA_V1)
+
+        with _connect(self.db_path) as connection:
+            legacy_v2 = ledger_manifest(
+                connection,
+                run_id,
+                schema=LEDGER_MANIFEST_SCHEMA_V2,
+            )
+        self.replace_terminal_manifest(
+            run_id,
+            legacy_v2,
+            legacy_identity="v2",
+        )
+        accepted_v2 = self.store.verify_chain(run_id)
+        self.assertTrue(accepted_v2["valid"])
+        self.assertEqual(
+            accepted_v2["ledger_manifest_schema"],
+            LEDGER_MANIFEST_SCHEMA_V2,
+        )
 
         tampered = dict(legacy)
         tampered["run_identity_sha256"] = "0" * 64

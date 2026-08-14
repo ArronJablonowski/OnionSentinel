@@ -29,7 +29,7 @@ ALLOWED_BUNDLE_FILES = frozenset(
         "runtime-secrets.tar.gz",
     }
 )
-CURRENT_HARNESS_SCHEMA_VERSION = 4
+CURRENT_HARNESS_SCHEMA_VERSION = 5
 
 
 def sha256_file(path: Path) -> str:

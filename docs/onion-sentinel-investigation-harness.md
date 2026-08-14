@@ -201,8 +201,8 @@ recommended by the
 
 ## Versioned Job Contract
 
-Every run should begin with a versioned envelope that is independent of the
-selected model:
+Every native harness run begins with a versioned envelope that is independent
+of the selected model:
 
 - run, trace, correlation, alert, and case identifiers;
 - agent role and task kind;
@@ -216,9 +216,22 @@ selected model:
 
 The current foundation creates this envelope from the bounded prompt package.
 It stores digests rather than duplicating the raw prompt in the event trace.
-The next contract revision should add an explicit schema version to both the
-request and result, deterministic retry metadata, and a migration policy for
-older replay fixtures.
+Before durable admission, the
+`onion-sentinel-harness-execution-contract-v1` identity pins the exact lowercase
+source commit, harness schema, policy version, native primary and optional
+reviewer provider/model/reasoning routes, and the selected skill registry and
+skill version digests. Missing or malformed identity fails closed; external
+Hermes and OpenClaw routes bypass the native harness before this boundary. The
+canonical contract and its SHA-256 digest are stored on the run row and in the
+`run.started` event, and the job digest covers both fields.
+
+New trace databases use SQLite schema version 5 and terminal ledger manifest
+version 3. Read-only verification remains compatible with legacy manifest
+versions 1 and 2, while rejecting a downgraded manifest when newer identity
+fields are present. Additive migration leaves empty execution-contract columns
+only on pre-version-5 rows; every newly admitted native job must carry a valid,
+digest-matching contract. Deterministic retry metadata and explicit
+request/result schema versions remain future contract work.
 
 ## Durable State Machine
 
@@ -254,9 +267,9 @@ sink without putting raw evidence or secrets in that sink.
 ### Run ledger
 
 The run ledger owns the current stage, status, assigned and active route,
-policy version and mode, timestamps, parent run, input digests, revision, and
-terminal summary. It is the harness execution record, not a replacement for
-the alert-store record.
+policy version and mode, timestamps, parent run, input digests, revision,
+immutable execution-contract JSON and digest, and terminal summary. It is the
+harness execution record, not a replacement for the alert-store record.
 
 ### Event ledger
 

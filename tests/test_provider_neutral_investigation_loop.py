@@ -3720,6 +3720,8 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                 configuration={
                     "reviewer_route": "codex-cli:gpt-5.6-sol:xhigh",
                 },
+                source_revision="1" * 40,
+                policy_version="test",
             )
             durable = self.harness.HarnessRun(
                 self.harness.HarnessStore(
@@ -3991,6 +3993,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_name:
             runtime = self.harness.start_harness_run(
                 run_id="run-durable-query-binding",
+                source_revision="1" * 40,
                 prompt_package=prompt_package,
                 role="soc-analyst",
                 assigned_route=route,
@@ -4467,6 +4470,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_name:
             runtime = self.harness.start_harness_run(
                 run_id="run-shadow-live-osquery-denied",
+                source_revision="1" * 40,
                 prompt_package=prompt_package,
                 role="soc-analyst",
                 assigned_route=route,
@@ -4697,6 +4701,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_name:
             runtime = self.harness.start_harness_run(
                 run_id="run-query-result-digest",
+                source_revision="1" * 40,
                 prompt_package=prompt_package,
                 role="soc-analyst",
                 assigned_route="codex-cli:gpt-5.5:medium",
@@ -4825,6 +4830,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_name:
             runtime = self.harness.start_harness_run(
                 run_id="run-sparse-query-audit",
+                source_revision="1" * 40,
                 prompt_package=prompt_package,
                 role="soc-analyst",
                 assigned_route="codex-cli:gpt-5.5:medium",

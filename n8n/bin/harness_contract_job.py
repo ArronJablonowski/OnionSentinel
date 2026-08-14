@@ -64,21 +64,42 @@ def _execution_contract_fields(
     contract: Mapping[str, Any],
     assigned_route: str,
     configuration: Mapping[str, Any],
+    source_revision: str,
+    policy_version: str,
     model_route: Callable[..., str],
     digest_value: Callable[[Any], str],
     skill_attestation: Callable[[Mapping[str, Any]], dict[str, Any]],
+    execution_contract_builder: Callable[..., dict[str, Any]],
+    execution_contract_json_value: Callable[[Any], str],
+    execution_contract_digest_value: Callable[[Any], str],
 ) -> dict[str, Any]:
+    primary_route = model_route(assigned_route, "assigned primary route")
+    reviewer_route = model_route(
+        configuration.get("reviewer_route"),
+        "assigned reviewer route",
+        allow_empty=True,
+    )
+    skills = skill_attestation(prompt_package)
+    execution_contract = execution_contract_builder(
+        source_revision=source_revision,
+        assigned_route=primary_route,
+        reviewer_route=reviewer_route,
+        policy_version=policy_version,
+        skill_attestation=skills,
+    )
     return {
-        "assigned_route": model_route(assigned_route, "assigned primary route"),
-        "assigned_reviewer_route": model_route(
-            configuration.get("reviewer_route"),
-            "assigned reviewer route",
-            allow_empty=True,
-        ),
+        "assigned_route": primary_route,
+        "assigned_reviewer_route": reviewer_route,
         "prompt_digest": digest_value(prompt_package),
         "evidence_manifest_digest": digest_value(contract),
         "configuration_digest": digest_value(configuration),
-        "skill_selection_attestation": skill_attestation(prompt_package),
+        "execution_contract_json": execution_contract_json_value(
+            execution_contract
+        ),
+        "execution_contract_digest": execution_contract_digest_value(
+            execution_contract
+        ),
+        "skill_selection_attestation": skills,
     }
 
 
@@ -97,12 +118,17 @@ def job_envelope_values(
     role: str,
     assigned_route: str,
     configuration: Mapping[str, Any],
+    source_revision: str,
+    policy_version: str,
     reanalysis_attempt_id: str,
     valid_identifier: Callable[..., str],
     model_route: Callable[..., str],
     digest_value: Callable[[Any], str],
     task_kind_value: Callable[..., str],
     skill_attestation: Callable[[Mapping[str, Any]], dict[str, Any]],
+    execution_contract_builder: Callable[..., dict[str, Any]],
+    execution_contract_json_value: Callable[[Any], str],
+    execution_contract_digest_value: Callable[[Any], str],
     now_value: Callable[[], str],
 ) -> dict[str, Any]:
     """Validate a prompt and return the exact immutable envelope fields."""
@@ -131,9 +157,14 @@ def job_envelope_values(
             contract=contract,
             assigned_route=assigned_route,
             configuration=configuration,
+            source_revision=source_revision,
+            policy_version=policy_version,
             model_route=model_route,
             digest_value=digest_value,
             skill_attestation=skill_attestation,
+            execution_contract_builder=execution_contract_builder,
+            execution_contract_json_value=execution_contract_json_value,
+            execution_contract_digest_value=execution_contract_digest_value,
         ),
         "parent_run_id": _parent_run_id(prompt_package),
         "created_at": now_value(),

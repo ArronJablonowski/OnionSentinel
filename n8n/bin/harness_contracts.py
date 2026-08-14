@@ -10,6 +10,7 @@ from harness_contract_job import job_envelope_values
 from harness_contract_ledger import (
     LEDGER_TABLE_ORDERS,
     LEGACY_RUN_IDENTITY_COLUMNS_V1,
+    LEGACY_RUN_IDENTITY_COLUMNS_V2,
     RUN_IDENTITY_COLUMNS,
     SUPPORTED_LEDGER_MANIFEST_SCHEMAS,
     approximate_evidence_rows,
@@ -24,6 +25,12 @@ from harness_contract_metadata import (
 from harness_contract_skill_attestation import (
     investigation_skill_selection_attestation,
 )
+from harness_execution_contract import (
+    build_execution_contract,
+    execution_contract_digest,
+    execution_contract_json,
+    parse_execution_contract,
+)
 from harness_policy import (
     AgentRole,
     DIGEST_RE,
@@ -35,6 +42,7 @@ from harness_policy import (
     INVESTIGATION_SKILL_UNAVAILABLE_MODE,
     LEDGER_MANIFEST_SCHEMA,
     LEDGER_MANIFEST_SCHEMA_V1,
+    LEDGER_MANIFEST_SCHEMA_V2,
     MAX_ATTESTED_INVESTIGATION_SKILLS,
     MAX_EVENT_ITEMS,
     MAX_EVENT_PAYLOAD_BYTES,
@@ -64,6 +72,8 @@ class JobEnvelope:
     prompt_digest: str
     evidence_manifest_digest: str
     configuration_digest: str
+    execution_contract_json: str
+    execution_contract_digest: str
     skill_selection_attestation: dict[str, Any]
     parent_run_id: str
     created_at: str
@@ -77,6 +87,8 @@ class JobEnvelope:
         role: str,
         assigned_route: str,
         configuration: Mapping[str, Any],
+        source_revision: str,
+        policy_version: str,
         reanalysis_attempt_id: str = "",
     ) -> "JobEnvelope":
         values = job_envelope_values(
@@ -85,12 +97,17 @@ class JobEnvelope:
             role=role,
             assigned_route=assigned_route,
             configuration=configuration,
+            source_revision=source_revision,
+            policy_version=policy_version,
             reanalysis_attempt_id=reanalysis_attempt_id,
             valid_identifier=_valid_identifier,
             model_route=_model_route,
             digest_value=digest_json,
             task_kind_value=task_kind_for_role,
             skill_attestation=investigation_skill_selection_attestation,
+            execution_contract_builder=build_execution_contract,
+            execution_contract_json_value=execution_contract_json,
+            execution_contract_digest_value=execution_contract_digest,
             now_value=utc_now,
         )
         return cls(**values)

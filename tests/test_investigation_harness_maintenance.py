@@ -66,6 +66,8 @@ class InvestigationHarnessMaintenanceTests(unittest.TestCase):
             role=HARNESS.AgentRole.SOC_ANALYST.value,
             assigned_route="codex-cli:gpt-5.6-sol:high",
             configuration={"reviewer_route": ""},
+            source_revision="1" * 40,
+            policy_version="1.0.0",
         )
         store.start_run(envelope, HARNESS.HarnessPolicy.disabled_default())
         if terminal:

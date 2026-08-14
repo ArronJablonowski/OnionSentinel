@@ -19,6 +19,8 @@ BIN = ROOT / "n8n" / "bin"
 if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
 
+import harness_execution_contract as EXECUTION_CONTRACT  # noqa: E402
+
 
 def load_repository():
     path = BIN / "harness_store_run_repository.py"
@@ -210,6 +212,21 @@ class HarnessStoreRunRepositoryPhasesTests(unittest.TestCase):
         return method(self.repo, *args, **kwargs)
 
     def envelope(self) -> SimpleNamespace:
+        skills = {
+            "registry_version": 0,
+            "registry_sha256": "",
+            "selected": [],
+            "selected_count": 0,
+            "truncated": False,
+            "advisory_mode": "unavailable",
+        }
+        contract = EXECUTION_CONTRACT.build_execution_contract(
+            source_revision="1" * 40,
+            assigned_route="codex-cli:gpt-test:high",
+            reviewer_route="codex-cli:gpt-review:high",
+            policy_version="7",
+            skill_attestation=skills,
+        )
         return SimpleNamespace(
             run_id="run-1",
             trace_id="trace-1",
@@ -218,20 +235,26 @@ class HarnessStoreRunRepositoryPhasesTests(unittest.TestCase):
             alert_id="alert-1",
             role="soc-analyst",
             task_kind="analysis",
-            assigned_route="route-primary",
-            assigned_reviewer_route="route-reviewer",
+            assigned_route="codex-cli:gpt-test:high",
+            assigned_reviewer_route="codex-cli:gpt-review:high",
             prompt_digest="1" * 64,
             evidence_manifest_digest="2" * 64,
             configuration_digest="3" * 64,
+            execution_contract_json=EXECUTION_CONTRACT.execution_contract_json(
+                contract
+            ),
+            execution_contract_digest=(
+                EXECUTION_CONTRACT.execution_contract_digest(contract)
+            ),
             parent_run_id="parent-1",
             job_digest="4" * 64,
             created_at="created-time",
-            skill_selection_attestation={"schema": "skills-v1"},
+            skill_selection_attestation=skills,
         )
 
     def policy(self) -> SimpleNamespace:
         return SimpleNamespace(
-            version=7,
+            version="7",
             digest="5" * 64,
             mode="shadow",
         )
@@ -297,8 +320,12 @@ class HarnessStoreRunRepositoryPhasesTests(unittest.TestCase):
             (
                 "run-1", "trace-1", "correlation-1", "case-1", "alert-1",
                 "soc-analyst", "analysis", REPOSITORY.RunStatus.RUNNING.value,
-                REPOSITORY.Stage.INTAKE.value, "route-primary", "route-reviewer",
-                "1" * 64, "2" * 64, "3" * 64, 7, "5" * 64, "shadow",
+                REPOSITORY.Stage.INTAKE.value,
+                "codex-cli:gpt-test:high", "codex-cli:gpt-review:high",
+                "1" * 64, "2" * 64, "3" * 64,
+                envelope.execution_contract_json,
+                envelope.execution_contract_digest,
+                "7", "5" * 64, "shadow",
                 "parent-1", "4" * 64, "created-time", "created-time",
             ),
         )
@@ -307,7 +334,10 @@ class HarnessStoreRunRepositoryPhasesTests(unittest.TestCase):
         self.assertEqual(append[2]["event_type"], "run.started")
         self.assertEqual(append[2]["idempotency_key"], "run.started")
         self.assertEqual(append[2]["created_at"], "created-time")
-        self.assertEqual(append[2]["payload"]["skill_selection_attestation"], {"schema": "skills-v1"})
+        self.assertEqual(
+            append[2]["payload"]["skill_selection_attestation"],
+            envelope.skill_selection_attestation,
+        )
         self.assertEqual(
             [event[0] for event in self.repo.events],
             ["append_event", "audit", "snapshot"],

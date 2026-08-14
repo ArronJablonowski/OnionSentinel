@@ -21,6 +21,7 @@ class PipelinePreparationTests(unittest.TestCase):
     def inputs(self, *, frozen: bool = False) -> preparation.PreparationInputs:
         return preparation.PreparationInputs(
             run_id="run-1",
+            source_revision="1" * 40,
             prompt_package={"alert": "a"},
             settings={
                 "agent_models": {"soc-analyst": "codex:gpt-5.5"},
@@ -107,6 +108,7 @@ class PipelinePreparationTests(unittest.TestCase):
 
         request = state["request"]
         self.assertEqual(request.run_id, "run-1")
+        self.assertEqual(request.source_revision, "1" * 40)
         self.assertIs(request.prompt_package, inputs.prompt_package)
         self.assertEqual(request.role, "soc-analyst")
         self.assertEqual(request.assigned_route, "codex:gpt-5.5")

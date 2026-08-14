@@ -8,6 +8,7 @@ from harness_policy import (
     HarnessIntegrityError,
     LEDGER_MANIFEST_SCHEMA,
     LEDGER_MANIFEST_SCHEMA_V1,
+    LEDGER_MANIFEST_SCHEMA_V2,
     digest_json,
 )
 
@@ -36,6 +37,8 @@ RUN_IDENTITY_COLUMNS = (
     "prompt_digest",
     "evidence_manifest_digest",
     "configuration_digest",
+    "execution_contract_json",
+    "execution_contract_digest",
     "policy_version",
     "policy_digest",
     "policy_mode",
@@ -43,13 +46,22 @@ RUN_IDENTITY_COLUMNS = (
     "job_digest",
     "started_at",
 )
-LEGACY_RUN_IDENTITY_COLUMNS_V1 = tuple(
+LEGACY_RUN_IDENTITY_COLUMNS_V2 = tuple(
     column
     for column in RUN_IDENTITY_COLUMNS
+    if column not in {"execution_contract_json", "execution_contract_digest"}
+)
+LEGACY_RUN_IDENTITY_COLUMNS_V1 = tuple(
+    column
+    for column in LEGACY_RUN_IDENTITY_COLUMNS_V2
     if column != "assigned_reviewer_route"
 )
 SUPPORTED_LEDGER_MANIFEST_SCHEMAS = frozenset(
-    {LEDGER_MANIFEST_SCHEMA_V1, LEDGER_MANIFEST_SCHEMA}
+    {
+        LEDGER_MANIFEST_SCHEMA_V1,
+        LEDGER_MANIFEST_SCHEMA_V2,
+        LEDGER_MANIFEST_SCHEMA,
+    }
 )
 
 
@@ -114,6 +126,8 @@ def ledger_manifest(
 def _run_identity_columns(schema: str) -> tuple[str, ...]:
     if schema == LEDGER_MANIFEST_SCHEMA:
         return RUN_IDENTITY_COLUMNS
+    if schema == LEDGER_MANIFEST_SCHEMA_V2:
+        return LEGACY_RUN_IDENTITY_COLUMNS_V2
     if schema == LEDGER_MANIFEST_SCHEMA_V1:
         return LEGACY_RUN_IDENTITY_COLUMNS_V1
     raise HarnessIntegrityError(

@@ -411,7 +411,8 @@ def _preparation_inputs(
 ) -> Any:
     b = bindings
     return module.PreparationInputs(
-        run_id, prompt_package, settings, agent_role, memory_frozen,
+        run_id, str(os.environ.get("ONION_SENTINEL_RELEASE_ID") or "").strip(),
+        prompt_package, settings, agent_role, memory_frozen,
         args.reanalysis_attempt_id, args.investigation_harness_policy,
         args.investigation_harness_db, b["INVESTIGATION_QUERY_CONTRACT"],
         b["MAX_INVESTIGATION_QUERY_ROUNDS"],
@@ -446,7 +447,8 @@ def prepare_runtime(
                 policy_enabled=enabled, assigned_route=assigned,
                 reviewer_route=reviewer)),
         start_harness=lambda request, policy: b["start_harness_run"](
-            run_id=request.run_id, prompt_package=request.prompt_package,
+            run_id=request.run_id, source_revision=request.source_revision,
+            prompt_package=request.prompt_package,
             role=request.role, assigned_route=request.assigned_route,
             configuration=request.configuration,
             reanalysis_attempt_id=request.reanalysis_attempt_id,

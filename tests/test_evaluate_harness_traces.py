@@ -488,6 +488,8 @@ def create_terminal_harness_database(
         role=harness.AgentRole.INCIDENT_RESPONDER.value,
         assigned_route="codex-cli:gpt-5.6-sol:high",
         configuration={"query_mode": "read-only"},
+        source_revision="1" * 40,
+        policy_version="1.0.0",
     )
     run = harness.HarnessRun(
         harness.HarnessStore(path),
@@ -504,7 +506,7 @@ def replace_terminal_manifest(
     run_id: str,
     manifest: dict | None,
     *,
-    legacy_identity: bool = False,
+    legacy_identity: bool | str = False,
 ) -> None:
     """Rewrite terminal metadata while preserving the event hash chain."""
     with harness._connect(database) as connection:
@@ -521,7 +523,13 @@ def replace_terminal_manifest(
         for row in rows:
             payload = json.loads(row["payload_json"])
             if legacy_identity and row["event_type"] == "run.started":
-                payload.pop("assigned_reviewer_route", None)
+                if legacy_identity == "reviewer-only":
+                    payload.pop("assigned_reviewer_route", None)
+                else:
+                    payload.pop("execution_contract", None)
+                    payload.pop("execution_contract_digest", None)
+                    if legacy_identity is True or legacy_identity == "v1":
+                        payload.pop("assigned_reviewer_route", None)
             if row["event_type"] == "run.succeeded":
                 if manifest is None:
                     payload.pop("ledger_manifest", None)
@@ -975,6 +983,8 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
                 role=harness.AgentRole.SOC_ANALYST.value,
                 assigned_route=primary_route,
                 configuration={"reviewer_route": reviewer_route},
+                source_revision="1" * 40,
+                policy_version="reviewer-repair-test",
             )
             run = harness.HarnessRun(
                 harness.HarnessStore(database),
@@ -1609,7 +1619,7 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
             )
             self.assertEqual(database.stat().st_mtime_ns, before_mtime)
 
-    def test_current_terminal_manifest_is_mandatory_and_v1_is_compatible(self):
+    def test_current_terminal_manifest_is_mandatory_and_legacy_is_compatible(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "harness.sqlite3"
             run_id = create_terminal_harness_database(database)
@@ -1620,6 +1630,24 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
                     run_id,
                     schema=harness.LEDGER_MANIFEST_SCHEMA_V1,
                 )
+                legacy_v2_manifest = harness.ledger_manifest(
+                    connection,
+                    run_id,
+                    schema=harness.LEDGER_MANIFEST_SCHEMA_V2,
+                )
+
+            replace_terminal_manifest(
+                database,
+                run_id,
+                legacy_manifest,
+                legacy_identity="reviewer-only",
+            )
+            report = evaluator.evaluate_database(database, run_id)
+            self.assertIn(
+                "terminal ledger manifest schema downgrade",
+                report["runs"][0]["integrity"]["errors"],
+            )
+
             replace_terminal_manifest(
                 database,
                 run_id,
@@ -1633,6 +1661,20 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
             self.assertEqual(
                 integrity["ledger_manifest_schema"],
                 evaluator.LEDGER_MANIFEST_SCHEMA_V1,
+            )
+
+            replace_terminal_manifest(
+                database,
+                run_id,
+                legacy_v2_manifest,
+                legacy_identity="v2",
+            )
+            report = evaluator.evaluate_database(database, run_id)
+            integrity = report["runs"][0]["integrity"]
+            self.assertTrue(integrity["valid"])
+            self.assertEqual(
+                integrity["ledger_manifest_schema"],
+                evaluator.LEDGER_MANIFEST_SCHEMA_V2,
             )
 
             replace_terminal_manifest(database, run_id, None)
@@ -1709,6 +1751,8 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
                 configuration={
                     "reviewer_route": "codex-cli:gpt-5.6-terra:high"
                 },
+                source_revision="1" * 40,
+                policy_version="route-audit-test",
             )
             run = harness.HarnessRun(
                 harness.HarnessStore(database),
@@ -1826,6 +1870,8 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
                     "reviewer_route": "codex-cli:gpt-5.6-sol:xhigh",
                     "evaluation_memory_frozen": True,
                 },
+                source_revision="1" * 40,
+                policy_version="terminal-execution-controls",
             )
             run = harness.HarnessRun(
                 harness.HarnessStore(database),

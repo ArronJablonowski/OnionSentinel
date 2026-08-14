@@ -13,6 +13,7 @@ from harness_contracts import (
 )
 from harness_policy import (
     LEDGER_MANIFEST_SCHEMA_V1,
+    LEDGER_MANIFEST_SCHEMA_V2,
     HarnessIntegrityError,
     RunStatus,
     digest_json,
@@ -133,17 +134,29 @@ def _verify_hypothesis_manifest(
         errors.append("hypothesis ledger manifest mismatch")
 
 
-def _legacy_manifest_eligible(rows: list[Mapping[str, Any]]) -> bool:
+def _legacy_manifest_eligible(
+    rows: list[Mapping[str, Any]],
+    schema: str,
+) -> bool:
     started_event = next(
         (row for row in rows if row["event_type"] == "run.started"),
         None,
     )
     started_payload = _event_payload(started_event)
-    return (
-        started_event is not None
-        and isinstance(started_payload, dict)
-        and "assigned_reviewer_route" not in started_payload
-    )
+    if started_event is None or not isinstance(started_payload, dict):
+        return False
+    if schema == LEDGER_MANIFEST_SCHEMA_V1:
+        return not {
+            "assigned_reviewer_route",
+            "execution_contract",
+            "execution_contract_digest",
+        }.intersection(started_payload)
+    if schema == LEDGER_MANIFEST_SCHEMA_V2:
+        return not {
+            "execution_contract",
+            "execution_contract_digest",
+        }.intersection(started_payload)
+    return False
 
 
 def _verify_terminal_manifest(
@@ -169,7 +182,10 @@ def _verify_terminal_manifest(
         return False, ""
     schema = str(expected_manifest.get("schema") or "")
     actual_manifest = actual_manifests.get(schema)
-    if schema == LEDGER_MANIFEST_SCHEMA_V1 and not _legacy_manifest_eligible(rows):
+    if (
+        schema in {LEDGER_MANIFEST_SCHEMA_V1, LEDGER_MANIFEST_SCHEMA_V2}
+        and not _legacy_manifest_eligible(rows, schema)
+    ):
         errors.append("terminal ledger manifest schema downgrade")
         return False, schema
     if actual_manifest is None:
