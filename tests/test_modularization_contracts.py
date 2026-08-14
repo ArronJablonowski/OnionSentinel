@@ -575,6 +575,11 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
         dhcp = ROOT / "relay" / "app" / "incident_evidence_dhcp.py"
         software = ROOT / "relay" / "app" / "incident_evidence_software.py"
         broker_phases = {
+            "_audited_transport_fields",
+            "_transport_payload_size",
+            "_receipt_fields",
+            "_receipt_contract_matches",
+            "_receipt_terminal_matches",
             "_receipt_identity",
             "_validate_receipt_accounting",
             "_admit_transport_request",
@@ -601,6 +606,8 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
         self.assertTrue(software.is_file())
         self.assertTrue(software_phases <= top_level_function_names(software))
         for path, name in (
+            (broker, "_transport_envelope"),
+            (broker, "_receipt_identity"),
             (broker, "_validate_receipt"),
             (broker, "main"),
             (software, "_validate_software_record"),
