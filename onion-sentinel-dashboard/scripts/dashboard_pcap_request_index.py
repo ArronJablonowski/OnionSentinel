@@ -30,7 +30,8 @@ def _pcap_request_select_query(columns: set[str]) -> str:
     newest = f"COALESCE({', '.join(timestamps)})" if timestamps else "request_id"
     return f"""
         SELECT request_id, {expression('group_id')}, {expression('alert_id')},
-               {expression('status')}, {expression('error')}, {expression('request_json', "'{}'")},
+               {expression('status')}, {expression('outcome')}, {expression('error')},
+               {expression('request_json', "'{}'")},
                {expression('completed_at')}, {expression('updated_at')}, {expression('created_at')}
         FROM pcap_requests
         ORDER BY {newest} DESC, request_id DESC
@@ -93,15 +94,20 @@ def request_for_alert(
     return {}
 
 
+def _text_field(row: sqlite3.Row, name: str) -> str:
+    return str(row[name] or "").strip()
+
+
 def _record_from_row(row: sqlite3.Row) -> dict[str, Any]:
     try:
         request_payload = json.loads(str(row["request_json"] or "{}"))
     except (TypeError, ValueError, json.JSONDecodeError):
         request_payload = {}
     return {
-        "request_id": str(row["request_id"] or "").strip(),
-        "status": str(row["status"] or "").strip().lower(),
-        "error": str(row["error"] or "").strip(),
+        "request_id": _text_field(row, "request_id"),
+        "status": _text_field(row, "status").lower(),
+        "outcome": _text_field(row, "outcome").lower(),
+        "error": _text_field(row, "error"),
         "updated_at": str(row["completed_at"] or row["updated_at"] or row["created_at"] or "").strip(),
         "used_capture_file": bool(request_payload.get("capture_file")) if isinstance(request_payload, dict) else False,
     }

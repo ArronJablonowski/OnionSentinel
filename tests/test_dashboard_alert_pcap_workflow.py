@@ -67,6 +67,13 @@ class DashboardAlertPcapWorkflowTests(unittest.TestCase):
             ({"status": "pending"}, ("queued", "Queued")),
             ({"status": "fulfilled"}, ("queued", "Parsing")),
             (
+                {
+                    "status": "rejected", "outcome": "policy_skipped",
+                    "error": "Automatic PCAP analysis skipped below configured high threshold",
+                },
+                ("not-queued", "Skipped"),
+            ),
+            (
                 {"status": "failed", "error": "no matching packets", "used_capture_file": False},
                 ("error", "Retry"),
             ),

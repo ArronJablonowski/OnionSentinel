@@ -67,6 +67,7 @@ def _acquire_selection(
             durable_intent=selection.durable_intent,
             controlled=controlled_evaluation_dir is not None,
             allowed_analysis_levels=selection.allowed_analysis_levels,
+            allowed_incident_levels=selection.allowed_incident_levels,
             state=claim_state,
         ),
     )

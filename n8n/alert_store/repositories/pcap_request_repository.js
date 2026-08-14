@@ -15,7 +15,9 @@ function createPcapRequestRepository({
   classifyPcapOutcome,
   recordMetric,
   readCaptureLossThreshold,
+  readPcapThreshold,
   requeueStaleClaims,
+  severityRank,
   priorityMaxWaitSeconds,
   captureRetentionSeconds,
   nowMs = () => Date.now(),
@@ -35,10 +37,22 @@ function createPcapRequestRepository({
     classifyPcapOutcome,
     recordMetric,
     readCaptureLossThreshold,
+    readPcapThreshold,
     requeueStaleClaims,
     nowMs,
   })) {
     if (typeof value !== 'function') throw new TypeError(`${name} must be a function`);
+  }
+  if (!severityRank || typeof severityRank !== 'object') {
+    throw new TypeError('severityRank must be an object');
+  }
+  const expectedSeverityRanks = {
+    informational: 0, low: 1, medium: 2, high: 3, critical: 4,
+  };
+  if (Object.entries(expectedSeverityRanks).some(
+    ([level, rank]) => Number(severityRank[level]) !== rank,
+  )) {
+    throw new TypeError('severityRank must match the canonical PCAP SQL ordering');
   }
 
   async function candidateFromPayload(payload) {
@@ -183,6 +197,35 @@ function createPcapRequestRepository({
     );
   }
 
+  async function retireBelowThresholdAutomaticRequests() {
+    const threshold = String(readPcapThreshold() || 'disabled').trim().toLowerCase();
+    const thresholdRank = threshold === 'disabled'
+      ? Math.max(...Object.values(severityRank).map(Number)) + 1
+      : Number(severityRank[threshold]);
+    const effectiveRank = Number.isFinite(thresholdRank)
+      ? thresholdRank
+      : Math.max(...Object.values(severityRank).map(Number)) + 1;
+    const now = nowUtc();
+    await run(
+      `UPDATE pcap_requests
+       SET status = 'rejected', outcome = 'policy_skipped', error = ?,
+           completed_at = ?, updated_at = ?
+       WHERE status = 'pending'
+         AND requested_by = 'alert-store-auto-pcap'
+         AND COALESCE((
+           SELECT CASE lower(COALESCE(g.triage_level, ''))
+             WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2
+             WHEN 'low' THEN 1 WHEN 'informational' THEN 0 WHEN 'info' THEN 0
+             ELSE -1 END
+           FROM alert_group_summary AS g
+           WHERE g.group_id = pcap_requests.group_id
+           LIMIT 1
+         ), -1) < ?`,
+      [`Automatic PCAP analysis skipped below configured ${threshold} threshold`,
+        now, now, effectiveRank],
+    );
+  }
+
   async function listRequests(query = new URLSearchParams()) {
     const allowed = new Set(['pending', 'claimed', 'fulfilled', 'failed', 'rejected']);
     const requestedStatus = safeString(query.get('status'), 32).toLowerCase();
@@ -190,6 +233,7 @@ function createPcapRequestRepository({
     const limit = Math.min(100, Math.max(1, Number(query.get('limit') || 25) || 25));
     await rejectExpiredPending();
     await requeueStaleClaims();
+    await retireBelowThresholdAutomaticRequests();
     const rows = status
       ? await all(
         `
@@ -245,21 +289,30 @@ function createPcapRequestRepository({
     const placeholders = requestIds.map(() => '?').join(', ');
     await run(
       `UPDATE pcap_requests
-       SET status = 'pending', outcome = NULL, relay_host = NULL, claimed_at = NULL,
-           completed_at = NULL, error = 'requeued after PCAP capture-selection upgrade',
+       SET status = 'pending', outcome = NULL,
+           requested_by = 'alert-store-explicit-requeue',
+           request_json = CASE WHEN json_valid(request_json)
+             THEN json_set(request_json,
+               '$.requested_by', 'alert-store-explicit-requeue',
+               '$.manual_override', 1)
+             ELSE request_json END,
+           relay_host = NULL, claimed_at = NULL, completed_at = NULL,
+           error = 'explicitly requeued after PCAP capture-selection or policy change',
            diagnostics_json = NULL, transfer_stage = NULL, transfer_bytes = 0,
            transfer_total_bytes = 0, transfer_progress_at = NULL,
            transfer_duration_seconds = NULL, transfer_attempt_count = 0,
            transfer_retry_count = 0, transfer_last_error = NULL,
            transfer_last_failed_stage = NULL, next_attempt_at = NULL, updated_at = ?
-       WHERE status = 'failed' AND request_id IN (${placeholders})`,
+       WHERE (status = 'failed' OR (status = 'rejected' AND outcome = 'policy_skipped'))
+         AND request_id IN (${placeholders})`,
       [now, ...requestIds],
     );
     const rows = await all(`SELECT * FROM pcap_requests WHERE request_id IN (${placeholders})`, requestIds);
     return {ok: true, requests: rows.map(pcapRequestFromRow)};
   }
 
-  return {backfillOutcomes, candidateFromPayload, createRequest, listRequests, requeueRequests};
+  return {backfillOutcomes, candidateFromPayload, createRequest, listRequests,
+    requeueRequests, retireBelowThresholdAutomaticRequests};
 }
 
 module.exports = {createPcapRequestRepository};

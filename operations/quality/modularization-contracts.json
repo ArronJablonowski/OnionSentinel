@@ -2314,6 +2314,7 @@
         "cli_agent_roles",
         "role_uses_codex_cli",
         "configured_analysis_levels",
+        "configured_incident_levels",
         "strict_controlled_ai_settings"
       ]
     },

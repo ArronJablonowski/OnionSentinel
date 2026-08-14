@@ -74,6 +74,7 @@ test('list preserves status bounds, priority aging, retention, and stale recover
   assert.equal(result.policy.capture_loss_threshold_percent, 5);
   assert.equal(env.calls[0].name, 'run');
   assert.equal(env.calls[1].name, 'stale');
+  assert.match(env.calls[2].sql, /policy_skipped/);
   const query = env.calls.find(({name}) => name === 'all');
   assert.match(query.sql, /WHEN 'critical' THEN 2/);
   assert.match(query.sql, /p.next_attempt_at IS NULL/);
@@ -106,6 +107,7 @@ test('bulk requeue explicitly overrides failed or policy-skipped requests', asyn
   assert.match(update.sql, /status = 'failed'/);
   assert.match(update.sql, /outcome = 'policy_skipped'/);
   assert.match(update.sql, /requested_by = 'alert-store-explicit-requeue'/);
+  assert.match(update.sql, /\$\.manual_override', 1/);
   assert.equal(update.params.length, 501);
   assert.equal(new Set(update.params.slice(1)).size, 500);
 });

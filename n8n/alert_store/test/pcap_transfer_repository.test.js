@@ -28,7 +28,9 @@ function harness({rows = [], changes = 1} = {}) {
     formatProjectTimestamp: (value) => value.toISOString().replace('T', '  '),
     pcapRequestFromRow: (row) => ({request_id: row.request_id, status: row.status}),
     classifyPcapOutcome: (_status, error) => error?.includes('timeout') ? 'timeout' : 'failed',
-    pcapOutcomes: new Set(['captured', 'timeout', 'failed']),
+    matchesPcap: (level) => ['critical', 'high', 'medium'].includes(level),
+    readPcapThreshold: () => 'medium',
+    pcapOutcomes: new Set(['captured', 'timeout', 'policy_skipped', 'failed']),
     pipelineMetrics: {
       record: async (...args) => calls.push({name: 'metric', args}),
     },
@@ -64,6 +66,28 @@ test('claim remains compare-and-set and honors durable retry clocks', async () =
   const update = claimed.calls.find(({name}) => name === 'run');
   assert.match(update.sql, /status = 'pending'/);
   assert.match(update.sql, /transfer_attempt_count = transfer_attempt_count \+ 1/);
+});
+
+test('claim boundary retires automatic work that no longer meets the PCAP floor', async () => {
+  const env = harness({rows: [
+    {request_id: 'p1', status: 'pending', requested_by: 'alert-store-auto-pcap', current_triage_level: 'low'},
+    {request_id: 'p1', status: 'rejected', outcome: 'policy_skipped'},
+  ]});
+  const result = await env.repository.claimRequest({request_id: 'p1'});
+  assert.equal(result.claimed, false);
+  assert.equal(result.status, 'rejected');
+  const update = env.calls.find(({name}) => name === 'run');
+  assert.match(update.sql, /policy_skipped/);
+  assert.equal(update.params[0], 'Automatic PCAP analysis skipped below configured medium threshold');
+});
+
+test('explicit requeue remains a labeled manual override at the claim boundary', async () => {
+  const env = harness({rows: [
+    {request_id: 'p1', status: 'pending', requested_by: 'alert-store-explicit-requeue', current_triage_level: 'low'},
+    {request_id: 'p1', status: 'claimed'},
+  ]});
+  assert.equal((await env.repository.claimRequest({request_id: 'p1'})).claimed, true);
+  assert.equal(env.calls.filter(({name}) => name === 'run').length, 1);
 });
 
 test('progress validates stage and byte bounds before renewing a claim', async () => {
@@ -103,6 +127,20 @@ test('retry state is bounded, stage-aware, durable, and metrically observable', 
   ]});
   assert.equal((await exhausted.repository.retryRequest({request_id: 'p2', error: 'timeout'})).exhausted, true);
   assert.equal(exhausted.calls.find(({name}) => name === 'run').params[0], 'failed');
+});
+
+test('retry boundary retires automatic work after a severity-policy change', async () => {
+  const env = harness({rows: [
+    {
+      request_id: 'p1', status: 'claimed', requested_by: 'alert-store-auto-pcap',
+      current_triage_level: 'low', transfer_attempt_count: 1,
+    },
+    {request_id: 'p1', status: 'rejected', outcome: 'policy_skipped'},
+  ]});
+  const result = await env.repository.retryRequest({request_id: 'p1', error: 'timeout'});
+  assert.equal(result.retry_scheduled, false);
+  assert.equal(result.policy_skipped, true);
+  assert.equal(env.calls.at(-1).args[1], 'policy_skipped');
 });
 
 test('completion validates artifacts and exposes only post-write wake intent', async () => {

@@ -137,7 +137,12 @@ def configured_analysis_levels(
         if level.strip().lower() in severity_priority
     }
     raw = load_untrusted_settings(path, policy) or {}
-    threshold = _analysis_threshold(raw, severity_priority)
+    threshold = _automatic_threshold(
+        raw,
+        "soc_analyst_analysis_min_severity",
+        severity_priority,
+        fallback="informational",
+    )
     if threshold == "disabled":
         return []
     last_index = severity_priority.index(threshold)
@@ -148,18 +153,40 @@ def configured_analysis_levels(
     ]
 
 
-def _analysis_threshold(
-    raw: dict[str, Any], severity_priority: tuple[str, ...]
+def configured_incident_levels(
+    path: Path,
+    policy: SchedulerSettingsPolicy,
+    severity_priority: tuple[str, ...],
+) -> list[str]:
+    """Return severities eligible for automatic Incident Response."""
+    raw = load_untrusted_settings(path, policy) or {}
+    threshold = _automatic_threshold(
+        raw,
+        "soc_analyst_incident_min_severity",
+        severity_priority,
+        fallback="disabled",
+    )
+    if threshold == "disabled":
+        return []
+    return list(severity_priority[: severity_priority.index(threshold) + 1])
+
+
+def _automatic_threshold(
+    raw: dict[str, Any],
+    key: str,
+    severity_priority: tuple[str, ...],
+    *,
+    fallback: str,
 ) -> str:
     threshold = str(
-        raw.get("soc_analyst_analysis_min_severity", "informational") or ""
+        raw.get(key, fallback) or ""
     ).strip().lower()
     if threshold == "info":
         threshold = "informational"
     if threshold == "disabled":
         return threshold
     if threshold not in severity_priority:
-        return "informational"
+        return fallback
     return threshold
 
 

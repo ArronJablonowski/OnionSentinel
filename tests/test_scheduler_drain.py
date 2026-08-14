@@ -58,6 +58,9 @@ class SchedulerDrainTests(unittest.TestCase):
         self.sources = SchedulerDrainSources(
             stop_for_drain=mock.Mock(return_value=False),
             configured_levels=mock.Mock(return_value=["critical", "high"]),
+            configured_incident_levels=mock.Mock(
+                return_value=["critical"]
+            ),
             open_readonly_database=mock.Mock(return_value=self.connection),
             select_indexed=mock.Mock(return_value=self.row),
             select_legacy=mock.Mock(return_value=self.row),
@@ -97,6 +100,8 @@ class SchedulerDrainTests(unittest.TestCase):
         self.assertEqual(result.job_type, "incident_response_analysis")
         self.assertTrue(result.durable_intent)
         self.assertEqual(result.allowed_analysis_levels, ("critical", "high"))
+        self.assertEqual(result.allowed_incident_levels, ("critical",))
+        self.assertFalse(result.automatic_execution_eligible)
         self.assertEqual(self.args.levels, "critical,high")
         self.assertEqual(state.attempted_count, 1)
         self.assertEqual(state.selected_groups, {"stable-1", "key-1"})
@@ -108,6 +113,25 @@ class SchedulerDrainTests(unittest.TestCase):
             self.args,
             state.selected_groups,
         )
+
+    def test_manual_incident_selection_is_an_explicit_policy_override(self) -> None:
+        self.sources.durable_payload.return_value = {
+            "agent_role": "incident-responder",
+            "manual_reanalysis": True,
+        }
+
+        result = select_scheduler_work(
+            self.sources,
+            self.args,
+            SchedulerDrainState(),
+            indexed_mode=True,
+            launch_levels="critical,high,medium,low,informational",
+            drain_file=Path("drain"),
+        )
+
+        self.assertTrue(result.automatic_execution_eligible)
+        emitted = json.loads(self.messages[-1])
+        self.assertTrue(emitted["automatic_execution_eligible"])
 
     def test_legacy_selection_uses_artifact_exclusions_and_derived_group(self) -> None:
         self.row.pop("stable_group_id")
@@ -144,6 +168,7 @@ class SchedulerDrainTests(unittest.TestCase):
 
         self.assertEqual(result.disposition, "stop")
         self.sources.configured_levels.assert_not_called()
+        self.sources.configured_incident_levels.assert_not_called()
         self.sources.open_readonly_database.assert_not_called()
 
     def test_attempt_limit_stops_before_maintenance_check(self) -> None:

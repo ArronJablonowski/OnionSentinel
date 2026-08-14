@@ -664,7 +664,9 @@ routes, detects Codex use across primary/reviewer/adjudicator assignments,
 applies the saved automatic-analysis severity floor, and builds the strict
 normalized-plus-raw snapshot used by controlled route binding. The canonical
 runner parser and bounded reader are injected so scheduler and runner retain
-one normalization contract.
+one normalization contract. Automatic AI and Incident Response floors remain
+independent: the historical AI fallback admits all severities during rolling
+upgrade, while a missing or invalid Incident Response floor fails closed.
 
 `scheduler_artifact_repository.py` owns the pre-indexed scheduler's read-only
 filesystem artifact index. It tolerates malformed or concurrently removed
@@ -735,7 +737,10 @@ time for compatibility.
 `scheduler_drain.py` owns per-drain exclusions and counters, the runtime
 automation-floor refresh, maintenance checks immediately before each claim,
 read-only indexed-versus-legacy selection, candidate identity projection, and
-the dry-run/max-attempt stop contract. Claim contention explicitly returns its
+the dry-run/max-attempt stop contract. Each durable selection carries an
+explicit automatic-execution eligibility projection for its job type; manual
+reanalysis remains a labeled override, and the claim boundary repeats the
+check against the server-authoritative job snapshot. Claim contention explicitly returns its
 attempt slot, while completed and recovered outcomes update the shared state
 used by final settlement.
 

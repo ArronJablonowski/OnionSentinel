@@ -43,7 +43,7 @@ def _load_requests(conn: sqlite3.Connection, terms: list[str]) -> list[sqlite3.R
     placeholders = ",".join("?" for _ in terms)
     try:
         return conn.execute(
-            "SELECT request_id, alert_id, group_id, status, error, request_json, "
+            "SELECT request_id, alert_id, group_id, status, outcome, error, request_json, "
             "updated_at, completed_at FROM pcap_requests "
             f"WHERE group_id IN ({placeholders}) OR alert_id IN ({placeholders}) "
             f"OR request_id IN ({placeholders}) "
@@ -66,6 +66,7 @@ def _request_record(item: sqlite3.Row) -> JsonObject:
     return {
         "request_id": str(item["request_id"] or "").strip(),
         "status": str(item["status"] or "").strip().lower(),
+        "outcome": str(item["outcome"] or "").strip().lower(),
         "error": str(item["error"] or "").strip(),
         "updated_at": str(item["completed_at"] or item["updated_at"] or "").strip(),
         "used_capture_file": _used_capture_file(item["request_json"]),
@@ -120,6 +121,23 @@ def _failed_status(record: object) -> JsonObject:
     )
 
 
+def _terminal_status(status: str, record: object) -> JsonObject:
+    if status == "failed":
+        return _failed_status(record)
+    policy_skipped = status == "rejected" and isinstance(record, dict) and (
+        str(record.get("outcome") or "").strip().lower() == "policy_skipped"
+    )
+    if policy_skipped:
+        detail = str(record.get("error") or "").strip()
+        return _status(
+            "not-queued", "Skipped",
+            detail[:180] or "Automatic PCAP analysis is below the configured severity minimum",
+        )
+    return _status(
+        "none", "None", "No parsed PCAP analysis is available for this detection group",
+    )
+
+
 def compose_pcap_status(group_id: str, alert_id: str, analysis_index: object,
                         request_statuses: object) -> JsonObject:
     """Return a truthful compact PCAP state for one detection group."""
@@ -138,8 +156,4 @@ def compose_pcap_status(group_id: str, alert_id: str, analysis_index: object,
             "queued", label,
             f"PCAP request is {status}; parsed analysis is not available yet",
         )
-    if status != "failed":
-        return _status(
-            "none", "None", "No parsed PCAP analysis is available for this detection group",
-        )
-    return _failed_status(record)
+    return _terminal_status(status, record)

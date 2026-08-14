@@ -29,6 +29,7 @@ class SchedulerWorkerTests(unittest.TestCase):
         self.selection = SchedulerSelection(
             disposition="selected",
             allowed_analysis_levels=("critical", "high"),
+            allowed_incident_levels=("critical",),
             selected={"alert_id": "selected-alert"},
             alert_id="selected-alert",
             group_id="selected-group",

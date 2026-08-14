@@ -85,3 +85,15 @@ test('updated AI processing returns exact durable snapshot and records metric', 
     payload: {group_id: 'group-one'}});
   assert.equal(env.metrics[0][1], 'started');
 });
+
+test('incident severity retirement projects a skipped case with its policy reason', async () => {
+  const reason = 'automatic incident response skipped: low is below configured high threshold';
+  const job = {id: 9, status: 'failed', attempt_count: 1, updated_at: 'time', payload: {}};
+  const env = harness({mode: false, getResults: [job, {case_id: 'case-one'}],
+    transitions: [{updated: true}]});
+  await env.owner.transition(
+    'incident_response_analysis', 'group-one', 'failed', reason, 'lease-one', false,
+  );
+  const caseUpdate = env.runs.find(({sql}) => /SET agent_status/.test(sql));
+  assert.deepEqual(caseUpdate.params, ['skipped', reason, '2026-08-09  12:00:00Z', 'case-one']);
+});

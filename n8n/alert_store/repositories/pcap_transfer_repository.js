@@ -13,6 +13,8 @@ function createPcapTransferRepository({
   formatProjectTimestamp,
   pcapRequestFromRow,
   classifyPcapOutcome,
+  matchesPcap,
+  readPcapThreshold,
   pcapOutcomes,
   pipelineMetrics,
   claimLeaseSeconds,
@@ -29,6 +31,8 @@ function createPcapTransferRepository({
     formatProjectTimestamp,
     pcapRequestFromRow,
     classifyPcapOutcome,
+    matchesPcap,
+    readPcapThreshold,
     nowMs,
   })) {
     if (typeof value !== 'function') throw new TypeError(`${name} must be a function`);
@@ -38,6 +42,37 @@ function createPcapTransferRepository({
   }
   if (!pipelineMetrics || typeof pipelineMetrics.record !== 'function') {
     throw new TypeError('pipelineMetrics.record must be a function');
+  }
+
+  async function requestWithSeverity(requestId) {
+    return get(
+      `SELECT p.*,
+          (SELECT g.triage_level FROM alert_group_summary AS g
+           WHERE g.group_id = p.group_id LIMIT 1) AS current_triage_level
+       FROM pcap_requests AS p WHERE p.request_id = ?`,
+      [requestId],
+    );
+  }
+
+  function automaticRequestBelowFloor(request) {
+    return request?.requested_by === 'alert-store-auto-pcap'
+      && !matchesPcap(request.current_triage_level);
+  }
+
+  async function retireAutomaticRequest(requestId) {
+    const threshold = safeString(readPcapThreshold() || 'disabled', 32).toLowerCase();
+    const now = nowUtc();
+    await run(
+      `UPDATE pcap_requests
+       SET status = 'rejected', outcome = 'policy_skipped',
+           error = ?, relay_host = NULL, claimed_at = NULL,
+           completed_at = ?, next_attempt_at = NULL, updated_at = ?
+       WHERE request_id = ? AND requested_by = 'alert-store-auto-pcap'
+         AND status IN ('pending', 'claimed')`,
+      [`Automatic PCAP analysis skipped below configured ${threshold} threshold`,
+        now, now, requestId],
+    );
+    return requestWithSeverity(requestId);
   }
 
   async function requeueStaleClaims() {
@@ -69,10 +104,19 @@ function createPcapTransferRepository({
     if (!requestId) throw new Error('request_id is required');
     const relayHost = safeString(payload?.relay_host || 'relay', 120);
     const now = nowUtc();
-    const existing = await get('SELECT * FROM pcap_requests WHERE request_id = ?', [requestId]);
+    let existing = await requestWithSeverity(requestId);
     if (!existing) throw new Error('pcap request not found');
     if (existing.status !== 'pending') {
       return {ok: true, claimed: false, status: existing.status, request: pcapRequestFromRow(existing)};
+    }
+    if (automaticRequestBelowFloor(existing)) {
+      existing = await retireAutomaticRequest(requestId);
+      return {
+        ok: true,
+        claimed: false,
+        status: existing.status,
+        request: pcapRequestFromRow(existing),
+      };
     }
     if (existing.next_attempt_at && Date.parse(existing.next_attempt_at) > nowMs()) {
       return {ok: true, claimed: false, status: existing.status, request: pcapRequestFromRow(existing)};
@@ -139,8 +183,22 @@ function createPcapTransferRepository({
   async function retryRequest(payload) {
     const requestId = safeString(payload?.request_id, 64);
     if (!requestId) throw new Error('request_id is required');
-    const existing = await get('SELECT * FROM pcap_requests WHERE request_id = ?', [requestId]);
+    let existing = await requestWithSeverity(requestId);
     if (!existing) throw new Error('pcap request not found');
+    if (['pending', 'claimed'].includes(existing.status)
+      && automaticRequestBelowFloor(existing)) {
+      existing = await retireAutomaticRequest(requestId);
+      await pipelineMetrics.record('pcap_transfer', 'policy_skipped', requestId, {
+        eventKey: `pcap_transfer:policy_skipped:${requestId}:${nowUtc()}`,
+      });
+      return {
+        ok: true,
+        retry_scheduled: false,
+        exhausted: false,
+        policy_skipped: true,
+        request: pcapRequestFromRow(existing),
+      };
+    }
     if (existing.status === 'pending') {
       return {ok: true, retry_scheduled: true, exhausted: false, request: pcapRequestFromRow(existing)};
     }

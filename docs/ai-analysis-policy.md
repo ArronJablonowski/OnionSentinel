@@ -939,6 +939,15 @@ Default behavior:
   checks in Python.
 - Eligible levels are `critical`, `high`, `medium`, `low`, and
   `informational`.
+- Settings retain three independent lowest-severity controls for automatic AI
+  analysis, automatic PCAP analysis, and automatic Incident Response. The
+  alert-store checks them during ingestion; PCAP selection, claim, and retry
+  retire stale automatic requests as `policy_skipped`; and the scheduler
+  projects job-type-specific execution eligibility before repeating the check
+  after its atomic durable claim. Explicit PCAP requeue and manual analysis or
+  reanalysis are labeled overrides and remain available below an automatic
+  floor. Dashboard status resolves queued work separately from policy-skipped
+  work and preserves the bounded retirement reason.
 - Eligible filter statuses are `accepted`, `escalated`, `unknown`, and
   `suppressed`. Suppressed alerts are still analyzed so the model can recommend
   investigation and tuning actions.

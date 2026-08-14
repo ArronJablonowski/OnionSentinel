@@ -23,8 +23,11 @@ function createOptions() {
       pcapRequestFromRow: (row) => row,
       classifyPcapOutcome: () => 'success',
       readCaptureLossThreshold: () => 10,
+      readPcapThreshold: () => 'medium',
       matchesAnalysis: () => true,
-      severityRank: {},
+      severityRank: {
+        informational: 0, low: 1, medium: 2, high: 3, critical: 4,
+      },
       compactCorrelationCandidates: () => [],
       enrichmentRecord: () => ({}),
       groupKeyFromRow: () => 'group-key',

@@ -186,7 +186,7 @@ DEPENDENCIES: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     ("bounded_process", (("BoundedProcessError", "BoundedProcessError"), ("run_bounded_command", "run_bounded_command"))),
     ("controlled_evaluation_isolation", (("ControlledEvaluationIsolationError", "ControlledEvaluationIsolationError"), ("pin_controlled_tmpdir", "pin_controlled_tmpdir"), ("validate_controlled_incident_evidence_route", "validate_controlled_incident_evidence_route"))),
     ("scheduler_cli", (("SchedulerCliDefaults", "SchedulerCliDefaults"), ("SchedulerCliPolicy", "SchedulerCliPolicy"), ("parse_scheduler_args", "parse_scheduler_args"))),
-    ("scheduler_ai_settings", (("SchedulerSettingsPolicy", "SchedulerSettingsPolicy"), ("StrictSettingsSources", "StrictSettingsSources"), ("discover_cli_agent_roles", "cli_agent_roles"), ("apply_analysis_level_floor", "configured_analysis_levels"), ("role_uses_codex_cli", "role_uses_codex_cli"), ("strict_controlled_ai_settings", "strict_controlled_ai_settings"))),
+    ("scheduler_ai_settings", (("SchedulerSettingsPolicy", "SchedulerSettingsPolicy"), ("StrictSettingsSources", "StrictSettingsSources"), ("discover_cli_agent_roles", "cli_agent_roles"), ("apply_analysis_level_floor", "configured_analysis_levels"), ("apply_incident_level_floor", "configured_incident_levels"), ("role_uses_codex_cli", "role_uses_codex_cli"), ("strict_controlled_ai_settings", "strict_controlled_ai_settings"))),
     ("scheduler_artifact_repository", tuple((name, name) for name in ("alert_group_id", "alert_group_key", "alert_group_key_from_mapping", "analyzed_alert_groups", "analyzed_alert_ids", "completed_analysis_group_ids", "latest_analysis_mtimes", "latest_pcap_analysis_mtimes", "latest_pcap_evidence_mtime_for_alert", "latest_pcap_group_mtimes", "latest_prompt_for_alert", "latest_prompt_group_mtimes", "latest_prompt_mtimes", "reusable_prompt_for_alert"))),
     ("scheduler_legacy_reconciliation", tuple((name, name) for name in ("orphaned_pending_ai_job_ids", "pending_ai_job_ids", "reconcilable_ai_job_ids", "reconcilable_completed_ai_job_ids"))),
     ("scheduler_controlled_runtime", (("ControlledRuntimePolicy", "ControlledRuntimePolicy"), ("ControlledRuntimeSources", "ControlledRuntimeSources"), ("validate_controlled_evaluation_runtime", "validate_controlled_evaluation_runtime"))),
@@ -291,6 +291,7 @@ def _install_configuration_exports(namespace: Namespace) -> None:
     _bind(namespace, "effective_prompt_package_limit", configuration.effective_prompt_package_limit)
     _bind(namespace, "effective_initial_prompt_package_limit", configuration.effective_prompt_package_limit, initial=True)
     _bind(namespace, "configured_analysis_levels", configuration.configured_analysis_levels)
+    _bind(namespace, "configured_incident_levels", configuration.configured_incident_levels)
     _bind(namespace, "provider_lane_sql", configuration.provider_lane_sql)
 
 

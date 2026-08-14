@@ -38,7 +38,10 @@ function createPcapService({
   }
 
   async function list(searchParams) {
-    return listRequests(searchParams);
+    // Selection also performs bounded expiry, stale-lease recovery, and policy
+    // retirement, so keep those compare-and-set writes behind the same gate as
+    // claim and retry.
+    return gated(() => listRequests(searchParams));
   }
 
   async function claim(payload) {

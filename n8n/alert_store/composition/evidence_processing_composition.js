@@ -38,11 +38,13 @@ function createEvidenceProcessingComposition(options = {}) {
     classifyPcapOutcome: policy.classifyPcapOutcome,
     recordMetric,
     readCaptureLossThreshold: policy.readCaptureLossThreshold,
+    readPcapThreshold: policy.readPcapThreshold,
     requeueStaleClaims: (...args) => (
       services.pcapTransferRepository().requeueStaleClaims(...args)
     ),
     priorityMaxWaitSeconds: runtime.pcapPriorityMaxWaitSeconds,
     captureRetentionSeconds: runtime.pcapCaptureRetentionSeconds,
+    severityRank: policy.severityRank,
   });
   const pcapAnalysisCompletion = createPcapAnalysisCompletion({
     run: database.run,

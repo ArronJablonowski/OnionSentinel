@@ -17,6 +17,22 @@ assert.strictEqual(matchesSeverityThreshold('info', 'informational'), true);
 assert.strictEqual(matchesSeverityThreshold('critical', 'disabled'), false);
 assert.strictEqual(legacyPcapThreshold('critical,high,medium'), 'medium');
 
+const severityTransitions = ['critical', 'high', 'medium', 'low', 'informational'];
+for (const [thresholdIndex, threshold] of severityTransitions.entries()) {
+  for (const [severityIndex, severity] of severityTransitions.entries()) {
+    assert.strictEqual(
+      matchesSeverityThreshold(severity, threshold),
+      severityIndex <= thresholdIndex,
+      `${severity} against ${threshold}`,
+    );
+  }
+}
+for (const severity of [...severityTransitions, 'info', 'unknown', '']) {
+  assert.strictEqual(matchesSeverityThreshold(severity, 'disabled'), false);
+}
+assert.strictEqual(matchesSeverityThreshold('unknown', 'low'), false);
+assert.strictEqual(matchesSeverityThreshold('critical', 'unknown'), false);
+
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'onion-sentinel-policy-'));
 const settingsPath = path.join(root, 'ai_model_settings.json');
 fs.writeFileSync(settingsPath, JSON.stringify({

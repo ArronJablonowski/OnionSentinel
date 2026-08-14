@@ -31,6 +31,7 @@ class SchedulerDrainState:
 class SchedulerDrainSources:
     stop_for_drain: Callable[[Any], bool]
     configured_levels: Callable[[Any, str], list[str]]
+    configured_incident_levels: Callable[[Any], list[str]]
     open_readonly_database: Callable[[Any], Any]
     select_indexed: Callable[[Any, Any, set[str]], Any | None]
     select_legacy: Callable[[Any, Any, set[str], set[str]], Any | None]
@@ -46,6 +47,8 @@ class SchedulerDrainSources:
 class SchedulerSelection:
     disposition: str
     allowed_analysis_levels: tuple[str, ...] = ()
+    allowed_incident_levels: tuple[str, ...] = ()
+    automatic_execution_eligible: bool = True
     selected: Any | None = None
     alert_id: str = ""
     group_id: str = ""
@@ -111,6 +114,7 @@ def _emit_selection(
     selected: Any,
     alert_id: str,
     job_type: str,
+    automatic_execution_eligible: bool,
 ) -> None:
     sources.emit(
         json.dumps(
@@ -122,6 +126,7 @@ def _emit_selection(
                 "last_seen": selected["last_seen"],
                 "queue_time": selected["queue_time"],
                 "job_type": job_type,
+                "automatic_execution_eligible": automatic_execution_eligible,
                 "provider_lane": args.provider_lane,
             },
             sort_keys=True,
@@ -135,6 +140,7 @@ def _project_selection(
     state: SchedulerDrainState,
     selected: Any,
     allowed: tuple[str, ...],
+    incident_allowed: tuple[str, ...],
 ) -> SchedulerSelection:
     alert_id = selected["alert_id"]
     group_id, group_key = _selected_group(sources, selected)
@@ -150,11 +156,27 @@ def _project_selection(
         if _has_field(selected, "has_durable_intent")
         else False
     )
+    allowed_for_job = {
+        "ai_analysis": allowed,
+        "incident_response_analysis": incident_allowed,
+    }.get(job_type)
+    automatic_execution_eligible = (
+        not durable_intent
+        or payload.get("manual_reanalysis") is True
+        or allowed_for_job is None
+        or str(selected["triage_level"] or "").strip().lower()
+        in set(allowed_for_job)
+    )
     state.attempted_count += 1
-    _emit_selection(sources, args, selected, alert_id, job_type)
+    _emit_selection(
+        sources, args, selected, alert_id, job_type,
+        automatic_execution_eligible,
+    )
     return SchedulerSelection(
         disposition="dry_run" if args.dry_run else "selected",
         allowed_analysis_levels=allowed,
+        allowed_incident_levels=incident_allowed,
+        automatic_execution_eligible=automatic_execution_eligible,
         selected=selected,
         alert_id=alert_id,
         group_id=group_id,
@@ -182,6 +204,9 @@ def select_scheduler_work(
     allowed = tuple(
         sources.configured_levels(args.ai_settings_file, launch_levels)
     )
+    incident_allowed = tuple(
+        sources.configured_incident_levels(args.ai_settings_file)
+    )
     args.levels = ",".join(allowed or ("__disabled__",))
     sources.emit(
         f"{sources.now()} checking highest-priority unanalyzed alert queue"
@@ -191,4 +216,6 @@ def select_scheduler_work(
         if state.analyzed_count == 0:
             sources.emit(f"{sources.now()} no eligible unanalyzed alert found")
         return SchedulerSelection(disposition="stop")
-    return _project_selection(sources, args, state, selected, allowed)
+    return _project_selection(
+        sources, args, state, selected, allowed, incident_allowed
+    )

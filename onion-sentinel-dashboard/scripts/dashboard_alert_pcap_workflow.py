@@ -67,6 +67,24 @@ def failed_pcap_status(request_record: dict) -> StatusTuple:
     return "error", "Failed", error[:180] if error else "PCAP request failed before parsed analysis was produced"
 
 
+def _terminal_pcap_status(request_status: str, request: dict) -> StatusTuple:
+    """Project one terminal broker result without hiding policy retirement."""
+    if request_status == "failed":
+        return failed_pcap_status(request)
+    policy_skipped = (
+        request_status == "rejected"
+        and str(request.get("outcome") or "").strip().lower()
+        == "policy_skipped"
+    )
+    if policy_skipped:
+        detail = str(request.get("error") or "").strip()
+        return (
+            "not-queued", "Skipped",
+            detail[:180] or "Automatic PCAP analysis is below the configured severity minimum",
+        )
+    return "none", "None", "No parsed PCAP analysis is available for this detection group"
+
+
 def pcap_status_for_row(
     row: object,
     config: PcapWorkflowConfig,
@@ -83,9 +101,7 @@ def pcap_status_for_row(
     if request_status in {"pending", "claimed", "fulfilled"}:
         label = "Queued" if request_status in {"pending", "claimed"} else "Parsing"
         return "queued", label, f"PCAP request is {request_status}; parsed analysis is not available yet"
-    if request_status == "failed":
-        return failed_pcap_status(request)
-    return "none", "None", "No parsed PCAP analysis is available for this detection group"
+    return _terminal_pcap_status(request_status, request)
 
 
 def indexed_record(index: dict[str, object], bucket: str, key: str) -> dict | None:

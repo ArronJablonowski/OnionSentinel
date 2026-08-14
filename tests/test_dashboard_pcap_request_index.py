@@ -74,7 +74,8 @@ class DashboardPcapRequestIndexTests(unittest.TestCase):
         trace = []
         expected_query = """
         SELECT request_id, group_id, alert_id,
-               status, error, request_json,
+               status, '' AS outcome, error,
+               request_json,
                completed_at, updated_at, created_at
         FROM pcap_requests
         ORDER BY COALESCE(completed_at, updated_at, created_at) DESC, request_id DESC
@@ -292,7 +293,8 @@ class DashboardPcapRequestIndexTests(unittest.TestCase):
             queries[-1],
             """
         SELECT request_id, '' AS group_id, '' AS alert_id,
-               '' AS status, '' AS error, '{}' AS request_json,
+               '' AS status, '' AS outcome, '' AS error,
+               '{}' AS request_json,
                '' AS completed_at, '' AS updated_at, '' AS created_at
         FROM pcap_requests
         ORDER BY request_id DESC, request_id DESC

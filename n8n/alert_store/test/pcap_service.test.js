@@ -38,7 +38,7 @@ function harness({wakePcap = false, wakeAi = false, failCommit = false} = {}) {
   return {calls, service};
 }
 
-test('owns the write gate for every PCAP mutation and leaves listing read-only', async () => {
+test('owns the write gate for every PCAP mutation including selection maintenance', async () => {
   const cases = [
     ['request', 'createRequest'],
     ['claim', 'claimRequest'],
@@ -56,7 +56,10 @@ test('owns the write gate for every PCAP mutation and leaves listing read-only',
   const env = harness();
   const query = new URLSearchParams('status=pending');
   await env.service.list(query);
-  assert.deepEqual(env.calls, [{name: 'listRequests', value: query}]);
+  assert.deepEqual(env.calls.map(({name}) => name), [
+    'gate:begin', 'listRequests', 'gate:end',
+  ]);
+  assert.equal(env.calls[1].value, query);
 });
 
 test('signals the PCAP worker only after committed transfer metadata and hides wake state', async () => {

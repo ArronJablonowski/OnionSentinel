@@ -828,6 +828,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         register_claimed_alert: bool = True,
         job_type: str = "ai_analysis",
         analysis_threshold: str = "medium",
+        incident_threshold: str = "disabled",
         only_group_id: str = "",
         only_alert_id: str = "",
         only_stable_group_key: str = "",
@@ -935,6 +936,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         settings_path = worker_root / "ai_model_settings.json"
         settings = {
             "soc_analyst_analysis_min_severity": analysis_threshold,
+            "soc_analyst_incident_min_severity": incident_threshold,
         }
         if controlled_evaluation:
             controlled_agent_role = (
@@ -1816,6 +1818,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             severity="low",
             payload={"agent_role": "incident-responder"},
             job_type="incident_response_analysis",
+            incident_threshold="low",
         )
 
         self.assertEqual(result["return_code"], 0)
@@ -1824,6 +1827,27 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             result["run_analysis"].call_args.kwargs["reanalysis_attempt_id"],
             "",
         )
+
+    def test_automatic_incident_below_independent_floor_is_retired(self) -> None:
+        result = self.run_indexed_worker_once(
+            severity="low",
+            payload={
+                "agent_role": "incident-responder",
+                "manual_reanalysis": False,
+            },
+            job_type="incident_response_analysis",
+            analysis_threshold="informational",
+            incident_threshold="high",
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["collect_incident_evidence"].assert_not_called()
+        result["build_prompt"].assert_not_called()
+        result["run_analysis"].assert_not_called()
+        retired = result["report_status"].call_args_list[-1]
+        self.assertEqual(retired.args[2], "failed")
+        self.assertIn("automatic incident response skipped", retired.args[3])
+        self.assertIs(retired.kwargs["retryable"], False)
 
     def test_legacy_manual_incident_escalation_without_run_id_runs_unbound(
         self,

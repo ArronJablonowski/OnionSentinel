@@ -24,7 +24,7 @@ class SocPcapStatusTests(unittest.TestCase):
         self.conn.row_factory = sqlite3.Row
         self.conn.execute(
             "CREATE TABLE pcap_requests (request_id TEXT, alert_id TEXT, group_id TEXT, "
-            "status TEXT, error TEXT, request_json TEXT, created_at TEXT, updated_at TEXT, "
+            "status TEXT, outcome TEXT, error TEXT, request_json TEXT, created_at TEXT, updated_at TEXT, "
             "completed_at TEXT)"
         )
 
@@ -41,7 +41,7 @@ class SocPcapStatusTests(unittest.TestCase):
 
     def test_newest_request_is_indexed_by_group_alert_and_request(self) -> None:
         self.conn.executemany(
-            "INSERT INTO pcap_requests VALUES (?, 'alert', 'dash', ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO pcap_requests VALUES (?, 'alert', 'dash', ?, '', ?, ?, ?, ?, ?)",
             [
                 ("old", "failed", "old", "{}", "2026-08-07T16:00:00Z", "", ""),
                 ("new", "fulfilled", "", json.dumps({"capture_file": "/capture"}),
@@ -89,6 +89,21 @@ class SocPcapStatusTests(unittest.TestCase):
         self.assertEqual(no_packets["pcap_status_key"], "no-packets")
         self.assertEqual(failed["pcap_status_label"], "Failed")
         self.assertEqual(none["pcap_status_key"], "none")
+
+    def test_policy_retirement_is_presented_as_skipped_with_exact_reason(self) -> None:
+        result = compose_pcap_status(
+            "dash", "alert", {},
+            {"dash": {
+                "status": "rejected",
+                "outcome": "policy_skipped",
+                "error": "Automatic PCAP analysis skipped below configured high threshold",
+            }},
+        )
+        self.assertEqual(
+            (result["pcap_status_key"], result["pcap_status_label"]),
+            ("not-queued", "Skipped"),
+        )
+        self.assertIn("high threshold", result["pcap_status_detail"])
 
 
 if __name__ == "__main__":

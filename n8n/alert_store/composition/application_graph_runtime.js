@@ -124,6 +124,10 @@ function createApplicationGraphRuntime(options = {}) {
       formatProjectTimestamp: serialization.formatProjectTimestamp,
       pcapRequestFromRow: pcapPolicy.pcapRequestFromRow,
       classifyPcapOutcome: pcapPolicy.classifyPcapOutcome,
+      matchesPcap: (level) => foundation.socAnalysisPolicy.matchesPcap(level),
+      readPcapThreshold: () => (
+        foundation.socAnalysisPolicy.read().soc_analyst_pcap_min_severity
+      ),
       pcapOutcomes: pcapPolicy.pcapOutcomes,
     },
     platform: {
@@ -158,6 +162,9 @@ function createApplicationGraphRuntime(options = {}) {
       classifyPcapOutcome: pcapPolicy.classifyPcapOutcome,
       readCaptureLossThreshold: () => (
         foundation.socAnalysisPolicy.read().pcap_capture_loss_threshold_percent
+      ),
+      readPcapThreshold: () => (
+        foundation.socAnalysisPolicy.read().soc_analyst_pcap_min_severity
       ),
       matchesAnalysis: (level) => foundation.socAnalysisPolicy.matchesAnalysis(level),
       severityRank: foundation.severityRank,

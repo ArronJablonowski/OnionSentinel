@@ -33,6 +33,8 @@ function createOptions(overrides = {}) {
       formatProjectTimestamp: (value) => value.toISOString(),
       pcapRequestFromRow: (row) => row,
       classifyPcapOutcome: () => 'success',
+      matchesPcap: () => true,
+      readPcapThreshold: () => 'medium',
       pcapOutcomes: new Set(['success']),
     },
     platform: {

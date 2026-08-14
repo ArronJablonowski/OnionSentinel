@@ -99,6 +99,8 @@ function createMutableRuntimeOwners(options = {}) {
       formatProjectTimestamp: pcap.formatProjectTimestamp,
       pcapRequestFromRow: pcap.pcapRequestFromRow,
       classifyPcapOutcome: pcap.classifyPcapOutcome,
+      matchesPcap: pcap.matchesPcap,
+      readPcapThreshold: pcap.readPcapThreshold,
       pcapOutcomes: pcap.pcapOutcomes,
       pipelineMetrics,
       claimLeaseSeconds: runtime.pcapClaimLeaseSeconds,

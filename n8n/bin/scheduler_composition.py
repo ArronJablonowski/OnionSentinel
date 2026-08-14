@@ -179,6 +179,7 @@ def build_drain_sources(runtime: RuntimeNamespace) -> Any:
     return runtime["SchedulerDrainSources"](
         stop_for_drain=runtime["stop_for_maintenance_drain"],
         configured_levels=runtime["configured_analysis_levels"],
+        configured_incident_levels=runtime["configured_incident_levels"],
         open_readonly_database=open_readonly_database,
         select_indexed=runtime["select_next_alert_indexed"],
         select_legacy=runtime["select_next_alert"],

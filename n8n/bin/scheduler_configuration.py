@@ -165,6 +165,17 @@ def configured_analysis_levels(
     )
 
 
+def configured_incident_levels(
+    runtime: RuntimeNamespace,
+    settings_path: Path,
+) -> list[str]:
+    return runtime["apply_incident_level_floor"](
+        settings_path,
+        build_settings_policy(runtime),
+        runtime["SEVERITY_PRIORITY"],
+    )
+
+
 def provider_lane_sql(runtime: RuntimeNamespace, args: Any) -> tuple[str, list[object]]:
     provider_lane = str(getattr(args, "provider_lane", "any") or "any")
     cli_roles = sorted(

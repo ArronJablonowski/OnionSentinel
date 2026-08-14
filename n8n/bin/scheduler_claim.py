@@ -28,6 +28,7 @@ class SchedulerClaimRequest:
     durable_intent: bool
     controlled: bool
     allowed_analysis_levels: tuple[str, ...]
+    allowed_incident_levels: tuple[str, ...]
     state: SchedulerClaimState
 
 
@@ -196,12 +197,58 @@ def _below_automatic_floor(
     payload: dict[str, object],
     triage_level: str,
 ) -> bool:
+    allowed = {
+        "ai_analysis": request.allowed_analysis_levels,
+        "incident_response_analysis": request.allowed_incident_levels,
+    }.get(request.job_type)
     return (
         request.indexed_mode
         and request.durable_intent
-        and request.job_type == "ai_analysis"
+        and allowed is not None
         and payload.get("manual_reanalysis") is not True
-        and triage_level not in set(request.allowed_analysis_levels)
+        and triage_level not in set(allowed)
+    )
+
+
+def _retire_below_floor(
+    sources: SchedulerClaimSources,
+    request: SchedulerClaimRequest,
+    group_id: str,
+    triage_level: str,
+    lease_token: str,
+) -> None:
+    if request.job_type == "incident_response_analysis":
+        threshold = (
+            request.allowed_incident_levels[-1]
+            if request.allowed_incident_levels
+            else "disabled"
+        )
+        detail = (
+            "automatic incident response skipped: "
+            f"{triage_level or 'unknown'} is below configured "
+            f"{threshold} threshold"
+        )
+        sources.report_status(
+            request.args.alert_store_url,
+            group_id,
+            "failed",
+            detail,
+            lease_token=lease_token,
+            job_type=request.job_type,
+            retryable=False,
+        )
+        sources.emit(f"{sources.now()} {detail}")
+        return
+    sources.report_status(
+        request.args.alert_store_url,
+        group_id,
+        "completed",
+        lease_token=lease_token,
+        job_type=request.job_type,
+    )
+    sources.emit(
+        f"{sources.now()} skipped automatic AI analysis for "
+        f"{triage_level} group below configured threshold"
     )
 
 
@@ -227,16 +274,8 @@ def acquire_scheduler_claim(
     )
     disposition = "claimed"
     if _below_automatic_floor(request, payload, triage_level):
-        sources.report_status(
-            request.args.alert_store_url,
-            group_id,
-            "completed",
-            lease_token=lease_token,
-            job_type=request.job_type,
-        )
-        sources.emit(
-            f"{sources.now()} skipped automatic AI analysis for "
-            f"{triage_level} group below configured threshold"
+        _retire_below_floor(
+            sources, request, group_id, triage_level, lease_token
         )
         disposition = "retired"
     return SchedulerClaimResult(

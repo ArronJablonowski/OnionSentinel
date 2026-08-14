@@ -18,6 +18,7 @@ from scheduler_ai_settings import (  # noqa: E402
     StrictSettingsSources,
     cli_agent_roles,
     configured_analysis_levels,
+    configured_incident_levels,
     load_untrusted_settings,
     role_uses_codex_cli,
     strict_controlled_ai_settings,
@@ -186,6 +187,36 @@ class SchedulerAiSettingsTests(unittest.TestCase):
                     ),
                     list(severity),
                 )
+
+    def test_incident_floor_covers_every_transition_and_fails_closed(self) -> None:
+        severity = ("critical", "high", "medium", "low", "informational")
+        cases = {
+            "critical": ["critical"],
+            "high": ["critical", "high"],
+            "medium": ["critical", "high", "medium"],
+            "low": ["critical", "high", "medium", "low"],
+            "informational": list(severity),
+            "info": list(severity),
+            "disabled": [],
+            "not-a-severity": [],
+        }
+        for value, expected in cases.items():
+            with self.subTest(value=value):
+                self.write({"soc_analyst_incident_min_severity": value})
+                self.assertEqual(
+                    configured_incident_levels(
+                        self.path,
+                        self.policy,
+                        severity,
+                    ),
+                    expected,
+                )
+
+        self.path.unlink()
+        self.assertEqual(
+            configured_incident_levels(self.path, self.policy, severity),
+            [],
+        )
 
     def test_strict_snapshot_preserves_normalized_and_raw_assignments(self) -> None:
         raw = {"agent_models": {"soc-analyst": "codex-cli"}}

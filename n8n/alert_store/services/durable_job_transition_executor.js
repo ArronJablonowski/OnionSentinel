@@ -200,8 +200,10 @@ function createDurableJobTransitionExecutor({
       claim = {...claim, reanalysis_attempt_id: progress?.attempt_id || null,
         reanalysis_run_id: progress?.run_id || null, case_id: progress?.case_id || null};
     }
-    const agentStatus = {pending: 'queued', processing: 'analyzing',
-      completed: 'analyzed', failed: 'failed'}[job?.status] || 'queued';
+    const policySkipped = job?.status === 'failed'
+      && String(error || '').startsWith('automatic incident response skipped:');
+    const agentStatus = policySkipped ? 'skipped' : ({pending: 'queued', processing: 'analyzing',
+      completed: 'analyzed', failed: 'failed'}[job?.status] || 'queued');
     const caseRow = await get(
       'SELECT case_id FROM incident_response_cases WHERE group_id = ?', [resolvedKey],
     );
