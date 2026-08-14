@@ -47,25 +47,23 @@ def llm_agent_execution_state(record: object) -> dict:
     }
 
 
-def decorate_llm_analysis_record(record: object, *, live: bool) -> dict:
-    """Add display provenance while retaining immutable raw audit fields."""
-    decorated = dict(record) if isinstance(record, dict) else {}
-    for key, value in llm_agent_execution_state(decorated).items():
-        decorated.setdefault(key, value)
-    if live:
-        runtime = llm_runtime_model_state(decorated)
-        if runtime.get("running"):
-            decorated.update(
-                {
-                    "runtime_model_label": runtime.get("label") or "Unknown model",
-                    "phase_label": runtime.get("phase_label") or "Analysis",
-                }
-            )
-        else:
-            decorated.update(
-                {"runtime_model_label": "No model running", "phase_label": "Idle"}
-            )
-        return decorated
+def _decorate_live_record(decorated: dict) -> dict:
+    runtime = llm_runtime_model_state(decorated)
+    if runtime.get("running"):
+        decorated.update(
+            {
+                "runtime_model_label": runtime.get("label") or "Unknown model",
+                "phase_label": runtime.get("phase_label") or "Analysis",
+            }
+        )
+    else:
+        decorated.update(
+            {"runtime_model_label": "No model running", "phase_label": "Idle"}
+        )
+    return decorated
+
+
+def _historical_runtime_model_label(decorated: dict) -> str:
     historical = dict(decorated)
     historical["status"] = "running"
     historical.pop("active_phase", None)
@@ -74,11 +72,21 @@ def decorate_llm_analysis_record(record: object, *, live: bool) -> dict:
         str(decorated.get("model") or "").strip()
         or str(decorated.get("model_route") or "").strip()
     )
-    model_label = (
+    return (
         runtime.get("label") or "Unknown model"
         if model_observed
         else "No model started"
     )
+
+
+def decorate_llm_analysis_record(record: object, *, live: bool) -> dict:
+    """Add display provenance while retaining immutable raw audit fields."""
+    decorated = dict(record) if isinstance(record, dict) else {}
+    for key, value in llm_agent_execution_state(decorated).items():
+        decorated.setdefault(key, value)
+    if live:
+        return _decorate_live_record(decorated)
+    model_label = _historical_runtime_model_label(decorated)
     decorated.update(
         {"runtime_model_label": model_label, "phase_label": "Completed run"}
     )
