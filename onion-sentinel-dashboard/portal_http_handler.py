@@ -95,15 +95,7 @@ def _cti_program_mutation_audit(
     return None
 
 
-def _soc_review_write_authorized(handler: Any, runtime: Any) -> bool:
-    content_type = str(handler.headers.get("Content-Type") or "").lower()
-    if not content_type.startswith("application/json"):
-        return False
-    if handler.headers.get("X-Onion-Sentinel-Request") != "dashboard":
-        return False
-    fetch_site = str(handler.headers.get("Sec-Fetch-Site") or "").strip().lower()
-    if fetch_site and fetch_site != "same-origin":
-        return False
+def _soc_review_origin_authorized(handler: Any, runtime: Any) -> bool:
     origin = str(handler.headers.get("Origin") or "").strip()
     if not origin:
         return True
@@ -114,6 +106,18 @@ def _soc_review_write_authorized(handler: Any, runtime: Any) -> bool:
         and parsed_origin.netloc
         and parsed_origin.netloc.lower() == request_host
     )
+
+
+def _soc_review_write_authorized(handler: Any, runtime: Any) -> bool:
+    content_type = str(handler.headers.get("Content-Type") or "").lower()
+    if not content_type.startswith("application/json"):
+        return False
+    if handler.headers.get("X-Onion-Sentinel-Request") != "dashboard":
+        return False
+    fetch_site = str(handler.headers.get("Sec-Fetch-Site") or "").strip().lower()
+    if fetch_site and fetch_site != "same-origin":
+        return False
+    return _soc_review_origin_authorized(handler, runtime)
 
 
 def _do_head(handler: Any, runtime: Any) -> None:
