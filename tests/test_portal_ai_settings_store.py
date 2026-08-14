@@ -116,6 +116,38 @@ class AiSettingsStoreTest(unittest.TestCase):
         persisted = json.loads(self.path.read_text())
         self.assertEqual(persisted["agent_adjudicator_models"]["soc-analyst"], "ollama:judge")
 
+    def test_global_save_preserves_a_newer_agent_assignment_transaction(self) -> None:
+        save_soc_ai_settings(self.sources, {})
+        saved, _response = save_soc_agent_model(self.sources, {
+            "role": "soc-analyst",
+            "model": "ollama:reviewer",
+            "second_opinion_model": "ollama:primary",
+            "adjudicator_model": "ollama:judge",
+        })
+        self.assertTrue(saved)
+
+        saved, response = save_soc_ai_settings(self.sources, {
+            "policy_marker": "updated",
+            "agent_models": {"soc-analyst": "ollama:primary"},
+            "agent_second_opinion_models": {"soc-analyst": ""},
+            "agent_adjudicator_models": {"soc-analyst": ""},
+        })
+
+        self.assertTrue(saved)
+        self.assertEqual(response["settings"]["policy_marker"], "updated")
+        self.assertEqual(
+            response["settings"]["agent_models"]["soc-analyst"],
+            "ollama:reviewer",
+        )
+        self.assertEqual(
+            response["settings"]["agent_second_opinion_models"]["soc-analyst"],
+            "ollama:primary",
+        )
+        self.assertEqual(
+            response["settings"]["agent_adjudicator_models"]["soc-analyst"],
+            "ollama:judge",
+        )
+
     def test_agent_save_rejects_invalid_role_disabled_route_and_collisions(self) -> None:
         save_soc_ai_settings(self.sources, {})
         cases = (
