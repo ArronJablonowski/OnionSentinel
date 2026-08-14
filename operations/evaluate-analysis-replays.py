@@ -142,6 +142,38 @@ def load_suite(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _detection_packet_rows(
+    case: dict[str, Any],
+    fixture: dict[str, Any],
+    sid: str,
+    ruleset: str,
+    raw_base: dict[str, Any],
+    message_base: dict[str, Any],
+) -> list[dict[str, Any]]:
+    rows = []
+    for packet in fixture["packets"]:
+        if not isinstance(packet, dict):
+            raise ValueError(f"{case['case_id']} detection packet must be an object")
+        packet_base64 = str(packet.get("packet_base64") or "")
+        if not packet_base64:
+            raise ValueError(f"{case['case_id']} detection packet is missing packet_base64")
+        rows.append(
+            {
+                "rule_id": sid,
+                "raw_event_json": {
+                    **raw_base,
+                    "message": {
+                        **message_base,
+                        "packet": packet_base64,
+                        "packet_info": {"linktype": int(packet.get("linktype") or 1)},
+                    },
+                },
+                "alert_json": {"rule_id": sid, "rule_ruleset": ruleset},
+            }
+        )
+    return rows
+
+
 def rebuild_detection_validation(
     case: dict[str, Any],
     detection_module: Any | None = None,
@@ -173,27 +205,14 @@ def rebuild_detection_validation(
     )
     registry = module.load_detection_playbooks(DEFAULT_DETECTION_PLAYBOOKS)
     playbook = module.resolve_detection_playbook(registry, context)
-    rows = []
-    for packet in fixture["packets"]:
-        if not isinstance(packet, dict):
-            raise ValueError(f"{case['case_id']} detection packet must be an object")
-        packet_base64 = str(packet.get("packet_base64") or "")
-        if not packet_base64:
-            raise ValueError(f"{case['case_id']} detection packet is missing packet_base64")
-        rows.append(
-            {
-                "rule_id": sid,
-                "raw_event_json": {
-                    **raw_base,
-                    "message": {
-                        **message_base,
-                        "packet": packet_base64,
-                        "packet_info": {"linktype": int(packet.get("linktype") or 1)},
-                    },
-                },
-                "alert_json": {"rule_id": sid, "rule_ruleset": ruleset},
-            }
-        )
+    rows = _detection_packet_rows(
+        case,
+        fixture,
+        sid,
+        ruleset,
+        raw_base,
+        message_base,
+    )
     features = module.extract_group_packet_features(
         rows,
         module.marker_specs(context, playbook),
