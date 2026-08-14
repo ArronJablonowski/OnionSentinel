@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import copy
 import inspect
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -173,6 +175,194 @@ class SoftwareInventoryQueryFilterArchitectureTests(unittest.TestCase):
                     query.InventoryQueryError, f"^{message}$"
                 ):
                     query.parse_filters(value)
+
+    def test_public_record_base_projection_contract_is_exact(self) -> None:
+        self.assertEqual(
+            str(inspect.signature(query._public_record)),
+            "(record: 'dict[str, object]', observed_at: 'dt.datetime') -> 'dict[str, object]'",
+        )
+        observed_at = query.dt.datetime(
+            2026, 8, 14, 1, 0, tzinfo=query.dt.timezone.utc
+        )
+        marker = object()
+        record: dict[str, object] = {
+            "_last_seen": observed_at,
+            "tier": "installed",
+            "source": "other",
+            "marker": marker,
+            "operating_system_observed_at": None,
+            "operating_system_freshness": " existing ",
+            "operating_system_association": 7,
+            "operating_system_source": "",
+            "operating_system_type": "",
+            "operating_system_version": "",
+            "last_seen": "2026-08-14T00:00:00Z",
+            "product": "ignored",
+            "category": "ignored",
+            "version": "ignored",
+            "_private": "secret",
+        }
+        before = copy.copy(record)
+        with mock.patch.object(
+            query, "_freshness", return_value="current"
+        ) as freshness:
+            public = query._public_record(record, observed_at)
+
+        freshness.assert_called_once_with(record, observed_at)
+        self.assertIsNot(public, record)
+        self.assertEqual(record, before)
+        self.assertIs(public["marker"], marker)
+        self.assertNotIn("_last_seen", public)
+        self.assertNotIn("_private", public)
+        self.assertEqual(public["operating_system_observed_at"], "")
+        self.assertEqual(
+            public["operating_system_freshness"], " existing "
+        )
+        self.assertEqual(public["operating_system_association"], "7")
+        self.assertNotIn("observed_user_agent", public)
+        self.assertEqual(
+            list(public),
+            [key for key in record if not key.startswith("_")]
+            + ["freshness"],
+        )
+
+    def test_public_record_endpoint_and_user_agent_projections_are_exact(self) -> None:
+        observed_at = query.dt.datetime(
+            2026, 8, 14, 1, 0, tzinfo=query.dt.timezone.utc
+        )
+        endpoint = {
+            "_last_seen": observed_at,
+            "tier": "installed",
+            "source": "osquery_apps",
+            "operating_system_source": "osquery_manager.result:host.os",
+            "operating_system_type": "macOS",
+            "operating_system_version": "26.0",
+            "operating_system_observed_at": "old",
+            "operating_system_freshness": "old",
+            "operating_system_association": "direct",
+            "last_seen": "endpoint:last-seen",
+            "product": "",
+            "category": "",
+            "version": "",
+        }
+        with mock.patch.object(
+            query, "_freshness", return_value="recent"
+        ):
+            public = query._public_record(endpoint, observed_at)
+        self.assertEqual(
+            public["operating_system_observed_at"], "endpoint:last-seen"
+        )
+        self.assertEqual(public["operating_system_freshness"], "recent")
+        self.assertNotIn("observed_user_agent", public)
+
+        http = {
+            **endpoint,
+            "source": "http_user_agent",
+            "operating_system_source": "",
+            "product": " Mozilla/5.0 ",
+        }
+        zeek = {
+            **endpoint,
+            "source": "zeek_software",
+            "operating_system_source": "",
+            "category": "HTTP::Browser",
+            "version": "Agent/2.0",
+        }
+        with mock.patch.object(
+            query, "_freshness", return_value="current"
+        ):
+            self.assertEqual(
+                query._public_record(http, observed_at)[
+                    "observed_user_agent"
+                ],
+                " Mozilla/5.0 ",
+            )
+            self.assertEqual(
+                query._public_record(zeek, observed_at)[
+                    "observed_user_agent"
+                ],
+                "Agent/2.0",
+            )
+            self.assertNotIn(
+                "observed_user_agent",
+                query._public_record(
+                    {**zeek, "category": " HTTP::Browser "},
+                    observed_at,
+                ),
+            )
+
+    def test_public_record_evaluation_order_and_failures_are_exact(self) -> None:
+        observed_at = query.dt.datetime(
+            2026, 8, 14, 1, 0, tzinfo=query.dt.timezone.utc
+        )
+        events: list[tuple[object, ...]] = []
+
+        class TracedKey(str):
+            def startswith(self, prefix: str, *args: object) -> bool:
+                events.append(("startswith", str(self), prefix, args))
+                return super().startswith(prefix, *args)
+
+        class TracedDict(dict):
+            def items(self):
+                events.append(("items",))
+                return super().items()
+
+            def get(self, key: object, default: object = None) -> object:
+                events.append(("get", key, default))
+                return super().get(key, default)
+
+            def __getitem__(self, key: object) -> object:
+                events.append(("getitem", key))
+                return super().__getitem__(key)
+
+        record = TracedDict(
+            {
+                TracedKey("source"): "http_user_agent",
+                TracedKey("product"): "Agent",
+                TracedKey("operating_system_observed_at"): "",
+                TracedKey("operating_system_freshness"): "",
+                TracedKey("operating_system_association"): "",
+                TracedKey("operating_system_source"): "",
+                TracedKey("operating_system_type"): "",
+                TracedKey("operating_system_version"): "",
+            }
+        )
+
+        def freshness(value: dict[str, object], when: object) -> str:
+            events.append(("freshness", value is record, when))
+            return "current"
+
+        with mock.patch.object(query, "_freshness", side_effect=freshness):
+            public = query._public_record(record, observed_at)
+        self.assertEqual(public["observed_user_agent"], "Agent")
+        self.assertEqual(events[0], ("freshness", True, observed_at))
+        self.assertEqual(events[1], ("items",))
+        self.assertEqual(
+            [event[1] for event in events if event[0] == "startswith"],
+            list(record),
+        )
+        self.assertEqual(
+            [event for event in events if event[0] == "get"],
+            [
+                ("get", "operating_system_observed_at", None),
+                ("get", "operating_system_freshness", None),
+                ("get", "operating_system_association", None),
+            ],
+        )
+        self.assertEqual(
+            [event for event in events if event[0] == "getitem"],
+            [
+                ("getitem", "source"),
+                ("getitem", "source"),
+                ("getitem", "product"),
+            ],
+        )
+
+        with mock.patch.object(
+            query, "_freshness", side_effect=RuntimeError("freshness")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "freshness"):
+                query._public_record(record, observed_at)
 
 
 if __name__ == "__main__":
