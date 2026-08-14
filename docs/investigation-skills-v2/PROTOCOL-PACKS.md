@@ -17,6 +17,11 @@ a typed broker using the deployed field catalog and fixed target scope.
 | HTTP | flow/time, host/URI/method/user agent | Zeek HTTP, DNS, TLS upgrade, file metadata, bounded body metadata | updates, telemetry, automation, scanners |
 | SSH | endpoints/time/direction | Zeek SSH/conn, duration/bytes, auth telemetry if available | administration, backup, automation |
 | ICMP | type/code/direction/size/frequency | Suricata rule version, flow/PCAP-derived summary, peer history | monitoring, diagnostics, network appliances |
+| Scanning | trusted actor/target and bounded window | peer/port breadth, outcomes, direction, asset authorization | vulnerability scanning, discovery, health checks, retry storms |
+| DoH | attributable HTTPS flow and client | TLS/QUIC identity, visible HTTP metadata, conventional DNS baseline | approved secure DNS, privacy/security software, shared resolver infrastructure |
+| STUN | exact STUN event/flow and role semantics | method/class, NAT addresses, flow duration/bytes, application context | conferencing, WebRTC, gaming, VPN or support software |
+| Beaconing | attributable peer and multiple covered windows | timestamp/volume series, cross-sensor application context | updates, telemetry, messaging, VPN keepalives |
+| Long connection | connection anchor, duration/state/bytes | peer/application ownership and bounded timeline | VPN, administration, replication, messaging, incomplete capture |
 | Suricata intent | exact SID/revision and event | active rule metadata, upstream documentation, matching fields, flow context | signature is syntactically true but benign in environment |
 | Zeek correlation | UID/community ID/five-tuple/time | conn then protocol log, files, notices, weirds | parser/retention/asymmetric-routing gaps |
 | Elastic/OQL | normalized identity and bounded time | exact field catalog and read-only language-specific query | field drift, index/sensor/retention gaps |
@@ -75,6 +80,13 @@ Flow/window expansion begins at the trusted anchor and widens only inside the
 broker-owned authorization envelope, without changing observable or tuple
 meaning. Both candidates use the governed `alert_context`, `network_flow`, and
 `cross_sensor_timeline` projections and remain inactive and unpromotable.
+
+Five behavioral network candidates cover scanning, DoH, STUN, beaconing, and
+long connections. They require attributable bounded observations and competing
+benign explanations: breadth, encryption, periodicity, STUN use, or duration
+alone never establishes malicious intent. The STUN pack is pinned to Security
+Onion's bundled Zeek analyzer; the DoH pack follows RFC 8484 and reports
+encrypted DNS content as unavailable unless separately observable.
 
 `skill-packs/dns-triage-v2.example.json` demonstrates the v2 boundary. Its
 verification flags are deliberately false because this package has not passed

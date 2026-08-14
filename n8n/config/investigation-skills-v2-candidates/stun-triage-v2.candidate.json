@@ -1,0 +1,31 @@
+{
+  "schema": "onion-sentinel-investigation-skill-manifest-v2",
+  "id": "network.stun.triage",
+  "version": "2.0.0-candidate.1",
+  "artifact_digest": "623013a2822d564f8bbd02c415086cf7e20a3d8b113f7100a59a847ec3740c86",
+  "lineage": {"source_revision": "dbbfb5f", "predecessor_digest": ""},
+  "compatibility": {"harness_contract": "onion-sentinel-harness-job-envelope-v1", "policy_schema": "onion-sentinel-investigation-harness-policy-v1", "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"},
+  "maintainer": {"owner": "Onion Sentinel", "reviewed_at": "2026-08-14T19:25:00Z", "reviewer": "pending"},
+  "roles": ["soc-analyst", "incident-responder", "threat-hunter"],
+  "match": {"tasks": ["alert-triage", "incident-response", "reanalysis", "threat-hunt"], "protocols": ["stun", "udp", "tcp"], "alert_families": ["stun"], "data_sources": ["elastic", "oql", "zeek.stun", "zeek.stun_nat"]},
+  "objective": "Validate STUN method, class, addressing, and related flow context while distinguishing expected real-time communication and NAT traversal from unapproved tunneling or command-and-control hypotheses.",
+  "capabilities": ["security-onion.events.query", "security-onion.oql.query", "zeek.derived.query"],
+  "safety": {"read_only": true, "active_operation": false, "sensitivity": "moderate", "requires_approval": false},
+  "budgets": {"max_queries": 4, "max_rows": 1500, "max_bytes": 1572864, "timeout_seconds": 120},
+  "preconditions": ["a bounded STUN event or flow identity exists", "originator responder semantics are attributable", "deployed Zeek STUN and flow field catalogs are available"],
+  "required_evidence": ["STUN method class transaction and address metadata when available", "bounded tuple timing direction bytes and peer history", "application or asset context and sensor coverage"],
+  "query_templates": [
+    {"id": "stun-session-context", "backend": "zeek", "language": "broker-parameters", "purpose": "Retrieve bounded Zeek STUN and STUN NAT metadata with originator-responder semantics.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "source.ip", "source.port", "destination.ip", "destination.port", "network.transport", "network.community_id", "stun.class", "stun.id", "stun.method", "stun.lan.addresses", "stun.wan.addresses", "stun.wan.ports"]},
+    {"id": "stun-flow-context", "backend": "elastic", "language": "query-dsl", "purpose": "Correlate the STUN session with bounded flow duration volume and direction.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "event.duration", "source.ip", "source.port", "destination.ip", "destination.port", "network.transport", "network.direction", "network.community_id", "network.bytes", "network.packets"]}
+  ],
+  "output_contract": {"schema": "onion-sentinel-skill-result-v1", "coverage_required": true, "truncation_required": true, "evidence_refs_required": true, "fact_states": ["observed", "inferred", "unverified", "unavailable"]},
+  "alternative_hypotheses": ["approved voice video or collaboration NAT traversal", "browser WebRTC or gaming traffic", "VPN remote-access or connectivity testing", "unapproved tunnel relay discovery or malicious peer setup"],
+  "stop_conditions": ["method peer pattern and application context discriminate the leading hypotheses", "missing application attribution is reported unverified", "the next bounded peer or window pivot has low expected information value", "a query budget or deadline is exhausted"],
+  "confidence_limiters": ["STUN analyzer fields unavailable", "shared public STUN infrastructure", "NAT obscures endpoint roles", "application ownership or authorization unavailable"],
+  "known_false_positive_patterns": ["video conferencing", "browser WebRTC", "online gaming", "approved VPN and remote-support software"],
+  "verification": {"unit_tests": false, "replay_cases": 0, "independent_query_review": false, "adversarial_tests": false, "human_approved": false},
+  "references": [
+    {"title": "Security Onion 2.4 Zeek and bundled STUN analyzer", "url": "https://docs.securityonion.net/en/2.4/zeek.html", "product_version": "2.4", "retrieved_at": "2026-08-14T19:25:00Z"},
+    {"title": "Elastic Common Schema network fields", "url": "https://www.elastic.co/docs/reference/ecs/ecs-network", "product_version": "9.4.0 as reviewed", "retrieved_at": "2026-08-14T19:25:00Z"}
+  ]
+}

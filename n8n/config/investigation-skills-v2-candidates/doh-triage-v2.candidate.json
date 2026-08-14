@@ -1,0 +1,33 @@
+{
+  "schema": "onion-sentinel-investigation-skill-manifest-v2",
+  "id": "network.doh.triage",
+  "version": "2.0.0-candidate.1",
+  "artifact_digest": "19e8f9812b3ea4bdf148c4267b5913a5ee437de71fc809f6d883c15e532cf1d5",
+  "lineage": {"source_revision": "dbbfb5f", "predecessor_digest": ""},
+  "compatibility": {"harness_contract": "onion-sentinel-harness-job-envelope-v1", "policy_schema": "onion-sentinel-investigation-harness-policy-v1", "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"},
+  "maintainer": {"owner": "Onion Sentinel", "reviewed_at": "2026-08-14T19:25:00Z", "reviewer": "pending"},
+  "roles": ["soc-analyst", "incident-responder", "threat-hunter"],
+  "match": {"tasks": ["alert-triage", "incident-response", "reanalysis", "threat-hunt"], "protocols": ["https", "http2", "quic"], "alert_families": ["doh"], "data_sources": ["elastic", "oql", "zeek.http", "zeek.ssl", "zeek.quic"]},
+  "objective": "Correlate HTTPS, TLS, HTTP, QUIC, and conventional DNS evidence to distinguish approved encrypted resolution from policy bypass or suspicious resolver use without claiming DNS content that encryption makes unavailable.",
+  "capabilities": ["security-onion.events.query", "security-onion.oql.query", "zeek.derived.query"],
+  "safety": {"read_only": true, "active_operation": false, "sensitivity": "moderate", "requires_approval": false},
+  "budgets": {"max_queries": 5, "max_rows": 2000, "max_bytes": 2097152, "timeout_seconds": 120},
+  "preconditions": ["a trusted client endpoint and bounded HTTPS flow window exist", "TLS HTTP or QUIC metadata is attributable", "deployed DNS TLS and HTTP field catalogs are available"],
+  "required_evidence": ["TLS or QUIC server identity and flow tuple", "HTTP method URI or media metadata when observable", "conventional DNS baseline resolver policy and telemetry coverage"],
+  "query_templates": [
+    {"id": "doh-tls-context", "backend": "zeek", "language": "broker-parameters", "purpose": "Identify the bounded TLS or QUIC service endpoint without inferring encrypted DNS payload content.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "source.ip", "source.port", "destination.ip", "destination.port", "network.transport", "network.protocol", "network.community_id", "ssl.server_name", "ssl.validation_status", "tls.server.hash.sha256"]},
+    {"id": "doh-http-context", "backend": "zeek", "language": "broker-parameters", "purpose": "Retrieve bounded HTTP metadata that can support or refute a DoH exchange when visible.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "source.ip", "destination.ip", "network.community_id", "http.method", "http.status_code", "http.uri", "http.virtual_host", "http.request.body.length", "http.response.body.length"]},
+    {"id": "doh-dns-baseline", "backend": "elastic", "language": "query-dsl", "purpose": "Compare attributable conventional DNS activity without treating its absence as proof of DoH.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "source.ip", "destination.ip", "dns.query.name", "dns.query.type", "dns.response.code", "network.community_id"]}
+  ],
+  "output_contract": {"schema": "onion-sentinel-skill-result-v1", "coverage_required": true, "truncation_required": true, "evidence_refs_required": true, "fact_states": ["observed", "inferred", "unverified", "unavailable"]},
+  "alternative_hypotheses": ["approved browser or operating-system encrypted DNS", "ordinary HTTPS to shared resolver infrastructure", "privacy or security software using an authorized resolver", "policy bypass or malware using encrypted resolution"],
+  "stop_conditions": ["resolver identity client policy and corroborating protocol metadata discriminate the hypotheses", "encrypted fields remain unavailable and are reported as such", "a wider pivot has low expected information value", "a query budget or deadline is exhausted"],
+  "confidence_limiters": ["encrypted DNS payload is not observable", "shared CDN or resolver infrastructure", "HTTP metadata unavailable for HTTP2 or QUIC", "endpoint resolver policy unavailable or stale"],
+  "known_false_positive_patterns": ["browser secure DNS", "operating-system privacy features", "approved security agents and VPN clients", "enterprise resolvers delivered over HTTPS"],
+  "verification": {"unit_tests": false, "replay_cases": 0, "independent_query_review": false, "adversarial_tests": false, "human_approved": false},
+  "references": [
+    {"title": "RFC 8484 DNS Queries over HTTPS", "url": "https://www.rfc-editor.org/info/rfc8484/", "product_version": "RFC 8484", "retrieved_at": "2026-08-14T19:25:00Z"},
+    {"title": "Security Onion 2.4 Zeek protocol metadata", "url": "https://docs.securityonion.net/en/2.4/zeek.html", "product_version": "2.4", "retrieved_at": "2026-08-14T19:25:00Z"},
+    {"title": "Elastic Common Schema field reference", "url": "https://www.elastic.co/docs/reference/ecs/ecs-field-reference", "product_version": "9.4.0 as reviewed", "retrieved_at": "2026-08-14T19:25:00Z"}
+  ]
+}

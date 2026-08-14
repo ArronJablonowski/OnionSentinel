@@ -1,0 +1,32 @@
+{
+  "schema": "onion-sentinel-investigation-skill-manifest-v2",
+  "id": "network.beaconing.triage",
+  "version": "2.0.0-candidate.1",
+  "artifact_digest": "f208af74747e42b1fc4fea9f18ea627ef7f8c02162960019e694e2fa15e7ae74",
+  "lineage": {"source_revision": "dbbfb5f", "predecessor_digest": ""},
+  "compatibility": {"harness_contract": "onion-sentinel-harness-job-envelope-v1", "policy_schema": "onion-sentinel-investigation-harness-policy-v1", "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"},
+  "maintainer": {"owner": "Onion Sentinel", "reviewed_at": "2026-08-14T19:25:00Z", "reviewer": "pending"},
+  "roles": ["soc-analyst", "incident-responder", "threat-hunter"],
+  "match": {"tasks": ["alert-triage", "incident-response", "reanalysis", "threat-hunt"], "protocols": ["tcp", "udp", "tls", "http", "https", "any"], "alert_families": ["beaconing"], "data_sources": ["elastic", "oql", "zeek.conn"]},
+  "objective": "Measure repeated connection timing and volume across bounded windows, compare competing scheduled-service explanations, and avoid labeling periodicity alone as command and control.",
+  "capabilities": ["security-onion.events.query", "security-onion.oql.query", "zeek.derived.query"],
+  "safety": {"read_only": true, "active_operation": false, "sensitivity": "moderate", "requires_approval": false},
+  "budgets": {"max_queries": 5, "max_rows": 2500, "max_bytes": 2621440, "timeout_seconds": 150},
+  "preconditions": ["a trusted endpoint or peer and anchor time exist", "multiple bounded windows fit inside the authorization envelope", "deployed flow and timeline field catalogs are available"],
+  "required_evidence": ["timestamp series exact window filters and successful coverage", "peer tuple duration byte packet and outcome distributions", "asset process DNS TLS or HTTP context when available"],
+  "query_templates": [
+    {"id": "beacon-flow-series", "backend": "elastic", "language": "query-dsl", "purpose": "Collect bounded flow timestamps and volumes for one authorized endpoint-peer relationship.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "event.outcome", "event.duration", "source.ip", "source.port", "destination.ip", "destination.port", "network.transport", "network.community_id", "network.bytes", "network.packets"]},
+    {"id": "beacon-cross-sensor", "backend": "oql", "language": "oql", "purpose": "Correlate periodic flow observations with bounded DNS protocol alert and endpoint context.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "event.id", "rule.id", "source.ip", "destination.ip", "destination.domain", "tls.server.name", "network.transport", "network.community_id", "dns.question.name", "process.name"]}
+  ],
+  "output_contract": {"schema": "onion-sentinel-skill-result-v1", "coverage_required": true, "truncation_required": true, "evidence_refs_required": true, "fact_states": ["observed", "inferred", "unverified", "unavailable"]},
+  "alternative_hypotheses": ["scheduled updater telemetry or health check", "persistent messaging VPN or management channel", "user-driven activity that appears periodic in a bounded sample", "automated malicious command-and-control polling"],
+  "stop_conditions": ["timing volume peer and application context discriminate the hypotheses", "additional windows repeat the same evidence without changing a hypothesis", "coverage or sample size prevents periodicity claims", "a query budget or deadline is exhausted"],
+  "confidence_limiters": ["short or gapped observation window", "shared proxy NAT or CDN peer", "process and application attribution unavailable", "bounded samples distort interval variance"],
+  "known_false_positive_patterns": ["software update checks", "monitoring telemetry and heartbeats", "persistent chat or push-notification channels", "VPN keepalives and device management"],
+  "verification": {"unit_tests": false, "replay_cases": 0, "independent_query_review": false, "adversarial_tests": false, "human_approved": false},
+  "references": [
+    {"title": "Security Onion 2.4 Zeek connection metadata", "url": "https://docs.securityonion.net/en/2.4/zeek.html", "product_version": "2.4", "retrieved_at": "2026-08-14T19:25:00Z"},
+    {"title": "Zeek current logs and conn.log", "url": "https://docs.zeek.org/en/current/tutorial/logs.html", "product_version": "8.2.1 as reviewed", "retrieved_at": "2026-08-14T19:25:00Z"},
+    {"title": "Elastic Common Schema network fields", "url": "https://www.elastic.co/docs/reference/ecs/ecs-network", "product_version": "9.4.0 as reviewed", "retrieved_at": "2026-08-14T19:25:00Z"}
+  ]
+}

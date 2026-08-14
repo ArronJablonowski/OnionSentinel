@@ -1,0 +1,31 @@
+{
+  "schema": "onion-sentinel-investigation-skill-manifest-v2",
+  "id": "network.scan.triage",
+  "version": "2.0.0-candidate.1",
+  "artifact_digest": "1bcce00e03ba1efd12b695968dece3daacff36f971895f5f9f5d527f276331ec",
+  "lineage": {"source_revision": "dbbfb5f", "predecessor_digest": ""},
+  "compatibility": {"harness_contract": "onion-sentinel-harness-job-envelope-v1", "policy_schema": "onion-sentinel-investigation-harness-policy-v1", "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"},
+  "maintainer": {"owner": "Onion Sentinel", "reviewed_at": "2026-08-14T19:25:00Z", "reviewer": "pending"},
+  "roles": ["soc-analyst", "incident-responder", "threat-hunter"],
+  "match": {"tasks": ["alert-triage", "incident-response", "reanalysis", "threat-hunt"], "protocols": ["tcp", "udp", "any"], "alert_families": ["scanning"], "data_sources": ["elastic", "oql", "zeek.conn", "suricata"]},
+  "objective": "Distinguish authorized discovery and service health checks from scanning by measuring bounded destination breadth, response state, timing, and corroborated alert context without treating connection attempts alone as malicious intent.",
+  "capabilities": ["security-onion.events.query", "security-onion.oql.query", "zeek.derived.query"],
+  "safety": {"read_only": true, "active_operation": false, "sensitivity": "moderate", "requires_approval": false},
+  "budgets": {"max_queries": 4, "max_rows": 2000, "max_bytes": 2097152, "timeout_seconds": 120},
+  "preconditions": ["a trusted source or destination and bounded window exist", "tuple role semantics are known or reported unavailable", "deployed alert and flow field catalogs are available"],
+  "required_evidence": ["bounded unique peer and port counts with exact filters", "connection outcomes direction timing and sensor coverage", "rule context asset authorization and attributable evidence references"],
+  "query_templates": [
+    {"id": "scan-flow-summary", "backend": "elastic", "language": "query-dsl", "purpose": "Measure bounded peer and port breadth plus response and byte patterns for one authorized observable.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "event.outcome", "source.ip", "source.port", "destination.ip", "destination.port", "network.transport", "network.direction", "network.community_id", "network.bytes", "network.packets"]},
+    {"id": "scan-alert-context", "backend": "suricata", "language": "broker-parameters", "purpose": "Correlate exact alert identities without treating a scan signature as proof of hostile intent.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "event.id", "rule.id", "rule.uuid", "rule.name", "source.ip", "destination.ip", "network.transport", "network.community_id"]}
+  ],
+  "output_contract": {"schema": "onion-sentinel-skill-result-v1", "coverage_required": true, "truncation_required": true, "evidence_refs_required": true, "fact_states": ["observed", "inferred", "unverified", "unavailable"]},
+  "alternative_hypotheses": ["authorized vulnerability or inventory scanning", "service discovery health checking or load-balancer probes", "misconfiguration or retry storm", "reconnaissance or lateral-movement discovery"],
+  "stop_conditions": ["breadth timing outcomes and authorization context discriminate the leading hypotheses", "the next bounded window or peer pivot has low expected information value", "coverage prevents a conclusion and is reported unverified", "a query budget or deadline is exhausted"],
+  "confidence_limiters": ["missing response state or asymmetric visibility", "NAT proxy or shared scanner obscures actor identity", "asset authorization context unavailable", "bounded retention hides prior or subsequent activity"],
+  "known_false_positive_patterns": ["approved vulnerability scanners", "network inventory discovery", "load balancer and uptime probes", "backup and orchestration service enumeration"],
+  "verification": {"unit_tests": false, "replay_cases": 0, "independent_query_review": false, "adversarial_tests": false, "human_approved": false},
+  "references": [
+    {"title": "Security Onion 2.4 Zeek connection metadata", "url": "https://docs.securityonion.net/en/2.4/zeek.html", "product_version": "2.4", "retrieved_at": "2026-08-14T19:25:00Z"},
+    {"title": "Zeek current logs and conn.log", "url": "https://docs.zeek.org/en/current/tutorial/logs.html", "product_version": "8.2.1 as reviewed", "retrieved_at": "2026-08-14T19:25:00Z"}
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "schema": "onion-sentinel-investigation-skill-manifest-v2",
+  "id": "network.long-connection.triage",
+  "version": "2.0.0-candidate.1",
+  "artifact_digest": "f6227109fa8586ca63dedcbd6195ef9c93af924e97ee43cdc8fad6d095075b7c",
+  "lineage": {"source_revision": "dbbfb5f", "predecessor_digest": ""},
+  "compatibility": {"harness_contract": "onion-sentinel-harness-job-envelope-v1", "policy_schema": "onion-sentinel-investigation-harness-policy-v1", "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"},
+  "maintainer": {"owner": "Onion Sentinel", "reviewed_at": "2026-08-14T19:25:00Z", "reviewer": "pending"},
+  "roles": ["soc-analyst", "incident-responder", "threat-hunter"],
+  "match": {"tasks": ["alert-triage", "incident-response", "reanalysis", "threat-hunt"], "protocols": ["tcp", "udp", "tls", "ssh", "any"], "alert_families": ["long-connection"], "data_sources": ["elastic", "oql", "zeek.conn"]},
+  "objective": "Assess a long-lived connection using exact duration, transfer, role, peer, and application context while accounting for Zeek duration semantics and avoiding duration-only malicious verdicts.",
+  "capabilities": ["security-onion.events.query", "security-onion.oql.query", "zeek.derived.query"],
+  "safety": {"read_only": true, "active_operation": false, "sensitivity": "moderate", "requires_approval": false},
+  "budgets": {"max_queries": 4, "max_rows": 1500, "max_bytes": 1572864, "timeout_seconds": 120},
+  "preconditions": ["a trusted connection anchor and bounded time envelope exist", "originator responder or event-native roles are attributable", "deployed flow and timeline field catalogs are available"],
+  "required_evidence": ["duration start tuple state bytes packets and correlation identity", "peer ownership protocol application and expected-use context", "sensor coverage termination semantics and evidence references"],
+  "query_templates": [
+    {"id": "long-connection-summary", "backend": "zeek", "language": "broker-parameters", "purpose": "Retrieve the exact bounded connection summary with duration transfer and role-safe tuple semantics.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "event.outcome", "event.duration", "source.ip", "source.port", "source.bytes", "destination.ip", "destination.port", "destination.bytes", "network.transport", "network.protocol", "network.community_id", "network.bytes", "network.packets"]},
+    {"id": "long-connection-timeline", "backend": "elastic", "language": "query-dsl", "purpose": "Correlate bounded alert protocol DNS and endpoint context before interpreting the long-lived session.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "event.id", "rule.id", "source.ip", "destination.ip", "destination.domain", "tls.server.name", "network.transport", "network.protocol", "network.community_id", "process.name"]}
+  ],
+  "output_contract": {"schema": "onion-sentinel-skill-result-v1", "coverage_required": true, "truncation_required": true, "evidence_refs_required": true, "fact_states": ["observed", "inferred", "unverified", "unavailable"]},
+  "alternative_hypotheses": ["approved VPN remote administration or persistent application session", "large backup synchronization or media transfer", "idle keepalive or incomplete termination visibility", "malicious tunnel remote shell or exfiltration channel"],
+  "stop_conditions": ["duration transfer peer and application context discriminate the hypotheses", "termination or capture semantics remain unavailable and are reported explicitly", "the next bounded context pivot has low expected information value", "a query budget or deadline is exhausted"],
+  "confidence_limiters": ["Zeek duration excludes trailing nonproductive packets", "connection state or byte counts are incomplete", "capture started or ended mid-session", "process application or peer ownership unavailable"],
+  "known_false_positive_patterns": ["VPN and remote desktop sessions", "SSH administration and tunnels approved by policy", "database message queue and websocket connections", "backups replication and large transfers"],
+  "verification": {"unit_tests": false, "replay_cases": 0, "independent_query_review": false, "adversarial_tests": false, "human_approved": false},
+  "references": [
+    {"title": "Security Onion 2.4 Zeek connection metadata", "url": "https://docs.securityonion.net/en/2.4/zeek.html", "product_version": "2.4", "retrieved_at": "2026-08-14T19:25:00Z"},
+    {"title": "Zeek current logs and conn.log", "url": "https://docs.zeek.org/en/current/tutorial/logs.html", "product_version": "8.2.1 as reviewed", "retrieved_at": "2026-08-14T19:25:00Z"},
+    {"title": "Elastic Common Schema network fields", "url": "https://www.elastic.co/docs/reference/ecs/ecs-network", "product_version": "9.4.0 as reviewed", "retrieved_at": "2026-08-14T19:25:00Z"}
+  ]
+}
