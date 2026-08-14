@@ -77,24 +77,34 @@ def raw_logs_markdown(
     return "\n\n".join(["## Raw Logs", *sections]).strip()
 
 
+def _summary_value(row: object, key: str, fallback: object) -> object:
+    """Return one summary field with its established truthy fallback."""
+    return row_value(row, key) or fallback
+
+
+def _summary_nullable_value(row: object, key: str) -> object:
+    """Preserve zero while retaining the legacy two-read non-None path."""
+    return row_value(row, key) if row_value(row, key) is not None else "n/a"
+
+
 def alert_summary_markdown(row: object) -> str:
     """Build the standard alert summary from authoritative group data."""
     return "\n".join([
         "## Alert Summary", "", "| Field | Value |", "| --- | --- |",
-        f'| Rule name | {markdown_cell(row_value(row, "rule_name") or "n/a", 240)} |',
-        f'| Event dataset | {markdown_cell(row_value(row, "event_dataset") or "n/a", 160)} |',
-        f'| Severity | {markdown_cell(row_value(row, "severity") if row_value(row, "severity") is not None else "n/a")} |',
-        f'| Severity label | {markdown_cell(row_value(row, "severity_label") or "n/a")} |',
-        f'| Triage level | {markdown_cell(row_value(row, "triage_level") or "n/a")} |',
-        f'| First seen | {markdown_cell(normalize_iso_display_text(row_value(row, "first_seen") or "n/a"))} |',
-        f'| Last seen | {markdown_cell(normalize_iso_display_text(row_value(row, "last_seen") or "n/a"))} |',
-        f'| Seen count | {markdown_cell(row_value(row, "seen_count") if row_value(row, "seen_count") is not None else "n/a")} |',
+        f'| Rule name | {markdown_cell(_summary_value(row, "rule_name", "n/a"), 240)} |',
+        f'| Event dataset | {markdown_cell(_summary_value(row, "event_dataset", "n/a"), 160)} |',
+        f'| Severity | {markdown_cell(_summary_nullable_value(row, "severity"))} |',
+        f'| Severity label | {markdown_cell(_summary_value(row, "severity_label", "n/a"))} |',
+        f'| Triage level | {markdown_cell(_summary_value(row, "triage_level", "n/a"))} |',
+        f'| First seen | {markdown_cell(normalize_iso_display_text(_summary_value(row, "first_seen", "n/a")))} |',
+        f'| Last seen | {markdown_cell(normalize_iso_display_text(_summary_value(row, "last_seen", "n/a")))} |',
+        f'| Seen count | {markdown_cell(_summary_nullable_value(row, "seen_count"))} |',
         f'| Grouped alert rows | {markdown_cell(row_value(row, "raw_alert_count", "n/a"))} |',
-        f'| Source IP | {markdown_cell(row_value(row, "source_ip") or "n/a")} |',
-        f'| Destination IP | {markdown_cell(row_value(row, "destination_ip") or "n/a")} |',
-        f'| Destination port | {markdown_cell(row_value(row, "destination_port") or "n/a")} |',
-        f'| Route | {markdown_cell(row_value(row, "routing") or "n/a")} |',
-        f'| Filter status | {markdown_cell(row_value(row, "filter_status") or "accepted")} |',
+        f'| Source IP | {markdown_cell(_summary_value(row, "source_ip", "n/a"))} |',
+        f'| Destination IP | {markdown_cell(_summary_value(row, "destination_ip", "n/a"))} |',
+        f'| Destination port | {markdown_cell(_summary_value(row, "destination_port", "n/a"))} |',
+        f'| Route | {markdown_cell(_summary_value(row, "routing", "n/a"))} |',
+        f'| Filter status | {markdown_cell(_summary_value(row, "filter_status", "accepted"))} |',
     ])
 
 
