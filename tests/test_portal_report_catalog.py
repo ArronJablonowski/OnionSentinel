@@ -1,9 +1,19 @@
+#!/usr/bin/env python3
+"""Contracts for read-only report catalog discovery."""
+from __future__ import annotations
+
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+import sys
 
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "onion-sentinel-dashboard"))
+
+import portal_report_catalog as catalog  # noqa: E402
 from tests.test_portal_admin_session_store import load_portal
 
 
@@ -74,6 +84,156 @@ class PortalReportCatalogContractTests(unittest.TestCase):
         self.assertEqual(self.portal.soc_alerts_default_path([report]), "/view/soc/")
         self.assertEqual(self.portal.human_size(1024), "1.0 KB")
         self.assertEqual(self.portal.human_size(1023), "1023 B")
+
+
+class Root:
+    def __init__(
+        self,
+        label: str,
+        *,
+        exists: bool = True,
+        is_file: bool = False,
+        suffix: str = "",
+        failure: Exception | None = None,
+    ) -> None:
+        self.label = label
+        self.exists_value = exists
+        self.is_file_value = is_file
+        self.suffix = suffix
+        self.failure = failure
+        self.calls: list[str] = []
+
+    def exists(self) -> bool:
+        self.calls.append("exists")
+        if self.failure is not None:
+            raise self.failure
+        return self.exists_value
+
+    def is_file(self) -> bool:
+        self.calls.append("is_file")
+        return self.is_file_value
+
+    def __repr__(self) -> str:
+        return f"Root({self.label!r})"
+
+
+class PortalReportCatalogTests(unittest.TestCase):
+    def test_candidate_traversal_preserves_order_pruning_and_standalones(self) -> None:
+        html_file = Root("file", is_file=True, suffix=".HTML")
+        missing = Root("missing", exists=False)
+        directory = Root("directory")
+        non_html_file = Root("text-file", is_file=True, suffix=".txt")
+        standalone = Root("standalone")
+        standalone_missing = Root("standalone-missing", exists=False)
+        top_dirnames = ["keep", ".hidden", "node_modules", "excluded"]
+        walk_calls: list[Root] = []
+
+        def walk(root):
+            walk_calls.append(root)
+            if root is directory:
+                return iter((
+                    (
+                        "/reports",
+                        top_dirnames,
+                        ["first.HTML", "skip.txt", "second.htm"],
+                    ),
+                    ("/reports/keep", [], ["third.HtM"]),
+                ))
+            return iter(())
+
+        with (
+            mock.patch.object(catalog.os, "walk", side_effect=walk),
+            mock.patch.object(
+                catalog,
+                "should_skip_dir",
+                wraps=catalog.should_skip_dir,
+            ) as skip_dir,
+        ):
+            result = catalog._candidate_paths(
+                [html_file, missing, directory, non_html_file],
+                [standalone, standalone_missing, html_file],
+                {"node_modules", "excluded"},
+            )
+
+        self.assertEqual(
+            result,
+            [
+                html_file,
+                Path("/reports/first.HTML"),
+                Path("/reports/second.htm"),
+                Path("/reports/keep/third.HtM"),
+                standalone,
+                html_file,
+            ],
+        )
+        self.assertEqual(walk_calls, [directory, non_html_file])
+        self.assertEqual(top_dirnames, ["keep"])
+        self.assertEqual(
+            skip_dir.call_args_list,
+            [
+                mock.call(Path("/reports/keep"), {"node_modules", "excluded"}),
+                mock.call(Path("/reports/.hidden"), {"node_modules", "excluded"}),
+                mock.call(Path("/reports/node_modules"), {"node_modules", "excluded"}),
+                mock.call(Path("/reports/excluded"), {"node_modules", "excluded"}),
+            ],
+        )
+        self.assertEqual(html_file.calls, ["exists", "is_file", "exists"])
+        self.assertEqual(missing.calls, ["exists"])
+        self.assertEqual(directory.calls, ["exists", "is_file"])
+        self.assertEqual(non_html_file.calls, ["exists", "is_file"])
+        self.assertEqual(standalone.calls, ["exists"])
+        self.assertEqual(standalone_missing.calls, ["exists"])
+
+    def test_candidate_discovery_prunes_real_hidden_and_excluded_trees(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            reports = root / "reports"
+            keep = reports / "keep"
+            hidden = reports / ".hidden"
+            excluded = reports / "node_modules"
+            keep.mkdir(parents=True)
+            hidden.mkdir()
+            excluded.mkdir()
+            (reports / "index.HTML").write_text("index")
+            (reports / "notes.txt").write_text("notes")
+            (keep / "nested.htm").write_text("nested")
+            (hidden / "hidden.html").write_text("hidden")
+            (excluded / "dependency.html").write_text("dependency")
+            standalone = root / "standalone.txt"
+            standalone.write_text("standalone")
+
+            result = catalog._candidate_paths(
+                [reports], [standalone], {"node_modules"}
+            )
+
+        self.assertEqual(
+            result,
+            [reports / "index.HTML", keep / "nested.htm", standalone],
+        )
+
+    def test_candidate_discovery_preserves_exception_boundaries(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "exists failed"):
+            catalog._candidate_paths(
+                [Root("broken", failure=RuntimeError("exists failed"))],
+                [],
+                set(),
+            )
+
+        directory = Root("directory")
+        with mock.patch.object(
+            catalog.os,
+            "walk",
+            side_effect=RuntimeError("walk failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "walk failed"):
+                catalog._candidate_paths([directory], [], set())
+
+        with self.assertRaisesRegex(RuntimeError, "standalone failed"):
+            catalog._candidate_paths(
+                [],
+                [Root("broken", failure=RuntimeError("standalone failed"))],
+                set(),
+            )
 
 
 if __name__ == "__main__":
