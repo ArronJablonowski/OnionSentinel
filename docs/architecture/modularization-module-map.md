@@ -3591,6 +3591,12 @@ deduplication, filtering, and Relay-root capacity policy. Its bounded policy
 phases separately own JSON-evidence retention admission/removal, existing-root
 anchor and disk-threshold projection, and wrapped webhook rejection parsing.
 
+`process_io.py` is the leaf owner for bounded Relay control processes. It
+stages input in an anonymous file, starts a dedicated process group, registers
+nonblocking stdout/stderr channels, drains them under exact byte and time
+ceilings, and owns process-group termination, reaping, and stream cleanup.
+PCAP artifact bytes remain on the separate streaming path.
+
 `relay_pcap_spool_policy.py` owns absolute spool-path and required-mount
 admission, capacity/high-watermark enforcement, usage projection, bounded
 partial/completed artifact retention, hashes, and atomic JSON checkpoints.
