@@ -160,6 +160,117 @@ class UpdateHealthTests(unittest.TestCase):
         ).astimezone().isoformat()
         self.assertIn(expected, result[1])
 
+    def test_running_action_preserves_order_process_failure_and_first_live_short_circuit(self) -> None:
+        trace = []
+        statuses = {
+            "macos-update": {"state": "running", "pid": 1},
+            "brew-update": {"state": "idle", "pid": 2},
+            "hermes-update": {
+                "state": "running",
+                "pid": 3,
+                "label": "Hermes Agent update",
+                "updated_at": "2026-08-07T03:00:00+00:00",
+            },
+        }
+
+        def read_status(action_id):
+            trace.append(("read", action_id))
+            return statuses[action_id]
+
+        def process_running(pid):
+            trace.append(("process", pid))
+            if pid == 1:
+                raise PermissionError("process unavailable")
+            return pid == 3
+
+        def parse_timestamp(value):
+            trace.append(("parse", value))
+            return dt.datetime.fromisoformat(value)
+
+        def format_timestamp(value):
+            trace.append(("format", value))
+            return "formatted-time"
+
+        sources = UpdateHealthSources(
+            macos_status_file=self.status_file,
+            run_brew_check=lambda: self.brew,
+            run_hermes_check=lambda: self.hermes,
+            read_action_status=read_status,
+            process_running=process_running,
+            action_labels={},
+            parse_timestamp=parse_timestamp,
+            format_timestamp=format_timestamp,
+        )
+
+        result = compose_latest_running_update_action(sources)
+
+        self.assertEqual(result[0], "Hermes running")
+        self.assertIn("PID 3; started at formatted-time", result[1])
+        self.assertEqual(trace, [
+            ("read", "macos-update"),
+            ("process", 1),
+            ("read", "brew-update"),
+            ("read", "hermes-update"),
+            ("process", 3),
+            ("parse", "2026-08-07T03:00:00+00:00"),
+            ("format", dt.datetime(
+                2026, 8, 7, 3, 0, tzinfo=dt.timezone.utc
+            ).astimezone()),
+        ])
+
+    def test_running_action_preserves_unknown_pid_label_and_timestamp_fallbacks(self) -> None:
+        self.statuses["macos-update"] = {
+            "state": "running",
+            "pid": 0,
+            "label": "",
+            "started_at": "",
+            "updated_at": "invalid",
+        }
+        sources = self.sources()
+        sources = UpdateHealthSources(
+            **{
+                **sources.__dict__,
+                "process_running": lambda _pid: True,
+                "action_labels": {},
+            }
+        )
+
+        result = compose_latest_running_update_action(sources)
+
+        self.assertEqual(result[0], "Update running")
+        self.assertIn("macos-update is currently running as PID unknown", result[1])
+        self.assertIn("started at unknown time", result[1])
+
+    def test_running_action_propagates_format_and_base_exception_boundaries(self) -> None:
+        self.statuses["macos-update"] = {
+            "state": "running",
+            "pid": 7,
+            "started_at": "2026-08-07T01:02:03+00:00",
+        }
+        self.running_pids.add(7)
+        sources = self.sources()
+        format_failure = UpdateHealthSources(
+            **{
+                **sources.__dict__,
+                "format_timestamp": lambda _value: (_ for _ in ()).throw(
+                    RuntimeError("format owner failed")
+                ),
+            }
+        )
+        with self.assertRaisesRegex(RuntimeError, "format owner failed"):
+            compose_latest_running_update_action(format_failure)
+
+        process_failure = UpdateHealthSources(
+            **{
+                **sources.__dict__,
+                "process_running": lambda _pid: (_ for _ in ()).throw(
+                    KeyboardInterrupt("process owner stopped")
+                ),
+            }
+        )
+        with self.assertRaisesRegex(KeyboardInterrupt, "process owner stopped"):
+            compose_latest_running_update_action(process_failure)
+
     def test_failure_action_selects_newest_and_handles_invalid_timestamp(self) -> None:
         self.statuses.update(
             {
