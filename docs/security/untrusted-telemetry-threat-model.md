@@ -1,8 +1,11 @@
 # Untrusted Telemetry And Tool-Boundary Threat Model
 
-Status: enforced release contract  
-Owner: Onion Sentinel analysis, portal, and dashboard maintainers  
-Tracked by: ARR-23, related to ARR-70  
+Status: enforced release contract
+
+Owner: Onion Sentinel analysis, portal, and dashboard maintainers
+
+Tracked by: ARR-23, related to ARR-70
+
 Applies to: Security Onion alerts, packet-derived strings, OSQuery results,
 public-enrichment responses, model output, API bodies, report artifacts, and
 all values crossing an investigation or presentation boundary.
