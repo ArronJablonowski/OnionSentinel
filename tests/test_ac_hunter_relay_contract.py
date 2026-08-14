@@ -8,8 +8,10 @@ import inspect
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,10 +31,23 @@ def load_contract():
     return module
 
 
+def load_broker():
+    spec = importlib.util.spec_from_file_location(
+        "ac_hunter_broker_characterization",
+        BROKER_PATH,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class AcHunterRelayContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.contract = load_contract()
+        cls.broker = load_broker()
 
     def envelope(
         self,
@@ -411,6 +426,82 @@ class AcHunterRelayContractTests(unittest.TestCase):
         self.assertNotIn("requests.", source)
         self.assertNotIn("logging.", source)
         self.assertNotIn("print(", source)
+
+    def test_broker_config_admission_preserves_exact_defaults_and_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "ac-hunter.json"
+            ca_bundle = Path(directory) / "ca.pem"
+            value = {
+                "schema": self.broker.CONFIG_SCHEMA,
+                "enabled": True,
+                "upstream_ip": "192.168.1.12",
+                "upstream_port": 443,
+                "tls_server_name": "localhost",
+                "ca_bundle": str(ca_bundle),
+                "certificate_sha256": "a" * 64,
+            }
+            config_path.write_text(json.dumps(value), encoding="utf-8")
+            config_stat = config_path.stat()
+            calls = []
+
+            def secure(path, *, maximum_bytes, owner_uid=0):
+                calls.append((path, maximum_bytes, owner_uid))
+                return config_stat
+
+            with mock.patch.object(
+                self.broker,
+                "_secure_regular_file",
+                side_effect=secure,
+            ):
+                loaded = self.broker._load_config(config_path)
+
+        self.assertEqual(loaded["ca_bundle"], ca_bundle)
+        self.assertEqual(loaded["lock_file"], self.broker.DEFAULT_LOCK)
+        self.assertNotIn("connect_timeout_seconds", loaded)
+        self.assertNotIn("request_timeout_seconds", loaded)
+        self.assertNotIn("max_response_bytes", loaded)
+        self.assertEqual(
+            calls,
+            [
+                (config_path, self.broker.MAX_CONFIG_BYTES, 0),
+                (ca_bundle, 128 * 1024, 0),
+            ],
+        )
+
+    def test_broker_config_rejects_limits_only_after_ca_admission(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "ac-hunter.json"
+            ca_bundle = Path(directory) / "ca.pem"
+            value = {
+                "schema": self.broker.CONFIG_SCHEMA,
+                "enabled": True,
+                "upstream_ip": "192.168.1.12",
+                "upstream_port": 443,
+                "tls_server_name": "localhost",
+                "ca_bundle": str(ca_bundle),
+                "certificate_sha256": "a" * 64,
+                "connect_timeout_seconds": True,
+            }
+            config_path.write_text(json.dumps(value), encoding="utf-8")
+            config_stat = config_path.stat()
+            calls = []
+
+            def secure(path, *, maximum_bytes, owner_uid=0):
+                calls.append(path)
+                return config_stat
+
+            with mock.patch.object(
+                self.broker,
+                "_secure_regular_file",
+                side_effect=secure,
+            ):
+                with self.assertRaisesRegex(
+                    self.broker.BrokerError,
+                    "connect timeout is invalid",
+                ):
+                    self.broker._load_config(config_path)
+
+        self.assertEqual(calls, [config_path, ca_bundle])
 
     def test_contract_and_broker_compile_under_current_python(self) -> None:
         subprocess.run(

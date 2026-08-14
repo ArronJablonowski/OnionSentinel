@@ -3597,6 +3597,13 @@ nonblocking stdout/stderr channels, drains them under exact byte and time
 ceilings, and owns process-group termination, reaping, and stream cleanup.
 PCAP artifact bytes remain on the separate streaming path.
 
+`ac_hunter_broker.py` owns the source-restricted, pinned-TLS AC Hunter request
+boundary. Its configuration phases separately own stable file opening and
+decoding, exact schema/field admission, fixed upstream identity and certificate
+pin validation, CA trust-file validation, numeric limits, and the fixed lock
+path. No configuration field can widen the approved host, port, SNI, command,
+or filesystem authority.
+
 `relay_pcap_spool_policy.py` owns absolute spool-path and required-mount
 admission, capacity/high-watermark enforcement, usage projection, bounded
 partial/completed artifact retention, hashes, and atomic JSON checkpoints.

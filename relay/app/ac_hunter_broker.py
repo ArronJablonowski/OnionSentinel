@@ -96,7 +96,7 @@ def _secure_regular_file(
     return metadata
 
 
-def _load_config(path: Path) -> dict[str, Any]:
+def _read_config_snapshot(path: Path) -> object:
     before = _secure_regular_file(path, maximum_bytes=MAX_CONFIG_BYTES)
     with path.open("rb") as handle:
         after = os.fstat(handle.fileno())
@@ -118,9 +118,12 @@ def _load_config(path: Path) -> dict[str, Any]:
     if len(raw) > MAX_CONFIG_BYTES:
         raise BrokerError("AC Hunter relay configuration exceeds its byte limit")
     try:
-        value = json.loads(raw.decode("utf-8"))
+        return json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise BrokerError("AC Hunter relay configuration is invalid")
+
+
+def _validate_config_shape(value: object) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("schema") != CONFIG_SCHEMA:
         raise BrokerError("AC Hunter relay configuration schema is unsupported")
     allowed = {
@@ -138,6 +141,10 @@ def _load_config(path: Path) -> dict[str, Any]:
     }
     if set(value) - allowed:
         raise BrokerError("AC Hunter relay configuration has unsupported fields")
+    return value
+
+
+def _validate_upstream_identity(value: dict[str, Any]) -> None:
     if value.get("enabled") is not True:
         raise BrokerError("AC Hunter relay transport is disabled")
     if value.get("upstream_ip") != "192.168.1.12":
@@ -153,8 +160,15 @@ def _load_config(path: Path) -> dict[str, Any]:
         or any(character not in "0123456789abcdef" for character in digest)
     ):
         raise BrokerError("AC Hunter relay certificate pin is invalid")
+
+
+def _validated_ca_bundle(value: dict[str, Any]) -> Path:
     ca_bundle = Path(str(value.get("ca_bundle") or ""))
     _secure_regular_file(ca_bundle, maximum_bytes=128 * 1024)
+    return ca_bundle
+
+
+def _validate_config_limits(value: dict[str, Any]) -> None:
     connect_timeout = value.get("connect_timeout_seconds", 8)
     request_timeout = value.get("request_timeout_seconds", 30)
     maximum = value.get("max_response_bytes", MAX_RESPONSE_BYTES)
@@ -169,9 +183,21 @@ def _load_config(path: Path) -> dict[str, Any]:
             or not minimum <= item <= maximum_value
         ):
             raise BrokerError(f"AC Hunter relay {label} is invalid")
+
+
+def _validated_lock_file(value: dict[str, Any]) -> Path:
     lock_file = Path(str(value.get("lock_file") or DEFAULT_LOCK))
     if lock_file != DEFAULT_LOCK:
         raise BrokerError("AC Hunter relay lock path is outside the fixed allowlist")
+    return lock_file
+
+
+def _load_config(path: Path) -> dict[str, Any]:
+    value = _validate_config_shape(_read_config_snapshot(path))
+    _validate_upstream_identity(value)
+    ca_bundle = _validated_ca_bundle(value)
+    _validate_config_limits(value)
+    lock_file = _validated_lock_file(value)
     return {
         **value,
         "ca_bundle": ca_bundle,
