@@ -1,9 +1,6 @@
 {
   "files": {},
   "functions": {
-    "operations/evaluate-analysis-replays.py::_classification_metrics": {
-      "max_complexity": 32
-    },
     "operations/evaluate-analysis-replays.py::summarize": {
       "max_complexity": 27
     },
@@ -71,5 +68,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "b01fe012bc91649578c4f55ada0a6af81c1fc278"
+  "source_release": "e8135cbb75e87fb8947a17f5cb0a683d865e43ad"
 }
