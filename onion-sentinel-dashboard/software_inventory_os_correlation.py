@@ -62,16 +62,16 @@ def _trusted_asset(
     return asset
 
 
-def _endpoint_candidate(
-    item: object,
-    now: dt.datetime,
-    assets: dict[str, dict],
-) -> tuple[str, dt.datetime, tuple[str, str], dict[str, object]] | None:
+def _normalized_item_field(item: dict, key: str) -> str:
+    return str(item.get(key) or "").strip()
+
+
+def _endpoint_os_identity(item: object) -> tuple[str, str, str] | None:
     if not isinstance(item, dict):
         return None
-    asset_label = str(item.get("asset_label") or "").strip()
-    os_type = str(item.get("operating_system_type") or "").strip()
-    os_version = str(item.get("operating_system_version") or "").strip()
+    asset_label = _normalized_item_field(item, "asset_label")
+    os_type = _normalized_item_field(item, "operating_system_type")
+    os_version = _normalized_item_field(item, "operating_system_version")
     if (
         not asset_label
         or item.get("source") != "osquery_apps"
@@ -81,6 +81,18 @@ def _endpoint_candidate(
         or not os_version
     ):
         return None
+    return asset_label, os_type, os_version
+
+
+def _endpoint_candidate(
+    item: object,
+    now: dt.datetime,
+    assets: dict[str, dict],
+) -> tuple[str, dt.datetime, tuple[str, str], dict[str, object]] | None:
+    identity = _endpoint_os_identity(item)
+    if identity is None:
+        return None
+    asset_label, os_type, os_version = identity
     last_seen = item.get("_last_seen")
     if not isinstance(last_seen, dt.datetime):
         try:
