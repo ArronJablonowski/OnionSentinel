@@ -7,11 +7,13 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "onion-sentinel-dashboard"))
 
+import portal_hermes_backup_health as backup_health  # noqa: E402
 from portal_hermes_backup_health import (  # noqa: E402
     HermesBackupSources,
     backup_base_path,
@@ -175,6 +177,88 @@ class HermesBackupHealthTests(unittest.TestCase):
         parsed = backup_timestamp_from_name(archive)
 
         self.assertEqual(parsed, dt.datetime.fromtimestamp(expected, dt.timezone.utc))
+
+    def test_latest_metric_projection_and_callback_trace_are_exact(self) -> None:
+        callbacks = []
+        sources = HermesBackupSources(
+            backup_dir=Path("/synthetic/hermes-backups"),
+            remote_dest="unused",
+            remote_directory="unused",
+            format_timestamp=lambda value: callbacks.append(("format", value)) or "STAMP",
+            human_size=lambda value: callbacks.append(("size", value)) or "13 bytes",
+            relative_time_label=lambda value: callbacks.append(("relative", value)) or "recently",
+            redact_text=lambda value: value,
+        )
+        incomplete = [
+            {
+                "archive": Path(f"failed-{index}.tar.zst"),
+                "created": dt.datetime(2026, 8, index + 1, tzinfo=dt.timezone.utc),
+                "size": 0,
+                "ok": False,
+                "missing": [f"part-{index}"],
+            }
+            for index in range(4)
+        ]
+        unreadable_log = backup_health._BackupLog(
+            "", frozenset(), (), (), "bounded log warning"
+        )
+        with mock.patch.object(
+            backup_health, "_catalog", return_value=(incomplete, unreadable_log)
+        ):
+            self.assertEqual(
+                compose_latest_hermes_backup_metric(sources),
+                (
+                    "⚠ None",
+                    "WARNING: No successful full Hermes backup sets found in "
+                    "/synthetic/hermes-backups · Incomplete artifacts: "
+                    "failed-1.tar.zst missing part-1; failed-2.tar.zst missing part-2; "
+                    "failed-3.tar.zst missing part-3 · bounded log warning",
+                    True,
+                ),
+            )
+        self.assertEqual(callbacks, [])
+
+        successful = {
+            "archive": Path("macstudio-hermes-dr_20260803_000000Z.tar.zst"),
+            "created": dt.datetime(2026, 8, 3, tzinfo=dt.timezone.utc),
+            "size": 13,
+            "ok": True,
+            "missing": [],
+        }
+        rows = [successful, incomplete[-1]]
+        with (
+            mock.patch.object(
+                backup_health, "_catalog", return_value=(rows, unreadable_log)
+            ),
+            mock.patch.object(
+                backup_health,
+                "backup_timestamp_from_name",
+                return_value=dt.datetime(2026, 8, 3, tzinfo=dt.timezone.utc),
+            ),
+            mock.patch.object(
+                backup_health, "_attempt_warning", return_value="attempt warning"
+            ),
+        ):
+            self.assertEqual(
+                compose_latest_hermes_backup_metric(sources),
+                (
+                    "⚠ recently",
+                    "WARNING: Newer backup artifact is incomplete/not confirmed successful: "
+                    "failed-3.tar.zst missing part-3 | attempt warning | bounded log warning · "
+                    "Latest successful full Hermes backup: "
+                    "macstudio-hermes-dr_20260803_000000Z.tar.zst · STAMP · 13 bytes · "
+                    "success confirmed by backup-cron.log",
+                    True,
+                ),
+            )
+        self.assertEqual(
+            callbacks,
+            [
+                ("relative", successful["created"].timestamp()),
+                ("format", successful["created"].astimezone()),
+                ("size", 13),
+            ],
+        )
 
 
 if __name__ == "__main__":
