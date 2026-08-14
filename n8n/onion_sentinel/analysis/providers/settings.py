@@ -25,7 +25,7 @@ class Dependencies:
     openclaw_uses_ollama: Callable[[str], bool]
     enabled_routes: Callable[[dict[str, Any]], list[str]]
     normalize_primary: Callable[[Any, list[str]], dict[str, str]]
-    normalize_reviewer: Callable[[Any, list[str], dict[str, str]], dict[str, str]]
+    normalize_reviewer: Callable[..., dict[str, str]]
     normalize_adjudicator: Callable[..., dict[str, str]]
     error_type: type[Exception]
 
@@ -299,7 +299,8 @@ def apply_roster(
     routes = dependencies.enabled_routes(settings)
     settings["agent_models"] = dependencies.normalize_primary(raw.get("agent_models"), routes)
     settings["agent_second_opinion_models"] = dependencies.normalize_reviewer(
-        raw.get("agent_second_opinion_models"), routes, settings["agent_models"],
+        raw.get("agent_second_opinion_models"), routes,
+        settings["agent_models"], settings,
     )
     settings["agent_adjudicator_models"] = dependencies.normalize_adjudicator(
         raw.get("agent_adjudicator_models"), routes, settings["agent_models"],

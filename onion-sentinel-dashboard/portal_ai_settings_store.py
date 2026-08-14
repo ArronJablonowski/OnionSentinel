@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import ContextManager
 
+from portal_atomic_json_store import write_owner_only_json
+
 
 @dataclass(frozen=True)
 class AiSettingsStoreSources:
@@ -68,17 +70,7 @@ def write_soc_ai_settings(
 ) -> tuple[bool, dict]:
     """Write one normalized document while the caller holds the settings lock."""
     try:
-        sources.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = sources.path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(normalized, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        try:
-            tmp.chmod(0o600)
-        except Exception:
-            pass
-        tmp.replace(sources.path)
+        write_owner_only_json(sources.path, normalized)
     except Exception as exc:
         return False, {
             "ok": False,

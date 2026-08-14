@@ -83,7 +83,10 @@ DEFAULT_DASHBOARD_WAKE = Path(
         HOME / "n8n-local" / "run" / "dashboard-refresh.wake",
     )
 )
-DEFAULT_MODEL = os.environ.get("SOC_AI_MODEL", "")
+# Saved AI settings are the automatic worker authority. Operators may still
+# request an explicit one-shot override with ``--model``; a legacy launchd
+# environment value must not silently replace a persisted assignment.
+DEFAULT_MODEL = ""
 DEFAULT_LEVELS = "critical,high,medium,low,informational"
 SEVERITY_PRIORITY = ("critical", "high", "medium", "low", "informational")
 ELIGIBLE_FILTER_STATUSES = ("accepted", "escalated", "unknown", "suppressed")

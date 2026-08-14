@@ -120,18 +120,20 @@ def normalize_agent_second_opinion_models(
     value: Any,
     routes: list[str],
     primary_assignments: dict[str, str],
+    settings: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     b = bindings
     source = value if isinstance(value, dict) else {}
-    return {
-        role: route
-        if (
-            (route := b["canonical_model_route"](source.get(role), routes)) in routes
-            and route != primary_assignments.get(role)
+    assignments: dict[str, str] = {}
+    for role in b["CYBER_SECURITY_AGENT_ROLES"]:
+        route = b["canonical_model_route"](source.get(role), routes)
+        independent = b["model_route_identity"](
+            route, settings
+        ) != b["model_route_identity"](
+            primary_assignments.get(role), settings
         )
-        else ""
-        for role in b["CYBER_SECURITY_AGENT_ROLES"]
-    }
+        assignments[role] = route if route in routes and independent else ""
+    return assignments
 
 
 def normalize_agent_adjudicator_models(
@@ -312,6 +314,7 @@ def effective_ai_settings(
         settings.get("agent_second_opinion_models"),
         routes,
         settings["agent_models"],
+        settings,
     )
     settings["agent_adjudicator_models"] = b[
         "normalize_agent_adjudicator_models"

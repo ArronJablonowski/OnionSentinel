@@ -9,7 +9,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "n8n"))
-from onion_sentinel.analysis.providers import routing, settings  # noqa: E402
+from onion_sentinel.analysis.providers import routing, runtime_adapter, settings  # noqa: E402
 
 
 class SettingsError(ValueError):
@@ -34,7 +34,9 @@ def dependencies() -> settings.Dependencies:
         openclaw_uses_ollama=routing.openclaw_model_uses_ollama_runtime,
         enabled_routes=routing.enabled_agent_model_routes,
         normalize_primary=lambda _value, routes: {"soc-analyst": routes[0] if routes else ""},
-        normalize_reviewer=lambda _value, _routes, _primary: {"soc-analyst": ""},
+        normalize_reviewer=lambda _value, _routes, _primary, _settings: {
+            "soc-analyst": ""
+        },
         normalize_adjudicator=lambda _value, _routes, _primary, _reviewer, _settings: {
             "soc-analyst": ""
         },
@@ -205,6 +207,28 @@ class ProviderSettingsPackageTests(unittest.TestCase):
 
         self.assertEqual(observed, [target])
         self.assertEqual(target["agent_second_opinion_models"]["soc-analyst"], "")
+
+    def test_worker_reviewer_policy_matches_cross_harness_model_identity(self) -> None:
+        routes = [
+            "codex-cli:gpt-5.6-sol:high",
+            "hermes-agent:gpt-5.6-sol:medium",
+        ]
+        current = {"codex_cli_model": "gpt-5.6-sol"}
+        bindings = {
+            "CYBER_SECURITY_AGENT_ROLES": ("soc-analyst",),
+            "canonical_model_route": routing.canonical_model_route,
+            "model_route_identity": routing.model_route_identity,
+        }
+
+        normalized = runtime_adapter.normalize_agent_second_opinion_models(
+            bindings,
+            {"soc-analyst": "hermes-agent:gpt-5.6-sol:medium"},
+            routes,
+            {"soc-analyst": "codex-cli:gpt-5.6-sol:high"},
+            current,
+        )
+
+        self.assertEqual(normalized, {"soc-analyst": ""})
 
     def test_merge_protects_structured_fields_and_runs_normalizers_in_order(self) -> None:
         target = {

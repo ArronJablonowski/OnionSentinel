@@ -501,8 +501,10 @@ The Settings page exposes independent provider controls:
   model, and `Not assigned` is the safe default.
 - The active SOC Analyst worker executes only the model assigned to
   `soc-analyst`; it does not silently switch models or privacy boundaries after
-  a failure. Other role assignments are persisted for their manual or planned
-  workflows.
+  a failure. Legacy `SOC_AI_MODEL` environment values do not override the
+  persisted automatic-worker assignment; an operator must use the explicit
+  one-shot `--model` CLI option to request a temporary manual override. Other
+  role assignments are persisted for their manual or planned workflows.
 - If an assigned route is later disabled, normalization assigns that role to
   the first still-enabled Ollama model, or GPT CLI when it is the only enabled
   route. At least one route must remain enabled.

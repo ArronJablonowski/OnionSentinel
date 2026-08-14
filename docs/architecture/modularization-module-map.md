@@ -1631,13 +1631,16 @@ and injects an immutable policy containing the existing model-roster, route-
 identity, executable, and assignment helpers. The normalizer has no persistence,
 HTTP, filesystem reads or writes, process execution, or network access.
 
-`portal_ai_settings_store.py` owns locked settings reads, atomic owner-only JSON
-writes, normalized full-roster saves, and per-agent primary/reviewer/adjudicator
-assignment transactions. It enforces enabled-route membership and distinct
-provider/model identities before mutation and projects the stable settings and
-GeoIP response schema. Its source bundle exposes normalization, CLI readiness,
-route composition/identity, GeoIP projection, roles, the settings path, and
-lock; HTTP authorization and response serialization remain outside the module.
+`portal_atomic_json_store.py` owns same-directory owner-only staging, file and
+directory synchronization, atomic replacement, and failed-stage cleanup for
+runtime JSON documents. `portal_ai_settings_store.py` owns locked settings
+reads, normalized full-roster saves, and per-agent primary/reviewer/adjudicator
+assignment transactions, delegating durable replacement to that filesystem
+boundary. It enforces enabled-route membership and distinct provider/model
+identities before mutation and projects the stable settings and GeoIP response
+schema. Its source bundle exposes normalization, CLI readiness, route
+composition/identity, GeoIP projection, roles, the settings path, and lock;
+HTTP authorization and response serialization remain outside the module.
 
 `portal_settings_runtime.py` owns the late-bound compatibility orchestration
 across prompt and memory allowlists, AI settings normalization/persistence,

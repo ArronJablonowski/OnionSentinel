@@ -3103,6 +3103,14 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_atomic_json_store.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_atomic_json_store.py",
+      "required_symbols": [
+        "write_owner_only_json"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_ai_settings_store.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_ai_settings_store.py",

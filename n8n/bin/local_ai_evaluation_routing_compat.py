@@ -281,10 +281,11 @@ def normalize_agent_second_opinion_models(
     value: Any,
     routes: list[str],
     primary_assignments: dict[str, str],
+    settings: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Keep optional secondary routes enabled, distinct, and fail-closed."""
     return _provider_settings_runtime_adapter().normalize_agent_second_opinion_models(
-        globals(), value, routes, primary_assignments)
+        globals(), value, routes, primary_assignments, settings)
 
 
 def normalize_agent_adjudicator_models(
