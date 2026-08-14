@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +47,237 @@ def baseline(files=None, functions=None):
 
 
 class ModuleQualityGateTests(unittest.TestCase):
+    def test_metric_issues_preserves_classification_and_order(self) -> None:
+        configured = policy()
+        metrics = {
+            "files": {
+                "file-failure": {"lines": 21},
+                "file-warning": {"lines": 20},
+                "file-target": {"lines": 10},
+            },
+            "functions": {
+                "function-both-failures": {"lines": 11, "complexity": 6},
+                "function-both-warnings": {"lines": 10, "complexity": 5},
+                "function-target": {"lines": 5, "complexity": 3},
+            },
+        }
+
+        failures, warnings = quality.metric_issues(
+            metrics,
+            configured,
+            baseline(),
+        )
+
+        self.assertEqual(
+            failures,
+            [
+                quality.issue("module_lines", "file-failure", 21, 20),
+                quality.issue(
+                    "function_lines",
+                    "function-both-failures",
+                    11,
+                    10,
+                ),
+                quality.issue(
+                    "function_complexity",
+                    "function-both-failures",
+                    6,
+                    5,
+                ),
+            ],
+        )
+        self.assertEqual(
+            warnings,
+            [
+                quality.issue("module_lines", "file-warning", 20, 10),
+                quality.issue(
+                    "function_lines",
+                    "function-both-warnings",
+                    10,
+                    5,
+                ),
+                quality.issue(
+                    "function_complexity",
+                    "function-both-warnings",
+                    5,
+                    3,
+                ),
+            ],
+        )
+        second_failures, second_warnings = quality.metric_issues(
+            metrics,
+            configured,
+            baseline(),
+        )
+        self.assertIsNot(failures, second_failures)
+        self.assertIsNot(warnings, second_warnings)
+        self.assertEqual((failures, warnings), (second_failures, second_warnings))
+
+    def test_metric_issues_preserves_policy_and_issue_call_order(self) -> None:
+        configured = policy()
+        metrics = {
+            "files": {
+                "file-failure": {"lines": 21},
+                "file-warning": {"lines": 11},
+            },
+            "functions": {
+                "function-warning": {"lines": 6, "complexity": 4},
+            },
+        }
+        calls = []
+        sentinels = []
+
+        def traced_positive_integer(value, name):
+            calls.append(("policy", name))
+            return quality_positive_integer(value, name)
+
+        def traced_issue(kind, name, measured, allowed):
+            calls.append(("issue", kind, name, measured, allowed))
+            token = object()
+            sentinels.append(token)
+            return token
+
+        quality_positive_integer = quality.positive_integer
+        with mock.patch.object(
+            quality,
+            "positive_integer",
+            side_effect=traced_positive_integer,
+        ), mock.patch.object(quality, "issue", side_effect=traced_issue):
+            failures, warnings = quality.metric_issues(
+                metrics,
+                configured,
+                baseline(),
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                ("policy", "module_target_lines"),
+                ("policy", "new_module_max_lines"),
+                ("policy", "function_target_lines"),
+                ("policy", "new_function_max_lines"),
+                ("policy", "complexity_target"),
+                ("policy", "new_complexity_max"),
+                ("issue", "module_lines", "file-failure", 21, 20),
+                ("issue", "module_lines", "file-warning", 11, 10),
+                ("issue", "function_lines", "function-warning", 6, 5),
+                (
+                    "issue",
+                    "function_complexity",
+                    "function-warning",
+                    4,
+                    3,
+                ),
+            ],
+        )
+        self.assertEqual(failures, [sentinels[0]])
+        self.assertEqual(warnings, sentinels[1:])
+        self.assertIs(failures[0], sentinels[0])
+        self.assertIs(warnings[0], sentinels[1])
+
+    def test_metric_issues_admits_only_dictionary_baseline_debt(self) -> None:
+        class DebtDict(dict):
+            pass
+
+        metrics = {
+            "files": {
+                "dict-subclass": {"lines": 21},
+                "mapping-only": {"lines": 21},
+            },
+            "functions": {
+                "dict-subclass": {"lines": 11, "complexity": 6},
+                "mapping-only": {"lines": 11, "complexity": 6},
+            },
+        }
+        configured_baseline = baseline(
+            files={
+                "dict-subclass": DebtDict(max_lines=21),
+                "mapping-only": mock.MagicMock(
+                    spec=["get"],
+                    **{"get.return_value": 21},
+                ),
+            },
+            functions={
+                "dict-subclass": DebtDict(
+                    max_lines=11,
+                    max_complexity=6,
+                ),
+                "mapping-only": mock.MagicMock(
+                    spec=["get"],
+                    **{"get.return_value": 99},
+                ),
+            },
+        )
+
+        failures, warnings = quality.metric_issues(
+            metrics,
+            policy(),
+            configured_baseline,
+        )
+
+        self.assertEqual(
+            [(item["kind"], item["name"]) for item in failures],
+            [
+                ("module_lines", "mapping-only"),
+                ("function_lines", "mapping-only"),
+                ("function_complexity", "mapping-only"),
+            ],
+        )
+        self.assertEqual(
+            [(item["kind"], item["name"]) for item in warnings],
+            [
+                ("module_lines", "dict-subclass"),
+                ("function_lines", "dict-subclass"),
+                ("function_complexity", "dict-subclass"),
+            ],
+        )
+        configured_baseline["files"]["mapping-only"].get.assert_not_called()
+        configured_baseline["functions"]["mapping-only"].get.assert_not_called()
+
+    def test_metric_issues_stops_at_policy_or_issue_failure(self) -> None:
+        metrics = {
+            "files": {
+                "first": {"lines": 21},
+                "second": {"lines": 22},
+            },
+            "functions": {},
+        }
+        configured = policy()
+        calls = []
+
+        def fail_policy(value, name):
+            calls.append(("policy", name))
+            if name == "function_target_lines":
+                raise RuntimeError("policy-stop")
+            return value[name]
+
+        with mock.patch.object(
+            quality,
+            "positive_integer",
+            side_effect=fail_policy,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "policy-stop"):
+                quality.metric_issues(metrics, configured, baseline())
+        self.assertEqual(
+            calls,
+            [
+                ("policy", "module_target_lines"),
+                ("policy", "new_module_max_lines"),
+                ("policy", "function_target_lines"),
+            ],
+        )
+
+        calls.clear()
+
+        def fail_issue(kind, name, measured, allowed):
+            calls.append((kind, name, measured, allowed))
+            raise LookupError("issue-stop")
+
+        with mock.patch.object(quality, "issue", side_effect=fail_issue):
+            with self.assertRaisesRegex(LookupError, "issue-stop"):
+                quality.metric_issues(metrics, configured, baseline())
+        self.assertEqual(calls, [("module_lines", "first", 21, 20)])
+
     def test_repository_baseline_passes(self) -> None:
         result = subprocess.run(
             [sys.executable, str(SCRIPT), "--root", str(ROOT)],
