@@ -62,13 +62,13 @@ def _case_id(package: Mapping[str, Any]) -> str:
     incident = _optional_mapping(incident)
     current_contract = package.get("memory_context_contract")
     current_contract = _optional_mapping(current_contract)
-    value = str(
-        local.get("case_id")
-        or incident.get("case_id")
-        or package.get("case_id")
-        or current_contract.get("case_id")
-        or ""
-    ).strip()
+    alert = _optional_mapping(package.get("alert"))
+    candidates = (
+        local.get("case_id"), incident.get("case_id"), package.get("case_id"),
+        current_contract.get("case_id"), package.get("stable_group_id"),
+        package.get("group_id"), alert.get("alert_id"),
+    )
+    value = next((str(candidate).strip() for candidate in candidates if candidate), "")
     if not value or len(value) > 160 or not re.fullmatch(r"[A-Za-z0-9._:-]+", value):
         raise ValueError("memory contract requires a valid case identity")
     return value

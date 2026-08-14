@@ -36,6 +36,8 @@ def build(source: dict, *, hosted: bool = False, hashes: list | None = None) -> 
         artifact_catalog=lambda _value: ["document-id"],
         rule_shorthand_catalog=lambda _value: ["et-test"],
         evidence_hash=evidence_hash,
+        refresh_memory_snapshot=lambda _context: None,
+        rebind_memory_contract=lambda _value: None,
     )
 
 

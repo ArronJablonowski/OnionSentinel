@@ -136,6 +136,15 @@ class AgentMemoryContextContractTests(unittest.TestCase):
             second["memory_context_contract"]["layers"]["case_local_working_memory"]["manifest_digest"],
         )
 
+    def test_alert_identity_is_the_legacy_case_fallback(self) -> None:
+        prompt = package()
+        prompt.pop("_local_investigation_query_context")
+        prompt.pop("group_id")
+
+        attach_agent_memory_context_contract(prompt, evaluation_frozen=False)
+
+        self.assertEqual(prompt["memory_context_contract"]["case_id"], "alert-a")
+
     def test_contract_is_provider_neutral_and_contains_no_memory_content(self) -> None:
         prompt = package()
         attach_agent_memory_context_contract(prompt, evaluation_frozen=True)
@@ -151,6 +160,8 @@ class AgentMemoryContextContractTests(unittest.TestCase):
     def test_missing_case_or_snapshot_identity_fails_closed(self) -> None:
         missing_case = package()
         missing_case["_local_investigation_query_context"].pop("case_id")
+        missing_case.pop("group_id")
+        missing_case["alert"].pop("alert_id")
         with self.assertRaisesRegex(ValueError, "case identity"):
             attach_agent_memory_context_contract(
                 missing_case,

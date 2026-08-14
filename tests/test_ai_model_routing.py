@@ -3732,6 +3732,13 @@ class AiModelRoutingTests(unittest.TestCase):
                 stack.enter_context(
                     mock.patch.object(
                         self.runner,
+                        "attach_agent_memory_context_contract",
+                        side_effect=lambda value, **_kwargs: value,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        self.runner,
                         "load_investigation_harness_policy",
                         return_value=policy,
                     )
