@@ -6,6 +6,7 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +84,107 @@ class AlertDetailSectionTests(unittest.TestCase):
         self.assertIn("| Seen count | 0 |", summary)
         self.assertIn("| Grouped alert rows | 0 |", summary)
         self.assertNotIn("T18:", summary)
+
+    def test_summary_preserves_field_and_callback_order(self) -> None:
+        row = object()
+        values = {
+            "rule_name": "rule",
+            "event_dataset": "dataset",
+            "severity": 0,
+            "severity_label": "label",
+            "triage_level": "triage",
+            "first_seen": "first",
+            "last_seen": "last",
+            "seen_count": 0,
+            "raw_alert_count": 0,
+            "source_ip": "source",
+            "destination_ip": "destination",
+            "destination_port": 0,
+            "routing": "route",
+            "filter_status": "status",
+        }
+        trace: list[tuple[object, ...]] = []
+
+        def traced_row_value(candidate: object, key: str, default: object = None) -> object:
+            trace.append(("row", candidate, key, default))
+            return values.get(key, default)
+
+        def traced_normalize(value: object) -> str:
+            trace.append(("normalize", value))
+            return f"time:{value}"
+
+        def traced_cell(value: object, max_len: int = 420) -> str:
+            trace.append(("cell", value, max_len))
+            return f"cell:{value}:{max_len}"
+
+        with (
+            mock.patch.object(self.sections, "row_value", side_effect=traced_row_value),
+            mock.patch.object(self.sections, "normalize_iso_display_text", side_effect=traced_normalize),
+            mock.patch.object(self.sections, "markdown_cell", side_effect=traced_cell),
+        ):
+            summary = self.sections.alert_summary_markdown(row)
+
+        self.assertEqual(
+            summary,
+            "\n".join([
+                "## Alert Summary", "", "| Field | Value |", "| --- | --- |",
+                "| Rule name | cell:rule:240 |",
+                "| Event dataset | cell:dataset:160 |",
+                "| Severity | cell:0:420 |",
+                "| Severity label | cell:label:420 |",
+                "| Triage level | cell:triage:420 |",
+                "| First seen | cell:time:first:420 |",
+                "| Last seen | cell:time:last:420 |",
+                "| Seen count | cell:0:420 |",
+                "| Grouped alert rows | cell:0:420 |",
+                "| Source IP | cell:source:420 |",
+                "| Destination IP | cell:destination:420 |",
+                "| Destination port | cell:n/a:420 |",
+                "| Route | cell:route:420 |",
+                "| Filter status | cell:status:420 |",
+            ]),
+        )
+        self.assertEqual(
+            trace,
+            [
+                ("row", row, "rule_name", None), ("cell", "rule", 240),
+                ("row", row, "event_dataset", None), ("cell", "dataset", 160),
+                ("row", row, "severity", None), ("row", row, "severity", None),
+                ("cell", 0, 420),
+                ("row", row, "severity_label", None), ("cell", "label", 420),
+                ("row", row, "triage_level", None), ("cell", "triage", 420),
+                ("row", row, "first_seen", None), ("normalize", "first"),
+                ("cell", "time:first", 420),
+                ("row", row, "last_seen", None), ("normalize", "last"),
+                ("cell", "time:last", 420),
+                ("row", row, "seen_count", None), ("row", row, "seen_count", None),
+                ("cell", 0, 420),
+                ("row", row, "raw_alert_count", "n/a"), ("cell", 0, 420),
+                ("row", row, "source_ip", None), ("cell", "source", 420),
+                ("row", row, "destination_ip", None), ("cell", "destination", 420),
+                ("row", row, "destination_port", None), ("cell", "n/a", 420),
+                ("row", row, "routing", None), ("cell", "route", 420),
+                ("row", row, "filter_status", None), ("cell", "status", 420),
+            ],
+        )
+
+    def test_summary_none_paths_read_nullable_fields_once(self) -> None:
+        row = object()
+        trace: list[tuple[str, object]] = []
+
+        def traced_row_value(candidate: object, key: str, default: object = None) -> object:
+            self.assertIs(candidate, row)
+            trace.append((key, default))
+            return default
+
+        with mock.patch.object(self.sections, "row_value", side_effect=traced_row_value):
+            summary = self.sections.alert_summary_markdown(row)
+
+        self.assertIn("| Severity | n/a |", summary)
+        self.assertIn("| Seen count | n/a |", summary)
+        self.assertEqual(trace.count(("severity", None)), 1)
+        self.assertEqual(trace.count(("seen_count", None)), 1)
+        self.assertEqual(trace.count(("raw_alert_count", "n/a")), 1)
 
     def test_triage_notes_and_raw_logs_preserve_legacy_and_ai_evidence(self) -> None:
         triage = self.sections.triage_reasons_markdown(
