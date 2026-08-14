@@ -64,6 +64,9 @@ class InvestigationSkillsV2Tests(unittest.TestCase):
                 "network.stun.triage",
                 "network.tls.triage",
                 "source.suricata.rule-intent",
+                "source.elastic.query-dsl",
+                "source.elastic.kql-equivalent",
+                "source.security-onion.oql-equivalent",
                 "source.zeek.correlation",
             },
         )
@@ -146,10 +149,52 @@ class InvestigationSkillsV2Tests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         result = json.loads(completed.stdout)
         self.assertTrue(result["passed"])
-        self.assertEqual(result["candidate_count"], 14)
-        self.assertEqual(result["passed_count"], 15)
+        self.assertEqual(result["candidate_count"], 17)
+        self.assertEqual(result["passed_count"], 18)
         self.assertFalse(result["query_execution"])
         self.assertFalse(result["candidate_activation"])
+
+    def test_language_specific_candidates_preserve_execution_semantics(self):
+        expected = {
+            "source.elastic.query-dsl": (
+                "elastic",
+                "query-dsl",
+                "exact executed",
+                "https://www.elastic.co/docs/reference/query-languages/query-dsl/query-dsl-bool-query",
+            ),
+            "source.elastic.kql-equivalent": (
+                "elastic",
+                "kql",
+                "not executed",
+                "https://www.elastic.co/docs/reference/query-languages/kql",
+            ),
+            "source.security-onion.oql-equivalent": (
+                "oql",
+                "oql",
+                "compiled",
+                "https://docs.securityonion.net/en/2.4/dashboards.html",
+            ),
+        }
+        manifests = {
+            manifest["id"]: manifest
+            for manifest in (
+                SKILLS.load_manifest(path)
+                for path in sorted(CANDIDATE.parent.glob("*.candidate.json"))
+            )
+        }
+        for skill_id, (backend, language, marker, reference_url) in expected.items():
+            with self.subTest(skill=skill_id):
+                manifest = manifests[skill_id]
+                self.assertEqual(len(manifest["query_templates"]), 1)
+                template = manifest["query_templates"][0]
+                self.assertEqual(template["backend"], backend)
+                self.assertEqual(template["language"], language)
+                self.assertIn(marker, template["purpose"].lower())
+                self.assertIn(
+                    reference_url,
+                    {item["url"] for item in manifest["references"]},
+                )
+                self.assertFalse(manifest["safety"]["active_operation"])
 
     def test_foundational_alert_and_flow_cases_are_in_offline_replay(self):
         fixtures = json.loads(
