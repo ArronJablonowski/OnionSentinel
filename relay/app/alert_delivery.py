@@ -58,8 +58,7 @@ def delivery_enabled(config: dict) -> bool:
     return bool(config.get("webhook", {}).get("enabled"))
 
 
-def _ssh_command(config: dict) -> tuple[list[str], int]:
-    ingest = config.get("alert_ingest", {})
+def _ssh_intake_identity(ingest: dict) -> tuple[str, str, Path]:
     host = str(ingest.get("host") or "").strip()
     user = str(ingest.get("user") or "").strip()
     key_value = str(ingest.get("ssh_key") or "").strip()
@@ -68,6 +67,10 @@ def _ssh_command(config: dict) -> tuple[list[str], int]:
     key = Path(key_value).expanduser()
     if not key.is_file():
         raise AlertDeliveryError(f"SSH alert intake key does not exist: {key}")
+    return host, user, key
+
+
+def _ssh_known_hosts(ingest: dict) -> Path:
     known_hosts_value = str(
         ingest.get("known_hosts") or "/opt/so-alert-relay/keys/macstudio_known_hosts"
     ).strip()
@@ -78,10 +81,22 @@ def _ssh_command(config: dict) -> tuple[list[str], int]:
         raise AlertDeliveryError(
             f"SSH alert intake known_hosts file does not exist: {known_hosts}"
         )
-    connect_timeout = _positive_int(ingest.get("connect_timeout_seconds"), 20, 120)
+    return known_hosts
+
+
+def _ssh_intake_command(ingest: dict) -> str:
     command = str(ingest.get("remote_command") or "onion-sentinel-alert-intake batch").strip()
     if command != "onion-sentinel-alert-intake batch":
         raise AlertDeliveryError("unsupported SSH alert intake command")
+    return command
+
+
+def _ssh_command(config: dict) -> tuple[list[str], int]:
+    ingest = config.get("alert_ingest", {})
+    host, user, key = _ssh_intake_identity(ingest)
+    known_hosts = _ssh_known_hosts(ingest)
+    connect_timeout = _positive_int(ingest.get("connect_timeout_seconds"), 20, 120)
+    command = _ssh_intake_command(ingest)
     return [
         "ssh",
         "-i",
@@ -155,11 +170,12 @@ def _last_json_object(text: str) -> dict:
     raise AlertDeliveryError("SSH alert intake returned no JSON acknowledgement")
 
 
-def deliver_ssh_batch(config: dict, messages: list[dict]) -> dict:
-    command, connect_timeout = _ssh_command(config)
-    ingest = config.get("alert_ingest", {})
-    process_timeout = _positive_int(ingest.get("request_timeout_seconds"), 180, 1800)
-    payload = _encoded_batch(messages)
+def _run_ssh_alert_batch(
+    command: list[str],
+    payload: bytes,
+    connect_timeout: int,
+    process_timeout: int,
+):
     result = process_io.run_bounded_command(
         command,
         input_bytes=payload,
@@ -172,7 +188,11 @@ def deliver_ssh_batch(config: dict, messages: list[dict]) -> dict:
         raise AlertDeliveryError(
             f"SSH alert intake exited {result.returncode}: {detail or 'no error detail'}"
         )
-    response = _last_json_object(result.stdout.decode("utf-8", errors="replace"))
+    return result
+
+
+def _validate_ssh_batch_response(messages: list[dict], stdout: bytes) -> dict:
+    response = _last_json_object(stdout.decode("utf-8", errors="replace"))
     if response.get("protocol") != PROTOCOL or not isinstance(response.get("results"), list):
         raise AlertDeliveryError("SSH alert intake returned an invalid protocol response")
     expected = {str(item.get("delivery_id") or "") for item in messages}
@@ -181,6 +201,19 @@ def deliver_ssh_batch(config: dict, messages: list[dict]) -> dict:
     if missing:
         raise AlertDeliveryError(f"SSH alert intake omitted {len(missing)} acknowledgement(s)")
     return response
+
+
+def deliver_ssh_batch(config: dict, messages: list[dict]) -> dict:
+    command, connect_timeout = _ssh_command(config)
+    ingest = config.get("alert_ingest", {})
+    process_timeout = _positive_int(ingest.get("request_timeout_seconds"), 180, 1800)
+    result = _run_ssh_alert_batch(
+        command,
+        _encoded_batch(messages),
+        connect_timeout,
+        process_timeout,
+    )
+    return _validate_ssh_batch_response(messages, result.stdout)
 
 
 def deliver_ssh_messages(config: dict, messages: Iterable[dict]) -> list[dict]:

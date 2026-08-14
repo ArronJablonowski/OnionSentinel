@@ -3621,6 +3621,14 @@ projection. The public lock wrapper and historical unlocked helper remain the
 compatibility surfaces. Dependencies flow from the leaf policies to transport,
 delivery, service, and the facade; they do not cycle.
 
+`alert_delivery.py` owns authenticated, bounded SSH alert-batch transport to the
+Mac Studio intake. Its phases separately admit the configured SSH identity,
+private key, pinned known-hosts file, and forced command; project the exact SSH
+argument vector; execute one byte-bounded process; and validate the protocol and
+per-delivery acknowledgements. Batch splitting and the public delivery helpers
+remain stable compatibility surfaces, and no phase gains broader credentials or
+remote command authority.
+
 `relay_application.py` owns durable alert outbox delivery, quiet-cycle
 heartbeats, CLI parsing, and one-shot lifecycle composition. Its bounded phases
 separate SSH batch claim/acknowledgement accounting, webhook outbox delivery,
