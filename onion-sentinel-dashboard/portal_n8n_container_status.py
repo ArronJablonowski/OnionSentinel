@@ -40,6 +40,31 @@ def _failure(
     }
 
 
+def _inspect_process_failure(
+    sources: N8nContainerStatusSources,
+    base: dict[str, object],
+    checked_label: str,
+    proc: object,
+) -> dict[str, object]:
+    lines = (
+        proc.stderr or proc.stdout or "docker inspect failed"
+    ).strip().splitlines()
+    reason = lines[-1] if lines else "docker inspect failed"
+    missing = (
+        "no such object" in reason.lower()
+        or "no such container" in reason.lower()
+    )
+    detail = (
+        f"WARNING: {sources.container_name} status unavailable: {reason} "
+        f"· healthz not checked · checked {checked_label}"
+    )
+    return _failure(
+        base,
+        "Missing" if missing else "Docker unavailable",
+        detail,
+    )
+
+
 def _inspect_container(
     sources: N8nContainerStatusSources,
     base: dict[str, object],
@@ -55,11 +80,9 @@ def _inspect_container(
         detail = f"WARNING: unable to inspect {sources.container_name}: {exc} · checked {checked_label}"
         return {}, _failure(base, "Docker unavailable", detail)
     if proc.returncode != 0:
-        lines = (proc.stderr or proc.stdout or "docker inspect failed").strip().splitlines()
-        reason = lines[-1] if lines else "docker inspect failed"
-        missing = "no such object" in reason.lower() or "no such container" in reason.lower()
-        detail = f"WARNING: {sources.container_name} status unavailable: {reason} · healthz not checked · checked {checked_label}"
-        return {}, _failure(base, "Missing" if missing else "Docker unavailable", detail)
+        return {}, _inspect_process_failure(
+            sources, base, checked_label, proc
+        )
     try:
         payload = json.loads(proc.stdout)
         return (payload[0] if isinstance(payload, list) and payload else {}), None
