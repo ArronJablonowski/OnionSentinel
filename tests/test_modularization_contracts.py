@@ -503,6 +503,23 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
                     50,
                 )
 
+    def test_relay_storage_health_has_bounded_probe_phases(self) -> None:
+        storage_health = ROOT / "relay" / "app" / "storage_health.py"
+        expected = {
+            "_root_storage_health",
+            "_mount_source",
+            "_ssd_storage_health",
+            "_smart_summary",
+            "_smart_health",
+        }
+
+        self.assertTrue(expected <= top_level_function_names(storage_health))
+        function = top_level_function(storage_health, "main")
+        self.assertLessEqual(
+            (function.end_lineno or function.lineno) - function.lineno + 1,
+            50,
+        )
+
     def test_relay_health_wrapper_supports_isolated_file_loader_import(self) -> None:
         wrapper = ROOT / "relay" / "app" / "relay_health_wrapper.py"
         script = (
