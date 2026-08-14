@@ -1,21 +1,6 @@
 {
   "files": {},
-  "functions": {
-    "relay/app/incident_evidence_broker.py::_validate_receipt": {
-      "max_complexity": 37
-    },
-    "relay/app/incident_evidence_broker.py::_validate_software_record": {
-      "max_complexity": 38,
-      "max_lines": 101
-    },
-    "relay/app/incident_evidence_broker.py::main": {
-      "max_complexity": 27,
-      "max_lines": 119
-    },
-    "relay/app/incident_evidence_broker.py::validate_software_response": {
-      "max_complexity": 31
-    }
-  },
+  "functions": {},
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "1103d8ff77a240a89df9f5bd7062670b1ce7f8c0"
+  "source_release": "b6b6f815414e0b7cc0d830b2dcc66c0c3ec0edd0"
 }
