@@ -14,12 +14,8 @@
     },
     "relay/app/incident_evidence_broker.py::validate_software_response": {
       "max_complexity": 31
-    },
-    "relay/app/relay_health_application.py::main": {
-      "max_complexity": 43,
-      "max_lines": 221
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "d0c9efcd61f5e815e080e26160254b93024e34a1"
+  "source_release": "1103d8ff77a240a89df9f5bd7062670b1ce7f8c0"
 }
