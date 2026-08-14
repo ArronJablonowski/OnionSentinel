@@ -104,6 +104,66 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertFalse(ready)
         self.assertEqual(projection["status"], "identity_mismatch")
 
+    def test_controlled_readiness_projects_mismatch_fields_without_widening(self):
+        health = {
+            "service": None,
+            "controlled_evaluation": 1,
+            "runtime_mode": 42,
+            "release_id": False,
+            "listen_host": None,
+            "listen_port": "8787",
+            "accepting_requests": 1,
+            "credential": "must-not-project",
+        }
+        with (
+            mock.patch.object(
+                server.runtime,
+                "SOC_ALERT_STORE_API_URL",
+                "http://127.0.0.1:8787/private?token=not-projected",
+            ),
+            mock.patch.object(
+                server.runtime,
+                "alert_store_get_json",
+                return_value=health,
+            ) as request,
+        ):
+            ready, projection = server.controlled_alert_store_readiness()
+
+        self.assertFalse(ready)
+        self.assertEqual(
+            projection,
+            {
+                "status": "identity_mismatch",
+                "service": "",
+                "controlled_evaluation": False,
+                "runtime_mode": "42",
+                "release_id": "",
+                "listen_host": "",
+                "listen_port": "8787",
+                "accepting_requests": False,
+            },
+        )
+        request.assert_called_once_with("/health", timeout=1.0)
+        self.assertNotIn("credential", projection)
+
+    def test_controlled_readiness_fails_closed_with_bounded_unavailable_projection(self):
+        with (
+            mock.patch.object(
+                server.runtime,
+                "SOC_ALERT_STORE_API_URL",
+                "http://127.0.0.1:8787",
+            ),
+            mock.patch.object(
+                server.runtime,
+                "alert_store_get_json",
+                side_effect=RuntimeError("credential-bearing diagnostic"),
+            ),
+        ):
+            self.assertEqual(
+                server.controlled_alert_store_readiness(),
+                (False, {"status": "unavailable"}),
+            )
+
     def test_mutating_soc_api_requires_same_origin_json(self):
         headers = Message()
         headers["Content-Type"] = "application/json; charset=utf-8"
