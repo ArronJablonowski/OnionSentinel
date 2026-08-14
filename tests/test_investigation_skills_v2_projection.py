@@ -215,7 +215,7 @@ class InvestigationSkillsV2ProjectionTests(unittest.TestCase):
     def test_every_candidate_requires_explicit_fact_states(self) -> None:
         expected = ["observed", "inferred", "unverified", "unavailable"]
         paths = sorted(CANDIDATE_DIR.glob("*.candidate.json"))
-        self.assertEqual(len(paths), 7)
+        self.assertEqual(len(paths), 9)
         for path in paths:
             with self.subTest(path=path.name):
                 raw = json.loads(path.read_text(encoding="utf-8"))

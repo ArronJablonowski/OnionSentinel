@@ -51,6 +51,8 @@ class InvestigationSkillsV2Tests(unittest.TestCase):
         self.assertEqual(
             {item["id"] for item in manifests},
             {
+                "foundation.alert-context.validation",
+                "network.flow.window-expansion",
                 "network.dns.triage",
                 "network.http.triage",
                 "network.icmp.triage",
@@ -139,10 +141,24 @@ class InvestigationSkillsV2Tests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         result = json.loads(completed.stdout)
         self.assertTrue(result["passed"])
-        self.assertEqual(result["candidate_count"], 7)
-        self.assertEqual(result["passed_count"], 8)
+        self.assertEqual(result["candidate_count"], 9)
+        self.assertEqual(result["passed_count"], 10)
         self.assertFalse(result["query_execution"])
         self.assertFalse(result["candidate_activation"])
+
+    def test_foundational_alert_and_flow_cases_are_in_offline_replay(self):
+        fixtures = json.loads(
+            (CANDIDATE.parent / "offline-replay-fixtures.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        case_ids = {item["id"] for item in fixtures["cases"]}
+        self.assertTrue(
+            {
+                "grouped-alert-context-soc",
+                "flow-window-expansion-ir",
+            }.issubset(case_ids)
+        )
 
     def test_synthetic_catalog_cannot_mask_governed_wrapper_field_gap(self):
         with tempfile.TemporaryDirectory() as raw_root:
