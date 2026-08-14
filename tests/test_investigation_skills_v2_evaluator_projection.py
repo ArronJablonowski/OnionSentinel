@@ -90,6 +90,8 @@ class InvestigationSkillsV2EvaluatorProjectionTests(unittest.TestCase):
             "_load_fixture",
             "_load_candidates",
             "_shadow_records",
+            "load_pcap_field_catalog",
+            "load_ac_hunter_projection_catalog",
             "_field_catalogs",
             "_template_catalog",
             "_mapping_gaps",
@@ -328,10 +330,75 @@ class InvestigationSkillsV2EvaluatorProjectionTests(unittest.TestCase):
                 "candidate_activation": False,
                 "field_catalog": {
                     "security_onion": "governed-wrapper-pack-projections",
-                    "pcap_derived": "synthetic-contract-only",
+                    "pcap_derived": "repository-derived-policy-projections",
+                    "ac_hunter": "repository-normalized-snapshot-projection",
                 },
             },
         )
+
+    def test_repository_backed_source_catalogs_are_exact_and_not_fixture_owned(self) -> None:
+        pcap = EVALUATOR.load_pcap_field_catalog(EVALUATOR.DEFAULT_PCAP_POLICY)
+        self.assertEqual(
+            pcap["coverage"],
+            {
+                "complete", "decode_percent", "decoded_records", "duration_seconds",
+                "first_timestamp_epoch", "last_timestamp_epoch", "malformed_records",
+                "ok", "pcap_files_processed", "pcap_files_total",
+                "records_aggregated", "total_bytes", "total_records",
+                "undecoded_records",
+            },
+        )
+        self.assertTrue(
+            {"source_ip", "destination_ip", "duration", "uid"}.issubset(
+                pcap["connections"]
+            )
+        )
+        ac_hunter = EVALUATOR.load_ac_hunter_projection_catalog(
+            EVALUATOR.DEFAULT_AC_HUNTER_PROJECTION
+        )
+        self.assertEqual(
+            ac_hunter,
+            {
+                "analyst_notes", "cache", "correlated_hosts", "counts", "dataset",
+                "disclaimer", "last_pulled_at", "metadata", "modules", "ok", "schema",
+                "time_range", "top_hosts", "top_risky_internal_hosts", "verdict_counts",
+                "version",
+            },
+        )
+
+    def test_repository_templates_cannot_be_masked_by_synthetic_fixture_fields(self) -> None:
+        fixture = {
+            "pcap-derived": ["synthetic.only"],
+            "ac-hunter": ["synthetic.only"],
+        }
+        pcap = {"connections": {"source_ip"}}
+        ac_hunter = {"metadata"}
+        wrapper = {"osquery_history": {"host.name"}}
+        cases = [
+            (
+                {"id": "historical-osquery-context", "backend": "osquery-historical"},
+                {"host.name"},
+                "security-onion-wrapper:osquery_history",
+            ),
+            (
+                {"id": "derived-pcap-connections", "backend": "pcap-derived"},
+                {"source_ip"},
+                "pcap-derived-policy:connections",
+            ),
+            (
+                {"id": "ac-hunter-snapshot-context", "backend": "ac-hunter"},
+                {"metadata"},
+                "ac-hunter-projection:compose_collection",
+            ),
+        ]
+        for template, expected_fields, provenance in cases:
+            with self.subTest(template=template["id"]):
+                self.assertEqual(
+                    EVALUATOR._template_catalog(
+                        template, fixture, wrapper, pcap, ac_hunter
+                    ),
+                    (expected_fields, provenance),
+                )
 
     def test_invalid_case_stops_before_resolver_and_preserves_prior_call_count(self) -> None:
         fixture = self.valid_fixture(cases=[

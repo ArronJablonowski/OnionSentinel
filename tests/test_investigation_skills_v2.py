@@ -66,8 +66,11 @@ class InvestigationSkillsV2Tests(unittest.TestCase):
                 "source.suricata.rule-intent",
                 "source.elastic.query-dsl",
                 "source.elastic.kql-equivalent",
+                "source.osquery.historical",
+                "source.pcap.derived-evidence",
                 "source.security-onion.oql-equivalent",
                 "source.zeek.correlation",
+                "context.ac-hunter.behavioral-review",
             },
         )
         for manifest in manifests:
@@ -149,8 +152,8 @@ class InvestigationSkillsV2Tests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         result = json.loads(completed.stdout)
         self.assertTrue(result["passed"])
-        self.assertEqual(result["candidate_count"], 17)
-        self.assertEqual(result["passed_count"], 18)
+        self.assertEqual(result["candidate_count"], 20)
+        self.assertEqual(result["passed_count"], 21)
         self.assertFalse(result["query_execution"])
         self.assertFalse(result["candidate_activation"])
 
@@ -195,6 +198,53 @@ class InvestigationSkillsV2Tests(unittest.TestCase):
                     {item["url"] for item in manifest["references"]},
                 )
                 self.assertFalse(manifest["safety"]["active_operation"])
+
+    def test_direct_source_candidates_preserve_read_only_source_semantics(self):
+        expected = {
+            "source.osquery.historical": {
+                "capability": "security-onion.events.query",
+                "backend": "osquery-historical",
+                "marker": "historical",
+                "forbidden": ("live query", "execute sql"),
+            },
+            "source.pcap.derived-evidence": {
+                "capability": "pcap.derived.query",
+                "backend": "pcap-derived",
+                "marker": "already-derived",
+                "forbidden": ("new capture", "raw pcap", "parser"),
+            },
+            "context.ac-hunter.behavioral-review": {
+                "capability": "reports.read",
+                "backend": "ac-hunter",
+                "marker": "prioritize",
+                "forbidden": ("malware proof", "trigger collection", "relay"),
+            },
+        }
+        manifests = {
+            manifest["id"]: manifest
+            for manifest in (
+                SKILLS.load_manifest(path)
+                for path in sorted(CANDIDATE.parent.glob("*.candidate.json"))
+            )
+        }
+        for skill_id, contract in expected.items():
+            with self.subTest(skill=skill_id):
+                manifest = manifests[skill_id]
+                self.assertEqual(manifest["capabilities"], [contract["capability"]])
+                self.assertTrue(manifest["safety"]["read_only"])
+                self.assertFalse(manifest["safety"]["active_operation"])
+                self.assertIn(contract["marker"], json.dumps(manifest).lower())
+                self.assertEqual(
+                    {item["backend"] for item in manifest["query_templates"]},
+                    {contract["backend"]},
+                )
+                combined = " ".join(
+                    manifest["confidence_limiters"]
+                    + manifest["stop_conditions"]
+                    + manifest["alternative_hypotheses"]
+                ).lower()
+                for forbidden in contract["forbidden"]:
+                    self.assertIn(forbidden, combined)
 
     def test_foundational_alert_and_flow_cases_are_in_offline_replay(self):
         fixtures = json.loads(
