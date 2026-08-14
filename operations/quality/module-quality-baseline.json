@@ -1,9 +1,6 @@
 {
   "files": {},
   "functions": {
-    "relay/app/ac_hunter_broker.py::_load_config": {
-      "max_complexity": 22
-    },
     "relay/app/incident_evidence_broker.py::_validate_receipt": {
       "max_complexity": 37
     },
@@ -39,5 +36,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "ab540a443780c58bb0c54f7b0cf71179e6987bd6"
+  "source_release": "3b2c536b9c40523c43a5781cf104265359ecfb3a"
 }
