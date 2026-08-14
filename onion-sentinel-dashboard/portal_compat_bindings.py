@@ -363,23 +363,38 @@ _BINDINGS = (
 )
 
 
+_RUNTIME_MARKERS = (
+    "_FOUNDATION_RUNTIME", "_ACCESS_RUNTIME", "_SETTINGS_RUNTIME",
+    "_ADMIN_RUNTIME", "_CATALOG_RUNTIME", "_OPERATIONAL_RUNTIME",
+    "_DASHBOARD_RUNTIME", "_SOC_DETAIL_RUNTIME", "_SOC_PCAP_RUNTIME",
+    "_WRITE_RUNTIME", "_SOC_STATUS_RUNTIME", "_LLM_RUNTIME",
+    "_SOC_CORE_RUNTIME", "_SOC_RECORD_RUNTIME",
+    "_INCIDENT_ACTION_RUNTIME", "_INCIDENT_READ_RUNTIME",
+    "_SOC_QUERY_RUNTIME", "_DELIVERY_RUNTIME",
+)
+
+
 def bind(r):
     """Install compatibility delegates and per-portal mutable runtime state."""
+    _bind_delegates(r)
+    _bind_runtime_markers(r)
+    _initialize_portal_state(r)
+    _initialize_soc_constants(r)
+    _initialize_portal_callbacks(r)
+
+
+def _bind_delegates(r):
     for public_name, module_name, target_name in _BINDINGS:
         module = getattr(r, module_name)
         setattr(r, public_name, r.partial(getattr(module, target_name), r))
 
-    for marker in (
-        "_FOUNDATION_RUNTIME", "_ACCESS_RUNTIME", "_SETTINGS_RUNTIME",
-        "_ADMIN_RUNTIME", "_CATALOG_RUNTIME", "_OPERATIONAL_RUNTIME",
-        "_DASHBOARD_RUNTIME", "_SOC_DETAIL_RUNTIME", "_SOC_PCAP_RUNTIME",
-        "_WRITE_RUNTIME", "_SOC_STATUS_RUNTIME", "_LLM_RUNTIME",
-        "_SOC_CORE_RUNTIME", "_SOC_RECORD_RUNTIME",
-        "_INCIDENT_ACTION_RUNTIME", "_INCIDENT_READ_RUNTIME",
-        "_SOC_QUERY_RUNTIME", "_DELIVERY_RUNTIME",
-    ):
+
+def _bind_runtime_markers(r):
+    for marker in _RUNTIME_MARKERS:
         setattr(r, marker, r)
 
+
+def _initialize_portal_state(r):
     r.SOC_AI_SETTINGS_LOCK = r.threading.RLock()
     r.ADMIN_SERVICE_LABELS = {
         "macs-fan-control": "Macs Fan Control", "codex": "Codex app",
@@ -417,6 +432,9 @@ def bind(r):
     }
     r.LLM_ANALYSIS_COMBINED_HISTORY_LIMIT = 5000
     r.LLM_AGENT_ACTIVITY_CACHE = r.ResponseCache(3.0, max_entries=1, lock_stripes=1)
+
+
+def _initialize_soc_constants(r):
     r.SOC_ALERT_SORT_SQL = {
         "count": "COALESCE(total_seen_count, raw_alert_count, seen_count, 0)",
         "severity": "CASE lower(coalesce(triage_level, severity_label, 'informational')) WHEN 'critical' THEN 5 WHEN 'high' THEN 4 WHEN 'medium' THEN 3 WHEN 'low' THEN 2 WHEN 'informational' THEN 1 WHEN 'info' THEN 1 ELSE 0 END",
@@ -441,6 +459,9 @@ def bind(r):
         "false_negative": "False Negative", "duplicate": "Duplicate",
         "informational_no_action": "Informational", "inconclusive": "Inconclusive",
     }
+
+
+def _initialize_portal_callbacks(r):
     r.INCIDENT_ROW_CALLBACKS = r.IncidentRowCallbacks(
         epoch=r._soc_review_epoch, embedded_reviewer=r._soc_embedded_reviewer,
         final_review_status=r._soc_review_final_status,
