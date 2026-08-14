@@ -273,12 +273,8 @@ def fetch_enrichment_cache_runtime(
     return cache if isinstance(cache, dict) else None
 
 
-def load_enrichment_cache_metrics(
-    db_path: Path,
-    runtime_metrics: Optional[dict[str, Any]] = None,
-    fetch_runtime: bool = True,
-) -> EnrichmentCacheMetrics:
-    """Load sanitized cache telemetry without returning indicators or evidence."""
+def _durable_enrichment_cache_metrics(db_path: Path) -> dict[str, Any]:
+    """Load the sanitized durable enrichment-cache inventory."""
     durable: dict[str, Any] = {}
     path = Path(db_path)
     if path.is_file():
@@ -312,6 +308,16 @@ def load_enrichment_cache_metrics(
                         }
         except (OSError, sqlite3.Error):
             durable = {}
+    return durable
+
+
+def load_enrichment_cache_metrics(
+    db_path: Path,
+    runtime_metrics: Optional[dict[str, Any]] = None,
+    fetch_runtime: bool = True,
+) -> EnrichmentCacheMetrics:
+    """Load sanitized cache telemetry without returning indicators or evidence."""
+    durable = _durable_enrichment_cache_metrics(db_path)
 
     runtime = runtime_metrics
     if runtime is None and fetch_runtime:
