@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from . import primitives
+from . import ledger, primitives
 
 
 @dataclass(frozen=True)
@@ -266,6 +266,11 @@ def round_audit(
         "trusted_queries": trusted,
         "tool_call_bindings": tool_call_bindings(
             round_result, policy=policy, dependencies=dependencies
+        ),
+        "query_ledger": ledger.entries(
+            round_result,
+            digest_json=dependencies.digest_json,
+            maximum_entries=policy.maximum_queries_per_round * 2,
         ),
         "broker_audit": round_result.get("audit") or [],
         "request_normalizations": _normalizations(

@@ -203,6 +203,7 @@ class QueryAuditPackageTests(unittest.TestCase):
         self.assertEqual(record["results"][0]["query_digest"], "a" * 64)
         self.assertEqual(record["broker_audit"], [{"event": "broker_admission"}])
         self.assertEqual(record["tool_call_bindings"][0]["query_id"], "q-0")
+        self.assertEqual(record["query_ledger"][0]["query_id"], "q-0")
 
 
 if __name__ == "__main__":

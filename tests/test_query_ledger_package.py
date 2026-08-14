@@ -116,7 +116,7 @@ class QueryLedgerPackageTests(unittest.TestCase):
                 "executed_window": normalized["parameters"]["window"],
             }
         }
-        audit = trusted(returned=25, truncated=True)
+        audit = trusted(status="partial", returned=25, truncated=True)
 
         [entry] = self.entries({
             "round": 1,
@@ -165,6 +165,8 @@ class QueryLedgerPackageTests(unittest.TestCase):
         )
         self.assertEqual([entry["result_count"] for entry in entries], [None] * 3)
         self.assertEqual([entry["truncated"] for entry in entries], [None] * 3)
+        self.assertIsNone(entries[0]["actual_time_range"])
+        self.assertTrue(all(len(entry["query_digest"]) == 64 for entry in entries))
         self.assertTrue(all(len(entry["result_digest"]) == 64 for entry in entries))
 
     def test_grouped_result_binds_each_query_to_its_own_collector_audit(self) -> None:

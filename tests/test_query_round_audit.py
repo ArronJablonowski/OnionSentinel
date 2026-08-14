@@ -57,6 +57,7 @@ class QueryRoundAuditCharacterizationTests(unittest.TestCase):
         self.assertEqual(record["results"], [])
         self.assertEqual(record["trusted_queries"], [])
         self.assertEqual(record["tool_call_bindings"], [])
+        self.assertEqual(record["query_ledger"], [])
         self.assertIs(record["broker_audit"], broker_audit)
         self.assertEqual(record["request_normalizations"], [])
 
@@ -127,11 +128,14 @@ class QueryRoundAuditCharacterizationTests(unittest.TestCase):
             "results",
             "trusted_queries",
             "tool_call_bindings",
+            "query_ledger",
             "broker_audit",
             "request_normalizations",
         ])
         self.assertEqual(calls, [
             ("resolve", result, "q-1"),
+            ("digest", request),
+            ("digest", result),
             ("digest", request),
             ("digest", result),
         ])
