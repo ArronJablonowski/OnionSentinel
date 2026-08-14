@@ -586,6 +586,125 @@ class SoftwareInventoryRelayTests(unittest.TestCase):
                 network_request,
             )
 
+    def test_operating_system_rejection_precedence_and_messages_are_exact(self) -> None:
+        endpoint_request = self.request(source="osquery_apps")
+        endpoint_response = self.response(
+            endpoint_request,
+            records=[self.record("osquery_apps")],
+        )
+        cases = (
+            (
+                {"operating_system_type": 1},
+                "record.operating_system_type must be a string",
+            ),
+            (
+                {"operating_system_source": "untrusted"},
+                "endpoint operating-system provenance failed validation",
+            ),
+            (
+                {
+                    "operating_system_type": "",
+                    "operating_system_version": "",
+                },
+                "empty endpoint operating-system evidence claims provenance",
+            ),
+        )
+        for changes, message in cases:
+            mutated = json.loads(json.dumps(endpoint_response))
+            mutated["records"][0].update(changes)
+            with self.subTest(message=message, changes=changes):
+                with self.assertRaisesRegex(ValueError, message):
+                    self.broker.validate_software_response(
+                        mutated,
+                        endpoint_request,
+                    )
+
+        passive_request = self.request(source="zeek_software")
+        passive_response = self.response(
+            passive_request,
+            records=[self.record("zeek_software")],
+        )
+        passive_response["records"][0]["operating_system_confidence"] = "high"
+        with self.assertRaisesRegex(
+            ValueError,
+            "passive software evidence cannot assert an exact operating system",
+        ):
+            self.broker.validate_software_response(
+                passive_response,
+                passive_request,
+            )
+
+        legacy = self.record("zeek_software")
+        for field in (
+            "operating_system_type",
+            "operating_system_version",
+            "operating_system_source",
+            "operating_system_confidence",
+        ):
+            legacy.pop(field)
+        self.broker.validate_software_response(
+            self.response(passive_request, records=[legacy]),
+            passive_request,
+        )
+
+    def test_response_page_rejection_precedence_and_messages_are_exact(self) -> None:
+        request = self.request(source="zeek_software", page_size=1)
+        response = self.response(
+            request,
+            records=[self.record("zeek_software")],
+        )
+        count_cases = (
+            {"records": {}, "returned": 0},
+            {"returned": True},
+            {"returned": 0},
+            {"returned": 2},
+        )
+        for changes in count_cases:
+            mutated = json.loads(json.dumps(response))
+            mutated.update(changes)
+            with self.subTest(count_changes=changes):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "software inventory response count failed validation",
+                ):
+                    self.broker.validate_software_response(mutated, request)
+
+        pagination_cases = (
+            {"complete": 1},
+            {"truncated": 0},
+            {"complete": True, "truncated": True},
+            {"complete": False, "truncated": False},
+        )
+        for changes in pagination_cases:
+            mutated = json.loads(json.dumps(response))
+            mutated.update(changes)
+            with self.subTest(page_changes=changes):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "software inventory pagination state failed validation",
+                ):
+                    self.broker.validate_software_response(mutated, request)
+
+        complete_cursor = json.loads(json.dumps(response))
+        complete_cursor["after"] = {
+            "asset": "10.66.6.10",
+            "product": "Example App",
+            "version": "1.2.3",
+        }
+        with self.assertRaisesRegex(
+            ValueError,
+            "complete software inventory response retained a cursor",
+        ):
+            self.broker.validate_software_response(complete_cursor, request)
+
+        truncated = json.loads(json.dumps(response))
+        truncated.update(complete=False, truncated=True, after=None)
+        with self.assertRaisesRegex(
+            ValueError,
+            "truncated software inventory response omitted its cursor",
+        ):
+            self.broker.validate_software_response(truncated, request)
+
     def test_relay_rejects_inconsistent_pagination_and_semantic_tiers(self) -> None:
         request = self.request(source="zeek_software")
         response = self.response(

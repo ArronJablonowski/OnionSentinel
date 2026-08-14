@@ -606,9 +606,16 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
         software_phases = {
             "_validate_record_identity",
             "_validate_asset_reference",
+            "_validate_operating_system_fields",
+            "_validate_endpoint_operating_system",
+            "_validate_passive_operating_system",
             "_validate_operating_system",
             "_validate_record_observations",
             "_validate_response_identity",
+            "_response_records",
+            "_validate_pagination_state",
+            "_validate_response_cursor",
+            "_validate_response_records",
             "_validate_response_page",
             "_validate_query_audit",
         }
@@ -624,6 +631,8 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
             (broker, "_validate_receipt"),
             (broker, "main"),
             (dhcp, "validate_dhcp_request"),
+            (software, "_validate_operating_system"),
+            (software, "_validate_response_page"),
             (software, "_validate_software_record"),
             (software, "validate_software_response"),
         ):
