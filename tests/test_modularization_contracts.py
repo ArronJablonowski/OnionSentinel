@@ -406,6 +406,26 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
 
         self.assertTrue(expected <= top_level_function_names(core))
 
+    def test_relay_alert_delivery_has_bounded_transport_phases(self) -> None:
+        delivery = ROOT / "relay" / "app" / "alert_delivery.py"
+        expected = {
+            "_ssh_intake_identity",
+            "_ssh_intake_command",
+            "_run_ssh_alert_batch",
+            "_validate_ssh_batch_response",
+        }
+
+        self.assertTrue(expected <= top_level_function_names(delivery))
+        for name in ("_ssh_command", "deliver_ssh_batch"):
+            function = top_level_function(delivery, name)
+            with self.subTest(name=name):
+                self.assertLessEqual(
+                    (function.end_lineno or function.lineno)
+                    - function.lineno
+                    + 1,
+                    50,
+                )
+
     def test_relay_health_wrapper_supports_isolated_file_loader_import(self) -> None:
         wrapper = ROOT / "relay" / "app" / "relay_health_wrapper.py"
         script = (
