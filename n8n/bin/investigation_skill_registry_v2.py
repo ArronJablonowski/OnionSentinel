@@ -393,6 +393,7 @@ def _relation_rejections(
     selected_digests = {
         item["manifest"]["artifact_digest"] for item in selected
     }
+    conflicted_digests = _conflicted_digests(selected, selected_digests)
     rejected: list[dict[str, str]] = []
     admitted: list[dict[str, Any]] = []
     for item in selected:
@@ -400,13 +401,25 @@ def _relation_rejections(
         reason = ""
         if not set(item["dependencies"]).issubset(selected_digests):
             reason = "dependency_unavailable"
-        elif set(item["conflicts"]) & selected_digests:
+        elif digest in conflicted_digests:
             reason = "skill_conflict"
         if reason:
             rejected.append({"id": item["manifest"]["id"], "reason": reason})
         else:
             admitted.append(item)
     return admitted, rejected
+
+
+def _conflicted_digests(
+    selected: list[dict[str, Any]], selected_digests: set[str],
+) -> set[str]:
+    conflicted: set[str] = set()
+    for item in selected:
+        peers = set(item["conflicts"]) & selected_digests
+        if peers:
+            conflicted.add(item["manifest"]["artifact_digest"])
+            conflicted.update(peers)
+    return conflicted
 
 
 def _aggregate_budget(records: list[dict[str, Any]]) -> dict[str, int]:
