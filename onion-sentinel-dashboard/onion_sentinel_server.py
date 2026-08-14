@@ -288,12 +288,18 @@ def is_controlled_evaluation_dispatch(path: str) -> bool:
 def controlled_alert_store_readiness() -> tuple[bool, dict[str, object]]:
     """Verify that the configured downstream is this evaluation's store."""
     origin = urlparse(runtime.SOC_ALERT_STORE_API_URL)
-    expected_port = origin.port
     try:
         health = runtime.alert_store_get_json("/health", timeout=1.0)
     except Exception:
         return False, {"status": "unavailable"}
-    ready = bool(
+    ready = _controlled_alert_store_identity_matches(health, origin.port)
+    return ready, _controlled_alert_store_projection(health, ready)
+
+
+def _controlled_alert_store_identity_matches(
+    health: dict[str, object], expected_port: int | None
+) -> bool:
+    return bool(
         health.get("service") == "onion-sentinel-alert-store"
         and health.get("controlled_evaluation") is True
         and health.get("runtime_mode") == "controlled-evaluation"
@@ -302,7 +308,12 @@ def controlled_alert_store_readiness() -> tuple[bool, dict[str, object]]:
         and health.get("listen_port") == expected_port
         and health.get("accepting_requests") is True
     )
-    return ready, {
+
+
+def _controlled_alert_store_projection(
+    health: dict[str, object], ready: bool
+) -> dict[str, object]:
+    return {
         "status": "ready" if ready else "identity_mismatch",
         "service": str(health.get("service") or ""),
         "controlled_evaluation": (
