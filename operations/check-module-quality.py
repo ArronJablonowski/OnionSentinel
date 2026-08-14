@@ -550,6 +550,22 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _print_report(report: dict[str, Any], public_report: dict[str, Any], json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(public_report, indent=2, sort_keys=True))
+    elif report["ok"]:
+        print(
+            "module quality gate passed: "
+            f"{report['files_scanned']} files, "
+            f"{report['functions_scanned']} Python functions, "
+            f"{len(report['warnings'])} ratcheting warnings"
+        )
+    else:
+        for item in report["failures"]:
+            measured = f" measured={item['measured']} allowed={item['allowed']}" if "measured" in item else ""
+            print(f"{item['kind']}: {item['name']}{measured}", file=sys.stderr)
+
+
 def main() -> int:
     args = parse_args()
     try:
@@ -571,19 +587,7 @@ def main() -> int:
                 )
             atomic_json(baseline_path, candidate)
         public_report = {key: value for key, value in report.items() if key != "metrics"}
-        if args.json:
-            print(json.dumps(public_report, indent=2, sort_keys=True))
-        elif report["ok"]:
-            print(
-                "module quality gate passed: "
-                f"{report['files_scanned']} files, "
-                f"{report['functions_scanned']} Python functions, "
-                f"{len(report['warnings'])} ratcheting warnings"
-            )
-        else:
-            for item in report["failures"]:
-                measured = f" measured={item['measured']} allowed={item['allowed']}" if "measured" in item else ""
-                print(f"{item['kind']}: {item['name']}{measured}", file=sys.stderr)
+        _print_report(report, public_report, args.json)
         return 0 if report["ok"] else 1
     except QualityConfigError as exc:
         print(f"module quality configuration error: {exc}", file=sys.stderr)
