@@ -3600,8 +3600,9 @@ receipt accounting, terminal auditing, and exit behavior.
 audited envelope admission, canonical request/response digests, correlation
 identity, byte ceilings, and read-only terminal audit-receipt validation; the
 broker retains thin compatibility wrappers for its historical private seams.
-`incident_evidence_dhcp.py` owns the DHCP discovery request,
-window, and result-size contract. `incident_evidence_software.py` owns Software
+`incident_evidence_dhcp.py` owns the DHCP discovery request through bounded
+root/field, fixed-operation, window-shape, timestamp/range, and result-size
+admission phases. `incident_evidence_software.py` owns Software
 Inventory request, cursor, record, operating-system provenance, pagination,
 response, and query-audit validation. The broker re-exports both historical
 contract surfaces, and the Pi installer copies both inward owners before the
