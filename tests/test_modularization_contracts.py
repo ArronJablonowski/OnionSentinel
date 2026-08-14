@@ -234,7 +234,7 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
 
         self.assertTrue(policy.is_file())
         self.assertTrue(expected <= top_level_symbols(policy))
-        self.assertTrue(expected.isdisjoint(top_level_function_names(transport)))
+        self.assertTrue(expected.isdisjoint(top_level_symbols(transport)))
         self.assertEqual(
             undefined_global_names(policy.read_text(encoding="utf-8"), str(policy)),
             set(),
