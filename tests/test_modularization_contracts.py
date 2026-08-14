@@ -732,6 +732,30 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_pi_relay_python_installer_and_contract_are_complete(self) -> None:
+        installer = (
+            ROOT / "relay" / "bin" / "install-pi-relay.sh"
+        ).read_text(encoding="utf-8")
+        marker = '"$REPO_DIR/relay/app/'
+        installed = {
+            "relay/app/" + line.split(marker, 1)[1].split('"', 1)[0]
+            for line in installer.splitlines()
+            if marker in line and ".py" in line
+        }
+        contracted = {
+            entry["path"]: entry["runtime_path"]
+            for entry in load_contract()["python_entry_points"]
+            if entry["deployment"] == "relay-direct-copy"
+        }
+
+        self.assertEqual(set(contracted), installed)
+        for source_path in sorted(installed):
+            with self.subTest(source_path=source_path):
+                self.assertEqual(
+                    contracted[source_path],
+                    "/opt/so-alert-relay/app/" + Path(source_path).name,
+                )
+
     def test_extracted_harness_modules_have_no_undefined_globals(self) -> None:
         for path in sorted((ROOT / "n8n" / "bin").glob("harness_*.py")):
             with self.subTest(path=path.name):
