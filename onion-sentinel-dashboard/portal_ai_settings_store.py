@@ -212,15 +212,19 @@ def save_soc_agent_model(
             return False, normalized
         saved, response = write_soc_ai_settings(sources, normalized)
         if saved:
-            response.update({
-                "message": f"Model assignment saved for {role}.",
-                "role": role,
-                "model_route": normalized["agent_models"][role],
-                "second_opinion_model_route": (
-                    normalized["agent_second_opinion_models"][role]
-                ),
-                "adjudicator_model_route": (
-                    normalized["agent_adjudicator_models"][role]
-                ),
-            })
+            _agent_assignment_response(response, normalized, role)
         return saved, response
+
+
+def _agent_assignment_response(
+    response: dict, normalized: dict, role: str
+) -> None:
+    response.update({
+        "message": f"Model assignment saved for {role}.",
+        "role": role,
+        "model_route": normalized["agent_models"][role],
+        "second_opinion_model_route": (
+            normalized["agent_second_opinion_models"][role]
+        ),
+        "adjudicator_model_route": normalized["agent_adjudicator_models"][role],
+    })
