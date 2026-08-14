@@ -47,6 +47,142 @@ def baseline(files=None, functions=None):
 
 
 class ModuleQualityGateTests(unittest.TestCase):
+    def test_dependency_graph_uses_longest_unique_alias_and_skips_self(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src/pkg").mkdir(parents=True)
+            (root / "other").mkdir()
+            (root / "src/consumer.py").write_text(
+                "import pkg.sub.deep\n"
+                "import shared\n"
+                "import consumer\n"
+                "from .pkg import item\n",
+                encoding="utf-8",
+            )
+            (root / "src/pkg.py").write_text("value = 1\n", encoding="utf-8")
+            (root / "src/pkg/sub.py").write_text("value = 2\n", encoding="utf-8")
+            (root / "src/shared.py").write_text("value = 3\n", encoding="utf-8")
+            (root / "other/shared.py").write_text("value = 4\n", encoding="utf-8")
+            (root / "src/ignored.js").write_text("value = 5;\n", encoding="utf-8")
+            names = [
+                "src/consumer.py",
+                "src/pkg.py",
+                "src/pkg/sub.py",
+                "src/shared.py",
+                "other/shared.py",
+                "src/ignored.js",
+            ]
+            configured = policy(python_import_roots=["src", "other"])
+
+            graph = quality.dependency_graph(root, iter(names), configured)
+            second = quality.dependency_graph(root, iter(names), configured)
+
+        self.assertEqual(
+            list(graph),
+            [
+                "src/consumer.py",
+                "src/pkg.py",
+                "src/pkg/sub.py",
+                "src/shared.py",
+                "other/shared.py",
+            ],
+        )
+        self.assertEqual(
+            graph,
+            {
+                "src/consumer.py": {"src/pkg/sub.py", "src/pkg.py"},
+                "src/pkg.py": set(),
+                "src/pkg/sub.py": set(),
+                "src/shared.py": set(),
+                "other/shared.py": set(),
+            },
+        )
+        self.assertEqual(graph, second)
+        for name in graph:
+            self.assertIsNot(graph[name], second[name])
+
+    def test_dependency_graph_preserves_composition_and_failure_order(self) -> None:
+        calls = []
+
+        class SourceNames:
+            def __iter__(self):
+                calls.append(("source_names", "iter"))
+                yield "a.py"
+                yield "ignored.js"
+                yield "b.py"
+
+        class SourcePath:
+            def __init__(self, name):
+                self.name = name
+
+            def read_text(self, *, encoding):
+                calls.append(("read_text", self.name, encoding))
+                return "source:" + self.name
+
+        class Root:
+            def __truediv__(self, name):
+                calls.append(("join", name))
+                return SourcePath(name)
+
+        trees = {"a.py": object(), "b.py": object()}
+
+        def aliases(path, roots):
+            calls.append(("module_aliases", path, tuple(roots)))
+            return {"alpha" if path == "a.py" else "beta"}
+
+        def parse(source, *, filename):
+            calls.append(("parse", source, filename))
+            return trees[filename]
+
+        def imports(tree, current):
+            name = "a.py" if tree is trees["a.py"] else "b.py"
+            calls.append(("imported_names", name, tuple(sorted(current))))
+            return ["beta.deep", "alpha"] if name == "a.py" else []
+
+        with mock.patch.object(quality, "module_aliases", side_effect=aliases), \
+             mock.patch.object(quality.ast, "parse", side_effect=parse), \
+             mock.patch.object(quality, "imported_names", side_effect=imports):
+            graph = quality.dependency_graph(
+                Root(),
+                SourceNames(),
+                {"python_import_roots": ["root"]},
+            )
+
+        self.assertEqual(graph, {"a.py": {"b.py"}, "b.py": set()})
+        self.assertEqual(
+            calls,
+            [
+                ("source_names", "iter"),
+                ("module_aliases", "a.py", ("root",)),
+                ("module_aliases", "b.py", ("root",)),
+                ("join", "a.py"),
+                ("read_text", "a.py", "utf-8"),
+                ("parse", "source:a.py", "a.py"),
+                ("module_aliases", "a.py", ("root",)),
+                ("imported_names", "a.py", ("alpha",)),
+                ("join", "b.py"),
+                ("read_text", "b.py", "utf-8"),
+                ("parse", "source:b.py", "b.py"),
+                ("module_aliases", "b.py", ("root",)),
+                ("imported_names", "b.py", ("beta",)),
+            ],
+        )
+
+        calls.clear()
+        with mock.patch.object(
+            quality,
+            "string_list",
+            side_effect=RuntimeError("roots-stop"),
+        ), mock.patch.object(quality, "module_aliases") as alias_mock:
+            with self.assertRaisesRegex(RuntimeError, "roots-stop"):
+                quality.dependency_graph(
+                    Root(),
+                    SourceNames(),
+                    {"python_import_roots": ["root"]},
+                )
+        self.assertEqual(calls, [("source_names", "iter")])
+        alias_mock.assert_not_called()
+
     def test_metric_issues_preserves_classification_and_order(self) -> None:
         configured = policy()
         metrics = {
