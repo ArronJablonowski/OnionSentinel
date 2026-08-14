@@ -65,25 +65,33 @@ def active_llm_record_paths(directory: Path, limit: int) -> list[Path]:
     return [item[2] for item in sorted(newest, reverse=True)]
 
 
+def _normalized_runner_pid(runner_pid: object) -> int:
+    try:
+        return int(str(runner_pid or "").strip())
+    except (TypeError, ValueError):
+        return 0
+
+
+def _runner_pid_active(expected_pid: int, commands: list[str]) -> bool:
+    for command in commands:
+        parts = command.strip().split(maxsplit=1)
+        if (
+            len(parts) == 2
+            and parts[0] == str(expected_pid)
+            and "run-local-ai-analysis.py" in parts[1]
+        ):
+            return True
+    return False
+
+
 def llm_analysis_process_active(
     prompt_package: str,
     commands: list[str],
     runner_pid: object = None,
 ) -> bool:
-    try:
-        expected_pid = int(str(runner_pid or "").strip())
-    except (TypeError, ValueError):
-        expected_pid = 0
+    expected_pid = _normalized_runner_pid(runner_pid)
     if expected_pid > 0:
-        for command in commands:
-            parts = command.strip().split(maxsplit=1)
-            if (
-                len(parts) == 2
-                and parts[0] == str(expected_pid)
-                and "run-local-ai-analysis.py" in parts[1]
-            ):
-                return True
-        return False
+        return _runner_pid_active(expected_pid, commands)
     if prompt_package:
         return any(
             "run-local-ai-analysis.py" in command and prompt_package in command
