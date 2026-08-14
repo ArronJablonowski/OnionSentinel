@@ -245,17 +245,10 @@ def _field_result(expected: dict[str, Any], actual: dict[str, Any], field: str) 
     }
 
 
-def evaluate_case(
-    runner: Any,
-    case: dict[str, Any],
-    detection_module: Any | None = None,
-) -> dict[str, Any]:
-    prompt_package = copy.deepcopy(case["prompt_package"])
-    rebuilt_validation = rebuild_detection_validation(case, detection_module)
-    if rebuilt_validation is not None:
-        prompt_package["detection_validation"] = rebuilt_validation
-    primary = normalize_with_runtime(runner, case["primary_response"], prompt_package)
-    expected = case["expected"]
+def _case_field_results(
+    expected: dict[str, Any],
+    primary: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], bool]:
     fields = {
         field: _field_result(expected, primary, field)
         for field in (*FACTORED_FIELDS, "detection_outcome")
@@ -267,6 +260,15 @@ def evaluate_case(
         if factor_results
         else bool(fields) and all(value["correct"] for value in fields.values())
     )
+    return fields, exact_factors
+
+
+def _reviewer_analysis(
+    runner: Any,
+    case: dict[str, Any],
+    prompt_package: dict[str, Any],
+    primary: dict[str, Any],
+) -> tuple[dict[str, Any] | None, Any | None]:
     reviewer = None
     comparison = None
     if isinstance(case.get("reviewer_response"), dict):
@@ -274,32 +276,61 @@ def evaluate_case(
         comparison_fn = getattr(runner, "compare_analysis_results", None)
         if callable(comparison_fn):
             comparison = comparison_fn(primary, reviewer)
+    return reviewer, comparison
+
+
+def _unsupported_evidence_refs(
+    case: dict[str, Any],
+    primary: dict[str, Any],
+) -> list[str]:
     evidence_used = primary.get("evidence_used") if isinstance(primary.get("evidence_used"), list) else []
     has_evidence_catalog = isinstance(case.get("allowed_evidence_refs"), list)
     allowed_refs = {
         str(item) for item in case.get("allowed_evidence_refs", [])
     } if has_evidence_catalog else set()
-    unsupported_refs = [
+    return [
         str(item)
         for item in evidence_used
         if has_evidence_catalog and str(item) not in allowed_refs
     ]
+
+
+def _risk_flags(
+    expected: dict[str, Any],
+    primary: dict[str, Any],
+) -> tuple[bool, bool]:
     expected_handling = str(expected.get("handling") or "")
     actual_handling = str(primary.get("handling") or "")
     expected_disposition = str(expected.get("activity_disposition") or "")
-    dangerous_dismissal = (
-        expected_handling in ACTIVE_HANDLING
-        and actual_handling not in ACTIVE_HANDLING
-    )
-    over_escalation = (
-        expected_disposition in LOW_RISK_DISPOSITIONS
-        and actual_handling in HIGH_RISK_HANDLING
-    )
+    dangerous_dismissal = expected_handling in ACTIVE_HANDLING and actual_handling not in ACTIVE_HANDLING
+    over_escalation = expected_disposition in LOW_RISK_DISPOSITIONS and actual_handling in HIGH_RISK_HANDLING
+    return dangerous_dismissal, over_escalation
+
+
+def _confidence_probability(primary: dict[str, Any]) -> float:
     confidence_score = primary.get("confidence_score")
     try:
-        probability_correct = min(1.0, max(0.0, float(confidence_score)))
+        return min(1.0, max(0.0, float(confidence_score)))
     except (TypeError, ValueError, OverflowError):
-        probability_correct = 0.0
+        return 0.0
+
+
+def evaluate_case(
+    runner: Any,
+    case: dict[str, Any],
+    detection_module: Any | None = None,
+) -> dict[str, Any]:
+    prompt_package = copy.deepcopy(case["prompt_package"])
+    rebuilt_validation = rebuild_detection_validation(case, detection_module)
+    if rebuilt_validation is not None:
+        prompt_package["detection_validation"] = rebuilt_validation
+    primary = normalize_with_runtime(runner, case["primary_response"], prompt_package)
+    expected = case["expected"]
+    fields, exact_factors = _case_field_results(expected, primary)
+    reviewer, comparison = _reviewer_analysis(runner, case, prompt_package, primary)
+    unsupported_refs = _unsupported_evidence_refs(case, primary)
+    dangerous_dismissal, over_escalation = _risk_flags(expected, primary)
+    probability_correct = _confidence_probability(primary)
     correctness_target = 1.0 if exact_factors else 0.0
     verdict_validation = (
         primary.get("_verdict_validation")
