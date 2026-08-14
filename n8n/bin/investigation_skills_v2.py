@@ -8,11 +8,13 @@ It never executes a query or grants a capability.
 """
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 from pathlib import Path
 import re
 from typing import Any, Iterable, Mapping
+from urllib.parse import urlsplit
 
 
 SCHEMA = "onion-sentinel-investigation-skill-manifest-v2"
@@ -40,6 +42,12 @@ REQUIRED_FIELDS = {
     "alternative_hypotheses", "stop_conditions", "confidence_limiters",
     "known_false_positive_patterns", "verification", "references",
 }
+RUNTIME_COMPATIBILITY = {
+    "harness_contract": "onion-sentinel-harness-job-envelope-v1",
+    "policy_schema": "onion-sentinel-investigation-harness-policy-v1",
+    "evidence_contract": "onion-sentinel-evidence-reference-contract-v1",
+}
+_COMPATIBILITY_VALUE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -80,6 +88,110 @@ def _validate_manifest_identity(raw: dict[str, Any]) -> None:
     claimed = str(raw.get("artifact_digest") or "")
     if not DIGEST_RE.fullmatch(claimed) or artifact_digest(raw) != claimed:
         raise ValueError("manifest artifact digest mismatch")
+
+
+def _timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) > 40:
+        return False
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+def _validate_manifest_lineage(raw: dict[str, Any]) -> None:
+    lineage = raw.get("lineage")
+    if not isinstance(lineage, dict) or set(lineage) != {
+        "source_revision", "predecessor_digest",
+    }:
+        raise ValueError("manifest lineage is invalid")
+    revision = lineage.get("source_revision")
+    predecessor = lineage.get("predecessor_digest")
+    if not isinstance(revision, str) or not re.fullmatch(r"[a-f0-9]{7,64}", revision):
+        raise ValueError("manifest lineage is invalid")
+    if predecessor != "" and (
+        not isinstance(predecessor, str) or not DIGEST_RE.fullmatch(predecessor)
+    ):
+        raise ValueError("manifest lineage is invalid")
+
+
+def _validate_manifest_compatibility(raw: dict[str, Any]) -> None:
+    compatibility = raw.get("compatibility")
+    if not isinstance(compatibility, dict) or set(compatibility) != set(
+        RUNTIME_COMPATIBILITY
+    ):
+        raise ValueError("manifest compatibility is invalid")
+    if any(
+        not isinstance(value, str) or not _COMPATIBILITY_VALUE_RE.fullmatch(value)
+        for value in compatibility.values()
+    ):
+        raise ValueError("manifest compatibility is invalid")
+
+
+def _validate_manifest_maintainer(raw: dict[str, Any]) -> None:
+    maintainer = raw.get("maintainer")
+    if not isinstance(maintainer, dict) or set(maintainer) != {
+        "owner", "reviewed_at", "reviewer",
+    }:
+        raise ValueError("manifest maintainer is invalid")
+    if any(
+        not isinstance(maintainer.get(key), str)
+        or not str(maintainer[key]).strip()
+        or len(str(maintainer[key])) > 100
+        for key in ("owner", "reviewer")
+    ) or not _timestamp(maintainer.get("reviewed_at")):
+        raise ValueError("manifest maintainer is invalid")
+
+
+def _validate_manifest_verification(raw: dict[str, Any]) -> None:
+    verification = raw.get("verification")
+    flags = {
+        "unit_tests", "independent_query_review", "adversarial_tests",
+        "human_approved",
+    }
+    if not isinstance(verification, dict) or set(verification) != flags | {
+        "replay_cases",
+    }:
+        raise ValueError("manifest verification is invalid")
+    replay_cases = verification.get("replay_cases")
+    if any(not isinstance(verification.get(key), bool) for key in flags) or (
+        not isinstance(replay_cases, int)
+        or isinstance(replay_cases, bool)
+        or replay_cases < 0
+    ):
+        raise ValueError("manifest verification is invalid")
+
+
+def _bounded_reference_text(value: Any, maximum: int) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and len(value) <= maximum
+
+
+def _https_reference_url(value: Any) -> bool:
+    parsed = urlsplit(value) if isinstance(value, str) else None
+    return bool(parsed and parsed.scheme == "https" and parsed.hostname)
+
+
+def _validate_reference(reference: Any) -> None:
+    fields = {"title", "url", "product_version", "retrieved_at"}
+    if not isinstance(reference, dict) or set(reference) != fields:
+        raise ValueError("manifest references are invalid")
+    valid = (
+        _bounded_reference_text(reference.get("title"), 200)
+        and _bounded_reference_text(reference.get("product_version"), 80)
+        and _https_reference_url(reference.get("url"))
+        and _timestamp(reference.get("retrieved_at"))
+    )
+    if not valid:
+        raise ValueError("manifest references are invalid")
+
+
+def _validate_manifest_references(raw: dict[str, Any]) -> None:
+    references = raw.get("references")
+    if not isinstance(references, list) or not references or len(references) > 64:
+        raise ValueError("manifest references are invalid")
+    for reference in references:
+        _validate_reference(reference)
 
 
 def _validate_manifest_access(raw: dict[str, Any]) -> None:
@@ -169,12 +281,17 @@ def _validate_manifest_output(raw: dict[str, Any]) -> None:
 def validate_manifest(raw: Any) -> dict[str, Any]:
     manifest = _validate_manifest_contract(raw)
     _validate_manifest_identity(manifest)
+    _validate_manifest_lineage(manifest)
+    _validate_manifest_compatibility(manifest)
+    _validate_manifest_maintainer(manifest)
     _validate_manifest_access(manifest)
     _validate_manifest_safety(manifest)
     _validate_manifest_budgets(manifest)
     _validate_manifest_match(manifest)
     _validate_manifest_templates(manifest)
     _validate_manifest_output(manifest)
+    _validate_manifest_verification(manifest)
+    _validate_manifest_references(manifest)
     return json.loads(json.dumps(raw))
 
 
@@ -261,6 +378,8 @@ def _admission_rejection(
     eligible, _ = promotion_eligible(validated, state)
     if not eligible:
         return {"id": identity, "reason": "promotion_gates_incomplete"}
+    if validated["compatibility"] != RUNTIME_COMPATIBILITY:
+        return {"id": identity, "reason": "compatibility_mismatch"}
     if normalized_role not in validated["roles"]:
         return {"id": identity, "reason": "role_mismatch"}
     dimensions = _context_dimensions(context)
@@ -284,7 +403,10 @@ def _resolve_record(
     )
     if rejection is not None:
         return None, rejection
-    selected = {key: validated[key] for key in ("id", "version", "artifact_digest")}
+    selected = {
+        **{key: validated[key] for key in ("id", "version", "artifact_digest")},
+        "selection_reason": "exact_match_capability_and_promotion_gates_satisfied",
+    }
     return selected, None
 
 
