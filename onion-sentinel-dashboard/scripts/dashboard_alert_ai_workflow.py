@@ -34,6 +34,12 @@ def is_test_alert_id(alert_id: str) -> bool:
     return alert_id.startswith(TEST_ALERT_PREFIXES)
 
 
+def _all_candidates_are_test_alerts(candidate_ids: list[str]) -> bool:
+    return bool(candidate_ids) and all(
+        is_test_alert_id(alert_id) for alert_id in candidate_ids
+    )
+
+
 def normalized_severity(value: object, fallback: str = "informational") -> str:
     """Normalize the supported informational alias without accepting unknowns."""
     normalized = str(value or fallback).strip().lower()
@@ -59,7 +65,7 @@ def row_is_ai_backlog_eligible(
 ) -> tuple[bool, str]:
     """Apply automatic analysis exclusions and the configured severity floor."""
     candidate_ids = candidate_alert_ids_for_row(row)
-    if candidate_ids and all(is_test_alert_id(alert_id) for alert_id in candidate_ids):
+    if _all_candidates_are_test_alerts(candidate_ids):
         return False, "Test/validation alert is intentionally excluded from automatic assigned-model analysis"
     status = str(row_value(row, "filter_status") or "accepted").strip().lower()
     if status not in AI_ELIGIBLE_FILTER_STATUSES:
