@@ -83,6 +83,13 @@ def _iso_timestamp(epoch: float) -> str:
 
 
 def _safe_env_values(home: Path) -> dict[str, str]:
+    raw = _safe_env_bytes(home)
+    if raw is None:
+        return {}
+    return _parse_safe_env_values(raw)
+
+
+def _safe_env_bytes(home: Path) -> bytes | None:
     path = home.expanduser() / "n8n-local" / ".env"
     try:
         metadata = path.lstat()
@@ -93,12 +100,16 @@ def _safe_env_values(home: Path) -> dict[str, str]:
             or stat.S_IMODE(metadata.st_mode) & 0o077
             or metadata.st_size > MAX_ENV_BYTES
         ):
-            return {}
+            return None
         raw = path.read_bytes()
     except OSError:
-        return {}
+        return None
     if len(raw) > MAX_ENV_BYTES:
-        return {}
+        return None
+    return raw
+
+
+def _parse_safe_env_values(raw: bytes) -> dict[str, str]:
     allowed = {
         "ALERT_STORE_APPLICATION_LOG_MAX_BYTES",
         "ALERT_STORE_APPLICATION_LOG_BACKUPS",
