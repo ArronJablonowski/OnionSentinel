@@ -3700,6 +3700,9 @@ PCAP/storage summary validation, persisted-state cleansing, and bounded
 human-readable summaries. Its bounded phases separate PCAP scalar admission
 from outcome/spool/capture details, storage sections from SMART and failure
 categories, and child diagnostic selection from safe stdout/stderr rendering.
+Persisted health-state sanitization separately owns the required suppression
+projection, optional timestamps and summaries, return-code and HTTP-status
+admission, and PCAP failure-latch fields while preserving the public sanitizer.
 
 `relay_health_application.py` owns bounded component subprocess probes,
 capture-protection recovery proof, failure debounce/recovery transitions, safe

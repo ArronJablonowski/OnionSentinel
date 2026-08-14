@@ -331,11 +331,9 @@ def safe_timestamp(value: object) -> str | None:
     return None
 
 
-def sanitize_health_state(value: object) -> dict:
-    """Keep only typed suppression state and scrub summaries from older releases."""
-    raw = value if isinstance(value, dict) else {}
+def _base_health_state(raw: dict) -> dict:
     status = raw.get("status")
-    state = {
+    return {
         "status": (
             status
             if isinstance(status, str)
@@ -349,6 +347,9 @@ def sanitize_health_state(value: object) -> dict:
         ),
         "failure_notification_sent": raw.get("failure_notification_sent") is True,
     }
+
+
+def _optional_health_timestamps(raw: dict, state: dict) -> None:
     for field in (
         "last_started_at",
         "last_pcap_unproven_at",
@@ -356,9 +357,15 @@ def sanitize_health_state(value: object) -> dict:
         timestamp = safe_timestamp(raw.get(field))
         if timestamp is not None:
             state[field] = timestamp
+
+
+def _optional_health_summaries(raw: dict, state: dict) -> None:
     for field in ("last_summary", "last_pcap_unproven_summary"):
         if field in raw:
             state[field] = sanitize_persisted_summary(raw.get(field))
+
+
+def _optional_health_returncode(raw: dict, state: dict) -> None:
     returncode = validated_int(
         raw.get("last_returncode"),
         minimum=-255,
@@ -366,6 +373,9 @@ def sanitize_health_state(value: object) -> dict:
     )
     if returncode is not None:
         state["last_returncode"] = returncode
+
+
+def _health_http_status(raw: dict) -> int | None:
     http_status = validated_int(
         raw.get("last_http_status"),
         minimum=100,
@@ -375,8 +385,10 @@ def sanitize_health_state(value: object) -> dict:
         http_status = parse_http_status(
             diagnostic_scan_text(raw.get("last_summary"))
         )
-    if http_status is not None:
-        state["last_http_status"] = http_status
+    return http_status
+
+
+def _optional_pcap_failure_state(raw: dict, state: dict) -> None:
     if isinstance(raw.get("pcap_failure_unresolved"), bool):
         state["pcap_failure_unresolved"] = raw["pcap_failure_unresolved"]
     unproven_reason = raw.get("last_pcap_unproven_reason")
@@ -388,6 +400,19 @@ def sanitize_health_state(value: object) -> dict:
         }
     ):
         state["last_pcap_unproven_reason"] = unproven_reason
+
+
+def sanitize_health_state(value: object) -> dict:
+    """Keep only typed suppression state and scrub legacy summaries."""
+    raw = value if isinstance(value, dict) else {}
+    state = _base_health_state(raw)
+    _optional_health_timestamps(raw, state)
+    _optional_health_summaries(raw, state)
+    _optional_health_returncode(raw, state)
+    http_status = _health_http_status(raw)
+    if http_status is not None:
+        state["last_http_status"] = http_status
+    _optional_pcap_failure_state(raw, state)
     return state
 
 
