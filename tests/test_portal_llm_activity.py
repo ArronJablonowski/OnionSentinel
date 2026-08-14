@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -74,6 +75,85 @@ class LlmActivityTests(unittest.TestCase):
 
         self.assertEqual(record["runtime_model_label"], "No model started")
         self.assertEqual(record["phase_label"], "Completed run")
+
+    def test_live_decoration_preserves_copy_defaults_runtime_trace_and_order(self) -> None:
+        source = {
+            "raw": "audit",
+            "agent_role": "SOC_Analyst",
+            "agent_label": None,
+        }
+        snapshots = []
+
+        def runtime_state(record):
+            snapshots.append((id(record), dict(record)))
+            return {"running": "yes", "label": "", "phase_label": ""}
+
+        with mock.patch(
+            "portal_llm_activity.llm_runtime_model_state",
+            side_effect=runtime_state,
+        ):
+            decorated = decorate_llm_analysis_record(source, live=True)
+
+        self.assertEqual(source, {
+            "raw": "audit", "agent_role": "SOC_Analyst", "agent_label": None,
+        })
+        self.assertNotEqual(id(decorated), id(source))
+        self.assertEqual(snapshots, [
+            (
+                id(decorated),
+                {
+                    "raw": "audit",
+                    "agent_role": "SOC_Analyst",
+                    "agent_label": None,
+                    "job_type": "ai_analysis",
+                    "job_label": "SOC alert triage",
+                },
+            )
+        ])
+        self.assertEqual(decorated["agent_label"], None)
+        self.assertEqual(decorated["runtime_model_label"], "Unknown model")
+        self.assertEqual(decorated["phase_label"], "Analysis")
+        self.assertEqual(tuple(decorated)[-2:], ("runtime_model_label", "phase_label"))
+
+    def test_historical_decoration_uses_synthetic_copy_but_raw_observation(self) -> None:
+        source = {
+            "status": "failure",
+            "active_phase": "primary_analysis",
+            "model": " ",
+            "model_route": " codex-cli:model:high ",
+        }
+        runtime_inputs = []
+
+        def runtime_state(record):
+            runtime_inputs.append((id(record), dict(record)))
+            return {"running": True, "label": ""}
+
+        with mock.patch(
+            "portal_llm_activity.llm_runtime_model_state",
+            side_effect=runtime_state,
+        ):
+            decorated = decorate_llm_analysis_record(source, live=False)
+
+        self.assertEqual(source["status"], "failure")
+        self.assertEqual(source["active_phase"], "primary_analysis")
+        self.assertEqual(runtime_inputs[0][1]["status"], "running")
+        self.assertNotIn("active_phase", runtime_inputs[0][1])
+        self.assertNotEqual(runtime_inputs[0][0], id(decorated))
+        self.assertEqual(decorated["status"], "failure")
+        self.assertEqual(decorated["active_phase"], "primary_analysis")
+        self.assertEqual(decorated["runtime_model_label"], "Unknown model")
+        self.assertEqual(decorated["phase_label"], "Completed run")
+
+    def test_historical_decoration_ignores_runtime_label_without_raw_model(self) -> None:
+        with mock.patch(
+            "portal_llm_activity.llm_runtime_model_state",
+            return_value={"running": True, "label": "Assigned only"},
+        ):
+            decorated = decorate_llm_analysis_record(
+                {"model": "", "model_route": ""}, live=False,
+            )
+
+        self.assertEqual(decorated["runtime_model_label"], "No model started")
 
     def test_current_analysis_projects_idle_and_reconciles_stale_record(self) -> None:
         idle = compose_current_llm_analysis(4, [], {}, lambda _prompt: False)
