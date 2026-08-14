@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
 
@@ -10,6 +11,23 @@ import re
 OUTPUT_TIMESTAMP_RE = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})(Z|[+-]\d{2}:\d{2})$"
 )
+
+
+def write_private_text(path: Path, value: str) -> None:
+    """Create one owner-only UTF-8 artifact without replacing an existing path."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    os.chmod(path, 0o600)
 
 
 def safe_output_filename(value: object) -> str:

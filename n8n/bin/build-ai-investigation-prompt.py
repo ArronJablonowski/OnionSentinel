@@ -42,6 +42,7 @@ from prompt_builder_cli import (
     PromptBuilderCliSources,
     parse_prompt_builder_args,
 )
+from prompt_builder_io import write_private_text
 from prompt_builder_compatibility import (
     alert_group_id, alert_group_key, compact_package_to_budget,
     filename_timestamp, incident_prompt_immutable_query_provenance,
@@ -234,7 +235,7 @@ def main() -> int:
     stamp = filename_timestamp(project_now())
     alert_id = safe_filename(str(package["alert"]["alert_id"]))
     out_path = args.out_dir / f"{stamp}-{alert_id}-ai-prompt.json"
-    out_path.write_text(output + "\n", encoding="utf-8")
+    write_private_text(out_path, output + "\n")
     print(out_path)
     return 0
 
