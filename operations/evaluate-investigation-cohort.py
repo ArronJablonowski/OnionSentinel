@@ -30,6 +30,12 @@ evaluate_cohorts = _service.evaluate_cohorts
 render_markdown = _service.render_markdown
 write_private_bytes = _service.write_private_bytes
 write_private_json = _service.write_private_json
+normalize_adjudication = _adjudication.validate_adjudication
+
+
+def _adjudication_policy():
+    """Preserve the legacy evaluator policy adapter during extraction."""
+    return _service._adjudication_service().adjudication_policy()
 
 
 def __getattr__(name: str):
