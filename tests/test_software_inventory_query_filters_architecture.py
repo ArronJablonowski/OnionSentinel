@@ -364,6 +364,200 @@ class SoftwareInventoryQueryFilterArchitectureTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "freshness"):
                 query._public_record(record, observed_at)
 
+    def test_empty_payload_schema_order_and_identity_are_exact(self) -> None:
+        self.assertEqual(
+            str(inspect.signature(query._empty_payload)),
+            "(observed_at: 'dt.datetime', filters: 'dict[str, object]', *, error: 'str') -> 'dict[str, object]'",
+        )
+        observed_at = query.dt.datetime(
+            2026, 8, 14, 1, 0, tzinfo=query.dt.timezone.utc
+        )
+        marker = object()
+        filters: dict[str, object] = {
+            "limit": 25,
+            "offset": 50,
+            "marker": marker,
+        }
+        error = "".join(("collector", " unavailable"))
+        schema = object()
+        observed_projection = object()
+        with (
+            mock.patch.object(query, "API_SCHEMA", schema),
+            mock.patch.object(
+                query, "_utc_iso", return_value=observed_projection
+            ) as utc_iso,
+        ):
+            payload = query._empty_payload(
+                observed_at, filters, error=error
+            )
+
+        utc_iso.assert_called_once_with(observed_at)
+        self.assertEqual(
+            list(payload),
+            [
+                "ok",
+                "schema",
+                "generated_at",
+                "observed_at",
+                "collection",
+                "summary",
+                "coverage",
+                "filters",
+                "platforms",
+                "page",
+                "items",
+                "warnings",
+                "revision",
+                "error",
+            ],
+        )
+        self.assertEqual(
+            list(payload["collection"]),
+            [
+                "status",
+                "complete",
+                "window",
+                "last_attempt_at",
+                "last_success_at",
+                "last_error",
+                "source_statuses",
+            ],
+        )
+        self.assertEqual(
+            list(payload["summary"]),
+            [
+                "records",
+                "products",
+                "assets",
+                "installed",
+                "observed",
+                "inferred",
+                "current",
+                "recent",
+                "historical",
+                "expired",
+            ],
+        )
+        self.assertEqual(
+            list(payload["coverage"]),
+            [
+                "authoritative_denominator",
+                "denominator_status",
+                "osquery_ready",
+                "fresh_endpoint_inventories",
+                "network_observed_assets",
+                "coverage_gaps",
+                "labeled_visible_records",
+                "asset_label_inventory_complete",
+                "asset_os_correlated_records",
+            ],
+        )
+        self.assertEqual(
+            list(payload["page"]),
+            ["limit", "offset", "filtered_total", "has_more"],
+        )
+        self.assertIs(payload["schema"], schema)
+        self.assertIs(payload["observed_at"], observed_projection)
+        self.assertIs(payload["filters"], filters)
+        self.assertIs(payload["collection"]["last_error"], error)
+        self.assertIs(payload["warnings"][0], error)
+        self.assertIs(payload["error"], error)
+        self.assertEqual(payload["page"]["limit"], 25)
+        self.assertEqual(payload["page"]["offset"], 50)
+        self.assertIs(filters["marker"], marker)
+
+    def test_empty_payload_mutable_containers_are_fresh_per_call(self) -> None:
+        observed_at = query.dt.datetime(
+            2026, 8, 14, 1, 0, tzinfo=query.dt.timezone.utc
+        )
+        filters: dict[str, object] = {"limit": 10, "offset": 3}
+        with mock.patch.object(query, "_utc_iso", return_value="observed"):
+            first = query._empty_payload(
+                observed_at, filters, error="unavailable"
+            )
+            second = query._empty_payload(
+                observed_at, filters, error="unavailable"
+            )
+
+        self.assertEqual(first, second)
+        self.assertIsNot(first, second)
+        self.assertIs(first["filters"], filters)
+        self.assertIs(second["filters"], filters)
+        for key in (
+            "collection",
+            "summary",
+            "coverage",
+            "platforms",
+            "page",
+            "items",
+            "warnings",
+        ):
+            self.assertIsNot(first[key], second[key], key)
+        self.assertIsNot(
+            first["collection"]["window"],
+            second["collection"]["window"],
+        )
+        self.assertIsNot(
+            first["collection"]["source_statuses"],
+            second["collection"]["source_statuses"],
+        )
+
+    def test_empty_payload_evaluation_and_failure_order_is_exact(self) -> None:
+        observed_at = query.dt.datetime(
+            2026, 8, 14, 1, 0, tzinfo=query.dt.timezone.utc
+        )
+        events: list[tuple[object, ...]] = []
+
+        class TracedFilters(dict):
+            def __getitem__(self, key: object) -> object:
+                events.append(("getitem", key))
+                return super().__getitem__(key)
+
+        filters = TracedFilters(limit=10, offset=20)
+
+        def utc_iso(value: object) -> str:
+            events.append(("utc_iso", value))
+            return "observed"
+
+        with mock.patch.object(query, "_utc_iso", side_effect=utc_iso):
+            query._empty_payload(observed_at, filters, error="error")
+        self.assertEqual(
+            events,
+            [
+                ("utc_iso", observed_at),
+                ("getitem", "limit"),
+                ("getitem", "offset"),
+            ],
+        )
+
+        events.clear()
+        with mock.patch.object(
+            query, "_utc_iso", side_effect=RuntimeError("utc")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "utc"):
+                query._empty_payload(observed_at, filters, error="error")
+        self.assertEqual(events, [])
+
+        class FailingFilters(TracedFilters):
+            def __getitem__(self, key: object) -> object:
+                value = super().__getitem__(key)
+                if key == "limit":
+                    raise RuntimeError(f"filter:{key}:{value}")
+                return value
+
+        events.clear()
+        with mock.patch.object(query, "_utc_iso", side_effect=utc_iso):
+            with self.assertRaisesRegex(RuntimeError, "filter:limit:10"):
+                query._empty_payload(
+                    observed_at,
+                    FailingFilters(limit=10, offset=20),
+                    error="error",
+                )
+        self.assertEqual(
+            events,
+            [("utc_iso", observed_at), ("getitem", "limit")],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
