@@ -67,6 +67,72 @@ class AlertDetailLayoutTests(unittest.TestCase):
         self.assertIn("unknown body", legacy[0][1])
         self.assertEqual(len(issues), 2)
 
+    def test_front_matter_preamble_aliases_and_replaced_sections_are_exact(self) -> None:
+        sections, legacy, issues = self.layout.split_detail_source_sections(
+            "---\n"
+            "title: legacy\n"
+            "## Metadata Heading\n"
+            "---\n"
+            "ignored preamble\n"
+            "## *Public Enrichment*\n"
+            " enrichment body \n"
+            "## Raw Alert\n"
+            '{"event": true}\n'
+        )
+
+        self.assertEqual(
+            sections,
+            {
+                "enriched alert details": "## Enriched Alert Details\n\nenrichment body",
+                "raw alert": '## Raw Alert\n\n{"event": true}',
+            },
+        )
+        self.assertEqual(legacy, [])
+        self.assertEqual(issues, [])
+
+    def test_alias_duplicates_keep_the_first_and_relocate_the_second_exactly(self) -> None:
+        sections, legacy, issues = self.layout.split_detail_source_sections(
+            "## Enriched Alert Details\nfirst\n"
+            "## Public Enrichment\n### Nested\nsecond"
+        )
+
+        self.assertEqual(
+            sections,
+            {"enriched alert details": "## Enriched Alert Details\n\nfirst"},
+        )
+        self.assertEqual(
+            legacy,
+            [("Duplicate Public Enrichment", "##### Nested\nsecond")],
+        )
+        self.assertEqual(
+            issues,
+            [
+                'Legacy data contains duplicate "Enriched Alert Details" sections; '
+                "the first section was retained and the duplicate was moved to Raw Logs."
+            ],
+        )
+
+    def test_preamble_non_h2_and_empty_sections_preserve_current_boundaries(self) -> None:
+        self.assertEqual(
+            self.layout.split_detail_source_sections("preamble only\n### Child"),
+            ({}, [], []),
+        )
+        sections, legacy, issues = self.layout.split_detail_source_sections(
+            "preamble\n"
+            "## Analyst Notes\n\n"
+            "### Child stays nested\n"
+            "## Raw Logs"
+        )
+        self.assertEqual(
+            sections,
+            {
+                "analyst notes": "## Analyst Notes\n\n### Child stays nested",
+                "raw logs": "## Raw Logs",
+            },
+        )
+        self.assertEqual(legacy, [])
+        self.assertEqual(issues, [])
+
     def test_fenced_headings_and_malformed_documents_are_bounded(self) -> None:
         sections, legacy, issues = self.layout.split_detail_source_sections(
             "---\nunclosed metadata\n## Alert Summary\nbody"
