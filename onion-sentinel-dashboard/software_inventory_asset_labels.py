@@ -65,7 +65,7 @@ def _asset_claims(
     return claims, assets_by_id
 
 
-def _asset_operating_system(item: dict, asset: dict) -> None:
+def _asset_operating_system_values(asset: dict) -> tuple[str, str]:
     os_type = str(
         asset.get("operating_system_type")
         or asset.get("platform")
@@ -74,10 +74,18 @@ def _asset_operating_system(item: dict, asset: dict) -> None:
     os_version = str(
         asset.get("operating_system_version") or ""
     ).strip()[:512]
-    if not str(item.get("operating_system_type") or "").strip():
-        item["operating_system_type"] = os_type
-    if not str(item.get("operating_system_version") or "").strip():
-        item["operating_system_version"] = os_version
+    return os_type, os_version
+
+
+def _set_missing_os_value(item: dict, key: str, value: str) -> None:
+    if not str(item.get(key) or "").strip():
+        item[key] = value
+
+
+def _asset_operating_system(item: dict, asset: dict) -> None:
+    os_type, os_version = _asset_operating_system_values(asset)
+    _set_missing_os_value(item, "operating_system_type", os_type)
+    _set_missing_os_value(item, "operating_system_version", os_version)
     if (
         (os_type or os_version)
         and not str(item.get("operating_system_source") or "").strip()
