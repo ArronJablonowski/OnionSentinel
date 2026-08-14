@@ -97,6 +97,16 @@ alone never establishes malicious intent. The STUN pack is pinned to Security
 Onion's bundled Zeek analyzer; the DoH pack follows RFC 8484 and reports
 encrypted DNS content as unavailable unless separately observable.
 
+Three language-specific candidates preserve the deployed query provenance
+boundary. The Query DSL pack validates the canonical broker-generated request
+as the exact execution record. The KQL pack validates only the
+analyst-readable filter equivalent and explicitly records that KQL was not
+executed. The Security Onion OQL pack validates the release-pinned Hunt OQL
+representation and its independent compilation to the fixed Query DSL path; it
+does not claim that the SOC Hunt API executed the OQL text. All three accept
+only typed broker parameters, use governed wrapper field projections, and
+remain inactive and unpromotable.
+
 `skill-packs/dns-triage-v2.example.json` demonstrates the v2 boundary. Its
 verification flags are deliberately false because this package has not passed
 the required replay, review, or human promotion gates. It is structurally

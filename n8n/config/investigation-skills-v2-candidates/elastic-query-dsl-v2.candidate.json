@@ -1,0 +1,33 @@
+{
+  "schema": "onion-sentinel-investigation-skill-manifest-v2",
+  "id": "source.elastic.query-dsl",
+  "version": "2.0.0-candidate.1",
+  "artifact_digest": "703a4123ae79828af4f16459d1ea902f7897a11189f30d8d1975f2cce6b29792",
+  "lineage": {"source_revision": "c3676f8", "predecessor_digest": ""},
+  "compatibility": {"harness_contract": "onion-sentinel-harness-job-envelope-v1", "policy_schema": "onion-sentinel-investigation-harness-policy-v1", "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"},
+  "maintainer": {"owner": "Onion Sentinel", "reviewed_at": "2026-08-14T19:40:00Z", "reviewer": "pending"},
+  "roles": ["soc-analyst", "incident-responder", "siem-engineer", "threat-hunter"],
+  "match": {"tasks": ["query-language-validation"], "protocols": ["any"], "alert_families": ["elastic-query-dsl"], "data_sources": ["elastic"]},
+  "objective": "Validate the broker-generated Elasticsearch Query DSL as the exact executed request while preserving fixed index scope, filter context, bounded projection, and execution provenance.",
+  "capabilities": ["security-onion.events.query"],
+  "safety": {"read_only": true, "active_operation": false, "sensitivity": "moderate", "requires_approval": false},
+  "budgets": {"max_queries": 4, "max_rows": 400, "max_bytes": 1048576, "timeout_seconds": 120},
+  "preconditions": ["a trusted typed broker request and authorization envelope exist", "the deployed reviewed pack and field catalog are available", "the fixed read-only Elasticsearch execution path is healthy"],
+  "required_evidence": ["exact canonical Query DSL digest index scope endpoint and request-item digest", "successful control shard timeout total-hit and projection metadata", "result coverage truncation and evidence references bound to the executed request"],
+  "positive_evidence": ["the exact executed Query DSL contains only broker-generated allowlisted filter clauses and trusted scope", "admitted results satisfy the fixed pack projection tuple window and observable constraints"],
+  "negative_evidence": ["a successful exact-total query returns zero matches for the complete authorized filters and time window", "complete admitted results refute the scoped hypothesis without projection control or coverage gaps"],
+  "escalation_pivots": ["select another reviewed pack or bounded window through typed broker parameters", "compare the canonical Query DSL and execution digest with the independent validator", "stop for operator review when controls mappings shards or execution provenance disagree"],
+  "query_templates": [
+    {"id": "elastic-query-dsl-audit", "backend": "elastic", "language": "query-dsl", "purpose": "Validate the exact executed broker-generated Query DSL and its bounded result projection without accepting model-supplied JSON index fields or clauses.", "parameters": ["purpose", "pack", "observables", "event_tuple", "start_time", "end_time", "aggregation", "size"], "expected_fields": ["@timestamp", "event.dataset", "event.id", "rule.id", "source.ip", "destination.ip", "network.community_id"]}
+  ],
+  "output_contract": {"schema": "onion-sentinel-skill-result-v1", "coverage_required": true, "truncation_required": true, "evidence_refs_required": true, "fact_states": ["observed", "inferred", "unverified", "unavailable"]},
+  "alternative_hypotheses": ["the broker request is valid but the deployed mapping or pack is stale", "a complete exact-zero result is scoped absence rather than global absence", "a bounded sample omits relevant matches", "the executed request or returned projection violates the expected contract"],
+  "stop_conditions": ["the exact request and admitted result projection independently validate", "a control mapping shard timeout or provenance failure makes the result unusable", "the next bounded reviewed query has low expected information value", "a query budget or deadline is exhausted"],
+  "confidence_limiters": ["lower-bound total hits", "bounded sampling or truncation", "field or dataset mapping drift", "failed positive or negative controls", "missing exact execution digest or index scope"],
+  "known_false_positive_patterns": ["authorized validation and detection testing", "routine administrative or monitoring activity matching exact filters", "shared infrastructure represented by a correct event match", "a syntactically and semantically correct query over incomplete retention"],
+  "verification": {"unit_tests": false, "replay_cases": 0, "independent_query_review": false, "adversarial_tests": false, "human_approved": false},
+  "references": [
+    {"title": "Elastic Query DSL boolean query", "url": "https://www.elastic.co/docs/reference/query-languages/query-dsl/query-dsl-bool-query", "product_version": "9.4.0 as reviewed", "retrieved_at": "2026-08-14T19:40:00Z"},
+    {"title": "Security Onion 2.4 so-elasticsearch-query", "url": "https://docs.securityonion.net/en/2.4/so-elasticsearch-query.html", "product_version": "2.4", "retrieved_at": "2026-08-14T19:40:00Z"}
+  ]
+}

@@ -170,6 +170,13 @@ job attestation and `onion-sentinel-harness-execution-contract-v2`.
 - Artifacts: existing bounded PCAP/Zeek derivations only.
 - Context: CTI lookups and AC Hunter are behavioral context, not proof.
 
+Elastic language identities are separate contracts. Query DSL is the exact
+broker-generated execution record. KQL is a filter-only, analyst-readable
+equivalent and is not a second execution. Security Onion OQL is generated from
+typed parameters and independently compiled to the reviewed Query DSL path;
+its presence does not prove execution through the SOC Hunt API. A rejected or
+incompatible language must never be reinterpreted as another dialect.
+
 ## Acceptance criteria
 
 - Schema and digest validation is fail closed.

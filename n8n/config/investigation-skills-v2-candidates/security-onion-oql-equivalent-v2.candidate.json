@@ -1,0 +1,33 @@
+{
+  "schema": "onion-sentinel-investigation-skill-manifest-v2",
+  "id": "source.security-onion.oql-equivalent",
+  "version": "2.0.0-candidate.1",
+  "artifact_digest": "b5662afd45485605c2e10aed5be96649e21f5da950aff4a65e2eefe2c9917d60",
+  "lineage": {"source_revision": "c3676f8", "predecessor_digest": ""},
+  "compatibility": {"harness_contract": "onion-sentinel-harness-job-envelope-v1", "policy_schema": "onion-sentinel-investigation-harness-policy-v1", "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"},
+  "maintainer": {"owner": "Onion Sentinel", "reviewed_at": "2026-08-14T19:40:00Z", "reviewer": "pending"},
+  "roles": ["soc-analyst", "incident-responder", "siem-engineer", "threat-hunter"],
+  "match": {"tasks": ["query-language-validation"], "protocols": ["any"], "alert_families": ["security-onion-oql"], "data_sources": ["oql"]},
+  "objective": "Validate the locally generated Security Onion Hunt OQL equivalent and its compilation to the fixed Query DSL execution path without claiming that the SOC Hunt API executed the OQL text.",
+  "capabilities": ["security-onion.oql.query"],
+  "safety": {"read_only": true, "active_operation": false, "sensitivity": "moderate", "requires_approval": false},
+  "budgets": {"max_queries": 4, "max_rows": 400, "max_bytes": 1048576, "timeout_seconds": 120},
+  "preconditions": ["a trusted typed OQL-dialect broker request and authorization envelope exist", "the deployed Security Onion 2.4 pack and field catalog are available", "the OQL renderer and compiled Query DSL validator versions agree"],
+  "required_evidence": ["OQL equivalent text and digest bound to the request item", "canonical compiled Query DSL index scope endpoint and execution digest", "successful controls result coverage truncation and evidence references"],
+  "positive_evidence": ["the generated OQL contains only reviewed Lucene predicates and the allowlisted timeline sort segment", "independent compilation produces the same bounded Query DSL and admitted result projection"],
+  "negative_evidence": ["the successful complete compiled Query DSL result refutes the scoped hypothesis over exact authorized filters", "independent validation proves the OQL and compiled execution semantics diverge so the OQL cannot support the claim"],
+  "escalation_pivots": ["rebuild OQL and Query DSL independently from the same typed request", "inspect Security Onion pack fields datasets and OQL renderer version", "stop for operator review when OQL compilation execution or provenance digests disagree"],
+  "query_templates": [
+    {"id": "security-onion-oql-equivalent-audit", "backend": "oql", "language": "oql", "purpose": "Validate the generated Security Onion Hunt OQL and its compiled equivalent while never claiming the OQL text was executed through the SOC Hunt API.", "parameters": ["purpose", "pack", "observables", "event_tuple", "start_time", "end_time", "aggregation", "size"], "expected_fields": ["@timestamp", "event.dataset", "rule.id", "source.ip", "destination.ip", "network.community_id"]}
+  ],
+  "output_contract": {"schema": "onion-sentinel-skill-result-v1", "coverage_required": true, "truncation_required": true, "evidence_refs_required": true, "fact_states": ["observed", "inferred", "unverified", "unavailable"]},
+  "alternative_hypotheses": ["the OQL display is valid but compiled execution is partial", "Security Onion OQL or field mappings changed in the deployed release", "a display or digest mismatch is provenance failure rather than contrary evidence", "the typed request exceeds its trusted scope or reviewed grammar"],
+  "stop_conditions": ["OQL and compiled Query DSL independently validate from the same typed request", "a mapping control compilation or provenance failure is reported without claiming OQL execution", "the next bounded reviewed query has low expected information value", "a query budget or deadline is exhausted"],
+  "confidence_limiters": ["OQL is compiled to Query DSL rather than executed through the SOC Hunt API", "Security Onion release-specific grammar or field drift", "partial or truncated compiled execution", "missing control or exact-total evidence", "missing OQL Query DSL or request digest linkage"],
+  "known_false_positive_patterns": ["valid OQL display mistaken for a separate execution record", "routine Security Onion hunt filters over benign traffic", "shared infrastructure represented by exact fields", "timeline sort presentation mistaken for evidence ordering completeness"],
+  "verification": {"unit_tests": false, "replay_cases": 0, "independent_query_review": false, "adversarial_tests": false, "human_approved": false},
+  "references": [
+    {"title": "Security Onion 2.4 Dashboards OQL", "url": "https://docs.securityonion.net/en/2.4/dashboards.html", "product_version": "2.4", "retrieved_at": "2026-08-14T19:40:00Z"},
+    {"title": "Security Onion 2.4 Hunt", "url": "https://docs.securityonion.net/en/2.4/hunt", "product_version": "2.4", "retrieved_at": "2026-08-14T19:40:00Z"}
+  ]
+}

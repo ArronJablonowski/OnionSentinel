@@ -1,0 +1,33 @@
+{
+  "schema": "onion-sentinel-investigation-skill-manifest-v2",
+  "id": "source.elastic.kql-equivalent",
+  "version": "2.0.0-candidate.1",
+  "artifact_digest": "85092c1e132cbf941b0af8a581294d893c8bf8db26b863479841ac5d94a50be1",
+  "lineage": {"source_revision": "c3676f8", "predecessor_digest": ""},
+  "compatibility": {"harness_contract": "onion-sentinel-harness-job-envelope-v1", "policy_schema": "onion-sentinel-investigation-harness-policy-v1", "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"},
+  "maintainer": {"owner": "Onion Sentinel", "reviewed_at": "2026-08-14T19:40:00Z", "reviewer": "pending"},
+  "roles": ["soc-analyst", "incident-responder", "siem-engineer", "threat-hunter"],
+  "match": {"tasks": ["query-language-validation"], "protocols": ["any"], "alert_families": ["elastic-kql"], "data_sources": ["elastic"]},
+  "objective": "Validate the locally rendered KQL filter as an analyst-readable equivalent of trusted query intent while preserving that KQL is not executed by the Onion Sentinel broker.",
+  "capabilities": ["security-onion.events.query"],
+  "safety": {"read_only": true, "active_operation": false, "sensitivity": "moderate", "requires_approval": false},
+  "budgets": {"max_queries": 4, "max_rows": 400, "max_bytes": 1048576, "timeout_seconds": 120},
+  "preconditions": ["a trusted typed broker request and canonical executed Query DSL exist", "the deployed reviewed pack and field catalog are available", "the KQL renderer version matches the independent validator"],
+  "required_evidence": ["analyst-readable KQL text and digest bound to the request item", "canonical executed Query DSL and execution digest for the same typed request", "pack field mapping coverage truncation and evidence references"],
+  "positive_evidence": ["the rendered KQL expresses the same trusted time dataset observable and tuple filters as the canonical request", "independent reconstruction produces the same KQL digest without unsupported grammar or fields"],
+  "negative_evidence": ["the corresponding successful complete executed Query DSL refutes the scoped hypothesis over exact filters", "independent comparison proves the KQL display differs from the executed request and therefore cannot support the claim"],
+  "escalation_pivots": ["rebuild KQL and Query DSL independently from the same typed request", "inspect deployed pack field and dataset mappings for drift", "stop for operator review when the display and execution digests cannot be reconciled"],
+  "query_templates": [
+    {"id": "elastic-kql-equivalent-audit", "backend": "elastic", "language": "kql", "purpose": "Validate the analyst-readable KQL equivalent while stating it was not executed as KQL and never accepting model-supplied KQL as broker input.", "parameters": ["purpose", "pack", "observables", "event_tuple", "start_time", "end_time", "aggregation", "size"], "expected_fields": ["@timestamp", "event.dataset", "source.ip", "destination.ip", "network.community_id"]}
+  ],
+  "output_contract": {"schema": "onion-sentinel-skill-result-v1", "coverage_required": true, "truncation_required": true, "evidence_refs_required": true, "fact_states": ["observed", "inferred", "unverified", "unavailable"]},
+  "alternative_hypotheses": ["the KQL is a faithful display but the executed result is partial", "the renderer or field catalog is version-incompatible", "a KQL display mismatch is a provenance defect rather than contrary telemetry", "the underlying typed request is invalid or unauthorized"],
+  "stop_conditions": ["KQL and canonical Query DSL independently reconstruct from the same request and digests match", "a renderer mapping or provenance mismatch is reported without interpreting KQL as execution", "the next bounded reviewed query has low expected information value", "a query budget or deadline is exhausted"],
+  "confidence_limiters": ["KQL does not aggregate transform or sort", "KQL was not executed by the broker", "field mapping or renderer version drift", "partial or truncated underlying execution", "missing request KQL or Query DSL digest linkage"],
+  "known_false_positive_patterns": ["a correct KQL filter displayed beside incomplete execution", "valid filter text mistaken for proof that matching documents exist", "shared infrastructure represented by exact fields", "display-order differences mistaken for semantic differences"],
+  "verification": {"unit_tests": false, "replay_cases": 0, "independent_query_review": false, "adversarial_tests": false, "human_approved": false},
+  "references": [
+    {"title": "Elastic Kibana Query Language", "url": "https://www.elastic.co/docs/reference/query-languages/kql", "product_version": "9.4.0 as reviewed", "retrieved_at": "2026-08-14T19:40:00Z"},
+    {"title": "Security Onion 2.4 Dashboards query behavior", "url": "https://docs.securityonion.net/en/2.4/dashboards.html", "product_version": "2.4", "retrieved_at": "2026-08-14T19:40:00Z"}
+  ]
+}
