@@ -92,21 +92,69 @@ def demote_markdown_headings(text: str) -> str:
     return "\n".join(output)
 
 
+def _store_source_section(
+    sections: dict[str, str],
+    legacy_sections: list[tuple[str, str]],
+    issues: list[str],
+    title: str,
+    label: str,
+    body_lines: list[str],
+) -> None:
+    body = "\n".join(body_lines).strip()
+    canonical = DETAIL_REPORT_SOURCE_ALIASES.get(title, title)
+    known = (
+        canonical in DETAIL_REPORT_SECTION_ORDER
+        or canonical in DETAIL_REPORT_REPLACED_SOURCE_SECTIONS
+    )
+    if not known:
+        legacy_sections.append(
+            (label or title.title(), demote_markdown_headings(body))
+        )
+        issues.append(
+            f'Legacy top-level section "{label or title}" is not part of '
+            f"Detailed Alert Report layout {DETAIL_REPORT_LAYOUT_VERSION}; it was moved to Raw Logs."
+        )
+    elif canonical in sections:
+        legacy_sections.append(
+            (f"Duplicate {label or title.title()}", demote_markdown_headings(body))
+        )
+        issues.append(
+            f'Legacy data contains duplicate "{DETAIL_REPORT_SECTION_LABELS.get(canonical, label)}" '
+            "sections; the first section was retained and the duplicate was moved to Raw Logs."
+        )
+    else:
+        rendered_label = DETAIL_REPORT_SECTION_LABELS.get(
+            canonical, label or canonical.title()
+        )
+        sections[canonical] = f"## {rendered_label}\n\n{body}".rstrip()
+
+
+def _source_lines_after_front_matter(text: str, issues: list[str]) -> list[str]:
+    lines = (text or "").splitlines()
+    if lines and lines[0].strip() == "---":
+        closing = next(
+            (
+                index
+                for index, line in enumerate(lines[1:], start=1)
+                if line.strip() == "---"
+            ),
+            None,
+        )
+        if closing is None:
+            issues.append(
+                "Legacy Markdown front matter is not closed with a second `---` line."
+            )
+        else:
+            lines = lines[closing + 1 :]
+    return lines
+
+
 def split_detail_source_sections(
     text: str,
 ) -> tuple[dict[str, str], list[tuple[str, str]], list[str]]:
     """Parse legacy H2 sections without allowing them to control UI structure."""
     issues: list[str] = []
-    lines = (text or "").splitlines()
-    if lines and lines[0].strip() == "---":
-        closing = next(
-            (index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---"),
-            None,
-        )
-        if closing is None:
-            issues.append("Legacy Markdown front matter is not closed with a second `---` line.")
-        else:
-            lines = lines[closing + 1 :]
+    lines = _source_lines_after_front_matter(text, issues)
 
     sections: dict[str, str] = {}
     legacy_sections: list[tuple[str, str]] = []
@@ -120,26 +168,14 @@ def split_detail_source_sections(
         if not current_title:
             current_lines = []
             return
-        body = "\n".join(current_lines).strip()
-        canonical = DETAIL_REPORT_SOURCE_ALIASES.get(current_title, current_title)
-        known = canonical in DETAIL_REPORT_SECTION_ORDER or canonical in DETAIL_REPORT_REPLACED_SOURCE_SECTIONS
-        if not known:
-            legacy_sections.append((current_label or current_title.title(), demote_markdown_headings(body)))
-            issues.append(
-                f'Legacy top-level section "{current_label or current_title}" is not part of '
-                f"Detailed Alert Report layout {DETAIL_REPORT_LAYOUT_VERSION}; it was moved to Raw Logs."
-            )
-        elif canonical in sections:
-            legacy_sections.append(
-                (f"Duplicate {current_label or current_title.title()}", demote_markdown_headings(body))
-            )
-            issues.append(
-                f'Legacy data contains duplicate "{DETAIL_REPORT_SECTION_LABELS.get(canonical, current_label)}" '
-                "sections; the first section was retained and the duplicate was moved to Raw Logs."
-            )
-        else:
-            label = DETAIL_REPORT_SECTION_LABELS.get(canonical, current_label or canonical.title())
-            sections[canonical] = f"## {label}\n\n{body}".rstrip()
+        _store_source_section(
+            sections,
+            legacy_sections,
+            issues,
+            current_title,
+            current_label,
+            current_lines,
+        )
         current_title = ""
         current_label = ""
         current_lines = []
