@@ -1543,6 +1543,35 @@
       ]
     },
     {
+      "path": "n8n/bin/collect-endpoint-software-inventory.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/collect-endpoint-software-inventory.py",
+      "required_symbols": [
+        "collect",
+        "main",
+        "preflight"
+      ]
+    },
+    {
+      "path": "n8n/bin/endpoint_inventory_collection.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/endpoint_inventory_collection.py",
+      "required_symbols": [
+        "CollectionDependencies",
+        "CollectionPolicy",
+        "collect_inventory",
+        "record"
+      ]
+    },
+    {
+      "path": "n8n/bin/endpoint_inventory_preflight.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/endpoint_inventory_preflight.py",
+      "required_symbols": [
+        "run_preflight"
+      ]
+    },
+    {
       "path": "n8n/bin/software_inventory_contract.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/software_inventory_contract.py",

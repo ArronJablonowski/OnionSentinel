@@ -15,6 +15,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "n8n/bin/collect-endpoint-software-inventory.py"
 COLLECTION = ROOT / "n8n/bin/endpoint_inventory_collection.py"
+PREFLIGHT = ROOT / "n8n/bin/endpoint_inventory_preflight.py"
 BIN = ROOT / "n8n/bin"
 if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
@@ -126,10 +127,20 @@ class EndpointInventoryCollectionArchitectureTests(unittest.TestCase):
             self.assertLessEqual(lines, 50)
             self.assertLessEqual(complexity, 10)
         self.assertLessEqual(len(COLLECTION.read_text().splitlines()), 600)
+        for name in ("_approved_aliases", "run_preflight"):
+            lines, complexity = function_metrics(name, PREFLIGHT)
+            self.assertLessEqual(lines, 50)
+            self.assertLessEqual(complexity, 10)
+        self.assertLessEqual(len(PREFLIGHT.read_text().splitlines()), 150)
         installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
         self.assertIn(
             'cp "$REPO_DIR/n8n/bin/endpoint_inventory_collection.py" '
             '"$STACK_DIR/bin/endpoint_inventory_collection.py"',
+            installer,
+        )
+        self.assertIn(
+            'cp "$REPO_DIR/n8n/bin/endpoint_inventory_preflight.py" '
+            '"$STACK_DIR/bin/endpoint_inventory_preflight.py"',
             installer,
         )
 

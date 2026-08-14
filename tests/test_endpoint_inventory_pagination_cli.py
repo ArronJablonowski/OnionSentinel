@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import importlib.machinery
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -399,6 +400,48 @@ class EndpointInventoryPaginationCliCharacterizationTests(unittest.TestCase):
                 {"targets": 1},
             ]],
         )
+
+    def test_main_preflight_failure_logs_only_typed_redacted_receipt(self) -> None:
+        secret_text = "sensitive-host.example must never be logged"
+        failure = self.module.LiveOsqueryClientError(
+            secret_text,
+            reason_code="broker_timeout",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "endpoint-cache.json"
+            log = root / "collector.jsonl"
+            argv = [
+                str(SCRIPT),
+                "--config", str(root / "config.json"),
+                "--cache", str(cache),
+                "--log", str(log),
+                "--preflight",
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    self.module, "load_live_osquery_config", return_value={}
+                ),
+                mock.patch.object(self.module, "preflight", side_effect=failure),
+                mock.patch.object(self.module, "collect_with_retries") as collect,
+                mock.patch.object(self.module, "atomic_write") as write,
+            ):
+                status = self.module.main()
+
+            self.assertEqual(status, 1)
+            collect.assert_not_called()
+            write.assert_not_called()
+            receipts = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(len(receipts), 1)
+            self.assertEqual(
+                receipts[0]["event"],
+                "endpoint_software_inventory.preflight_failed",
+            )
+            self.assertEqual(receipts[0]["failure_code"], "broker_timeout")
+            self.assertEqual(receipts[0]["attempts"], 1)
+            self.assertEqual(receipts[0]["attempt_limit"], 1)
+            self.assertNotIn(secret_text, json.dumps(receipts))
 
     def test_invalid_cli_bounds_exit_before_logger_or_lock(self) -> None:
         for option, value in (("--attempts", "0"), ("--retry-delay-seconds", "3601")):

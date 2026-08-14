@@ -34,6 +34,7 @@ from endpoint_inventory_collection import (
     collect_inventory,
     record as project_inventory_record,
 )
+from endpoint_inventory_preflight import run_preflight
 from security_jsonl_log import SecurityJsonlLogger
 
 
@@ -262,6 +263,18 @@ def collect(config: dict[str, Any], previous_cache: dict[str, Any] | None = None
     )
 
 
+def preflight(config: dict[str, Any]) -> dict[str, Any]:
+    """Run the fixed preflight while preserving facade monkeypatch seams."""
+    return run_preflight(
+        config,
+        approved=scheduled_inventory_approved,
+        query=_query,
+        now=utc_now,
+        timestamp=timestamp,
+        error_type=EndpointInventoryError,
+    )
+
+
 def load_cache(path: Path) -> dict[str, Any] | None:
     try:
         info = path.lstat()
@@ -416,6 +429,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
     parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help=(
+            "run one fixed, read-only identity query per approved target; "
+            "do not retry, persist query artifacts, or update the cache"
+        ),
+    )
+    parser.add_argument(
         "--attempts",
         type=_bounded_cli_int("attempts", 1, MAX_ATTEMPTS),
         default=DEFAULT_ATTEMPTS,
@@ -432,6 +453,36 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _run_mode(
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    previous: dict[str, Any] | None,
+    logger: SecurityJsonlLogger,
+) -> None:
+    if args.preflight:
+        receipt = preflight(config)
+        logger.log(
+            "info",
+            "endpoint_software_inventory.preflight_completed",
+            targets=receipt["targets"],
+        )
+        return
+    result = collect_with_retries(
+        config,
+        previous,
+        attempts=args.attempts,
+        retry_delay_seconds=args.retry_delay_seconds,
+        logger=logger,
+    )
+    atomic_write(args.cache, result)
+    logger.log(
+        "info",
+        "endpoint_software_inventory.completed",
+        records=len(result["records"]),
+        targets=len(result["targets"]),
+    )
+
+
 def main() -> int:
     args = _parse_args()
     logger = SecurityJsonlLogger(args.log, service="endpoint-software-inventory")
@@ -443,19 +494,11 @@ def main() -> int:
         descriptor = open_collector_lock(lock_path)
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         previous = load_cache(args.cache)
-        result = collect_with_retries(
+        _run_mode(
+            args,
             load_live_osquery_config(args.config),
             previous,
-            attempts=args.attempts,
-            retry_delay_seconds=args.retry_delay_seconds,
-            logger=logger,
-        )
-        atomic_write(args.cache, result)
-        logger.log(
-            "info",
-            "endpoint_software_inventory.completed",
-            records=len(result["records"]),
-            targets=len(result["targets"]),
+            logger,
         )
         return 0
     except (
@@ -468,10 +511,14 @@ def main() -> int:
     ) as exc:
         logger.log(
             "error",
-            "endpoint_software_inventory.failed",
+            (
+                "endpoint_software_inventory.preflight_failed"
+                if args.preflight
+                else "endpoint_software_inventory.failed"
+            ),
             failure_code=failure_code(exc),
             attempts=int(getattr(exc, "attempts_completed", 1)),
-            attempt_limit=args.attempts,
+            attempt_limit=1 if args.preflight else args.attempts,
             last_good_cache_state=last_good_cache_state(previous),
         )
         return 1
