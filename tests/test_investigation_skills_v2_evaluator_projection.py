@@ -422,6 +422,7 @@ class InvestigationSkillsV2EvaluatorProjectionTests(unittest.TestCase):
             "mapping_compatible": True,
             "complete": True,
             "truncated": False,
+            "scope_exact": True,
             "evidence_refs": ["fixture:one"],
             "rows": [{"service": "benign"}],
             "claim_kind": "observation",
@@ -430,6 +431,12 @@ class InvestigationSkillsV2EvaluatorProjectionTests(unittest.TestCase):
             ("observed", base, "observed", False),
             ("inferred", {**base, "claim_kind": "inference"}, "inferred", False),
             ("empty", {**base, "rows": []}, "observed", True),
+            (
+                "empty-inexact-scope",
+                {**base, "rows": [], "scope_exact": False},
+                "observed",
+                False,
+            ),
             ("partial", {**base, "complete": False}, "unverified", False),
             ("truncated", {**base, "truncated": True}, "unverified", False),
             ("malformed", {**base, "rows": "not-a-list"}, "unverified", False),
@@ -462,6 +469,16 @@ class InvestigationSkillsV2EvaluatorProjectionTests(unittest.TestCase):
             "expected_negative_evidence_allowed": False,
         })
         self.assertNotIn("activate every skill", json.dumps(adversarial))
+
+    def test_evaluation_requires_a_nonempty_evidence_replay_corpus(self) -> None:
+        result = EVALUATOR._evaluation_result(
+            {"candidate": {}},
+            [{"passed": True}],
+            1,
+            [],
+            0,
+        )
+        self.assertFalse(result["passed"])
 
     def test_invalid_case_stops_before_resolver_and_preserves_prior_call_count(self) -> None:
         fixture = self.valid_fixture(cases=[
