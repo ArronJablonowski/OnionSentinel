@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +20,7 @@ from portal_live_revisions import (  # noqa: E402
     revision_digest,
     revision_rows,
 )
+import portal_live_revisions as live_revisions  # noqa: E402
 
 
 def table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -104,6 +106,115 @@ class PortalLiveRevisionTests(unittest.TestCase):
         self.assertEqual(state["reanalysis_runs"][0]["run_id"], "new")
         self.assertEqual(state["reanalysis_cases"][0]["case_id"], "c1")
         self.assertNotEqual(initial, changed)
+
+    def test_incident_state_empty_projection_has_exact_required_keys(self) -> None:
+        state = incident_response_revision_state(self.conn, SCHEMA)
+
+        self.assertEqual(list(state), [
+            "cases",
+            "groups",
+            "alerts",
+            "analyses",
+            "reviews",
+            "adjudications",
+            "reanalysis_runs",
+        ])
+        self.assertEqual(state, {
+            "cases": [],
+            "groups": [],
+            "alerts": [],
+            "analyses": [],
+            "reviews": [],
+            "adjudications": [],
+            "reanalysis_runs": [],
+        })
+
+    def test_incident_state_preserves_query_contract_order_values_and_identities(self) -> None:
+        cases = [
+            {
+                "case_id": "c1",
+                "dashboard_group_id": "g1",
+                "representative_alert_id": "a1",
+                "latest_analysis_id": "x1",
+            },
+            {
+                "case_id": "",
+                "dashboard_group_id": None,
+                "representative_alert_id": 0,
+                "latest_analysis_id": False,
+            },
+            {
+                "case_id": "c2",
+                "dashboard_group_id": "g1",
+                "representative_alert_id": 7,
+                "latest_analysis_id": None,
+            },
+        ]
+        latest_runs = [{"run_id": 0}]
+        calls = []
+        related_results = {}
+
+        def fake_revision_rows(conn, table, columns, schema, **kwargs):
+            calls.append(("revision_rows", conn, table, columns, schema, kwargs))
+            if table == "incident_response_cases":
+                return cases
+            if table == "incident_reanalysis_runs":
+                return latest_runs
+            raise AssertionError(f"unexpected direct table: {table}")
+
+        def fake_related_rows(conn, schema, table, columns, key, values):
+            calls.append((
+                "related_rows", conn, table, columns, schema, key, values,
+            ))
+            result = [{"table": table}]
+            related_results[table] = result
+            return result
+
+        with patch.object(live_revisions, "revision_rows", fake_revision_rows), patch.object(
+            live_revisions, "_related_rows", fake_related_rows
+        ):
+            state = incident_response_revision_state(self.conn, SCHEMA)
+
+        self.assertEqual(
+            [(call[0], call[2]) for call in calls],
+            [
+                ("revision_rows", "incident_response_cases"),
+                ("related_rows", "alert_group_summary"),
+                ("related_rows", "alerts"),
+                ("related_rows", "ai_analysis_runs"),
+                ("related_rows", "ai_second_opinion_runs"),
+                ("related_rows", "analyst_adjudications"),
+                ("revision_rows", "incident_reanalysis_runs"),
+                ("related_rows", "incident_reanalysis_run_cases"),
+            ],
+        )
+        self.assertEqual(
+            [(call[5], call[6]) for call in calls if call[0] == "related_rows"],
+            [
+                ("group_id", ("g1", "g1")),
+                ("alert_id", ("a1", "7")),
+                ("analysis_id", ("x1",)),
+                ("analysis_id", ("x1",)),
+                ("case_id", ("c1", "c2")),
+                ("run_id", ("",)),
+            ],
+        )
+        self.assertEqual(calls[0][5], {"order_sql": "case_id"})
+        self.assertEqual(
+            calls[6][5],
+            {"order_sql": "created_at DESC", "limit": 1},
+        )
+        self.assertEqual(list(state), [
+            "cases", "groups", "alerts", "analyses", "reviews",
+            "adjudications", "reanalysis_runs", "reanalysis_cases",
+        ])
+        self.assertIs(state["cases"], cases)
+        self.assertIs(state["reanalysis_runs"], latest_runs)
+        self.assertIs(state["groups"], related_results["alert_group_summary"])
+        self.assertIs(
+            state["reanalysis_cases"],
+            related_results["incident_reanalysis_run_cases"],
+        )
 
 
 if __name__ == "__main__":
