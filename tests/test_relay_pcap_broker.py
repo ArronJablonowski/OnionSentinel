@@ -365,6 +365,38 @@ class RelayPcapBrokerTest(unittest.TestCase):
             "no_packets_available",
         )
 
+    def test_pcap_error_outcomes_preserve_ordered_overlap_policy(self) -> None:
+        cases = {
+            None: "failed",
+            "": "failed",
+            "generic failure": "failed",
+            "NO MATCHING PACKET capture expired after timeout": "no_packets_available",
+            "retention artifact exceeded size": "expired",
+            "capture expired while checksum failed": "expired",
+            "artifact exceeded configured ceiling": "oversize",
+            "size exceeded configured ceiling": "oversize",
+            "operation timed out with sha256 mismatch": "timeout",
+            "request timeout": "timeout",
+            "artifact sha256 mismatch": "checksum_failed",
+            "checksum mismatch": "checksum_failed",
+            "unsupported rsync transport": "rejected",
+            "staging has been removed": "rejected",
+            "request rejected": "rejected",
+            "rsync exited 1": "transport_failed",
+            "artifact upload failed": "transport_failed",
+            "connection refused": "transport_failed",
+            "ssh unavailable": "transport_failed",
+            "spool filesystem unavailable": "transport_failed",
+            "artifact exceeded policy without size marker": "oversize",
+            "capture exceeded policy": "failed",
+        }
+        for detail, expected in cases.items():
+            with self.subTest(detail=detail):
+                self.assertEqual(
+                    self.relay.pcap_outcome_from_error(detail),
+                    expected,
+                )
+
     def test_claimed_request_is_exported_and_completed(self) -> None:
         request = {"request_id": "pcap-unit-test", "source_ip": "192.0.2.10", "destination_ip": "198.51.100.10"}
         calls: list[tuple[str, str, dict | None]] = []
