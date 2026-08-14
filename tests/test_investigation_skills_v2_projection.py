@@ -211,6 +211,32 @@ class InvestigationSkillsV2ProjectionTests(unittest.TestCase):
                     skills.validate_manifest(raw)
                 self.assertEqual(str(raised.exception), message)
 
+    def test_lineage_compatibility_maintainer_verification_and_references_fail_closed(self) -> None:
+        mutations = (
+            (lambda raw: raw.update(lineage={}), "manifest lineage is invalid"),
+            (
+                lambda raw: raw.update(compatibility={}),
+                "manifest compatibility is invalid",
+            ),
+            (
+                lambda raw: raw.update(maintainer={"reviewer": "independent"}),
+                "manifest maintainer is invalid",
+            ),
+            (
+                lambda raw: raw.update(verification={}),
+                "manifest verification is invalid",
+            ),
+            (lambda raw: raw.update(references=[]), "manifest references are invalid"),
+        )
+        for mutate, message in mutations:
+            raw = candidate()
+            mutate(raw)
+            raw["artifact_digest"] = skills.artifact_digest(raw)
+            with self.subTest(message=message):
+                with self.assertRaises(ValueError) as raised:
+                    skills.validate_manifest(raw)
+                self.assertEqual(str(raised.exception), message)
+
     def test_promotion_failure_order_deduplication_and_input_are_exact(self) -> None:
         raw = candidate()
         before = copy.deepcopy(raw)
@@ -292,8 +318,38 @@ class InvestigationSkillsV2ProjectionTests(unittest.TestCase):
                 },
             ],
         )
-        self.assertEqual(list(result["selected"][0]), ["id", "version", "artifact_digest"])
+        self.assertEqual(
+            list(result["selected"][0]),
+            ["id", "version", "artifact_digest", "selection_reason"],
+        )
+        self.assertEqual(
+            result["selected"][0]["selection_reason"],
+            "exact_match_capability_and_promotion_gates_satisfied",
+        )
         self.assertNotIn("query_templates", json.dumps(result))
+
+    def test_runtime_compatibility_mismatch_is_visible(self) -> None:
+        value = promotable()
+        value["compatibility"]["policy_schema"] = "legacy-policy-v0"
+        value["artifact_digest"] = skills.artifact_digest(value)
+
+        result = skills.resolve_manifests(
+            [{"state": "active", "manifest": value}],
+            {
+                "task": "alert-triage",
+                "protocol": "dns",
+                "alert_family": "dns",
+                "data_source": "elastic",
+            },
+            "soc-analyst",
+            value["capabilities"],
+        )
+
+        self.assertEqual(result["selected"], [])
+        self.assertEqual(
+            result["rejected"],
+            [{"id": value["id"], "reason": "compatibility_mismatch"}],
+        )
 
     def test_resolution_context_get_order_and_shadow_gate_are_exact(self) -> None:
         value = promotable()
