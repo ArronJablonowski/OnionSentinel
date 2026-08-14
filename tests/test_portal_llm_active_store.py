@@ -22,6 +22,17 @@ from portal_llm_active_store import (  # noqa: E402
 )
 
 
+class _CommandSequence(list[str]):
+    def __init__(self, commands: list[str]) -> None:
+        super().__init__(commands)
+        self.visited: list[str] = []
+
+    def __iter__(self):
+        for command in super().__iter__():
+            self.visited.append(command)
+            yield command
+
+
 class ActiveLlmStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -80,6 +91,50 @@ class ActiveLlmStoreTests(unittest.TestCase):
         self.assertTrue(llm_analysis_process_active("/tmp/a.json", commands))
         self.assertTrue(llm_analysis_process_active("", commands))
         self.assertFalse(llm_analysis_process_active("", ["1 unrelated"]))
+
+    def test_process_matching_identity_matrix_is_exact(self) -> None:
+        commands = [
+            "  7   python /opt/run-local-ai-analysis.py /tmp/prompt.json  ",
+            "07 python /opt/run-local-ai-analysis.py /tmp/other.json",
+            "7",
+            "8 python /tmp/not-run-local-ai-analysis.py /tmp/prompt.json",
+            "9 python /opt/run-local-ai-analysis.py /tmp/prompt.json.backup",
+        ]
+        for prompt, runner_pid, expected in (
+            ("/tmp/missing.json", " 7 ", True),
+            ("/tmp/prompt.json", 8, True),
+            ("/tmp/prompt.json", "07", True),
+            ("/tmp/prompt.json", -7, True),
+            ("/tmp/prompt.json", 0, True),
+            ("/tmp/prompt.json", 7.0, True),
+            ("/tmp/prompt.json", True, True),
+            ("/tmp/absent.json", None, False),
+            ("", None, True),
+        ):
+            with self.subTest(prompt=prompt, runner_pid=runner_pid):
+                self.assertIs(
+                    llm_analysis_process_active(prompt, commands, runner_pid),
+                    expected,
+                )
+
+    def test_process_matching_short_circuits_at_first_accepted_command(self) -> None:
+        pid_commands = _CommandSequence([
+            "1 unrelated",
+            "22 python run-local-ai-analysis.py",
+            "22 later run-local-ai-analysis.py",
+        ])
+        prompt_commands = _CommandSequence([
+            "1 run-local-ai-analysis.py /tmp/other.json",
+            "2 run-local-ai-analysis.py /tmp/target.json",
+            "3 run-local-ai-analysis.py /tmp/target.json",
+        ])
+
+        self.assertTrue(llm_analysis_process_active("/ignored", pid_commands, 22))
+        self.assertEqual(pid_commands.visited, pid_commands[:2])
+        self.assertTrue(
+            llm_analysis_process_active("/tmp/target.json", prompt_commands)
+        )
+        self.assertEqual(prompt_commands.visited, prompt_commands[:2])
 
     def test_active_reader_uses_one_snapshot_filters_and_orders_runs(self) -> None:
         self.write_record(
