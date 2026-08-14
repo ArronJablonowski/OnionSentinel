@@ -116,42 +116,17 @@ def incident_response_revision_state(
     analysis_ids = _values(cases, "latest_analysis_id")
     case_ids = _values(cases, "case_id")
     state: JsonObject = {"cases": cases}
-    state["groups"] = _related_rows(
-        conn, schema, "alert_group_summary",
-        (
-            "group_id", "rule_name", "severity", "severity_label",
-            "triage_level", "source_ip", "destination_ip",
-            "destination_port", "raw_alert_count", "total_seen_count",
-            "first_seen", "last_seen",
-        ),
-        "group_id", dashboard_group_ids,
-    )
-    state["alerts"] = _related_rows(
-        conn, schema, "alerts",
-        (
-            "alert_id", "rule_name", "severity", "severity_label",
-            "triage_level", "source_ip", "destination_ip",
-            "destination_port", "seen_count", "first_seen", "last_seen",
-        ),
-        "alert_id", representative_alert_ids,
-    )
-    state["analyses"] = _related_rows(
-        conn, schema, "ai_analysis_runs",
-        (
-            "analysis_id", "generated_at", "model", "detection_outcome",
-            "confidence", "evidence_hash", "response_json",
-        ),
-        "analysis_id", analysis_ids,
-    )
-    state["reviews"] = _related_rows(
-        conn, schema, "ai_second_opinion_runs",
-        (
-            "analysis_id", "status", "reviewer_outcome",
-            "reviewer_confidence", "agreement", "material_disagreement",
-            "disputed_fields_json", "generated_at",
-        ),
-        "analysis_id", analysis_ids,
-    )
+    state.update(_incident_case_revision_rows(
+        conn,
+        schema,
+        dashboard_group_ids,
+        representative_alert_ids,
+    ))
+    state.update(_incident_analysis_revision_rows(
+        conn,
+        schema,
+        analysis_ids,
+    ))
     state["adjudications"] = _related_rows(
         conn, schema, "analyst_adjudications",
         (
@@ -161,6 +136,67 @@ def incident_response_revision_state(
         ),
         "case_id", case_ids,
     )
+    state.update(_incident_reanalysis_revision_rows(conn, schema))
+    return state
+
+
+def _incident_case_revision_rows(
+    conn: sqlite3.Connection,
+    schema: RevisionSchemaDependencies,
+    dashboard_group_ids: tuple[str, ...],
+    representative_alert_ids: tuple[str, ...],
+) -> JsonObject:
+    groups = _related_rows(
+        conn, schema, "alert_group_summary",
+        (
+            "group_id", "rule_name", "severity", "severity_label",
+            "triage_level", "source_ip", "destination_ip",
+            "destination_port", "raw_alert_count", "total_seen_count",
+            "first_seen", "last_seen",
+        ),
+        "group_id", dashboard_group_ids,
+    )
+    alerts = _related_rows(
+        conn, schema, "alerts",
+        (
+            "alert_id", "rule_name", "severity", "severity_label",
+            "triage_level", "source_ip", "destination_ip",
+            "destination_port", "seen_count", "first_seen", "last_seen",
+        ),
+        "alert_id", representative_alert_ids,
+    )
+    return {"groups": groups, "alerts": alerts}
+
+
+def _incident_analysis_revision_rows(
+    conn: sqlite3.Connection,
+    schema: RevisionSchemaDependencies,
+    analysis_ids: tuple[str, ...],
+) -> JsonObject:
+    analyses = _related_rows(
+        conn, schema, "ai_analysis_runs",
+        (
+            "analysis_id", "generated_at", "model", "detection_outcome",
+            "confidence", "evidence_hash", "response_json",
+        ),
+        "analysis_id", analysis_ids,
+    )
+    reviews = _related_rows(
+        conn, schema, "ai_second_opinion_runs",
+        (
+            "analysis_id", "status", "reviewer_outcome",
+            "reviewer_confidence", "agreement", "material_disagreement",
+            "disputed_fields_json", "generated_at",
+        ),
+        "analysis_id", analysis_ids,
+    )
+    return {"analyses": analyses, "reviews": reviews}
+
+
+def _incident_reanalysis_revision_rows(
+    conn: sqlite3.Connection,
+    schema: RevisionSchemaDependencies,
+) -> JsonObject:
     latest_runs = revision_rows(
         conn,
         "incident_reanalysis_runs",
@@ -172,7 +208,7 @@ def incident_response_revision_state(
         order_sql="created_at DESC",
         limit=1,
     )
-    state["reanalysis_runs"] = latest_runs
+    state: JsonObject = {"reanalysis_runs": latest_runs}
     if latest_runs:
         state["reanalysis_cases"] = _related_rows(
             conn, schema, "incident_reanalysis_run_cases",
