@@ -135,6 +135,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         self.ir_path = self.root / "ir-export.json"
         self.soc_path = self.root / "soc-export.json"
         self.adjudication_path = self.root / "adjudication.json"
+        self.evidence_seal_path = self.root / "evidence-seal.json"
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -690,6 +691,54 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             "cases": cases,
         }
 
+    def _evidence_seal(
+        self,
+        *,
+        expected_count: int = evaluator.EXPECTED_ROLE_COUNT,
+        sealed_at: str = "2026-07-25T00:00:30Z",
+    ) -> dict:
+        adjudication = self._adjudication(expected_count=expected_count)
+        result = self._result_export(
+            "incident-responder",
+            "ir-newest-unit",
+            expected_count=expected_count,
+        )
+        detections = [
+            {
+                "rank": member["rank"],
+                "dashboard_group_id": member["dashboard_group_id"],
+                "stable_group_id": member["stable_group_id"],
+                "stable_group_key": member["stable_group_key"],
+                "representative_alert_id": member["representative_alert_id"],
+                "detection_sha256": evaluator.sha256_value(member["detection"]),
+            }
+            for member in result["members"]
+        ]
+        document = {
+            "schema": "onion-sentinel-independent-evidence-seal-v1",
+            "experiment_id": adjudication["experiment_id"],
+            "expected_count": expected_count,
+            "independent_review": True,
+            "reviewer_count": adjudication["reviewer_count"],
+            "sealed_at": sealed_at,
+            "methodology_sha256": adjudication["methodology_sha256"],
+            "source_rows_sha256": result["selection"]["source_sha256"],
+            "ordered_identity_sha256": result["selection"][
+                "ordered_identity_sha256"
+            ],
+            "ordered_detection_sha256": evaluator.sha256_value(detections),
+            "cases": [
+                {
+                    "rank": rank,
+                    "stable_group_id": case["stable_group_id"],
+                    "ground_truth": case["ground_truth"],
+                }
+                for rank, case in enumerate(adjudication["cases"], start=1)
+            ],
+        }
+        document["seal_sha256"] = evaluator.sha256_value(document)
+        return document
+
     def _write_fixture_documents(
         self,
         *,
@@ -718,6 +767,32 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         self._write_private(
             self.adjudication_path,
             self._adjudication(expected_count=expected_count),
+        )
+
+    def test_requires_a_pre_dispatch_independent_evidence_seal(self) -> None:
+        self._write_fixture_documents(expected_count=10)
+        self._write_private(
+            self.evidence_seal_path,
+            self._evidence_seal(expected_count=10),
+        )
+
+        report = evaluator.evaluate_cohorts(
+            result_paths={
+                "incident-responder": self.ir_path,
+                "soc-analyst": self.soc_path,
+            },
+            adjudication_path=self.adjudication_path,
+            evidence_seal_path=self.evidence_seal_path,
+            expected_count=10,
+        )
+
+        self.assertEqual(
+            report["independent_evidence_seal"]["seal_sha256"],
+            self._evidence_seal(expected_count=10)["seal_sha256"],
+        )
+        self.assertEqual(
+            report["independent_evidence_seal"]["sealed_before_dispatch_count"],
+            20,
         )
 
     def test_scores_roles_separately_and_enforces_hard_failures(self) -> None:
