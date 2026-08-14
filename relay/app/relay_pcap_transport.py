@@ -16,7 +16,11 @@ from pathlib import Path
 from urllib import request
 
 from relay_core import *  # noqa: F401,F403
-from relay_pcap_capture_policy import *  # noqa: F401,F403
+from relay_pcap_capture_policy import (
+    capture_protection_decision,
+    require_capture_safe,
+    security_onion_storage_status,
+)
 from relay_pcap_spool_policy import *  # noqa: F401,F403
 
 def mac_transfer_config(config: dict) -> dict:

@@ -57,6 +57,15 @@ def top_level_function(path: Path, name: str) -> ast.FunctionDef:
     raise AssertionError(f"missing top-level function: {name}")
 
 
+def top_level_function_names(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
 class _ReferenceContextVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
         self.annotation_names: set[str] = set()
@@ -234,7 +243,7 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
 
         self.assertTrue(policy.is_file())
         self.assertTrue(expected <= top_level_symbols(policy))
-        self.assertTrue(expected.isdisjoint(top_level_symbols(transport)))
+        self.assertTrue(expected.isdisjoint(top_level_function_names(transport)))
         self.assertEqual(
             undefined_global_names(policy.read_text(encoding="utf-8"), str(policy)),
             set(),
@@ -274,7 +283,7 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
 
         self.assertTrue(policy.is_file())
         self.assertTrue(expected <= top_level_symbols(policy))
-        self.assertTrue(expected.isdisjoint(top_level_symbols(transport)))
+        self.assertTrue(expected.isdisjoint(top_level_function_names(transport)))
         self.assertEqual(
             undefined_global_names(policy.read_text(encoding="utf-8"), str(policy)),
             set(),
