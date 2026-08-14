@@ -97,6 +97,10 @@ def valid_graph() -> dict:
                 fields=["event_status"], supports=["alert:current"],
             ),
             claim(
+                "event-inference", "inference",
+                supports=["alert:current"], certainty="supported",
+            ),
+            claim(
                 "bounded-absence", "negative_evidence",
                 supports=["query:empty"], certainty="supported",
             ),
@@ -142,8 +146,8 @@ class ClaimEvidencePackageTests(unittest.TestCase):
         self.assertEqual(
             {item["claim_kind"] for item in result["claims"]},
             {
-                "observation", "negative_evidence", "unavailable_telemetry",
-                "hypothesis", "final_determination",
+                "observation", "inference", "negative_evidence",
+                "unavailable_telemetry", "hypothesis", "final_determination",
             },
         )
         self.assertEqual(
@@ -175,7 +179,10 @@ class ClaimEvidencePackageTests(unittest.TestCase):
 
     def test_negative_evidence_requires_an_exact_successful_result(self) -> None:
         graph = valid_graph()
-        negative = graph["claims"][1]
+        negative = next(
+            item for item in graph["claims"]
+            if item["claim_kind"] == "negative_evidence"
+        )
         negative["material"] = False
         negative["supporting_evidence_refs"] = []
 
