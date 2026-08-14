@@ -173,16 +173,24 @@ def _skill_html(skill: dict, mode: str, config: InvestigationSkillCatalogConfig)
             </details>'''
 
 
+def _catalog_skill_rows(
+    data: dict,
+    config: InvestigationSkillCatalogConfig,
+) -> tuple[list[str], str]:
+    skills = data.get("skills") if isinstance(data.get("skills"), list) else []
+    mode = str(data.get("mode") or "unavailable")
+    rows = [_skill_html(skill, mode, config) for skill in skills if isinstance(skill, dict)]
+    state = f"{len(rows)} {mode}" if rows else "Unavailable"
+    return rows, state
+
+
 def render_investigation_skill_catalog(
     registry: object,
     config: InvestigationSkillCatalogConfig,
 ) -> str:
     """Render an escaped, deterministic, read-only skill catalog."""
     data = registry if isinstance(registry, dict) else {}
-    skills = data.get("skills") if isinstance(data.get("skills"), list) else []
-    mode = str(data.get("mode") or "unavailable")
-    rows = [_skill_html(skill, mode, config) for skill in skills if isinstance(skill, dict)]
-    state = f"{len(rows)} {mode}" if rows else "Unavailable"
+    rows, state = _catalog_skill_rows(data, config)
     digest = str(data.get("registry_sha256") or "")
     registry_meta = (
         f'<code title="{html.escape(digest, quote=True)}">{html.escape(digest)}</code>'
