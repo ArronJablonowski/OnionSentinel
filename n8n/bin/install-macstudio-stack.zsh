@@ -16,6 +16,49 @@ AI_DEPLOYMENT_GUARD_PID=""
 AI_DEPLOYMENT_GUARD_DIR=""
 ALERT_STORE_STAGE_DIR=""
 
+installer_usage() {
+  print -r -- "Usage: n8n/bin/install-macstudio-stack.zsh [--validate-only]"
+  print -r -- ""
+  print -r -- "Options:"
+  print -r -- "  --validate-only  Validate staged production sources and exit before deployment."
+  print -r -- "  -h, --help       Show this help and exit."
+}
+
+parse_installer_arguments() {
+  local validate_only_requested=0
+  local help_requested=0
+  local argument
+  for argument in "$@"; do
+    case "$argument" in
+      --validate-only)
+        validate_only_requested=1
+        ;;
+      -h|--help)
+        help_requested=1
+        ;;
+      *)
+        print -r -- "Unknown installer argument: $argument" >&2
+        installer_usage >&2
+        return 2
+        ;;
+    esac
+  done
+  if (( help_requested )); then
+    installer_usage
+    exit 0
+  fi
+  if [[ "${ONION_SENTINEL_VALIDATE_ONLY:-0}" != "0" \
+    && "${ONION_SENTINEL_VALIDATE_ONLY:-0}" != "1" ]]; then
+    print -r -- "ONION_SENTINEL_VALIDATE_ONLY must be 0 or 1." >&2
+    return 2
+  fi
+  if (( validate_only_requested )); then
+    ONION_SENTINEL_VALIDATE_ONLY=1
+  fi
+}
+
+parse_installer_arguments "$@"
+
 # Every deployed runtime must carry the exact code release that produced its
 # reports and reanalysis ledger. A commit-less disaster recovery is allowed
 # only through the explicit, auditable escape hatch below.
@@ -240,9 +283,6 @@ validate_production_python_sources
 if [[ "${ONION_SENTINEL_VALIDATE_ONLY:-0}" == "1" ]]; then
   echo "Mac Studio installer preflight validation passed."
   exit 0
-elif [[ "${ONION_SENTINEL_VALIDATE_ONLY:-0}" != "0" ]]; then
-  echo "ONION_SENTINEL_VALIDATE_ONLY must be 0 or 1." >&2
-  exit 2
 fi
 
 # Take the same advisory locks used by both AI scheduler lanes before touching

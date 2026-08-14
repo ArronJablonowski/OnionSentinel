@@ -900,6 +900,45 @@ class InstallerDependencyTests(unittest.TestCase):
             )
             self.assertFalse((runtime / ".env").exists())
 
+    def test_installer_help_and_invalid_validation_environment_are_safe(self) -> None:
+        installer = BIN_DIR / "install-macstudio-stack.zsh"
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp) / "runtime"
+            environment = {
+                **os.environ,
+                "STACK_DIR": str(runtime),
+            }
+            environment.pop("ONION_SENTINEL_RELEASE_ID", None)
+            help_result = subprocess.run(
+                ["/bin/zsh", str(installer), "--help"],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(help_result.returncode, 0)
+            self.assertIn("[--validate-only]", help_result.stdout)
+            self.assertFalse(runtime.exists())
+
+            invalid_result = subprocess.run(
+                ["/bin/zsh", str(installer)],
+                env={
+                    **environment,
+                    "ONION_SENTINEL_VALIDATE_ONLY": "invalid",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(invalid_result.returncode, 2)
+            self.assertIn(
+                "ONION_SENTINEL_VALIDATE_ONLY must be 0 or 1.",
+                invalid_result.stderr,
+            )
+            self.assertFalse(runtime.exists())
+
     def test_pi_installer_copies_bounded_process_helper(self) -> None:
         installer = (ROOT / "relay" / "bin" / "install-pi-relay.sh").read_text(encoding="utf-8")
         self.assertIn('relay/app/process_io.py" /opt/so-alert-relay/app/process_io.py', installer)
