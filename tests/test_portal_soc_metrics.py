@@ -11,11 +11,35 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "onion-sentinel-dashboard"))
 
 from portal_soc_metrics import (  # noqa: E402
+    SocMetricsQueryPlan,
     compose_metrics_payload,
     compose_status_payload,
     exclude_group_rows,
     metrics_query_plan,
 )
+
+
+class TruthySince:
+    def __init__(self) -> None:
+        self.bool_calls = 0
+
+    def __bool__(self) -> bool:
+        self.bool_calls += 1
+        return True
+
+
+class FormattingGroupExpression:
+    def __init__(self, value: str, *, fail: bool = False) -> None:
+        self.value = value
+        self.fail = fail
+        self.format_calls = 0
+
+    def __format__(self, spec: str) -> str:
+        self.format_calls += 1
+        if self.fail:
+            raise AssertionError("summary plan must not format the group expression")
+        self.last_spec = spec
+        return self.value
 
 
 class SocMetricsTests(unittest.TestCase):
@@ -51,6 +75,58 @@ class SocMetricsTests(unittest.TestCase):
         self.assertEqual(rows[0]["raw_alert_count"], 2)
         self.assertEqual(rows[0]["total_seen_count"], 5)
         conn.close()
+
+    def test_summary_plan_preserves_complete_sql_and_skips_group_formatting(self) -> None:
+        group_expr = FormattingGroupExpression("unused", fail=True)
+
+        plan = metrics_query_plan("cutoff", group_expr, True)
+
+        self.assertEqual(plan, SocMetricsQueryPlan(
+            source="sqlite-summary",
+            args=("cutoff",),
+            total_sql="SELECT COUNT(*) FROM alerts WHERE last_seen >= ?",
+            latest_sql="SELECT MAX(last_seen) FROM alerts WHERE last_seen >= ?",
+            grouped_sql="""
+            SELECT group_id, group_key, raw_alert_count, total_seen_count,
+                   last_seen, filter_status
+            FROM alert_group_summary
+             WHERE last_seen >= ?
+        """,
+            filter_status_sql=(
+                "SELECT COALESCE(filter_status, 'accepted'), COUNT(*) "
+                "FROM alerts WHERE last_seen >= ? "
+                "GROUP BY COALESCE(filter_status, 'accepted')"
+            ),
+            level_sql=(
+                "SELECT COALESCE(triage_level, severity_label, 'unknown'), COUNT(*) "
+                "FROM alerts WHERE last_seen >= ? "
+                "GROUP BY COALESCE(triage_level, severity_label, 'unknown')"
+            ),
+            top_rules_sql=(
+                "SELECT COALESCE(rule_name, 'unknown'), COUNT(*) AS rule_count "
+                "FROM alerts WHERE last_seen >= ? "
+                "GROUP BY COALESCE(rule_name, 'unknown') "
+                "ORDER BY rule_count DESC LIMIT 10"
+            ),
+            suppression_sql=(
+                "SELECT COUNT(*), COALESCE(SUM(suppressed_count), 0), "
+                "COALESCE(SUM(escalated_count), 0) FROM suppression_log"
+            ),
+        ))
+        self.assertEqual(group_expr.format_calls, 0)
+
+    def test_legacy_plan_preserves_truthiness_timing_and_group_formatting(self) -> None:
+        since = TruthySince()
+        group_expr = FormattingGroupExpression("group-expression")
+
+        plan = metrics_query_plan(since, group_expr, False)
+
+        self.assertEqual(since.bool_calls, 2)
+        self.assertEqual(group_expr.format_calls, 1)
+        self.assertEqual(group_expr.last_spec, "")
+        self.assertIs(plan.args[0], since)
+        self.assertIn("SELECT group-expression AS group_key", plan.grouped_sql)
+        self.assertIn(" WHERE last_seen >= ?", plan.grouped_sql)
 
     def test_exclusion_and_payload_preserve_grouped_public_schema(self) -> None:
         rows = [
