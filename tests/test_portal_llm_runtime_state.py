@@ -10,10 +10,73 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "onion-sentinel-dashboard"))
 
-from portal_llm_runtime_state import llm_runtime_model_state  # noqa: E402
+from portal_llm_runtime_state import (  # noqa: E402
+    _execution_fields,
+    llm_runtime_model_state,
+)
+
+
+class _TracingRecord(dict):
+    def __init__(self, values: dict) -> None:
+        super().__init__(values)
+        self.trace = []
+
+    def __contains__(self, key: object) -> bool:
+        self.trace.append(("contains", key))
+        return super().__contains__(key)
+
+    def get(self, key: object, default: object = None) -> object:
+        self.trace.append(("get", key, default))
+        return super().get(key, default)
 
 
 class LlmRuntimeStateTests(unittest.TestCase):
+    def test_execution_fields_preserve_presence_branch_access_order_and_normalization(self) -> None:
+        active = _TracingRecord({
+            "active_phase": None,
+            "active_model_route": " Route ",
+            "active_model": 7,
+            "active_provider": " CoDeX-CLI ",
+            "active_model_path": " FRONTIER ",
+            "model": "legacy must not be read",
+        })
+        legacy = _TracingRecord({
+            "model_route": " Legacy-Route ",
+            "model": None,
+            "mode": " OLLAMA ",
+            "model_path": " LOCAL ",
+            "active_model": "active must not be read",
+        })
+
+        self.assertEqual(
+            _execution_fields(active),
+            ("primary_analysis", "Route", "7", "codex-cli", "frontier"),
+        )
+        self.assertEqual(
+            active.trace,
+            [
+                ("contains", "active_phase"),
+                ("get", "active_phase", None),
+                ("get", "active_model_route", None),
+                ("get", "active_model", None),
+                ("get", "active_provider", None),
+                ("get", "active_model_path", None),
+            ],
+        )
+        self.assertEqual(
+            _execution_fields(legacy),
+            ("primary_analysis", "Legacy-Route", "", "ollama", "local"),
+        )
+        self.assertEqual(
+            legacy.trace,
+            [
+                ("contains", "active_phase"),
+                ("get", "model_route", None),
+                ("get", "model", None),
+                ("get", "mode", None),
+                ("get", "model_path", None),
+            ],
+        )
     def test_non_running_or_malformed_records_are_idle(self) -> None:
         for record in (None, [], {}, {"status": "success"}):
             with self.subTest(record=record):
