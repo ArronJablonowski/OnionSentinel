@@ -41,17 +41,20 @@ def _request_terms(rows: list[Row], dashboard_group_id: Callable[[str], str]) ->
 
 def _load_requests(conn: sqlite3.Connection, terms: list[str]) -> list[sqlite3.Row]:
     placeholders = ",".join("?" for _ in terms)
-    try:
-        return conn.execute(
-            "SELECT request_id, alert_id, group_id, status, outcome, error, request_json, "
-            "updated_at, completed_at FROM pcap_requests "
-            f"WHERE group_id IN ({placeholders}) OR alert_id IN ({placeholders}) "
-            f"OR request_id IN ({placeholders}) "
-            "ORDER BY COALESCE(completed_at, updated_at, created_at) DESC",
-            [*terms, *terms, *terms],
-        ).fetchall()
-    except sqlite3.Error:
-        return []
+    for outcome in ("outcome", "'' AS outcome"):
+        try:
+            return conn.execute(
+                "SELECT request_id, alert_id, group_id, status, " + outcome
+                + ", error, request_json, updated_at, completed_at "
+                "FROM pcap_requests "
+                f"WHERE group_id IN ({placeholders}) OR alert_id IN ({placeholders}) "
+                f"OR request_id IN ({placeholders}) "
+                "ORDER BY COALESCE(completed_at, updated_at, created_at) DESC",
+                [*terms, *terms, *terms],
+            ).fetchall()
+        except sqlite3.Error:
+            continue
+    return []
 
 
 def _used_capture_file(value: object) -> bool:

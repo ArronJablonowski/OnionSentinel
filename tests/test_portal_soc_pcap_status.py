@@ -105,6 +105,30 @@ class SocPcapStatusTests(unittest.TestCase):
         )
         self.assertIn("high threshold", result["pcap_status_detail"])
 
+    def test_legacy_request_schema_without_outcome_remains_visible(self) -> None:
+        legacy = sqlite3.connect(":memory:")
+        self.addCleanup(legacy.close)
+        legacy.row_factory = sqlite3.Row
+        legacy.execute(
+            "CREATE TABLE pcap_requests (request_id TEXT, alert_id TEXT, group_id TEXT, "
+            "status TEXT, error TEXT, request_json TEXT, created_at TEXT, updated_at TEXT, "
+            "completed_at TEXT)"
+        )
+        legacy.execute(
+            "INSERT INTO pcap_requests VALUES "
+            "('old', 'alert', 'dash', 'failed', 'no matching packets', '{}', "
+            "'2026-08-07T16:00:00Z', '', '')"
+        )
+
+        result = load_pcap_request_statuses(
+            legacy,
+            [{"group_key": "group-key", "alert_id": "alert"}],
+            self.dependencies(),
+        )
+
+        self.assertEqual(result["dash"]["request_id"], "old")
+        self.assertEqual(result["dash"]["outcome"], "")
+
 
 if __name__ == "__main__":
     unittest.main()
