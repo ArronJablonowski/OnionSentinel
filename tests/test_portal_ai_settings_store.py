@@ -143,6 +143,54 @@ class AiSettingsStoreTest(unittest.TestCase):
         self.assertTrue(saved)
         self.assertEqual(response["model_route"], bounded)
 
+    def test_invalid_role_short_circuits_before_lock_read_and_normalization(self) -> None:
+        class ExplodingLock:
+            def __enter__(self):
+                raise AssertionError("invalid role acquired settings lock")
+
+            def __exit__(self, *_args):
+                return False
+
+        sources = AiSettingsStoreSources(
+            **{
+                **self.sources.__dict__,
+                "lock": ExplodingLock(),
+                "normalize": lambda _value: (_ for _ in ()).throw(
+                    AssertionError("invalid role normalized settings")
+                ),
+            }
+        )
+        self.assertEqual(
+            save_soc_agent_model(
+                sources, {"role": "unknown", "model": "ollama:primary"}
+            ),
+            (
+                False,
+                {
+                    "ok": False,
+                    "error": "Cyber Security Agent role is invalid.",
+                },
+            ),
+        )
+
+    def test_failed_agent_write_does_not_add_success_projection(self) -> None:
+        directory_path = Path(self.temp.name) / "settings-directory"
+        directory_path.mkdir()
+        sources = AiSettingsStoreSources(
+            **{**self.sources.__dict__, "path": directory_path}
+        )
+
+        saved, response = save_soc_agent_model(
+            sources,
+            {"role": "soc-analyst", "model": "ollama:primary"},
+        )
+
+        self.assertFalse(saved)
+        self.assertIn("Could not read SOC AI settings", response["error"])
+        self.assertNotIn("message", response)
+        self.assertNotIn("role", response)
+        self.assertNotIn("model_route", response)
+
 
 if __name__ == "__main__":
     unittest.main()
