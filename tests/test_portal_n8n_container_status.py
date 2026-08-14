@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "onion-sentinel-dashboard"))
 
 from portal_n8n_container_status import (  # noqa: E402
     N8nContainerStatusSources,
+    _inspect_container,
     compose_n8n_container_status,
 )
 
@@ -48,14 +49,67 @@ def inspect_payload(state="running", restart="unless-stopped") -> str:
 
 
 class N8nContainerStatusTests(unittest.TestCase):
-    def compose(self, runner: Runner):
-        sources = N8nContainerStatusSources(
+    def sources(self, runner: Runner) -> N8nContainerStatusSources:
+        return N8nContainerStatusSources(
             docker_bin="/docker", container_name="n8n", health_url="http://healthz",
             environment={"PATH": "/bin"}, pipe=-1, run=runner,
             now=lambda: dt.datetime(2026, 8, 7, 12, 0, tzinfo=dt.timezone.utc),
             format_timestamp=lambda _value: "checked",
         )
-        return compose_n8n_container_status(sources)
+
+    def compose(self, runner: Runner):
+        return compose_n8n_container_status(self.sources(runner))
+
+    def test_inspect_boundary_preserves_runner_contract_and_success_shapes(self) -> None:
+        base = {"id": "n8n", "checked_at": "timestamp"}
+        for output, expected in (
+            ('[{"State":{"Status":"running"}}]', {"State": {"Status": "running"}}),
+            ("[]", {}),
+            ('{"State":{}}', {}),
+            ("null", {}),
+        ):
+            with self.subTest(output=output):
+                runner = Runner(Process(stdout=output))
+
+                result = _inspect_container(
+                    self.sources(runner), base, "checked-label",
+                )
+
+                self.assertEqual(result, (expected, None))
+                self.assertEqual(runner.calls, [
+                    (
+                        ["/docker", "inspect", "n8n"],
+                        {
+                            "text": True,
+                            "stdout": -1,
+                            "stderr": -1,
+                            "timeout": 5,
+                            "check": False,
+                            "env": {"PATH": "/bin"},
+                        },
+                    )
+                ])
+
+    def test_inspect_failure_reason_precedence_and_missing_classification(self) -> None:
+        base = {"id": "n8n", "checked_at": "timestamp"}
+        cases = (
+            (Process(1, stdout="ignored", stderr="first\nNo Such Container: n8n"), "Missing", "No Such Container: n8n"),
+            (Process(1, stdout="daemon offline", stderr=""), "Docker unavailable", "daemon offline"),
+            (Process(1, stdout="\n", stderr="\n"), "Docker unavailable", "docker inspect failed"),
+        )
+        for process, value, reason in cases:
+            with self.subTest(value=value, reason=reason):
+                container, failure = _inspect_container(
+                    self.sources(Runner(process)), base, "checked-label",
+                )
+
+                self.assertEqual(container, {})
+                self.assertEqual(failure["value"], value)
+                self.assertEqual(
+                    failure["detail"],
+                    f"WARNING: n8n status unavailable: {reason} · healthz not checked "
+                    "· checked checked-label",
+                )
 
     def test_inspect_exception_is_bounded_docker_unavailable(self) -> None:
         result = self.compose(Runner(RuntimeError("socket unavailable")))
