@@ -244,6 +244,20 @@ def save_batch(config: dict, batch: dict) -> Path:
     return output_path
 
 
+def _prune_runtime_evidence_directory(directory: Path, cutoff: float) -> int:
+    if not directory.exists() or not directory.is_dir():
+        return 0
+    removed = 0
+    for path in directory.glob("*.json"):
+        try:
+            if path.is_file() and not path.is_symlink() and path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def prune_runtime_evidence(config: dict) -> int:
     """Bound relay-owned JSON evidence without touching durable queue state."""
     relay = config.get("relay", {})
@@ -254,31 +268,29 @@ def prune_runtime_evidence(config: dict) -> int:
         raw_path = relay.get(key)
         if not raw_path:
             continue
-        directory = resolve_path(raw_path)
-        if not directory.exists() or not directory.is_dir():
-            continue
-        for path in directory.glob("*.json"):
-            try:
-                if path.is_file() and not path.is_symlink() and path.stat().st_mtime < cutoff:
-                    path.unlink()
-                    removed += 1
-            except OSError:
-                continue
+        removed += _prune_runtime_evidence_directory(resolve_path(raw_path), cutoff)
     return removed
+
+
+def _relay_root_capacity_policy(relay: dict, path: Path) -> tuple[object, float, float, int]:
+    anchor = path
+    while not anchor.exists() and anchor != anchor.parent:
+        anchor = anchor.parent
+    usage = shutil.disk_usage(anchor)
+    hard_limit = max(2.0, min(80.0, float(relay.get("root_hard_max_used_percent", 80) or 80)))
+    start_limit = max(1.0, min(hard_limit - 0.1, float(relay.get("root_start_max_used_percent", 75) or 75)))
+    min_free = max(0, int(relay.get("root_min_free_bytes", 2 * 1024**3) or 0))
+    return usage, hard_limit, start_limit, min_free
 
 
 def require_relay_root_capacity(config: dict) -> dict:
     """Stop new relay writes at 75 percent, leaving a hard 80 percent ceiling."""
     relay = config.get("relay", {})
     path = resolve_path(relay.get("batch_dir") or "/opt/so-alert-relay/state/batches")
-    anchor = path
-    while not anchor.exists() and anchor != anchor.parent:
-        anchor = anchor.parent
-    usage = shutil.disk_usage(anchor)
+    usage, hard_limit, start_limit, min_free = _relay_root_capacity_policy(
+        relay, path
+    )
     used_percent = (usage.used / usage.total * 100) if usage.total else 100.0
-    hard_limit = max(2.0, min(80.0, float(relay.get("root_hard_max_used_percent", 80) or 80)))
-    start_limit = max(1.0, min(hard_limit - 0.1, float(relay.get("root_start_max_used_percent", 75) or 75)))
-    min_free = max(0, int(relay.get("root_min_free_bytes", 2 * 1024**3) or 0))
     if used_percent >= hard_limit:
         raise RuntimeError(f"relay root disk reached hard limit: {used_percent:.1f}% >= {hard_limit:.1f}%")
     if used_percent >= start_limit or usage.free < min_free:
@@ -486,15 +498,20 @@ def parse_webhook_response(body: str) -> dict | list | None:
         return None
 
 
+def _webhook_failure_payload(candidate: object) -> dict | None:
+    if not isinstance(candidate, dict):
+        return None
+    nested = candidate.get("json")
+    return nested if isinstance(nested, dict) else candidate
+
+
 def webhook_response_failure(parsed: dict | list | None) -> str | None:
     """Return a sanitized failure reason when the workflow rejected a payload."""
-    if parsed is None:
-        return None
     candidates = parsed if isinstance(parsed, list) else [parsed]
     for candidate in candidates:
-        if not isinstance(candidate, dict):
+        payload = _webhook_failure_payload(candidate)
+        if payload is None:
             continue
-        payload = candidate.get("json") if isinstance(candidate.get("json"), dict) else candidate
         status = str(payload.get("status") or "").lower()
         if payload.get("ok") is False or status in {"rejected", "error"}:
             reason = payload.get("reason") or payload.get("error") or status or "workflow rejected payload"

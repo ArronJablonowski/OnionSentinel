@@ -3587,7 +3587,9 @@ tests. The facade performs no transport or persistence work and remains below
 
 `relay_core.py` owns configuration/path resolution, the restricted
 Security Onion alert pull, bounded webhook transport, evidence persistence,
-deduplication, filtering, and Relay-root capacity policy.
+deduplication, filtering, and Relay-root capacity policy. Its bounded policy
+phases separately own JSON-evidence retention admission/removal, existing-root
+anchor and disk-threshold projection, and wrapped webhook rejection parsing.
 
 `relay_pcap_spool_policy.py` owns absolute spool-path and required-mount
 admission, capacity/high-watermark enforcement, usage projection, bounded
