@@ -82,6 +82,29 @@ def report_id(path: Path) -> str:
     return hashlib.sha1(str(path).encode()).hexdigest()[:16]
 
 
+def _scan_root_candidate_paths(
+    root: Path,
+    excluded_names: set[str],
+) -> list[Path]:
+    if not root.exists():
+        return []
+    if root.is_file() and root.suffix.lower() in (".html", ".htm"):
+        return [root]
+    paths: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if not should_skip_dir(Path(dirpath) / name, excluded_names)
+        ]
+        paths.extend(
+            Path(dirpath) / filename
+            for filename in filenames
+            if filename.lower().endswith((".html", ".htm"))
+        )
+    return paths
+
+
 def _candidate_paths(
     scan_roots: Sequence[Path],
     standalone_html: Sequence[Path],
@@ -89,22 +112,7 @@ def _candidate_paths(
 ) -> list[Path]:
     paths: list[Path] = []
     for root in scan_roots:
-        if not root.exists():
-            continue
-        if root.is_file() and root.suffix.lower() in (".html", ".htm"):
-            paths.append(root)
-            continue
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [
-                name
-                for name in dirnames
-                if not should_skip_dir(Path(dirpath) / name, excluded_names)
-            ]
-            paths.extend(
-                Path(dirpath) / filename
-                for filename in filenames
-                if filename.lower().endswith((".html", ".htm"))
-            )
+        paths.extend(_scan_root_candidate_paths(root, excluded_names))
     paths.extend(path for path in standalone_html if path.exists())
     return paths
 
