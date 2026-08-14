@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import stat
 import sys
 import tempfile
 import unittest
@@ -22,10 +23,21 @@ from prompt_builder_io import (  # noqa: E402
     parse_json_mapping,
     read_bounded_bytes,
     safe_output_filename,
+    write_private_text,
 )
 
 
 class PromptBuilderIoTests(unittest.TestCase):
+    def test_private_output_is_owner_only_and_non_replaceable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "prompt.json"
+            write_private_text(path, "secret prompt\n")
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "secret prompt\n")
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            with self.assertRaises(FileExistsError):
+                write_private_text(path, "replacement\n")
+
     def test_output_names_preserve_legacy_projection_and_bounds(self):
         self.assertEqual(
             output_filename_timestamp("2026-08-08  12:34:56-06:00"),
