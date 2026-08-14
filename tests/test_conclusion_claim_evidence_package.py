@@ -203,6 +203,19 @@ class ClaimEvidencePackageTests(unittest.TestCase):
         ):
             claim_evidence.validate(graph, {}, package(), DEPS)
 
+    def test_confirmed_certainty_requires_corroborating_evidence(self) -> None:
+        graph = valid_graph()
+        inference = next(
+            item for item in graph["claims"] if item["claim_kind"] == "inference"
+        )
+        inference["certainty"] = "confirmed"
+        inference["supporting_evidence_refs"] = ["query:empty"]
+
+        with self.assertRaisesRegex(
+            ClaimEvidenceError, "confirmed claim event-inference lacks corroborating evidence",
+        ):
+            claim_evidence.validate(graph, {}, package(), DEPS)
+
     def test_reviewer_correction_retains_original_and_reason(self) -> None:
         missing_original = valid_graph()
         missing_original["claims"].append(claim(
