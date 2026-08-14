@@ -202,6 +202,38 @@ class PromptPriorAnalysisTests(unittest.TestCase):
         self.assertEqual(result[0]["detection_outcome"], "false_positive")
         self.assertEqual(result[0]["tuning_recommendation"], "Review rule threshold")
 
+    def test_current_legacy_artifact_response_retains_case_summary_fields(self):
+        query = mock.Mock(side_effect=sqlite3.OperationalError("missing table"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = root / "z-local-ai-analysis.json"
+            artifact.write_text(
+                json.dumps({
+                    "analysis_id": "analysis-current-artifact",
+                    "alert_id": "alert-1",
+                    "agent_role": "soc-analyst",
+                    "response": {
+                        "summary": "Current artifact response summary.",
+                        "confidence": "low",
+                        "confidence_score": 0.31,
+                        "evidence_used": ["alert:alert-1"],
+                        "evidence_gaps": ["Packet evidence unavailable."],
+                        "hypotheses": [],
+                    },
+                }),
+                encoding="utf-8",
+            )
+
+            result = build_prior_analysis_context(
+                source_bundle(query=query),
+                request(root),
+            )
+
+        self.assertEqual(result[0]["summary"], "Current artifact response summary.")
+        self.assertEqual(result[0]["confidence_score"], 0.31)
+        self.assertEqual(result[0]["evidence_used"], ["alert:alert-1"])
+        self.assertEqual(result[0]["evidence_gaps"], ["Packet evidence unavailable."])
+
     def test_legacy_scan_limit_prevents_unbounded_corpus_reads(self):
         loader = mock.Mock(side_effect=lambda path: json.loads(path.read_text()))
         with tempfile.TemporaryDirectory() as directory:

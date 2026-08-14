@@ -41,6 +41,7 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `bin/agent_memory.py` | Shared role-aware Markdown memory library with relevance retrieval, validation, locking, deduplication, and expiry. |
 | `bin/manage-agent-memory.py` | Query/writeback CLI adapter for SOC Analyst, Incident Responder, SIEM Engineer, Cyber Threat Intel, and Threat Hunter workflows. |
 | `bin/verify-agent-memory.py` | Read-only deployment verifier for every agent prompt, role memory, shared memory, permissions, and retrieval contract. |
+| `bin/agent_memory_context_contract.py` | Provider-neutral, content-free identity for immutable evidence, case-local working state, role memory, and shared cross-agent memory. |
 | `bin/onion_sentinel_harness.py` | Disabled-by-default investigation control plane with role policy, budgets, durable state, evidence/model/tool/decision ledgers, memory gates, and a hash-chained audit trace. |
 | `bin/harness_contracts.py` | Immutable job identity, secret-safe metadata, skill attestation, evidence counting, and terminal ledger-manifest contracts. |
 | `bin/harness_memory.py` | Evidence-, confidence-, review-, and approval-gated durable-memory promotion decision policy. |

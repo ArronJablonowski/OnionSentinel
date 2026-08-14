@@ -70,6 +70,7 @@ CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 ACTIVE_MEMORY_STATUSES = frozenset({"model-observed", "operator-confirmed"})
 DEFAULT_ROLE_RECORD_LIMIT = 200
 DEFAULT_SHARED_RECORD_LIMIT = 300
+MEMORY_SNAPSHOT_SCHEMA = "onion-sentinel-agent-memory-snapshot-v1"
 
 
 def role_memory_file(memory_dir: Path, agent_role: str) -> Path:

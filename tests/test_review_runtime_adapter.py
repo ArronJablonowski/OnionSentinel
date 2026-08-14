@@ -61,6 +61,8 @@ class ReviewRuntimeAdapterTests(unittest.TestCase):
             "reviewer_non_domain_artifact_catalog",
             "reviewer_non_domain_rule_shorthand_catalog",
             "reviewer_evidence_hash",
+            "refresh_selected_memory_snapshot",
+            "rebind_agent_memory_context_contract",
         )
         bindings = {name: mock.Mock(name=name) for name in names}
         bindings.update({
@@ -79,6 +81,14 @@ class ReviewRuntimeAdapterTests(unittest.TestCase):
         )
         self.assertIs(
             ports["evidence_hash"], bindings["reviewer_evidence_hash"]
+        )
+        self.assertIs(
+            ports["refresh_memory_snapshot"],
+            bindings["refresh_selected_memory_snapshot"],
+        )
+        self.assertIs(
+            ports["rebind_memory_contract"],
+            bindings["rebind_agent_memory_context_contract"],
         )
 
     def test_saved_response_strips_attestations_and_fails_closed_on_review(

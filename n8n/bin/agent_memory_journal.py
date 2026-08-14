@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -13,6 +14,7 @@ from typing import Any
 from agent_memory_validation import (
     ACTIVE_MEMORY_STATUSES,
     CONFIDENCE_RANK,
+    MEMORY_SNAPSHOT_SCHEMA,
     MEMORY_ROLES,
     _parse_time,
     _tokens,
@@ -28,8 +30,6 @@ RECORD_RE = re.compile(
     r"<!-- onion-sentinel-memory:v1\s*\n(?P<metadata>\{.*?\})\s*\n-->",
     re.DOTALL,
 )
-
-
 def _split_managed(text: str) -> tuple[str, str, str]:
     if MANAGED_START not in text or MANAGED_END not in text:
         return text.rstrip(), "", ""
@@ -51,6 +51,24 @@ def _load_text_locked(path: Path) -> str:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
+def _load_snapshot_locked(path: Path) -> tuple[str, dict[str, Any]]:
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
+        try:
+            exists = path.exists()
+            raw = path.read_bytes() if exists else b""
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    return raw.decode("utf-8", errors="replace"), {
+        "schema": MEMORY_SNAPSHOT_SCHEMA,
+        "source_digest": hashlib.sha256(raw).hexdigest(),
+        "source_bytes": len(raw),
+        "source_exists": exists,
+    }
+
+
 def _records_from_managed(managed: str) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for match in RECORD_RE.finditer(managed):
@@ -66,6 +84,12 @@ def _records_from_managed(managed: str) -> list[dict[str, Any]]:
 def read_memory_file(path: Path) -> tuple[str, list[dict[str, Any]]]:
     """Return operator-maintained Markdown and parsed managed records."""
     text = _load_text_locked(path)
+    before, managed, after = _split_managed(text)
+    manual = "\n\n".join(part for part in (before, after) if part).strip()
+    return manual, _records_from_managed(managed)
+
+
+def _memory_contents(text: str) -> tuple[str, list[dict[str, Any]]]:
     before, managed, after = _split_managed(text)
     manual = "\n\n".join(part for part in (before, after) if part).strip()
     return manual, _records_from_managed(managed)
@@ -142,9 +166,10 @@ def _selected_memory_records(
 
 def _compact_visible_record(record: dict[str, Any]) -> dict[str, Any]:
     visible_fields = (
-        "id", "category", "status", "confidence", "finding", "use_when",
+        "id", "version", "category", "status", "confidence", "finding", "use_when",
         "evidence_basis", "tags", "created_at", "last_reinforced_at",
         "expires_at", "reinforced_count", "source_agent", "source_analysis_id",
+        "source_artifact_hash",
     )
     return {
         key: record.get(key)
@@ -159,16 +184,63 @@ def _bounded_selected_records(
     record_budget: int,
 ) -> list[dict[str, Any]]:
     bounded_records: list[dict[str, Any]] = []
-    used = 0
     for record in selected:
         compact = _compact_visible_record(record)
-        size = len(json.dumps(compact, sort_keys=True).encode("utf-8"))
-        if bounded_records and used + size > record_budget:
+        candidate = [*bounded_records, compact]
+        size = len(
+            json.dumps(
+                candidate,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        )
+        if size > record_budget:
             break
-        if size <= record_budget:
-            bounded_records.append(compact)
-            used += size
+        bounded_records.append(compact)
     return bounded_records
+
+
+def _selection_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    bounded_records: list[dict[str, Any]],
+    selected_count: int,
+    records_count: int,
+    active_count: int,
+    manual: str,
+    manual_notes: str,
+    limit_bytes: int,
+    max_records: int,
+) -> dict[str, Any]:
+    selected_json = json.dumps(
+        bounded_records,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return {
+        **snapshot,
+        "selected_records_digest": hashlib.sha256(selected_json).hexdigest(),
+        "selected_record_versions": [
+            {
+                "id": str(record.get("id") or ""),
+                "version": max(1, int(record.get("version") or 1)),
+            }
+            for record in bounded_records
+        ],
+        "selected_records_bytes": len(selected_json),
+        "manual_notes_bytes": len(manual_notes.encode("utf-8")),
+        "total_managed_records": records_count,
+        "active_managed_records": active_count,
+        "selected_managed_records": len(bounded_records),
+        "max_bytes": limit_bytes,
+        "max_records": max_records,
+        "truncated": (
+            len(bounded_records) < selected_count
+            or manual_notes != manual
+        ),
+    }
 
 
 def load_memory_context(
@@ -180,19 +252,28 @@ def load_memory_context(
     max_records: int = 8,
 ) -> dict[str, Any]:
     """Select relevant records instead of blindly injecting a file prefix."""
-    manual, records = read_memory_file(path)
+    text, snapshot = _load_snapshot_locked(path)
+    manual, records = _memory_contents(text)
     active = _active_memory_records(records, now=dt.datetime.now().astimezone())
     selected = _selected_memory_records(
-        active,
-        evidence=evidence,
-        max_records=max_records,
-    )
+        active, evidence=evidence, max_records=max_records)
     manual_budget = min(2000, max(0, limit_bytes // 4))
     manual_notes = _bounded_utf8(manual, manual_budget)
     record_budget = max(0, limit_bytes - len(manual_notes.encode("utf-8")))
     bounded_records = _bounded_selected_records(
         selected,
         record_budget=record_budget,
+    )
+    snapshot = _selection_snapshot(
+        snapshot,
+        bounded_records=bounded_records,
+        selected_count=len(selected),
+        records_count=len(records),
+        active_count=len(active),
+        manual=manual,
+        manual_notes=manual_notes,
+        limit_bytes=limit_bytes,
+        max_records=max_records,
     )
     return {
         "path": str(path),
@@ -208,6 +289,7 @@ def load_memory_context(
             "be corroborated by current evidence."
         ),
         "max_bytes": limit_bytes,
+        "snapshot": snapshot,
     }
 
 

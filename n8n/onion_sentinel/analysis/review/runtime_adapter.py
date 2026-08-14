@@ -116,6 +116,8 @@ def independent_package(
         artifact_catalog=b["reviewer_non_domain_artifact_catalog"],
         rule_shorthand_catalog=b["reviewer_non_domain_rule_shorthand_catalog"],
         evidence_hash=b["reviewer_evidence_hash"],
+        refresh_memory_snapshot=b["refresh_selected_memory_snapshot"],
+        rebind_memory_contract=b["rebind_agent_memory_context_contract"],
     )
 
 

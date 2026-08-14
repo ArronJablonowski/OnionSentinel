@@ -760,6 +760,31 @@ The package includes at most a small bounded set of matching role/shared records
 plus bounded operator-authored notes. Memory remains context, not proof, and
 current evidence wins when they conflict.
 
+Every admitted run carries `memory_context_contract` using
+`onion-sentinel-memory-context-contract-v1`. The contract separates four
+owners instead of treating the prompt transcript as memory:
+
+1. immutable evidence is identified by the evidence-reference manifest;
+2. case-local working memory is the digest-bound set of current alert,
+   grouped state, analyst state, bounded prior-case summaries, correlation,
+   and query-result sections for one exact investigation case;
+3. durable analyst memory is the selected role-memory snapshot; and
+4. shared cross-agent knowledge is the selected shared-memory snapshot.
+
+The contract contains no memory text or evidence content. It records the case
+and role, source and selected-record digests, exact record IDs and monotonic
+versions, byte/record bounds, truncation state, retention/cleanup policy, and a
+digest of the complete manifest. Provider adapters receive the same contract;
+provider selection is not part of its identity.
+
+Prior-case summary projection remains bounded but no longer collapses history
+to a conclusion alone. When the indexed response is available it retains exact
+citations, confidence and confidence score, telemetry gaps, hypotheses with
+supporting and contradicting evidence, next discriminators, and correlation
+contradictions. Legacy artifact fallback admits an artifact only by exact alert
+or group identity; narrative substring matches cannot cross case boundaries.
+The projection publishes its limits and every field truncated by those limits.
+
 After a successful SOC Analyst run, the model may return `memory_candidates`.
 Deterministic code rejects malformed, low-confidence, secret-like, ungrounded,
 or oversized candidates before writing. Role memory accepts reusable medium or
@@ -768,6 +793,10 @@ cross-role value. Accepted records are labeled `model-observed`, include
 evidence basis, retrieval conditions, provenance, confidence, reinforcement
 count, and expiry, and are written atomically under a file lock. Equivalent
 records reinforce one entry instead of growing the file with duplicates.
+Each reinforcement or quarantine advances the managed record's monotonic
+version; idempotent replay does not. Retrieval records a content-free source
+digest and selected-record digest from the same locked read, so a later run can
+prove the exact versions it consumed.
 
 Operator notes remain outside the delimited managed section and are preserved
 on every write. Managed role files retain at most 200 records and shared memory

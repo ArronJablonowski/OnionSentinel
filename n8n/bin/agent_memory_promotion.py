@@ -34,6 +34,7 @@ def _merge_record(
     incoming: dict[str, Any],
 ) -> dict[str, Any]:
     merged = dict(existing)
+    merged["version"] = max(1, int(existing.get("version") or 1)) + 1
     merged["last_reinforced_at"] = incoming["last_reinforced_at"]
     merged["expires_at"] = incoming["expires_at"]
     merged["reinforced_count"] = int(existing.get("reinforced_count") or 1) + 1
@@ -153,6 +154,7 @@ def _apply_quarantine(
     for record in current_records:
         current = dict(record)
         if str(current.get("id") or "") in selected_ids and selected(current):
+            current["version"] = max(1, int(current.get("version") or 1)) + 1
             current["status"] = "quarantined"
             current["quarantined_at"] = now
             current["quarantine_reason"] = _clean_text(reason, 500)

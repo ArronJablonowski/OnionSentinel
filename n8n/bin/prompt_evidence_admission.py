@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
+from agent_memory_context_contract import refresh_selected_memory_snapshot
+
 
 @dataclass(frozen=True)
 class PromptEvidenceAdmissionRequest:
@@ -87,6 +89,7 @@ def _retain_confirmed_memory(memory: dict) -> None:
                     and str(record.get("status") or "") == "operator-confirmed"
                 )
             ]
+            refresh_selected_memory_snapshot(section)
     memory["usage_guidance"] = (
         "This is a blind reanalysis. Use only operator-authored notes and "
         "operator-confirmed memory; do not infer any previous model conclusion."

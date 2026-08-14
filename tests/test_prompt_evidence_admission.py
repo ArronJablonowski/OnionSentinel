@@ -200,6 +200,42 @@ class PromptEvidenceAdmissionTests(unittest.TestCase):
         self.assertEqual(len(memory["role_memory"]["records"]), 2)
         self.assertIn("prior_analysis", correlation["candidates"][0])
 
+    def test_blind_filter_rebinds_the_exact_selected_memory_snapshot(self):
+        memory = {
+            "role_memory": {
+                "records": [
+                    {"id": "keep", "version": 3, "status": "operator-confirmed"},
+                    {"id": "remove", "version": 7, "status": "model-observed"},
+                ],
+                "snapshot": {
+                    "source_digest": "a" * 64,
+                    "selected_records_digest": "b" * 64,
+                    "selected_record_versions": [
+                        {"id": "keep", "version": 3},
+                        {"id": "remove", "version": 7},
+                    ],
+                },
+            },
+            "shared_memory": {"records": []},
+        }
+
+        filtered, _ = blind_model_authored_context(memory, {})
+
+        snapshot = filtered["role_memory"]["snapshot"]
+        self.assertEqual(
+            snapshot["selected_record_versions"],
+            [{"id": "keep", "version": 3}],
+        )
+        self.assertNotEqual(snapshot["selected_records_digest"], "b" * 64)
+        self.assertTrue(snapshot["selection_filtered"])
+        self.assertEqual(
+            memory["role_memory"]["snapshot"]["selected_record_versions"],
+            [
+                {"id": "keep", "version": 3},
+                {"id": "remove", "version": 7},
+            ],
+        )
+
     def test_malformed_indicator_container_fails_closed(self):
         with self.assertRaises(AttributeError):
             permitted_enrichment_indicators({"indicators": None})

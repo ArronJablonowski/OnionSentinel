@@ -100,6 +100,10 @@ def _load_and_prepare(
         b, startup, state.context, state.args, state.controlled_identity)
     state.prompt_path = attested.prompt_path
     state.prompt_package = attested.prompt_package
+    b["attach_agent_memory_context_contract"](
+        state.prompt_package,
+        evaluation_frozen=state.memory_frozen,
+    )
     state.settings = attested.settings
     state.prepared = adapters.prepare_runtime(
         b, preparation, state.context, args=state.args,

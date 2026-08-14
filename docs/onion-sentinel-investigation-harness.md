@@ -1077,7 +1077,14 @@ For controlled cohort evaluation only, set
 `ONION_SENTINEL_EVALUATION_FREEZE_MEMORY=1` on the manually invoked analysis
 worker. The runner still reads the fixed pre-evaluation role/shared memory but
 marks every primary and reviewer candidate ineligible for persistence. The
-loaded harness configuration records that freeze in the run digest. It also
+loaded harness configuration records that freeze in the run digest. Before
+harness initialization, the runner also attaches the versioned
+`memory_context_contract`; its `evaluation_frozen` flag, exact case identity,
+immutable-evidence manifest, role/shared source digests, and selected record
+IDs/versions are therefore covered by the immutable prompt digest and exported
+trace. Blind reanalysis rebinds the selected-record digest after removing
+unconfirmed model memory, so the manifest proves what the agent could actually
+see rather than what the source file contained. It also
 defers replay of any crash-recovered committed memory journal entry until a
 normal, non-evaluation worker resumes, so recovery work cannot contaminate the
 cohort between cases. Hash the role/shared memory files and record the exact

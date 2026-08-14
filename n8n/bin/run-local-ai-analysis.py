@@ -25,8 +25,11 @@ BIN_DIR = Path(__file__).resolve().parent
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 from agent_memory import (  # noqa: E402
+    attach_agent_memory_context_contract,
     normalize_memory_candidates,
     persist_memory_candidates,
+    rebind_agent_memory_context_contract,
+    refresh_selected_memory_snapshot,
     role_prompt_file,
     role_second_opinion_prompt_file,
 )

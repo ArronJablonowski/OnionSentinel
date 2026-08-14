@@ -989,6 +989,54 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             certificate_digest,
         )
 
+    def test_memory_context_contract_is_identical_across_provider_transports(self) -> None:
+        package = {
+            "agent_role": "soc-analyst",
+            "group_id": "group-provider-neutral",
+            "alert": {"alert_id": "alert-provider-neutral"},
+            "_local_investigation_query_context": {
+                "case_id": "investigation-provider-neutral",
+            },
+            "evidence_reference_contract": {
+                "schema": "onion-sentinel-evidence-reference-contract-v1",
+                "references": [],
+            },
+            "agent_memory": {
+                "role_memory": {
+                    "snapshot": {
+                        "schema": "onion-sentinel-agent-memory-snapshot-v1",
+                        "source_digest": "1" * 64,
+                        "selected_records_digest": "2" * 64,
+                        "selected_record_versions": [],
+                    },
+                },
+                "shared_memory": {
+                    "snapshot": {
+                        "schema": "onion-sentinel-agent-memory-snapshot-v1",
+                        "source_digest": "3" * 64,
+                        "selected_records_digest": "4" * 64,
+                        "selected_record_versions": [],
+                    },
+                },
+            },
+        }
+        self.runner.attach_agent_memory_context_contract(
+            package,
+            evaluation_frozen=True,
+        )
+
+        local = self.runner.model_safe_copy(copy.deepcopy(package), hosted=False)
+        hosted = self.runner.model_safe_copy(copy.deepcopy(package), hosted=True)
+
+        self.assertEqual(
+            local["memory_context_contract"],
+            hosted["memory_context_contract"],
+        )
+        self.assertEqual(
+            local["memory_context_contract"]["contract_digest"],
+            package["memory_context_contract"]["contract_digest"],
+        )
+
     def test_hosted_synchronization_is_transactional_and_reaches_fixed_point(
         self,
     ) -> None:

@@ -165,6 +165,16 @@ class AgentMemoryContextContractTests(unittest.TestCase):
                 evaluation_frozen=False,
             )
 
+        unsupported_snapshot = package()
+        unsupported_snapshot["agent_memory"]["role_memory"]["snapshot"][
+            "schema"
+        ] = "onion-sentinel-agent-memory-snapshot-v0"
+        with self.assertRaisesRegex(ValueError, "snapshot schema is unsupported"):
+            attach_agent_memory_context_contract(
+                unsupported_snapshot,
+                evaluation_frozen=False,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

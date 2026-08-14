@@ -43,7 +43,10 @@ def _remove_prior_correlations(package: dict[str, Any]) -> None:
     correlation["candidates"] = sanitized
 
 
-def _retain_confirmed_memory(package: dict[str, Any]) -> None:
+def _retain_confirmed_memory(
+    package: dict[str, Any],
+    refresh_snapshot: Callable[[dict[str, Any]], None],
+) -> None:
     memory = package.get("agent_memory")
     if not isinstance(memory, dict):
         return
@@ -58,6 +61,7 @@ def _retain_confirmed_memory(package: dict[str, Any]) -> None:
                 if isinstance(record, dict)
                 and str(record.get("status") or "").strip().lower() == "operator-confirmed"
             ]
+            refresh_snapshot(context)
     memory["usage_guidance"] = (
         "Use only operator-authored notes and operator-confirmed memory as context. "
         "Corroborate every material conclusion with current collector-owned evidence."
@@ -152,14 +156,17 @@ def build(
     artifact_catalog: Callable[[dict[str, Any]], list[str]],
     rule_shorthand_catalog: Callable[[dict[str, Any]], list[str]],
     evidence_hash: Callable[[dict[str, Any]], str],
+    refresh_memory_snapshot: Callable[[dict[str, Any]], None],
+    rebind_memory_contract: Callable[[dict[str, Any]], None],
 ) -> dict[str, Any]:
     """Build the exact blind package after applying its transport boundary."""
     package = model_safe_copy(prompt_package, hosted=hosted, reviewer_safe=True)
     package.pop("prior_analyses", None)
     _remove_anchoring_instructions(package)
     _remove_prior_correlations(package)
-    _retain_confirmed_memory(package)
+    _retain_confirmed_memory(package, refresh_memory_snapshot)
     attach_evidence_contract(package)
+    rebind_memory_contract(package)
     package["response_schema"] = _response_schema(package)
     package["second_opinion_review"] = _review_metadata(hosted, max_queries)
     package["review_contract"] = _contract(

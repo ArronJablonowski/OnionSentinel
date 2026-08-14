@@ -23,6 +23,7 @@ if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
 import local_ai_pipeline_adapters as PIPELINE_ADAPTERS
+from agent_memory_context_contract import build_agent_memory_context_contract
 
 
 def load_runner():
@@ -5638,6 +5639,83 @@ class AiModelRoutingTests(unittest.TestCase):
         )
         self.assertIn("prior_analyses", package)
         self.assertIn("role", package["instructions"])
+
+    def test_reviewer_memory_contract_rebinds_to_confirmed_versions_only(self) -> None:
+        package = {
+            "agent_role": "soc-analyst",
+            "alert": {"alert_id": "review-memory-alert"},
+            "_local_investigation_query_context": {
+                "case_id": "review-memory-case",
+            },
+            "evidence_reference_contract": {
+                "schema": "onion-sentinel-evidence-reference-contract-v1",
+                "references": [],
+            },
+            "agent_memory": {
+                "role_memory": {
+                    "records": [
+                        {"id": "confirmed", "version": 3, "status": "operator-confirmed"},
+                        {"id": "model-only", "version": 8, "status": "model-observed"},
+                    ],
+                    "snapshot": {
+                        "schema": "onion-sentinel-agent-memory-snapshot-v1",
+                        "source_digest": "1" * 64,
+                        "selected_records_digest": "2" * 64,
+                        "selected_record_versions": [
+                            {"id": "confirmed", "version": 3},
+                            {"id": "model-only", "version": 8},
+                        ],
+                    },
+                },
+                "shared_memory": {
+                    "records": [
+                        {"id": "shared-model", "version": 5, "status": "model-observed"},
+                    ],
+                    "snapshot": {
+                        "schema": "onion-sentinel-agent-memory-snapshot-v1",
+                        "source_digest": "3" * 64,
+                        "selected_records_digest": "4" * 64,
+                        "selected_record_versions": [
+                            {"id": "shared-model", "version": 5},
+                        ],
+                    },
+                },
+            },
+        }
+        self.runner.attach_agent_memory_context_contract(
+            package,
+            evaluation_frozen=True,
+        )
+        primary_digest = package["memory_context_contract"]["contract_digest"]
+
+        reviewer = self.runner.independent_reviewer_package(package)
+
+        contract = reviewer["memory_context_contract"]
+        self.assertEqual(
+            contract["layers"]["durable_analyst_memory"]["selected_record_versions"],
+            [{"id": "confirmed", "version": 3}],
+        )
+        self.assertEqual(
+            contract["layers"]["shared_cross_agent_knowledge"]["selected_record_versions"],
+            [],
+        )
+        self.assertTrue(contract["evaluation_frozen"])
+        self.assertNotEqual(contract["contract_digest"], primary_digest)
+        self.assertEqual(contract["case_id"], "review-memory-case")
+        self.assertNotIn(
+            "prior_analyses",
+            [
+                item["name"]
+                for item in contract["layers"]["case_local_working_memory"]["sections"]
+            ],
+        )
+        self.assertEqual(
+            contract,
+            build_agent_memory_context_contract(
+                reviewer,
+                evaluation_frozen=True,
+            ),
+        )
 
     def test_hosted_model_copy_redacts_only_unshared_asset_owners(self) -> None:
         package = {

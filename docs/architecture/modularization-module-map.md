@@ -462,8 +462,9 @@ Implementation ownership points inward through three acyclic flat-bin modules:
 | `agent_memory_validation.py` | canonical role/prompt registry, candidate schema, redaction, TTLs, stable IDs, provenance records | pure standard-library policy; imports no other memory module |
 | `agent_memory_journal.py` | managed Markdown parsing/rendering, advisory locks, bounded relevance retrieval, atomic replacement, initialization | imports validation; owns filesystem read/write primitives |
 | `agent_memory_promotion.py` | reinforcement/replay policy, retention ordering, BPFDoor quarantine, role/shared persistence results | imports validation and journal; owns promotion transactions |
+| `agent_memory_context_contract.py` | versioned four-layer memory identity, case-scope manifest, snapshot versions, frozen-evaluation attestation | imports validation only; never reads files or provider configuration |
 
-The installer copies the facade and all three owners into the same runtime
+The installer copies the facade and all four owners into the same runtime
 `bin` directory before verification. Memory Markdown, prompts, credentials,
 and operator-authored notes remain runtime-owned and are never copied back to
 the repository. Characterization tests exercise flat-bin imports, owner-only

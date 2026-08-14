@@ -394,6 +394,7 @@ class AgentMemoryTests(unittest.TestCase):
             "agent_memory_validation.py",
             "agent_memory_journal.py",
             "agent_memory_promotion.py",
+            "agent_memory_context_contract.py",
         ):
             self.assertIn(
                 f'cp "$REPO_DIR/n8n/bin/{module}" "$STACK_DIR/bin/{module}"',
@@ -408,6 +409,7 @@ class AgentMemoryTests(unittest.TestCase):
             "agent_memory_validation.py",
             "agent_memory_journal.py",
             "agent_memory_promotion.py",
+            "agent_memory_context_contract.py",
         ):
             shutil.copy2(ROOT / "n8n" / "bin" / module, deployed_bin / module)
         completed = subprocess.run(
