@@ -2,9 +2,23 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from harness_policy import AgentRole, HARNESS_SCHEMA, HarnessPolicyError
+
+
+@dataclass(frozen=True)
+class JobEnvelopeProjectionServices:
+    valid_identifier: Callable[..., str]
+    model_route: Callable[..., str]
+    digest_value: Callable[[Any], str]
+    task_kind_value: Callable[..., str]
+    skill_attestation: Callable[[Mapping[str, Any]], dict[str, Any]]
+    execution_contract_builder: Callable[..., dict[str, Any]]
+    execution_contract_json_value: Callable[[Any], str]
+    execution_contract_digest_value: Callable[[Any], str]
+    now_value: Callable[[], str]
 
 
 def _validate_role(role: str) -> None:
@@ -66,21 +80,16 @@ def _execution_contract_fields(
     configuration: Mapping[str, Any],
     source_revision: str,
     policy_version: str,
-    model_route: Callable[..., str],
-    digest_value: Callable[[Any], str],
-    skill_attestation: Callable[[Mapping[str, Any]], dict[str, Any]],
-    execution_contract_builder: Callable[..., dict[str, Any]],
-    execution_contract_json_value: Callable[[Any], str],
-    execution_contract_digest_value: Callable[[Any], str],
+    services: JobEnvelopeProjectionServices,
 ) -> dict[str, Any]:
-    primary_route = model_route(assigned_route, "assigned primary route")
-    reviewer_route = model_route(
+    primary_route = services.model_route(assigned_route, "assigned primary route")
+    reviewer_route = services.model_route(
         configuration.get("reviewer_route"),
         "assigned reviewer route",
         allow_empty=True,
     )
-    skills = skill_attestation(prompt_package)
-    execution_contract = execution_contract_builder(
+    skills = services.skill_attestation(prompt_package)
+    execution_contract = services.execution_contract_builder(
         source_revision=source_revision,
         assigned_route=primary_route,
         reviewer_route=reviewer_route,
@@ -90,13 +99,13 @@ def _execution_contract_fields(
     return {
         "assigned_route": primary_route,
         "assigned_reviewer_route": reviewer_route,
-        "prompt_digest": digest_value(prompt_package),
-        "evidence_manifest_digest": digest_value(contract),
-        "configuration_digest": digest_value(configuration),
-        "execution_contract_json": execution_contract_json_value(
+        "prompt_digest": services.digest_value(prompt_package),
+        "evidence_manifest_digest": services.digest_value(contract),
+        "configuration_digest": services.digest_value(configuration),
+        "execution_contract_json": services.execution_contract_json_value(
             execution_contract
         ),
-        "execution_contract_digest": execution_contract_digest_value(
+        "execution_contract_digest": services.execution_contract_digest_value(
             execution_contract
         ),
         "skill_selection_attestation": skills,
@@ -121,15 +130,7 @@ def job_envelope_values(
     source_revision: str,
     policy_version: str,
     reanalysis_attempt_id: str,
-    valid_identifier: Callable[..., str],
-    model_route: Callable[..., str],
-    digest_value: Callable[[Any], str],
-    task_kind_value: Callable[..., str],
-    skill_attestation: Callable[[Mapping[str, Any]], dict[str, Any]],
-    execution_contract_builder: Callable[..., dict[str, Any]],
-    execution_contract_json_value: Callable[[Any], str],
-    execution_contract_digest_value: Callable[[Any], str],
-    now_value: Callable[[], str],
+    services: JobEnvelopeProjectionServices,
 ) -> dict[str, Any]:
     """Validate a prompt and return the exact immutable envelope fields."""
     _validate_role(role)
@@ -137,7 +138,7 @@ def job_envelope_values(
         prompt_package,
         run_id,
     )
-    task_kind = task_kind_value(
+    task_kind = services.task_kind_value(
         role,
         reanalysis_attempt_id=reanalysis_attempt_id,
         manual_reanalysis=bool(prompt_package.get("manual_reanalysis")),
@@ -148,7 +149,7 @@ def job_envelope_values(
             correlation_id=correlation_id,
             case_id=case_id,
             alert_id=alert_id,
-            valid_identifier=valid_identifier,
+            valid_identifier=services.valid_identifier,
         ),
         "role": role,
         "task_kind": task_kind,
@@ -159,15 +160,10 @@ def job_envelope_values(
             configuration=configuration,
             source_revision=source_revision,
             policy_version=policy_version,
-            model_route=model_route,
-            digest_value=digest_value,
-            skill_attestation=skill_attestation,
-            execution_contract_builder=execution_contract_builder,
-            execution_contract_json_value=execution_contract_json_value,
-            execution_contract_digest_value=execution_contract_digest_value,
+            services=services,
         ),
         "parent_run_id": _parent_run_id(prompt_package),
-        "created_at": now_value(),
+        "created_at": services.now_value(),
     }
 
 

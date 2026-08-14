@@ -87,28 +87,39 @@ def _skill_registry(attestation: Mapping[str, Any]) -> dict[str, Any]:
     return {"version": version, "sha256": digest}
 
 
+def _skill_id(value: Any) -> str:
+    if not isinstance(value, str) or not _SKILL_ID_RE.fullmatch(value):
+        raise ValueError("skill version entry is invalid")
+    return value
+
+
+def _skill_version(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("skill version entry is invalid")
+    return value
+
+
+def _skill_digest(value: Any) -> str:
+    if not isinstance(value, str) or not _DIGEST_RE.fullmatch(value):
+        raise ValueError("skill version entry is invalid")
+    return value
+
+
+def _skill_version_entry(item: Any) -> dict[str, Any]:
+    if not isinstance(item, Mapping):
+        raise ValueError("skill version entry is invalid")
+    return {
+        "id": _skill_id(item.get("id")),
+        "version": _skill_version(item.get("version")),
+        "sha256": _skill_digest(item.get("skill_sha256")),
+    }
+
+
 def _skill_versions(attestation: Mapping[str, Any]) -> list[dict[str, Any]]:
     selected = attestation.get("selected")
     if not isinstance(selected, list):
         raise ValueError("skill version selection is invalid")
-    projected: list[dict[str, Any]] = []
-    for item in selected:
-        if not isinstance(item, Mapping):
-            raise ValueError("skill version entry is invalid")
-        skill_id = item.get("id")
-        version = item.get("version")
-        digest = item.get("skill_sha256")
-        if (
-            not isinstance(skill_id, str)
-            or not _SKILL_ID_RE.fullmatch(skill_id)
-            or isinstance(version, bool)
-            or not isinstance(version, int)
-            or version < 1
-            or not isinstance(digest, str)
-            or not _DIGEST_RE.fullmatch(digest)
-        ):
-            raise ValueError("skill version entry is invalid")
-        projected.append({"id": skill_id, "version": version, "sha256": digest})
+    projected = [_skill_version_entry(item) for item in selected]
     projected.sort(key=lambda value: value["id"])
     if len({item["id"] for item in projected}) != len(projected):
         raise ValueError("skill version selection contains duplicates")
@@ -177,10 +188,7 @@ def _validated_skills(value: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-def validate_execution_contract(value: Any) -> dict[str, Any]:
-    """Validate an already-materialized execution contract without fallback."""
-    if not isinstance(value, Mapping) or frozenset(value) != _CONTRACT_FIELDS:
-        raise ValueError("execution contract field set is invalid")
+def _validate_contract_header(value: Mapping[str, Any]) -> None:
     if value.get("schema") != EXECUTION_CONTRACT_SCHEMA:
         raise ValueError("execution contract schema is invalid")
     if value.get("harness_version") != HARNESS_SCHEMA:
@@ -188,18 +196,28 @@ def validate_execution_contract(value: Any) -> dict[str, Any]:
     revision = value.get("source_revision")
     if not isinstance(revision, str) or not _RELEASE_RE.fullmatch(revision):
         raise ValueError("execution contract source revision is invalid")
-    policy_version = value.get("policy_version")
-    if not isinstance(policy_version, str) or not _POLICY_VERSION_RE.fullmatch(policy_version):
+    version = value.get("policy_version")
+    if not isinstance(version, str) or not _POLICY_VERSION_RE.fullmatch(version):
         raise ValueError("execution contract policy version is invalid")
-    registry = value.get("skill_registry")
-    if not isinstance(registry, Mapping) or frozenset(registry) != {"version", "sha256"}:
+
+
+def _validate_contract_registry(value: Any) -> None:
+    if not isinstance(value, Mapping) or frozenset(value) != {"version", "sha256"}:
         raise ValueError("execution contract skill registry field set is invalid")
     _skill_registry(
         {
-            "registry_version": registry.get("version"),
-            "registry_sha256": registry.get("sha256"),
+            "registry_version": value.get("version"),
+            "registry_sha256": value.get("sha256"),
         }
     )
+
+
+def validate_execution_contract(value: Any) -> dict[str, Any]:
+    """Validate an already-materialized execution contract without fallback."""
+    if not isinstance(value, Mapping) or frozenset(value) != _CONTRACT_FIELDS:
+        raise ValueError("execution contract field set is invalid")
+    _validate_contract_header(value)
+    _validate_contract_registry(value.get("skill_registry"))
     _validated_route(value.get("primary"), "primary", optional=False)
     _validated_route(value.get("reviewer"), "reviewer", optional=True)
     _validated_skills(value.get("skill_versions"))

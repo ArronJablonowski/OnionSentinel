@@ -6,7 +6,10 @@ import hashlib
 import sqlite3
 from typing import Any, Iterable, Mapping, Sequence
 
-from harness_contract_job import job_envelope_values
+from harness_contract_job import (
+    JobEnvelopeProjectionServices,
+    job_envelope_values,
+)
 from harness_contract_ledger import (
     LEDGER_TABLE_ORDERS,
     LEGACY_RUN_IDENTITY_COLUMNS_V1,
@@ -58,6 +61,19 @@ from harness_policy import (
 )
 
 
+_JOB_PROJECTION_SERVICES = JobEnvelopeProjectionServices(
+    valid_identifier=_valid_identifier,
+    model_route=_model_route,
+    digest_value=digest_json,
+    task_kind_value=task_kind_for_role,
+    skill_attestation=investigation_skill_selection_attestation,
+    execution_contract_builder=build_execution_contract,
+    execution_contract_json_value=execution_contract_json,
+    execution_contract_digest_value=execution_contract_digest,
+    now_value=utc_now,
+)
+
+
 @dataclasses.dataclass(frozen=True)
 class JobEnvelope:
     run_id: str
@@ -100,15 +116,7 @@ class JobEnvelope:
             source_revision=source_revision,
             policy_version=policy_version,
             reanalysis_attempt_id=reanalysis_attempt_id,
-            valid_identifier=_valid_identifier,
-            model_route=_model_route,
-            digest_value=digest_json,
-            task_kind_value=task_kind_for_role,
-            skill_attestation=investigation_skill_selection_attestation,
-            execution_contract_builder=build_execution_contract,
-            execution_contract_json_value=execution_contract_json,
-            execution_contract_digest_value=execution_contract_digest,
-            now_value=utc_now,
+            services=_JOB_PROJECTION_SERVICES,
         )
         return cls(**values)
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import dataclasses
 import hashlib
 import sys
 import unittest
@@ -123,6 +124,22 @@ class DependencyHarness:
         return "2026-08-12T00:00:00Z"
 
     def project(self, **overrides: Any) -> dict[str, Any]:
+        services = JOB.JobEnvelopeProjectionServices(
+            valid_identifier=self.valid_identifier,
+            model_route=self.model_route,
+            digest_value=self.digest_value,
+            task_kind_value=self.task_kind_value,
+            skill_attestation=self.skill_attestation,
+            execution_contract_builder=self.execution_contract_builder,
+            execution_contract_json_value=self.execution_contract_json_value,
+            execution_contract_digest_value=self.execution_contract_digest_value,
+            now_value=self.now_value,
+        )
+        service_overrides = {
+            field.name: overrides.pop(field.name)
+            for field in dataclasses.fields(services)
+            if field.name in overrides
+        }
         values = {
             "run_id": "run-1",
             "prompt_package": self.prompt,
@@ -132,15 +149,7 @@ class DependencyHarness:
             "source_revision": "1" * 40,
             "policy_version": "policy-v1",
             "reanalysis_attempt_id": "attempt-1",
-            "valid_identifier": self.valid_identifier,
-            "model_route": self.model_route,
-            "digest_value": self.digest_value,
-            "task_kind_value": self.task_kind_value,
-            "skill_attestation": self.skill_attestation,
-            "execution_contract_builder": self.execution_contract_builder,
-            "execution_contract_json_value": self.execution_contract_json_value,
-            "execution_contract_digest_value": self.execution_contract_digest_value,
-            "now_value": self.now_value,
+            "services": dataclasses.replace(services, **service_overrides),
         }
         values.update(overrides)
         return JOB.job_envelope_values(**values)
@@ -158,7 +167,7 @@ class HarnessJobEnvelopeProjectionCharacterizationTests(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 lines, complexity = function_metrics(name)
-                self.assertLessEqual(lines, 60)
+                self.assertLessEqual(lines, 50)
                 self.assertLessEqual(complexity, 10)
 
     def test_exact_result_and_dependency_order_use_validated_run_identity(self) -> None:
