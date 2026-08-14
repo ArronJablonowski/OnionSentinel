@@ -3611,11 +3611,17 @@ owner for bounded DHCP discovery and Software Inventory requests, cursors,
 responses, evidence provenance, source allowlists, LAN scope, pagination, and
 timestamp validation. `incident_evidence_broker.py` remains the forced-command
 transport and compatibility facade: it owns configuration, bounded process
-execution, transport envelopes and receipts, audit logging, error projection,
-CLI output, and exit behavior while re-exporting the inventory symbols used by
-existing callers. Dependencies flow from the broker to the pure contract only;
-the Pi installer copies the contract before the executable broker. No Relay or
-Security Onion runtime is changed by this repository-only split.
+execution, audit logging, error projection, CLI output, and exit behavior while
+re-exporting the contract symbols used by existing callers.
+
+`incident_evidence_transport_contract.py` owns canonical request and response
+digests, legacy and audited transport-envelope validation, correlation identity,
+receipt validation, and exact search, OSQuery, and helper accounting. It depends
+only on the inventory contract's fixed operation identities and digest pattern.
+Dependencies flow from the broker through the transport contract to the
+inventory contract without a cycle; the Pi installer copies both contracts
+before the executable broker. No Relay or Security Onion runtime is changed by
+these repository-only splits.
 
 ### Relay health supervision
 
