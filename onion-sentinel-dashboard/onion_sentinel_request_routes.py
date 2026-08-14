@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 
 
 JSON_TYPE = "application/json; charset=utf-8"
+_UNHANDLED = object()
 
 
 def do_head(handler: object, c: ModuleType) -> None:
@@ -58,6 +59,22 @@ def do_get(handler: object, c: ModuleType) -> None:
     log_id = c.application_log_route_identifier(path)
     if path == c.APPLICATION_LOG_API_PATH or log_id is not None:
         return _application_logs(handler, c, parsed, log_id)
+    dedicated = _dedicated_get(handler, c, path)
+    if dedicated is not _UNHANDLED:
+        return dedicated
+    if c.is_soc_get_api(path):
+        return c.runtime.PortalHandler.do_GET(handler)
+    target = c.resolve_dashboard_target(handler.dashboard_root, handler.path)
+    if target is not None:
+        return handler._serve_file(target)
+    return handler._send(
+        HTTPStatus.NOT_FOUND,
+        b"Not found",
+        "text/plain; charset=utf-8",
+    )
+
+
+def _dedicated_get(handler: object, c: ModuleType, path: str) -> object:
     if path == "/api/ac-hunter/deep-review":
         status, data = c.ac_hunter_review.deep_review_response(
             force_refresh=False
@@ -71,16 +88,7 @@ def do_get(handler: object, c: ModuleType) -> None:
         if not handler._admin_authenticated():
             return handler._redirect("/admin/login")
         return handler._send(HTTPStatus.OK, c.render_admin_status())
-    if c.is_soc_get_api(path):
-        return c.runtime.PortalHandler.do_GET(handler)
-    target = c.resolve_dashboard_target(handler.dashboard_root, handler.path)
-    if target is not None:
-        return handler._serve_file(target)
-    return handler._send(
-        HTTPStatus.NOT_FOUND,
-        b"Not found",
-        "text/plain; charset=utf-8",
-    )
+    return _UNHANDLED
 
 
 def _health(handler: object, c: ModuleType) -> None:
