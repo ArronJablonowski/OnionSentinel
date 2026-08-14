@@ -13,6 +13,7 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 import relay_core as _core
+import relay_pcap_capture_policy as _pcap_capture_policy
 import relay_pcap_transport as _pcap_transport
 import relay_pcap_delivery as _pcap_delivery
 import relay_pcap_service as _pcap_service
@@ -20,6 +21,7 @@ import relay_application as _application
 
 _MODULES: tuple[ModuleType, ...] = (
     _core,
+    _pcap_capture_policy,
     _pcap_transport,
     _pcap_delivery,
     _pcap_service,

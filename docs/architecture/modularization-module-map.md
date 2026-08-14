@@ -3594,16 +3594,20 @@ admission, capacity/high-watermark enforcement, usage projection, bounded
 partial/completed artifact retention, hashes, and atomic JSON checkpoints.
 It has no network or broker authority.
 
+`relay_pcap_capture_policy.py` owns the restricted storage-status projection,
+capture-loss and sensor-loss threshold admission, freshness decisions, and the
+retryable capture-protection deferral. The facade includes this module in its
+late-bound override set so recovery and characterization hooks remain exact.
+
 `relay_pcap_transport.py` owns broker HTTP calls, claim-progress reporting,
-capture-loss admission, bounded Security Onion streaming, and transfer
-timeout/bandwidth policy. It imports and re-exports the spool-policy surface so
-the original flat Relay API remains compatible, and remains below the 600-line
-target.
+bounded Security Onion streaming, and transfer timeout/bandwidth policy. It
+imports and re-exports the capture- and spool-policy surfaces so the original
+flat Relay API remains compatible, and remains below the 600-line target.
 
 `relay_pcap_delivery.py` owns the bounded SSH/rsync handoff to the Mac Studio,
 remote verification/cleanup, broker completion callbacks, and retry scheduling.
 `relay_pcap_service.py` owns the single-flight, one-request-per-run PCAP state
-machine and outcome accounting. Dependencies flow from spool policy to
+machine and outcome accounting. Dependencies flow from the leaf policies to
 transport, delivery, service, and the facade; they do not cycle.
 
 `relay_application.py` owns durable alert outbox delivery, quiet-cycle
