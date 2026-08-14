@@ -423,6 +423,53 @@ class ApplicationLogTests(unittest.TestCase):
         self.assertEqual([member["id"] for member in item["members"]], ["current", "2"])
         self.assertNotIn("must-never-be-returned", serialized)
 
+    def test_safe_env_values_preserves_allowlist_comments_whitespace_and_duplicates(self) -> None:
+        env_path = self.home / "n8n-local" / ".env"
+        env_path.write_text(
+            "  # ignored comment\n"
+            "MALFORMED\n"
+            "UNKNOWN=value\n"
+            " ALERT_STORE_APPLICATION_LOG_MAX_BYTES = 1048576 \n"
+            "ALERT_STORE_APPLICATION_LOG_BACKUPS=4=ignored-tail\n"
+            "ALERT_STORE_APPLICATION_LOG_MAX_BYTES=2097152\n",
+            encoding="utf-8",
+        )
+        os.chmod(env_path, 0o600)
+
+        self.assertEqual(
+            application_logs._safe_env_values(self.home),
+            {
+                "ALERT_STORE_APPLICATION_LOG_MAX_BYTES": "2097152",
+                "ALERT_STORE_APPLICATION_LOG_BACKUPS": "4=ignored-tail",
+            },
+        )
+
+    def test_safe_env_values_fails_closed_for_unsafe_or_unreadable_inputs(self) -> None:
+        env_path = self.home / "n8n-local" / ".env"
+        self.assertEqual(application_logs._safe_env_values(self.home), {})
+
+        env_path.write_bytes(b"ALERT_STORE_APPLICATION_LOG_BACKUPS=2\xff")
+        os.chmod(env_path, 0o600)
+        self.assertEqual(application_logs._safe_env_values(self.home), {})
+
+        env_path.write_bytes(b"x" * (application_logs.MAX_ENV_BYTES + 1))
+        os.chmod(env_path, 0o600)
+        self.assertEqual(application_logs._safe_env_values(self.home), {})
+
+        env_path.write_text("ALERT_STORE_APPLICATION_LOG_BACKUPS=2\n")
+        os.chmod(env_path, 0o640)
+        self.assertEqual(application_logs._safe_env_values(self.home), {})
+
+        env_path.unlink()
+        env_path.mkdir()
+        self.assertEqual(application_logs._safe_env_values(self.home), {})
+
+        env_path.rmdir()
+        outside = self.home / "outside.env"
+        outside.write_text("ALERT_STORE_APPLICATION_LOG_BACKUPS=2\n")
+        env_path.symlink_to(outside)
+        self.assertEqual(application_logs._safe_env_values(self.home), {})
+
     def test_symlink_and_directory_members_are_not_cataloged_or_read(self) -> None:
         outside = self.home / "outside.log"
         outside.write_text("outside-secret\n", encoding="utf-8")
