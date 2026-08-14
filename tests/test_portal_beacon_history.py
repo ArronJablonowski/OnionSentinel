@@ -11,7 +11,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "onion-sentinel-dashboard"))
 
-from portal_beacon_history import project_beacon_history  # noqa: E402
+from portal_beacon_history import _entry, project_beacon_history  # noqa: E402
 
 
 UTC = dt.timezone.utc
@@ -81,6 +81,59 @@ class BeaconHistoryTests(unittest.TestCase):
         self.assertEqual(payload["entries"][1]["http_status"], 204)
         self.assertEqual(payload["pcap"], {"healthy": True})
         self.assertEqual(payload["pipeline"], {"available": True})
+
+    def test_entry_preserves_exact_fallbacks_and_format_calls(self) -> None:
+        calls = []
+
+        def formatter(value, **kwargs):
+            calls.append((value, kwargs))
+            return f"formatted-{len(calls)}"
+
+        timestamp = dt.datetime(2026, 8, 7, 11, 0, tzinfo=UTC)
+        raw = {
+            "status": "200",
+            "first_rule": "fallback rule",
+            "alert_count": 0,
+            "posted_webhook_alerts": None,
+        }
+
+        entry = _entry(raw, timestamp, formatter)
+
+        self.assertEqual(entry, {
+            "timestamp": "formatted-1",
+            "timestamp_utc": "formatted-2",
+            "successful": True,
+            "stage": "unknown",
+            "status": "200",
+            "message_type": "",
+            "relay_host": "",
+            "alert_count": 0,
+            "posted_webhook_alerts": None,
+            "rule_name": "fallback rule",
+            "http_status": 200,
+            "error": "",
+            "previous_failure": None,
+        })
+        self.assertEqual(calls[0][1], {"timespec": "milliseconds"})
+        self.assertEqual(
+            calls[1],
+            (timestamp, {"timespec": "milliseconds", "utc_z": True}),
+        )
+
+    def test_entry_non_mapping_previous_failure_does_not_override_error_or_success(self) -> None:
+        entry = _entry(
+            {
+                "ok": True,
+                "status": "ok",
+                "error": "current failure text",
+                "relay_previous_failure": ["not", "a", "mapping"],
+            },
+            dt.datetime(2026, 8, 7, 11, 0, tzinfo=UTC),
+            format_timestamp,
+        )
+        self.assertFalse(entry["successful"])
+        self.assertEqual(entry["error"], "current failure text")
+        self.assertIsNone(entry["previous_failure"])
 
 
 if __name__ == "__main__":
