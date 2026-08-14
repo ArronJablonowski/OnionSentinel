@@ -7,9 +7,6 @@
     "operations/evaluate-analysis-replays.py::evaluate_case": {
       "max_complexity": 26
     },
-    "operations/evaluate-analysis-replays.py::load_suite": {
-      "max_complexity": 32
-    },
     "operations/evaluate-analysis-replays.py::summarize": {
       "max_complexity": 27
     },
@@ -77,5 +74,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "702dc8eca0c3b1301200865d63ff0ff202d77c9c"
+  "source_release": "55a8a0dc532426ad6599648d7f55637c2c1d1bf7"
 }
