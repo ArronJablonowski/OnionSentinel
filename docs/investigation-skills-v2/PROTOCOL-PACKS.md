@@ -69,9 +69,12 @@ python3 n8n/bin/evaluate-investigation-skills-v2.py
 The evaluator executes no query and cannot activate a candidate. It satisfies
 promotion attestations only in an in-memory copy and exercises the same
 identity-only resolver used by the framework. Security Onion, Elastic, Zeek,
-and Suricata template fields are checked against the exact allowlisted field
-projections in `security-onion/bin/export-incident-evidence`; only the
-not-yet-integrated derived-PCAP result contract remains synthetic. The replay
+Suricata, and historical OSQuery template fields are checked against the exact
+allowlisted field projections in
+`security-onion/bin/export-incident-evidence`. Derived-PCAP fields come from
+`pcap_evidence_query_policy.py`, and AC Hunter fields come from the stable
+top-level return projection in `ac_hunter_collection_projection.py`; fixture
+catalog fields cannot mask drift in any of those governed sources. The replay
 also includes an adversarial capability-expansion case. A passing offline
 replay is only the start of verification. It does not replace deployed-version
 mapping comparison, representative sanitized result replay, independent query
@@ -106,6 +109,17 @@ representation and its independent compilation to the fixed Query DSL path; it
 does not claim that the SOC Hunt API executed the OQL text. All three accept
 only typed broker parameters, use governed wrapper field projections, and
 remain inactive and unpromotable.
+
+Three direct-source candidates preserve their distinct authority and freshness
+semantics. Historical OSQuery searches only already-indexed endpoint and
+Osquery Manager streams through the governed `osquery_history` pack; it cannot
+dispatch SQL or select a live endpoint. Derived PCAP reads only an already
+admitted sanitized artifact through fixed coverage, connection, and packet-fact
+operations; it cannot carve a new stream, return raw packets, or invoke a
+parser, shell, filesystem path, or network call. AC Hunter reads only the
+normalized local snapshot through `reports.read`; its scores and correlations
+prioritize review and never prove malware, compromise, or malicious intent.
+All remain inactive and unpromotable.
 
 `skill-packs/dns-triage-v2.example.json` demonstrates the v2 boundary. Its
 verification flags are deliberately false because this package has not passed

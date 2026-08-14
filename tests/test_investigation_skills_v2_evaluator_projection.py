@@ -399,6 +399,17 @@ class InvestigationSkillsV2EvaluatorProjectionTests(unittest.TestCase):
                     ),
                     (expected_fields, provenance),
                 )
+        with self.assertRaisesRegex(
+            ValueError,
+            "unmapped repository-backed template: fixture-owned-pcap",
+        ):
+            EVALUATOR._template_catalog(
+                {"id": "fixture-owned-pcap", "backend": "pcap-derived"},
+                fixture,
+                wrapper,
+                pcap,
+                ac_hunter,
+            )
 
     def test_invalid_case_stops_before_resolver_and_preserves_prior_call_count(self) -> None:
         fixture = self.valid_fixture(cases=[

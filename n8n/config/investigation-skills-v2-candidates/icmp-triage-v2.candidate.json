@@ -1,11 +1,11 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.icmp.triage",
-  "version": "2.0.0-candidate.4",
-  "artifact_digest": "7dfd7d61a78db45ef8c83967b5b98e51ee987b77caac7b41dc355253c0fd056e",
+  "version": "2.0.0-candidate.5",
+  "artifact_digest": "8661ca82a199617aa8a06aef17e654d09ee7ba91def6f6eac8d75ca4f80ed12d",
   "lineage": {
-    "source_revision": "4d10442",
-    "predecessor_digest": "4cfef3f595b1e55cbc2cfe233e1e163b92d04dbf58e3a311c9c2066a8cb6bd42"
+    "source_revision": "24034f6",
+    "predecessor_digest": "7dfd7d61a78db45ef8c83967b5b98e51ee987b77caac7b41dc355253c0fd056e"
   },
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
@@ -50,7 +50,7 @@
     "security-onion.events.query",
     "security-onion.oql.query",
     "suricata.events.read",
-    "pcap.derived.read",
+    "pcap.derived.query",
     "zeek.derived.query"
   ],
   "safety": {
@@ -116,19 +116,23 @@
       "id": "icmp-pcap-summary",
       "backend": "pcap-derived",
       "language": "broker-parameters",
-      "purpose": "Read an existing bounded capture summary for packet sizes, direction, type, code, and timing.",
+      "purpose": "Read existing bounded packet facts for direction, type, code, size, timing, and selected-scope status.",
       "parameters": [
         "capture_digest",
         "source_alias",
         "destination_alias"
       ],
       "expected_fields": [
-        "packet_count",
-        "icmp_types",
-        "icmp_codes",
-        "size_distribution",
-        "timing_summary",
-        "capture_limits"
+        "timestamp_epoch",
+        "frame_number",
+        "frame_length",
+        "source_ip",
+        "destination_ip",
+        "icmp_type",
+        "icmp_code",
+        "icmp_payload_length",
+        "selected_scope_match",
+        "scope_exclusion_reason"
       ]
     }
   ],
