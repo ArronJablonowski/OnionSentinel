@@ -236,6 +236,114 @@ class RelayHealthWrapperTest(unittest.TestCase):
             "webhook_events": webhook_events,
         }
 
+    def test_notification_test_short_circuits_every_component_probe(self) -> None:
+        for notification, expected_rc in (
+            ({"ok": True, "status": 200}, 0),
+            ({"ok": False, "status": 503}, 1),
+        ):
+            with self.subTest(notification=notification):
+                stdout = io.StringIO()
+                with (
+                    mock.patch.object(
+                        self.wrapper,
+                        "send_telegram",
+                        return_value=notification,
+                    ) as send_telegram,
+                    mock.patch.object(
+                        self.wrapper, "now_iso", return_value="test-time"
+                    ),
+                    mock.patch.object(self.wrapper, "load_state") as load_state,
+                    mock.patch.object(self.wrapper, "run_relay") as run_relay,
+                    mock.patch.object(
+                        self.wrapper, "run_pcap_broker"
+                    ) as run_pcap,
+                    mock.patch.object(
+                        self.wrapper, "run_storage_health"
+                    ) as run_storage,
+                    mock.patch.object(
+                        sys,
+                        "argv",
+                        ["relay_health_wrapper.py", "--test-notification"],
+                    ),
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    rc = self.wrapper.main()
+
+                self.assertEqual(rc, expected_rc)
+                send_telegram.assert_called_once_with(
+                    f"[RECOVERY TEST] {self.wrapper.HOST_LABEL} "
+                    "notification path test at test-time"
+                )
+                load_state.assert_not_called()
+                run_relay.assert_not_called()
+                run_pcap.assert_not_called()
+                run_storage.assert_not_called()
+                self.assertEqual(
+                    json.loads(stdout.getvalue()),
+                    {"notification": notification},
+                )
+
+    def test_all_component_preserves_probe_event_and_persist_order(self) -> None:
+        events: list[str] = []
+        relay_result = completed(
+            0,
+            stdout=(
+                '{"alert_count":0,"dropped_alert_count":0,'
+                '"new_alert_count":0,"posted_webhook_alerts":0}\n'
+            ),
+        )
+        pcap_result = completed(
+            0,
+            stdout=(
+                '{"ok":true,"enabled":true,"broker_contacted":true,'
+                '"processed":0,"operational_failures":0}\n'
+            ),
+        )
+        with (
+            mock.patch.object(
+                self.wrapper,
+                "validate_webhook_token_sources",
+                side_effect=lambda: events.append("validate") or None,
+            ),
+            mock.patch.object(
+                self.wrapper,
+                "run_relay",
+                side_effect=lambda: events.append("alert") or relay_result,
+            ),
+            mock.patch.object(
+                self.wrapper,
+                "run_pcap_broker",
+                side_effect=lambda: events.append("pcap") or pcap_result,
+            ),
+            mock.patch.object(
+                self.wrapper,
+                "load_state",
+                return_value={"status": "unknown", "consecutive_failures": 0},
+            ),
+            mock.patch.object(
+                self.wrapper,
+                "send_relay_health_event",
+                side_effect=lambda _event: events.append("event")
+                or {"ok": True, "status": 200},
+            ),
+            mock.patch.object(
+                self.wrapper,
+                "persist_component_state",
+                side_effect=lambda *_args: events.append("persist"),
+            ),
+            mock.patch.object(self.wrapper, "send_telegram"),
+            mock.patch.object(
+                sys,
+                "argv",
+                ["relay_health_wrapper.py", "--component", "all"],
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            rc = self.wrapper.main()
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(events, ["validate", "alert", "pcap", "event", "persist"])
+
     def test_pcap_broker_runs_even_when_alert_relay_fails(self) -> None:
         rc, stdout, stderr, states = self.run_main_with(
             completed(1, stderr="Webhook returned HTTP 500: Internal Server Error\n"),

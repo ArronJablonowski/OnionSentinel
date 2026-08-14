@@ -207,74 +207,92 @@ def component_summary(relay_result: subprocess.CompletedProcess, pcap_result: su
     return f"alert_relay={relay_status} pcap_broker={pcap_status}"
 
 
-def main() -> int:
+def _test_notification_exit() -> int | None:
     if len(sys.argv) > 1 and sys.argv[1] == "--test-notification":
         # Safe manual test path: does not pull Security Onion alerts.
         result = send_telegram(f"[RECOVERY TEST] {HOST_LABEL} notification path test at {now_iso()}")
         print(json.dumps({"notification": result}, sort_keys=True))
         return 0 if result.get("ok") else 1
+    return None
 
+
+def _parse_component() -> str:
     parser = argparse.ArgumentParser(description="Run and monitor an Onion Sentinel relay component")
     parser.add_argument("--component", choices=("all", "alert", "pcap", "storage"), default="all")
     args, _unknown = parser.parse_known_args()
-    component = args.component
-    state_path = component_state_path(component)
-    state = sanitize_health_state(load_state(state_path))
-    started_at = now_iso()
+    return args.component
+
+
+def _run_alert_component() -> subprocess.CompletedProcess:
+    token_error = validate_webhook_token_sources()
+    if token_error:
+        result = subprocess.CompletedProcess(RELAY_COMMAND, 1, "", token_error)
+    else:
+        try:
+            result = run_relay()
+        except Exception as exc:
+            result = sanitized_exception_result(RELAY_COMMAND, "alert", exc)
+    result = sanitized_child_result(result, "alert")
+    print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    return result
+
+
+def _run_pcap_component() -> subprocess.CompletedProcess:
+    try:
+        result = run_pcap_broker()
+    except Exception as exc:
+        result = sanitized_exception_result(RELAY_PCAP_COMMAND, "pcap", exc)
+    result = sanitized_child_result(result, "pcap")
+    print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    # Publish every broker cycle, including intentional capture-protection
+    # holds. Delivery failure is observable in journald but must not turn a
+    # healthy, locally enforced safety hold into a broker process failure.
+    pcap_status = send_relay_health_event(build_pcap_status_event(result))
+    print(json.dumps({"pcap_status_event": pcap_status}, sort_keys=True))
+    return result
+
+
+def _run_storage_component() -> subprocess.CompletedProcess:
+    try:
+        result = run_storage_health()
+    except Exception as exc:
+        result = sanitized_exception_result(RELAY_STORAGE_COMMAND, "storage", exc)
+    result = sanitized_child_result(result, "storage")
+    print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    return result
+
+
+def _run_components(
+    component: str,
+) -> tuple[
+    subprocess.CompletedProcess,
+    subprocess.CompletedProcess,
+    subprocess.CompletedProcess,
+]:
     relay_result = subprocess.CompletedProcess(RELAY_COMMAND, 0, "", "")
     pcap_result = subprocess.CompletedProcess(RELAY_PCAP_COMMAND, 0, "", "")
     storage_result = subprocess.CompletedProcess(RELAY_STORAGE_COMMAND, 0, "", "")
     if component in {"all", "alert"}:
-        token_error = validate_webhook_token_sources()
-        if token_error:
-            relay_result = subprocess.CompletedProcess(RELAY_COMMAND, 1, "", token_error)
-        else:
-            try:
-                relay_result = run_relay()
-            except Exception as exc:
-                relay_result = sanitized_exception_result(
-                    RELAY_COMMAND,
-                    "alert",
-                    exc,
-                )
-        relay_result = sanitized_child_result(relay_result, "alert")
-        print(relay_result.stdout, end="")
-        if relay_result.stderr:
-            print(relay_result.stderr, end="", file=sys.stderr)
-
+        relay_result = _run_alert_component()
     if component in {"all", "pcap"}:
-        try:
-            pcap_result = run_pcap_broker()
-        except Exception as exc:
-            pcap_result = sanitized_exception_result(
-                RELAY_PCAP_COMMAND,
-                "pcap",
-                exc,
-            )
-        pcap_result = sanitized_child_result(pcap_result, "pcap")
-        print(pcap_result.stdout, end="")
-        if pcap_result.stderr:
-            print(pcap_result.stderr, end="", file=sys.stderr)
-        # Publish every broker cycle, including intentional capture-protection
-        # holds. Delivery failure is observable in journald but must not turn a
-        # healthy, locally enforced safety hold into a broker process failure.
-        pcap_status = send_relay_health_event(build_pcap_status_event(pcap_result))
-        print(json.dumps({"pcap_status_event": pcap_status}, sort_keys=True))
-
+        pcap_result = _run_pcap_component()
     if component == "storage":
-        try:
-            storage_result = run_storage_health()
-        except Exception as exc:
-            storage_result = sanitized_exception_result(
-                RELAY_STORAGE_COMMAND,
-                "storage",
-                exc,
-            )
-        storage_result = sanitized_child_result(storage_result, "storage")
-        print(storage_result.stdout, end="")
-        if storage_result.stderr:
-            print(storage_result.stderr, end="", file=sys.stderr)
+        storage_result = _run_storage_component()
+    return relay_result, pcap_result, storage_result
 
+
+def _component_outcome(
+    component: str,
+    relay_result: subprocess.CompletedProcess,
+    pcap_result: subprocess.CompletedProcess,
+    storage_result: subprocess.CompletedProcess,
+) -> tuple[subprocess.CompletedProcess, str]:
     result = storage_result if component == "storage" else combine_results(relay_result, pcap_result)
     component_label = component_summary(relay_result, pcap_result) if component == "all" else (
         f"alert_relay={'ok' if relay_result.returncode == 0 else f'failed({relay_result.returncode})'}"
@@ -283,8 +301,11 @@ def main() -> int:
         if component == "pcap"
         else f"storage_health={'ok' if storage_result.returncode == 0 else f'failed({storage_result.returncode})'}"
     )
-    summary = f"{component_label}; {summarize_output(result.stdout, result.stderr)}"
-    prior_pcap_failure = bool(
+    return result, f"{component_label}; {summarize_output(result.stdout, result.stderr)}"
+
+
+def _prior_pcap_failure(state: dict, component: str) -> bool:
+    return bool(
         state.get("status") == "failed"
         and (
             component == "pcap"
@@ -299,6 +320,14 @@ def main() -> int:
             )
         )
     )
+
+
+def _update_pcap_failure_latch(
+    state: dict,
+    component: str,
+    pcap_result: subprocess.CompletedProcess,
+    prior_pcap_failure: bool,
+) -> None:
     if component in {"all", "pcap"}:
         if pcap_result.returncode != 0:
             state["pcap_failure_unresolved"] = True
@@ -307,39 +336,44 @@ def main() -> int:
         elif prior_pcap_failure:
             state["pcap_failure_unresolved"] = True
 
-    if result.returncode == 0:
-        if (
-            prior_pcap_failure
-            and not pcap_result_proves_broker_recovery(pcap_result)
-        ):
-            # A local read gate, disabled worker, lock skip, or malformed/no
-            # summary does not exercise the Mac broker. Preserve the prior
-            # failure and notification latch until a normal poll proves
-            # end-to-end recovery.
-            deferred_pcap_hold = pcap_result_is_capture_protection_hold(
-                pcap_result
-            )
-            state.update({
-                "last_started_at": started_at,
-                "last_pcap_unproven_at": now_iso(),
-                "last_pcap_unproven_summary": summary,
-                "last_pcap_unproven_reason": (
-                    "capture_protection_hold"
-                    if deferred_pcap_hold
-                    else "broker_contact_not_proven"
-                ),
-            })
-            persist_component_state(state, component, state_path)
-            print(json.dumps({
-                "health_status": "pcap_recovery_unproven",
-                "consecutive_failures": int(state.get("consecutive_failures") or 0),
-                "reason": state["last_pcap_unproven_reason"],
-                "summary": summary,
-            }, sort_keys=True))
-            return 0
 
-        # If the previous run failed, this successful run is recovery-worthy.
-        previous_failure = {
+def _persist_unproven_pcap_recovery(
+    state: dict,
+    component: str,
+    state_path: Path,
+    started_at: str,
+    summary: str,
+    pcap_result: subprocess.CompletedProcess,
+    prior_pcap_failure: bool,
+) -> bool:
+    if not prior_pcap_failure or pcap_result_proves_broker_recovery(pcap_result):
+        return False
+    # A local read gate, disabled worker, lock skip, or malformed/no summary
+    # does not exercise the Mac broker. Preserve the prior failure and latch.
+    deferred_pcap_hold = pcap_result_is_capture_protection_hold(pcap_result)
+    state.update({
+        "last_started_at": started_at,
+        "last_pcap_unproven_at": now_iso(),
+        "last_pcap_unproven_summary": summary,
+        "last_pcap_unproven_reason": (
+            "capture_protection_hold"
+            if deferred_pcap_hold
+            else "broker_contact_not_proven"
+        ),
+    })
+    persist_component_state(state, component, state_path)
+    print(json.dumps({
+        "health_status": "pcap_recovery_unproven",
+        "consecutive_failures": int(state.get("consecutive_failures") or 0),
+        "reason": state["last_pcap_unproven_reason"],
+        "summary": summary,
+    }, sort_keys=True))
+    return True
+
+
+def _previous_failure(state: dict) -> dict | None:
+    return (
+        {
             "failed_at": safe_timestamp(state.get("last_failure")),
             "summary": sanitize_persisted_summary(
                 state.get("last_summary")
@@ -357,35 +391,59 @@ def main() -> int:
                 minimum=100,
                 maximum=599,
             ),
-        } if state.get("status") == "failed" else None
-        recovered = bool(previous_failure and state.get("failure_notification_sent"))
-        state.update({
-            "status": "ok",
-            "last_success": now_iso(),
-            "last_summary": summary,
-            "last_returncode": result.returncode,
-            "consecutive_failures": 0,
-            "failure_notification_sent": False,
-        })
-        persist_component_state(state, component, state_path)
-        if previous_failure:
-            recovery_event = {
-                "message_type": "relay_health_recovery",
-                "source": "security-onion",
-                "relay_host": HOST_LABEL,
-                "generated_at": state["last_success"],
-                "status": "recovered",
-                "relay_previous_failure": previous_failure,
-            }
-            notice = send_relay_health_event(recovery_event)
-            print(json.dumps({"health_event_status": notice}, sort_keys=True))
-        if recovered:
-            notice = send_telegram(f"[RECOVERY] {HOST_LABEL} {component} recovered at {state['last_success']}\n{summary}")
-            print(json.dumps({"health_status": "recovered", "notification": notice}, sort_keys=True))
-        else:
-            print(json.dumps({"health_status": "ok", "summary": summary}, sort_keys=True))
-        return 0
+        }
+        if state.get("status") == "failed"
+        else None
+    )
 
+
+def _complete_success(
+    state: dict,
+    component: str,
+    state_path: Path,
+    started_at: str,
+    summary: str,
+    result: subprocess.CompletedProcess,
+    pcap_result: subprocess.CompletedProcess,
+    prior_pcap_failure: bool,
+) -> int:
+    if _persist_unproven_pcap_recovery(
+        state, component, state_path, started_at, summary,
+        pcap_result, prior_pcap_failure,
+    ):
+        return 0
+    previous_failure = _previous_failure(state)
+    recovered = bool(previous_failure and state.get("failure_notification_sent"))
+    state.update({
+        "status": "ok", "last_success": now_iso(), "last_summary": summary,
+        "last_returncode": result.returncode, "consecutive_failures": 0,
+        "failure_notification_sent": False,
+    })
+    persist_component_state(state, component, state_path)
+    if previous_failure:
+        recovery_event = {
+            "message_type": "relay_health_recovery", "source": "security-onion",
+            "relay_host": HOST_LABEL, "generated_at": state["last_success"],
+            "status": "recovered", "relay_previous_failure": previous_failure,
+        }
+        notice = send_relay_health_event(recovery_event)
+        print(json.dumps({"health_event_status": notice}, sort_keys=True))
+    if recovered:
+        notice = send_telegram(f"[RECOVERY] {HOST_LABEL} {component} recovered at {state['last_success']}\n{summary}")
+        print(json.dumps({"health_status": "recovered", "notification": notice}, sort_keys=True))
+    else:
+        print(json.dumps({"health_status": "ok", "summary": summary}, sort_keys=True))
+    return 0
+
+
+def _complete_failure(
+    state: dict,
+    component: str,
+    state_path: Path,
+    started_at: str,
+    summary: str,
+    result: subprocess.CompletedProcess,
+) -> int:
     failed_at = now_iso()
     # Repeated failures should stay visible in journald but should not spam
     # Telegram every timer cycle.
@@ -428,3 +486,29 @@ def main() -> int:
         persist_component_state(state, component, state_path)
         print(json.dumps({"health_status": "failed", "notification": notice}, sort_keys=True))
     return result.returncode or 1
+
+
+def main() -> int:
+    notification_exit = _test_notification_exit()
+    if notification_exit is not None:
+        return notification_exit
+    component = _parse_component()
+    state_path = component_state_path(component)
+    state = sanitize_health_state(load_state(state_path))
+    started_at = now_iso()
+    relay_result, pcap_result, storage_result = _run_components(component)
+    result, summary = _component_outcome(
+        component, relay_result, pcap_result, storage_result
+    )
+    prior_pcap_failure = _prior_pcap_failure(state, component)
+    _update_pcap_failure_latch(
+        state, component, pcap_result, prior_pcap_failure
+    )
+    if result.returncode == 0:
+        return _complete_success(
+            state, component, state_path, started_at, summary, result,
+            pcap_result, prior_pcap_failure,
+        )
+    return _complete_failure(
+        state, component, state_path, started_at, summary, result
+    )

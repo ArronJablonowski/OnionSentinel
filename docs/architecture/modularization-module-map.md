@@ -3668,11 +3668,14 @@ categories, and child diagnostic selection from safe stdout/stderr rendering.
 `relay_health_application.py` owns bounded component subprocess probes,
 capture-protection recovery proof, failure debounce/recovery transitions, safe
 notification orchestration, component-specific state files, CLI parsing, and
-exit semantics. `relay_health_wrapper.py` remains the systemd executable and
-flat compatibility facade at below 250 lines. Its late-bound hooks and
-configuration values are forwarded only for the duration of a call, preserving
-test and recovery overrides without cross-import state leakage. The Pi installer
-copies all three implementation modules before the wrapper.
+exit semantics. Its composition root delegates alert, PCAP, and storage
+execution to isolated phases, then separates result selection, prior-PCAP
+failure inference, failure-latch transitions, successful recovery, and
+debounced failure persistence. `relay_health_wrapper.py` remains the systemd
+executable and flat compatibility facade at below 250 lines. Its late-bound
+hooks and configuration values are forwarded only for the duration of a call,
+preserving test and recovery overrides without cross-import state leakage. The
+Pi installer copies all three implementation modules before the wrapper.
 
 `storage_health.py` remains the read-only storage probe executable. Its bounded
 root-capacity, mount/SSD-capacity, and SMART phases retain the original probe
