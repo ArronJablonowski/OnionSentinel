@@ -596,6 +596,13 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
             "transport_envelope",
             "receipt_identity",
         }
+        dhcp_phases = {
+            "_request_fields",
+            "_validate_operation",
+            "_request_window",
+            "_validate_window",
+            "_validate_size",
+        }
         software_phases = {
             "_validate_record_identity",
             "_validate_asset_reference",
@@ -608,7 +615,7 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
 
         self.assertTrue(broker_phases <= top_level_function_names(broker))
         self.assertTrue(transport_phases <= top_level_function_names(transport))
-        self.assertTrue(dhcp.is_file())
+        self.assertTrue(dhcp_phases <= top_level_function_names(dhcp))
         self.assertTrue(software.is_file())
         self.assertTrue(software_phases <= top_level_function_names(software))
         for path, name in (
@@ -616,6 +623,7 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
             (broker, "_receipt_identity"),
             (broker, "_validate_receipt"),
             (broker, "main"),
+            (dhcp, "validate_dhcp_request"),
             (software, "_validate_software_record"),
             (software, "validate_software_response"),
         ):
