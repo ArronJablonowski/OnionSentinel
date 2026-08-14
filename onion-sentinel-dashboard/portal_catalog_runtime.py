@@ -67,23 +67,7 @@ def artifact_library_disk_usage(r: Any) -> int:
     total = 0
     seen = set()
     for configured_root in r.SCAN_ROOTS:
-        if not configured_root.exists():
-            continue
-        try:
-            root = configured_root.resolve()
-        except Exception:
-            continue
-        if root.is_file():
-            files = [root]
-        else:
-            files = []
-            for dirpath, dirnames, filenames in r.os.walk(root):
-                dirnames[:] = [
-                    name for name in dirnames
-                    if not r.should_skip_dir(r.Path(dirpath) / name)
-                ]
-                files.extend(r.Path(dirpath) / name for name in filenames)
-        for path in files:
+        for path in _artifact_files(r, configured_root):
             try:
                 resolved = path.resolve()
                 if resolved in seen or not resolved.is_file():
@@ -97,3 +81,22 @@ def artifact_library_disk_usage(r: Any) -> int:
             except Exception:
                 continue
     return total
+
+
+def _artifact_files(r: Any, configured_root: Any) -> list[Any]:
+    if not configured_root.exists():
+        return []
+    try:
+        root = configured_root.resolve()
+    except Exception:
+        return []
+    if root.is_file():
+        return [root]
+    files = []
+    for dirpath, dirnames, filenames in r.os.walk(root):
+        dirnames[:] = [
+            name for name in dirnames
+            if not r.should_skip_dir(r.Path(dirpath) / name)
+        ]
+        files.extend(r.Path(dirpath) / name for name in filenames)
+    return files
