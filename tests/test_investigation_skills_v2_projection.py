@@ -19,6 +19,7 @@ CANDIDATE = (
     / "n8n/config/investigation-skills-v2-candidates/dns-triage-v2.candidate.json"
 )
 CANDIDATE_DIR = CANDIDATE.parent
+SCHEMA_PATH = CANDIDATE_DIR / "investigation-skill-manifest-v2.schema.json"
 SPEC = importlib.util.spec_from_file_location(
     "investigation_skills_v2_projection", MODULE_PATH
 )
@@ -231,6 +232,25 @@ class InvestigationSkillsV2ProjectionTests(unittest.TestCase):
         raw["artifact_digest"] = skills.artifact_digest(raw)
         with self.assertRaisesRegex(ValueError, "skill output contract is unsafe"):
             skills.validate_manifest(raw)
+
+    def test_every_candidate_declares_evidence_and_escalation_semantics(self) -> None:
+        semantic_fields = (
+            "positive_evidence",
+            "negative_evidence",
+            "escalation_pivots",
+        )
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        self.assertTrue(set(semantic_fields).issubset(schema["required"]))
+        self.assertTrue(set(semantic_fields).issubset(schema["properties"]))
+
+        for path in sorted(CANDIDATE_DIR.glob("*.candidate.json")):
+            with self.subTest(path=path.name):
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                for field in semantic_fields:
+                    self.assertIn(field, raw)
+                    self.assertIsInstance(raw[field], list)
+                    self.assertGreaterEqual(len(raw[field]), 2)
+                self.assertEqual(skills.validate_manifest(raw), raw)
 
     def test_lineage_compatibility_maintainer_verification_and_references_fail_closed(self) -> None:
         mutations = (
