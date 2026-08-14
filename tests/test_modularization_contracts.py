@@ -736,15 +736,12 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
         installer = (
             ROOT / "relay" / "bin" / "install-pi-relay.sh"
         ).read_text(encoding="utf-8")
-        marker = '"$REPO_DIR/relay/app/'
+        marker = '"$REPO_DIR/'
         installed = {}
         for line in installer.replace("\\\n", " ").splitlines():
             if marker not in line or ".py" not in line:
                 continue
-            source_path = (
-                "relay/app/"
-                + line.split(marker, 1)[1].split('"', 1)[0]
-            )
+            source_path = line.split(marker, 1)[1].split('"', 1)[0]
             installed[source_path] = line.split()[-1]
         contracted = {
             entry["path"]: entry["runtime_path"]
