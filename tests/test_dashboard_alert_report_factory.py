@@ -242,6 +242,167 @@ class DashboardAlertReportFactoryTests(unittest.TestCase):
             "No summary text available yet.",
         )
 
+    def test_build_report_preserves_phase_and_model_projection_order(self) -> None:
+        row = object()
+        trace: list[tuple[object, ...]] = []
+        model = object()
+        raw = {"raw": True}
+        source = Path("source.md")
+        config = self.factory.AlertReportFactoryConfig(Path("db"), (), Path("pcap"))
+        services = self.services()
+        row_values = {
+            "raw_alert_count": 2,
+            "total_seen_count": 5,
+            "seen_count": 3,
+            "alert_id": "alert-1",
+            "filter_status": "accepted",
+            "filter_reason": "eligible",
+            "rule_name": "Rule",
+            "first_seen": "first",
+            "last_seen": "last",
+        }
+        workflow = self.factory.ReportWorkflowEvidence(
+            {"analysis": True},
+            {
+                "tuning_recommendation": " REVIEW ",
+                "tuning_reason": " reason ",
+            },
+            ("ai-key", "AI label", "AI detail"),
+            ("enrichment-key", "Enrichment label", "Enrichment detail", 7, 2, 1),
+            ("pcap-key", "PCAP label", "PCAP detail"),
+            "pcap markdown",
+        )
+        network = self.factory.ReportNetworkIdentity(
+            "source-ip", "source-port", "destination-ip", "destination-port",
+            "dataset", "rule-id",
+        )
+
+        def row_item(candidate: object, key: str, default: object = None) -> object:
+            trace.append(("row", candidate, key, default))
+            return row_values.get(key, default)
+
+        def safe_int(value: object) -> int:
+            trace.append(("safe-int", value))
+            return int(value)  # type: ignore[arg-type]
+
+        def alert_report(**kwargs: object) -> object:
+            trace.append(("model", tuple(kwargs)))
+            self.assertEqual(kwargs["source"], source)
+            self.assertIs(kwargs["ai_analysis"], workflow.ai_analysis)
+            self.assertEqual(kwargs["summary"], "accepted: eligible. Seen 5 time(s). summary")
+            return model
+
+        with (
+            mock.patch.object(
+                self.factory,
+                "raw_alert_object",
+                side_effect=lambda candidate: trace.append(("raw", candidate)) or raw,
+            ),
+            mock.patch.object(self.factory, "row_item", side_effect=row_item),
+            mock.patch.object(self.factory, "safe_int", side_effect=safe_int),
+            mock.patch.object(
+                self.factory,
+                "report_group_key",
+                side_effect=lambda candidate: trace.append(("group", candidate)) or "group",
+            ),
+            mock.patch.object(
+                self.factory,
+                "workflow_evidence",
+                side_effect=lambda *args: trace.append(("workflow", args)) or workflow,
+            ),
+            mock.patch.object(
+                self.factory,
+                "source_attachment",
+                side_effect=lambda *args: trace.append(("attachment", args))
+                or (source, "relative.md", "source text", 123),
+            ),
+            mock.patch.object(
+                self.factory,
+                "report_detail_html",
+                side_effect=lambda *args: trace.append(("detail", args))
+                or ("detail text", "rendered html"),
+            ),
+            mock.patch.object(
+                self.factory,
+                "severity_label_from_row",
+                side_effect=lambda candidate: trace.append(("severity", candidate)) or "Medium",
+            ),
+            mock.patch.object(
+                self.factory,
+                "network_identity",
+                side_effect=lambda *args: trace.append(("network", args)) or network,
+            ),
+            mock.patch.object(
+                self.factory,
+                "report_timestamp",
+                side_effect=lambda candidate: trace.append(("timestamp", candidate)) or 1234.5,
+            ),
+            mock.patch.object(
+                self.factory,
+                "summarize_markdown",
+                side_effect=lambda *args: trace.append(("summarize", args)) or "summary",
+            ),
+            mock.patch.object(
+                self.factory,
+                "endpoint_label",
+                side_effect=lambda *args: trace.append(("endpoint", args)) or ":".join(args),
+            ),
+            mock.patch.object(
+                self.factory,
+                "tuning_actions",
+                side_effect=lambda response: trace.append(("actions", response)) or ["action"],
+            ),
+            mock.patch.object(self.factory, "AlertReport", side_effect=alert_report),
+        ):
+            result = self.factory.build_alert_report(
+                row,
+                {"alert-1": (source, "stored", object())},
+                {"analysis": {}},
+                {"prompt": {}},
+                {"running"},
+                {"pcap": object()},
+                "medium",
+                config,
+                services,
+            )
+
+        self.assertIs(result, model)
+        self.assertEqual(
+            trace[-4:],
+            [
+                ("row", row, "first_seen", None),
+                ("row", row, "last_seen", None),
+                ("actions", workflow.ai_response),
+                (
+                    "model",
+                    (
+                        "title", "source", "rel_source", "mtime", "size", "digest",
+                        "rendered_html", "summary", "criticality", "criticality_rank",
+                        "alert_source", "filter_status", "source_ip", "source_port",
+                        "destination_ip", "destination_port", "source_endpoint",
+                        "destination_endpoint", "rule_id", "rule_name", "raw_alert_count",
+                        "total_seen_count", "repeat_count", "first_seen", "last_seen",
+                        "alert_group_key", "alert_ts", "ai_status_key", "ai_status_label",
+                        "ai_status_detail", "enrichment_status_key",
+                        "enrichment_status_label", "enrichment_status_detail",
+                        "enrichment_record_count", "enrichment_skip_count",
+                        "enrichment_error_count", "pcap_status_key", "pcap_status_label",
+                        "pcap_status_detail", "tuning_recommendation", "tuning_reason",
+                        "recommended_tuning_actions", "ai_analysis",
+                    ),
+                ),
+            ],
+        )
+        self.assertEqual(
+            [entry[0] for entry in trace],
+            [
+                "raw", "row", "safe-int", "row", "safe-int", "row", "safe-int",
+                "group", "row", "workflow", "attachment", "detail", "severity", "row",
+                "row", "network", "timestamp", "row", "summarize", "row", "endpoint",
+                "endpoint", "row", "row", "actions", "model",
+            ],
+        )
+
     def test_builder_reexports_factory_and_value_helpers(self) -> None:
         self.assertIs(self.builder.build_alert_report, self.factory.build_alert_report)
         self.assertIs(self.builder.clean_endpoint_part, self.factory.clean_endpoint_part)
