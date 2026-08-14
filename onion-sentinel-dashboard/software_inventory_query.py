@@ -147,6 +147,35 @@ def _freshness(record: dict[str, object], observed_at: dt.datetime) -> str:
     return "expired"
 
 
+def _apply_endpoint_os_projection(
+    record: dict[str, object],
+    freshness: str,
+    public: dict[str, object],
+) -> None:
+    if (
+        record["source"] == "osquery_apps"
+        and record["operating_system_source"] in ENDPOINT_OS_SOURCES
+        and (
+            record["operating_system_type"]
+            or record["operating_system_version"]
+        )
+    ):
+        public["operating_system_observed_at"] = record["last_seen"]
+        public["operating_system_freshness"] = freshness
+
+
+def _observed_user_agent(record: dict[str, object]) -> str:
+    observed_user_agent = ""
+    if record["source"] == "http_user_agent":
+        observed_user_agent = str(record["product"])
+    elif (
+        record["source"] == "zeek_software"
+        and str(record["category"]).casefold() == "http::browser"
+    ):
+        observed_user_agent = str(record["version"])
+    return observed_user_agent
+
+
 def _public_record(
     record: dict[str, object], observed_at: dt.datetime
 ) -> dict[str, object]:
@@ -167,24 +196,8 @@ def _public_record(
             record.get("operating_system_association") or ""
         ),
     }
-    if (
-        record["source"] == "osquery_apps"
-        and record["operating_system_source"] in ENDPOINT_OS_SOURCES
-        and (
-            record["operating_system_type"]
-            or record["operating_system_version"]
-        )
-    ):
-        public["operating_system_observed_at"] = record["last_seen"]
-        public["operating_system_freshness"] = freshness
-    observed_user_agent = ""
-    if record["source"] == "http_user_agent":
-        observed_user_agent = str(record["product"])
-    elif (
-        record["source"] == "zeek_software"
-        and str(record["category"]).casefold() == "http::browser"
-    ):
-        observed_user_agent = str(record["version"])
+    _apply_endpoint_os_projection(record, freshness, public)
+    observed_user_agent = _observed_user_agent(record)
     if observed_user_agent:
         public["observed_user_agent"] = observed_user_agent
     return public
