@@ -3614,8 +3614,14 @@ PCAP artifact bytes remain on the separate streaming path.
 boundary. Its configuration phases separately own stable file opening and
 decoding, exact schema/field admission, fixed upstream identity and certificate
 pin validation, CA trust-file validation, numeric limits, and the fixed lock
-path. No configuration field can widen the approved host, port, SNI, command,
-or filesystem authority.
+path. Its response phases independently sanitize Location and Set-Cookie
+headers, enforce declared and actual body bounds, and decode only the
+operation-authorized response kind. The bounded lifecycle root separates
+forced-command/input admission, request-ID recovery, contract/config
+preparation, single-flight execution, elapsed-time projection, and exact
+success/request-error/broker-error/internal-error envelopes. No configuration
+or request field can widen the approved host, port, SNI, command, response
+shape, or filesystem authority.
 
 `relay_pcap_spool_policy.py` owns absolute spool-path and required-mount
 admission, capacity/high-watermark enforcement, usage projection, bounded

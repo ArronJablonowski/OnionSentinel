@@ -257,8 +257,8 @@ def _tls_socket(config: dict[str, Any]) -> ssl.SSLSocket:
         raise BrokerError("AC Hunter relay TLS connection failed")
 
 
-def _response_headers(response: http.client.HTTPResponse) -> dict[str, object]:
-    location = response.headers.get("Location", "")
+def _safe_location(headers: object) -> str:
+    location = headers.get("Location", "")
     if not isinstance(location, str):
         location = ""
     if any(character in location for character in ("\r", "\n", "\x00")):
@@ -266,7 +266,11 @@ def _response_headers(response: http.client.HTTPResponse) -> dict[str, object]:
     encoded_location = location.encode("utf-8")
     if len(encoded_location) > MAX_LOCATION_BYTES:
         location = ""
-    cookies = response.headers.get_all("Set-Cookie") or []
+    return location
+
+
+def _safe_cookies(headers: object) -> list[str]:
+    cookies = headers.get_all("Set-Cookie") or []
     safe_cookies: list[str] = []
     for cookie in cookies[:MAX_SET_COOKIES]:
         if (
@@ -276,7 +280,62 @@ def _response_headers(response: http.client.HTTPResponse) -> dict[str, object]:
             and len(cookie.encode("utf-8")) <= 16 * 1024
         ):
             safe_cookies.append(cookie)
-    return {"location": location, "set_cookie": safe_cookies}
+    return safe_cookies
+
+
+def _response_headers(response: http.client.HTTPResponse) -> dict[str, object]:
+    return {
+        "location": _safe_location(response.headers),
+        "set_cookie": _safe_cookies(response.headers),
+    }
+
+
+def _validate_declared_length(headers: object, maximum_bytes: int) -> None:
+    length = headers.get("Content-Length")
+    if length:
+        try:
+            if int(length) > maximum_bytes:
+                raise BrokerError(
+                    "AC Hunter relay response exceeded its byte limit"
+                )
+        except ValueError:
+            raise BrokerError("AC Hunter relay response length was invalid")
+
+
+def _read_bounded_body(
+    response: http.client.HTTPResponse,
+    maximum_bytes: int,
+) -> bytes:
+    raw = response.read(maximum_bytes + 1)
+    if len(raw) > maximum_bytes:
+        raise BrokerError("AC Hunter relay response exceeded its byte limit")
+    return raw
+
+
+def _decode_response_body(
+    response: http.client.HTTPResponse,
+    request: UpstreamRequest,
+    raw: bytes,
+) -> object:
+    if request.response_kind == "none":
+        return None
+    if request.response_kind == "html":
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise BrokerError("AC Hunter login form was not valid UTF-8")
+    if response.status == 302:
+        return None
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise BrokerError("AC Hunter returned a non-JSON API response")
+    if (
+        not isinstance(body, (dict, list, int, float, str, bool))
+        and body is not None
+    ):
+        raise BrokerError("AC Hunter returned an unsupported JSON value")
+    return body
 
 
 def _read_response(
@@ -285,32 +344,9 @@ def _read_response(
     maximum_bytes: int,
 ) -> tuple[str, object]:
     content_type = str(response.headers.get("Content-Type", "")).split(";", 1)[0]
-    length = response.headers.get("Content-Length")
-    if length:
-        try:
-            if int(length) > maximum_bytes:
-                raise BrokerError("AC Hunter relay response exceeded its byte limit")
-        except ValueError:
-            raise BrokerError("AC Hunter relay response length was invalid")
-    raw = response.read(maximum_bytes + 1)
-    if len(raw) > maximum_bytes:
-        raise BrokerError("AC Hunter relay response exceeded its byte limit")
-    if request.response_kind == "none":
-        return content_type, None
-    if request.response_kind == "html":
-        try:
-            return content_type, raw.decode("utf-8")
-        except UnicodeDecodeError:
-            raise BrokerError("AC Hunter login form was not valid UTF-8")
-    if response.status == 302:
-        return content_type, None
-    try:
-        body = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        raise BrokerError("AC Hunter returned a non-JSON API response")
-    if not isinstance(body, (dict, list, int, float, str, bool)) and body is not None:
-        raise BrokerError("AC Hunter returned an unsupported JSON value")
-    return content_type, body
+    _validate_declared_length(response.headers, maximum_bytes)
+    raw = _read_bounded_body(response, maximum_bytes)
+    return content_type, _decode_response_body(response, request, raw)
 
 
 def _perform(
@@ -347,79 +383,130 @@ def _perform(
         connection.close()
 
 
-def main() -> int:
-    started = time.monotonic()
-    request_id = "0" * 32
+def _admit_request_bytes(request_id: str) -> tuple[bytes | None, int | None]:
     if len(sys.argv) != 1 or os.environ.get("SSH_ORIGINAL_COMMAND", "").strip():
-        return _emit(
+        code = _emit(
             request_id=request_id,
             ok=False,
             status=0,
             error="commands and arguments are not accepted by this forced endpoint",
             exit_code=2,
         )
+        return None, code
     raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
     if len(raw) > MAX_REQUEST_BYTES:
-        return _emit(
+        code = _emit(
             request_id=request_id,
             ok=False,
             status=0,
             error="request exceeds the AC Hunter relay byte limit",
             exit_code=2,
         )
+        return None, code
+    return raw, None
+
+
+def _candidate_request_id(payload: object, current: str) -> str:
+    if isinstance(payload, dict):
+        candidate = payload.get("request_id")
+        if isinstance(candidate, str) and len(candidate) == 32:
+            return candidate
+    return current
+
+
+def _execute_request(
+    config: dict[str, Any],
+    request: UpstreamRequest,
+) -> tuple[int, str, dict[str, object], object]:
+    with _acquire_lock(config["lock_file"]):
+        return _perform(config, request)
+
+
+def _elapsed_ms(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)
+
+
+def _emit_success(
+    request_id: str,
+    request: UpstreamRequest,
+    result: tuple[int, str, dict[str, object], object],
+    started: float,
+) -> int:
+    status, content_type, headers, body = result
+    duration = _elapsed_ms(started)
+    accepted = status in request.allowed_statuses
+    return _emit(
+        request_id=request_id,
+        ok=accepted,
+        status=status,
+        content_type=content_type,
+        headers=headers,
+        body=body,
+        duration_ms=duration,
+        error="" if accepted else "AC Hunter returned an unexpected status",
+        exit_code=0 if accepted else 5,
+    )
+
+
+def _emit_invalid_request(request_id: str, started: float) -> int:
+    return _emit(
+        request_id=request_id,
+        ok=False,
+        status=0,
+        duration_ms=_elapsed_ms(started),
+        error="invalid AC Hunter relay request",
+        exit_code=2,
+    )
+
+
+def _emit_broker_failure(
+    request_id: str,
+    started: float,
+    error: BrokerError,
+) -> int:
+    return _emit(
+        request_id=request_id,
+        ok=False,
+        status=0,
+        duration_ms=_elapsed_ms(started),
+        error=str(error),
+        exit_code=4,
+    )
+
+
+def _emit_internal_failure(request_id: str, started: float) -> int:
+    return _emit(
+        request_id=request_id,
+        ok=False,
+        status=0,
+        duration_ms=_elapsed_ms(started),
+        error="AC Hunter relay request failed",
+        exit_code=4,
+    )
+
+
+def main() -> int:
+    started = time.monotonic()
+    request_id = "0" * 32
+    raw, code = _admit_request_bytes(request_id)
+    if code is not None:
+        return code
     try:
         payload = json.loads(raw.decode("utf-8"))
-        if isinstance(payload, dict):
-            candidate = payload.get("request_id")
-            if isinstance(candidate, str) and len(candidate) == 32:
-                request_id = candidate
+        request_id = _candidate_request_id(payload, request_id)
         request_id, request = compile_request(payload)
         config_path = Path(
             os.environ.get("ONION_SENTINEL_AC_HUNTER_CONFIG", DEFAULT_CONFIG)
         )
         config = _load_config(config_path)
-        with _acquire_lock(config["lock_file"]):
-            status, content_type, headers, body = _perform(config, request)
-        duration = int((time.monotonic() - started) * 1000)
-        accepted = status in request.allowed_statuses
-        return _emit(
-            request_id=request_id,
-            ok=accepted,
-            status=status,
-            content_type=content_type,
-            headers=headers,
-            body=body,
-            duration_ms=duration,
-            error="" if accepted else "AC Hunter returned an unexpected status",
-            exit_code=0 if accepted else 5,
-        )
+        result = _execute_request(config, request)
+        return _emit_success(request_id, request, result, started)
     except (UnicodeDecodeError, json.JSONDecodeError, AcHunterContractError):
-        return _emit(
-            request_id=request_id,
-            ok=False,
-            status=0,
-            duration_ms=int((time.monotonic() - started) * 1000),
-            error="invalid AC Hunter relay request",
-            exit_code=2,
-        )
+        return _emit_invalid_request(request_id, started)
     except BrokerError as exc:
-        return _emit(
-            request_id=request_id,
-            ok=False,
-            status=0,
-            duration_ms=int((time.monotonic() - started) * 1000),
-            error=str(exc),
-            exit_code=4,
-        )
+        return _emit_broker_failure(request_id, started, exc)
     except BaseException:
-        return _emit(
-            request_id=request_id,
-            ok=False,
-            status=0,
-            duration_ms=int((time.monotonic() - started) * 1000),
-            error="AC Hunter relay request failed",
-            exit_code=4,
-        )
+        return _emit_internal_failure(request_id, started)
 
 
 if __name__ == "__main__":
