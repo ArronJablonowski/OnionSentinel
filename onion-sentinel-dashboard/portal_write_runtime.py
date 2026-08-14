@@ -21,6 +21,19 @@ def asset_store_post_json(
     ).post(path, payload, timeout)
 
 
+def _alert_store_http_error(r: Any, exc: Any) -> Exception:
+    try:
+        error_payload = r.read_bounded_json(
+            exc, max_bytes=r.SOC_ALERT_STORE_RESPONSE_MAX_BYTES
+        )
+        detail = str(
+            error_payload.get("reason") or error_payload.get("error") or exc.reason
+        )
+    except (OSError, r.BoundedResponseError):
+        detail = str(exc.reason)
+    return r.AlertStoreRequestError(detail, int(exc.code or 503))
+
+
 def alert_store_post_json(
     r: Any, path: str, payload: dict, timeout: float = 5.0
 ) -> dict:
@@ -38,14 +51,7 @@ def alert_store_post_json(
                 response, max_bytes=r.SOC_ALERT_STORE_RESPONSE_MAX_BYTES
             )
     except r.urllib_error.HTTPError as exc:
-        try:
-            error_payload = r.read_bounded_json(
-                exc, max_bytes=r.SOC_ALERT_STORE_RESPONSE_MAX_BYTES
-            )
-            detail = str(error_payload.get("reason") or error_payload.get("error") or exc.reason)
-        except (OSError, r.BoundedResponseError):
-            detail = str(exc.reason)
-        raise r.AlertStoreRequestError(detail, int(exc.code or 503)) from exc
+        raise _alert_store_http_error(r, exc) from exc
     except (OSError, r.urllib_error.URLError, r.json.JSONDecodeError) as exc:
         raise r.AlertStoreRequestError(str(exc), 503) from exc
     if not isinstance(result, dict) or not result.get("ok"):

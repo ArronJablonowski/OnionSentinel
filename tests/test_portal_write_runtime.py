@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
 import unittest
@@ -131,8 +132,9 @@ class PortalWriteRuntimeTests(unittest.TestCase):
             422,
             "http reason",
             {},
-            None,
+            io.BytesIO(),
         )
+        self.addCleanup(error.close)
         runtime, trace, _, _ = self.runtime(
             urlopen_error=error,
             error_result={"reason": "bounded reason", "error": "secondary"},
@@ -147,7 +149,8 @@ class PortalWriteRuntimeTests(unittest.TestCase):
         self.assertEqual(trace[-1], ("read", error, 4096))
 
     def test_alert_store_post_uses_http_reason_only_for_bounded_read_failures(self) -> None:
-        error = urllib.error.HTTPError("url", None, "http reason", {}, None)
+        error = urllib.error.HTTPError("url", None, "http reason", {}, io.BytesIO())
+        self.addCleanup(error.close)
         runtime, _, _, _ = self.runtime(
             urlopen_error=error,
             error_read_error=BoundedResponseError("too large"),
