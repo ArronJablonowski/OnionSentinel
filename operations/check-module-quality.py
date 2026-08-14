@@ -405,6 +405,19 @@ def imported_names(tree: ast.Module, current_modules: set[str]) -> set[str]:
     return names
 
 
+def _dependency_candidates(
+    imported: str,
+    aliases: dict[str, set[str]],
+) -> set[str]:
+    candidates: set[str] = set()
+    parts = imported.split(".")
+    for length in range(len(parts), 0, -1):
+        candidates = aliases.get(".".join(parts[:length]), set())
+        if candidates:
+            break
+    return candidates
+
+
 def dependency_graph(
     root: Path,
     source_names: Iterable[str],
@@ -421,12 +434,7 @@ def dependency_graph(
         tree = ast.parse((root / path).read_text(encoding="utf-8"), filename=path)
         current_modules = module_aliases(path, roots)
         for imported in imported_names(tree, current_modules):
-            candidates: set[str] = set()
-            parts = imported.split(".")
-            for length in range(len(parts), 0, -1):
-                candidates = aliases.get(".".join(parts[:length]), set())
-                if candidates:
-                    break
+            candidates = _dependency_candidates(imported, aliases)
             if len(candidates) == 1:
                 target = next(iter(candidates))
                 if target != path:
