@@ -520,6 +520,28 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
             50,
         )
 
+    def test_relay_health_application_has_bounded_lifecycle_phases(self) -> None:
+        application = ROOT / "relay" / "app" / "relay_health_application.py"
+        expected = {
+            "_parse_component",
+            "_run_alert_component",
+            "_run_pcap_component",
+            "_run_storage_component",
+            "_run_components",
+            "_component_outcome",
+            "_prior_pcap_failure",
+            "_update_pcap_failure_latch",
+            "_complete_success",
+            "_complete_failure",
+        }
+
+        self.assertTrue(expected <= top_level_function_names(application))
+        function = top_level_function(application, "main")
+        self.assertLessEqual(
+            (function.end_lineno or function.lineno) - function.lineno + 1,
+            50,
+        )
+
     def test_relay_health_wrapper_supports_isolated_file_loader_import(self) -> None:
         wrapper = ROOT / "relay" / "app" / "relay_health_wrapper.py"
         script = (
