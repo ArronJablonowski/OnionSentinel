@@ -116,6 +116,10 @@ def _provider(analysis: Mapping[str, Any]) -> str | None:
     return str(result.get("_analysis_provider") or "").strip()[:80] or None
 
 
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 def _stable_id(
     member: Mapping[str, Any],
     known: set[str],
@@ -156,6 +160,7 @@ def _normalized_record(
     state: str,
     analysis: Mapping[str, Any],
     result: Mapping[str, Any],
+    dispatch: Mapping[str, Any],
     detection_sha256: str,
     policy: ResultMemberPolicy,
 ) -> dict[str, Any]:
@@ -176,6 +181,7 @@ def _normalized_record(
         "detection_sha256": detection_sha256,
         "response_sha256": str(analysis.get("response_sha256") or "")[:64] or None,
         "second_opinion": _second_opinion(result),
+        "dispatch_started_at": str(dispatch.get("started_at") or ""),
     }
 
 
@@ -218,6 +224,7 @@ def normalize_export_member(
         state=state,
         analysis=analysis,
         result=result,
+        dispatch=_mapping(member.get("dispatch")),
         detection_sha256=detection_sha256,
         policy=policy,
     )

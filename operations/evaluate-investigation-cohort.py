@@ -77,6 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--adjudication", required=True, type=Path)
     parser.add_argument(
+        "--evidence-seal",
+        required=True,
+        type=Path,
+        help="owner-only independent evidence seal created before dispatch",
+    )
+    parser.add_argument(
         "--expected-count",
         type=_parse_expected_count,
         default=EXPECTED_ROLE_COUNT,
@@ -120,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
         report = evaluate_cohorts(
             result_paths=result_paths,
             adjudication_path=args.adjudication,
+            evidence_seal_path=args.evidence_seal,
             expected_count=args.expected_count,
             required_evaluation_profile=args.required_evaluation_profile,
         )

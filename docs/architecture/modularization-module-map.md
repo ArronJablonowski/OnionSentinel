@@ -1125,7 +1125,20 @@ concerns.
 projection of one execution-gated cohort-export member. It binds stable-group
 identity to the detection, enforces unique bounded rank and role, invokes the
 execution-proof port, and emits ordered identity, detection-digest, verdict,
-provider, second-opinion, and query-audit projections without file access.
+provider, second-opinion, query-audit, and already-admitted dispatch-time
+projections without file access.
+
+`operations/cohort_evidence_seal.py` owns the canonical independent-evidence
+seal and its temporal binding. It validates an owner-only caller-loaded,
+embedded-digest document that fixes every ordered case's ground truth and
+evidence-basis digests, binds it to the exact paired frozen cohort, proves the
+seal predates every admitted dispatch, and rejects later adjudication drift.
+It performs no file access, evidence collection, result loading, or scoring.
+
+`operations/cohort_evaluation_adjudication_service.py` is the composition
+adapter for independent adjudication and evidence-seal policy. It injects the
+shared schemas, bounded-value rules, timestamp and hashing ports, and ground-
+truth normalizer without owning file access or evaluation workflow order.
 
 `operations/cohort_evaluation_result_export.py` owns sealed export admission,
 frozen selection and execution-gate validation, ordered member-set proof,
@@ -1140,9 +1153,10 @@ cross-role comparison. All thresholds, rubric weights, verdict fields, and
 promotion cohort size are supplied by an immutable scoring policy.
 
 `operations/cohort_evaluation_workflow.py` composes the pure paired-role grading
-workflow after private inputs have been loaded and normalized. It validates the
-shared frozen cohort, binds independent adjudication by stable group, evaluates
-both roles through injected scoring ports, and assembles the sealed report data.
+workflow after private inputs and the pre-dispatch evidence seal have been
+loaded and normalized. It validates the shared frozen cohort, binds independent
+adjudication by stable group, evaluates both roles through injected scoring
+ports, and assembles the sealed report data.
 Filesystem access, private output, Markdown rendering, and CLI behavior remain
 outside this module.
 
@@ -1194,10 +1208,11 @@ through injected private-I/O and execution-proof ports. The CLI no longer
 constructs the nested result policy inline.
 
 `operations/cohort_evaluation_api.py` is the public sealed-evaluation workflow
-boundary. It loads each role through injected result ports, validates paired
-cohort identity, loads independent adjudication, binds stable groups, builds
-role reports, and assembles the final report without parsing CLI arguments or
-writing output files.
+boundary. It loads and validates the independent evidence seal before opening
+either role export, validates paired cohort identity and seal-before-dispatch
+ordering, then loads later independent adjudication, rejects ground-truth drift,
+binds stable groups, builds role reports, and assembles the final report without
+parsing CLI arguments or writing output files.
 
 `operations/cohort_evaluation_service.py` configures the canonical contracts,
 admission policies, scoring policy, API ports, and bounded report adapters. The

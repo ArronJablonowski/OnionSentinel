@@ -233,3 +233,24 @@ GPT-5.6 Sol XHigh campaign, pass
 `--required-evaluation-profile onion-sentinel-gpt55-high-gpt56-sol-xhigh-v1`
 to `evaluate-investigation-cohort.py`; generic grading may omit that optional
 selector.
+
+Before either cohort is dispatched, an independent reviewer must create an
+owner-only evidence seal using schema
+`onion-sentinel-independent-evidence-seal-v1`. The canonical embedded digest
+binds the exact frozen source, ordered identity/detection digests, methodology,
+and every case's labels, confidence, evidence-basis/timeline/attribution
+digests, required query classes, and telemetry gaps. Its timezone-aware
+`sealed_at` must precede every admitted dispatch. Later adjudication must match
+the sealed ground truth exactly; a boolean independence assertion is not proof.
+Pass that private artifact explicitly when grading:
+
+```bash
+python3 operations/evaluate-investigation-cohort.py \
+  --result incident-responder=/path/to/private/ir-results.json \
+  --result soc-analyst=/path/to/private/soc-results.json \
+  --evidence-seal /path/to/private/independent-evidence-seal.json \
+  --adjudication /path/to/private/adjudication.json \
+  --expected-count 20 \
+  --json-out /path/to/private/evaluation.json \
+  --markdown-out /path/to/private/evaluation.md
+```

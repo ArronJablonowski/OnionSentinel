@@ -239,6 +239,15 @@ def _ground_truth(
     }
 
 
+def validate_ground_truth(
+    value: Any,
+    label: str,
+    policy: AdjudicationPolicy,
+) -> dict[str, Any]:
+    """Normalize one evidence-bound ground-truth record."""
+    return _ground_truth(value, label, policy)
+
+
 def _ground_truth_digests(
     value: Mapping[str, Any],
     label: str,

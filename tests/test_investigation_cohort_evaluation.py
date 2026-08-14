@@ -768,6 +768,10 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             self.adjudication_path,
             self._adjudication(expected_count=expected_count),
         )
+        self._write_private(
+            self.evidence_seal_path,
+            self._evidence_seal(expected_count=expected_count),
+        )
 
     def test_requires_a_pre_dispatch_independent_evidence_seal(self) -> None:
         self._write_fixture_documents(expected_count=10)
@@ -795,6 +799,121 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             20,
         )
 
+    def test_invalid_evidence_seal_fails_before_result_exports_are_opened(
+        self,
+    ) -> None:
+        self._write_fixture_documents(expected_count=10)
+        seal = self._evidence_seal(expected_count=10)
+        seal["seal_sha256"] = "0" * 64
+        self._write_private(self.evidence_seal_path, seal)
+
+        with self.assertRaisesRegex(
+            evaluator.CohortEvaluationError, "seal_sha256 does not match"
+        ):
+            evaluator.evaluate_cohorts(
+                result_paths={
+                    "incident-responder": self.root / "missing-ir.json",
+                    "soc-analyst": self.root / "missing-soc.json",
+                },
+                adjudication_path=self.adjudication_path,
+                evidence_seal_path=self.evidence_seal_path,
+                expected_count=10,
+            )
+
+    def test_evidence_seal_fails_closed_on_tamper_drift_order_and_lateness(
+        self,
+    ) -> None:
+        self._write_fixture_documents(expected_count=10)
+
+        def resign(document: dict) -> None:
+            document.pop("seal_sha256", None)
+            document["seal_sha256"] = evaluator.sha256_value(document)
+
+        mutations = (
+            (
+                "tampered",
+                lambda value: value["cases"][0]["ground_truth"]["labels"].update(
+                    handling="contain"
+                ),
+                False,
+                "seal_sha256 does not match",
+            ),
+            (
+                "wrong-source",
+                lambda value: value.update(source_rows_sha256="9" * 64),
+                True,
+                "does not match the frozen cohort",
+            ),
+            (
+                "reordered",
+                lambda value: value["cases"].reverse(),
+                True,
+                "rank/order binding is invalid",
+            ),
+            (
+                "changed-detection",
+                lambda value: value["cases"][0]["ground_truth"].update(
+                    detection_sha256="9" * 64
+                ),
+                True,
+                "case binding changed",
+            ),
+            (
+                "post-dispatch",
+                lambda value: value.update(sealed_at="2026-07-25T00:01:00Z"),
+                True,
+                "was not created before",
+            ),
+            (
+                "fractional-reviewer-count",
+                lambda value: value.update(reviewer_count=1.5),
+                True,
+                "reviewer_count must be an integer",
+            ),
+        )
+        for name, mutate, should_resign, message in mutations:
+            with self.subTest(name=name):
+                seal = self._evidence_seal(expected_count=10)
+                mutate(seal)
+                if should_resign:
+                    resign(seal)
+                self._write_private(self.evidence_seal_path, seal)
+                with self.assertRaisesRegex(
+                    evaluator.CohortEvaluationError, message
+                ):
+                    evaluator.evaluate_cohorts(
+                        result_paths={
+                            "incident-responder": self.ir_path,
+                            "soc-analyst": self.soc_path,
+                        },
+                        adjudication_path=self.adjudication_path,
+                        evidence_seal_path=self.evidence_seal_path,
+                        expected_count=10,
+                    )
+
+        self._write_private(
+            self.evidence_seal_path,
+            self._evidence_seal(expected_count=10),
+        )
+        adjudication = self._adjudication(expected_count=10)
+        adjudication["cases"][0]["ground_truth"]["labels"]["handling"] = (
+            "contain"
+        )
+        self._write_private(self.adjudication_path, adjudication)
+        with self.assertRaisesRegex(
+            evaluator.CohortEvaluationError,
+            "adjudication ground truth differs from evidence seal",
+        ):
+            evaluator.evaluate_cohorts(
+                result_paths={
+                    "incident-responder": self.ir_path,
+                    "soc-analyst": self.soc_path,
+                },
+                adjudication_path=self.adjudication_path,
+                evidence_seal_path=self.evidence_seal_path,
+                expected_count=10,
+            )
+
     def test_scores_roles_separately_and_enforces_hard_failures(self) -> None:
         self._write_fixture_documents()
 
@@ -804,6 +923,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 "soc-analyst": self.soc_path,
             },
             adjudication_path=self.adjudication_path,
+            evidence_seal_path=self.evidence_seal_path,
         )
 
         self.assertEqual(report["schema"], evaluator.REPORT_SCHEMA)
@@ -868,6 +988,10 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             self.adjudication_path,
             self._adjudication(),
         )
+        self._write_private(
+            self.evidence_seal_path,
+            self._evidence_seal(),
+        )
         with self.assertRaisesRegex(
             evaluator.CohortEvaluationError,
             "same execution contract",
@@ -878,6 +1002,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
+                evidence_seal_path=self.evidence_seal_path,
             )
 
         profile = "onion-sentinel-gpt55-high-gpt56-sol-xhigh-v1"
@@ -903,6 +1028,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 "soc-analyst": self.soc_path,
             },
             adjudication_path=self.adjudication_path,
+            evidence_seal_path=self.evidence_seal_path,
             required_evaluation_profile=profile,
         )
         self.assertEqual(
@@ -919,6 +1045,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
+                evidence_seal_path=self.evidence_seal_path,
                 required_evaluation_profile="wrong-profile",
             )
 
@@ -934,6 +1061,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
+                evidence_seal_path=self.evidence_seal_path,
             )
 
     def test_zero_tool_call_ledger_blocks_grading(self) -> None:
@@ -960,6 +1088,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
+                evidence_seal_path=self.evidence_seal_path,
             )
 
     def test_exact_reviewer_repair_is_gradeable_but_tampering_is_not(
@@ -1013,6 +1142,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 "soc-analyst": self.soc_path,
             },
             adjudication_path=self.adjudication_path,
+            evidence_seal_path=self.evidence_seal_path,
         )
         self.assertEqual(report["schema"], evaluator.REPORT_SCHEMA)
 
@@ -1032,6 +1162,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
+                evidence_seal_path=self.evidence_seal_path,
             )
 
     def test_planning_repair_then_followup_two_is_gradeable(self) -> None:
@@ -1193,6 +1324,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                             "soc-analyst": self.soc_path,
                         },
                         adjudication_path=self.adjudication_path,
+                        evidence_seal_path=self.evidence_seal_path,
                     )
 
     def test_query_audit_digest_mismatch_blocks_grading(self) -> None:
@@ -1216,6 +1348,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
+                evidence_seal_path=self.evidence_seal_path,
             )
 
     def _single_role_adjudication(self, role: str) -> Path:
@@ -1243,6 +1376,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 "soc-analyst": self.soc_path,
             },
             adjudication_path=self.adjudication_path,
+            evidence_seal_path=self.evidence_seal_path,
         )
         json_out = self.root / "reports" / "evaluation.json"
         markdown_out = self.root / "reports" / "evaluation.md"
@@ -1287,6 +1421,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
+                evidence_seal_path=self.evidence_seal_path,
             )
 
         self._write_private(self.adjudication_path, self._adjudication())
@@ -1306,6 +1441,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
+                evidence_seal_path=self.evidence_seal_path,
             )
 
         self._write_private(self.adjudication_path, self._adjudication())
@@ -1325,6 +1461,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
+                evidence_seal_path=self.evidence_seal_path,
             )
 
     def test_rejects_stable_group_key_binding_drift(self) -> None:
@@ -1345,6 +1482,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
+                evidence_seal_path=self.evidence_seal_path,
             )
 
     def test_rejects_permissive_or_raw_result_exports(self) -> None:
@@ -1359,6 +1497,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
+                evidence_seal_path=self.evidence_seal_path,
             )
 
         document = self._result_export(
@@ -1377,6 +1516,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
+                evidence_seal_path=self.evidence_seal_path,
             )
 
     def test_cli_emits_safe_summary_and_optional_gate_failure(self) -> None:
@@ -1392,6 +1532,8 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 f"soc-analyst={self.soc_path}",
                 "--adjudication",
                 str(self.adjudication_path),
+                "--evidence-seal",
+                str(self.evidence_seal_path),
                 "--json-out",
                 str(json_out),
                 "--markdown-out",
@@ -1413,6 +1555,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             evaluator.evaluate_cohorts(
                 result_paths={"soc-analyst": self.soc_path},
                 adjudication_path=self.adjudication_path,
+                evidence_seal_path=self.evidence_seal_path,
             )
 
         self._write_private(
@@ -1433,6 +1576,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
+                evidence_seal_path=self.evidence_seal_path,
             )
 
     def test_refuses_same_source_identity_with_different_detection_snapshot(
@@ -1458,6 +1602,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
+                evidence_seal_path=self.evidence_seal_path,
             )
 
     def test_project_timestamp_double_space_remains_gradeable(self) -> None:
@@ -1507,6 +1652,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 "soc-analyst": self.soc_path,
             },
             adjudication_path=self.adjudication_path,
+            evidence_seal_path=self.evidence_seal_path,
         )
         self.assertTrue(report["dual_role_execution_gate"]["passed"])
 
@@ -1652,6 +1798,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                         "soc-analyst": self.soc_path,
                     },
                     adjudication_path=self.adjudication_path,
+                    evidence_seal_path=self.evidence_seal_path,
                     expected_count=expected_count,
                 )
 
@@ -1684,6 +1831,8 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             f"soc-analyst={self.soc_path}",
             "--adjudication",
             str(self.adjudication_path),
+            "--evidence-seal",
+            str(self.evidence_seal_path),
             "--json-out",
             str(self.root / "result.json"),
             "--markdown-out",
@@ -1708,6 +1857,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     evaluator.evaluate_cohorts(
                         result_paths={},
                         adjudication_path=self.adjudication_path,
+                        evidence_seal_path=self.evidence_seal_path,
                         expected_count=invalid_count,
                     )
 

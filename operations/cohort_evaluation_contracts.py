@@ -8,6 +8,7 @@ import re
 RESULT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v4"
 MANIFEST_SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
 ADJUDICATION_SCHEMA = "onion-sentinel-investigation-cohort-adjudication-v1"
+EVIDENCE_SEAL_SCHEMA = "onion-sentinel-independent-evidence-seal-v1"
 REPORT_SCHEMA = "onion-sentinel-investigation-cohort-evaluation-v1"
 
 MAX_INPUT_BYTES = 10_000_000

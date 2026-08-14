@@ -34,10 +34,8 @@ from cohort_model_call_proof import (
     SUPPLEMENTAL_REVIEW_PURPOSE,
     bounded_model_call_proof_valid as validate_bounded_model_call_proof,
 )
-from cohort_adjudication import (
-    AdjudicationPolicy,
-    normalize_duplicate_of as normalize_adjudication_duplicate,
-    validate_adjudication as normalize_adjudication,
+from cohort_evaluation_adjudication_service import (
+    AdjudicationSealService,
 )
 from cohort_execution_skills import (
     SkillAttestationPolicy,
@@ -218,28 +216,20 @@ def load_private_json(path: Path, label: str) -> tuple[dict[str, Any], str]:
     return read_private_json(path, label, _private_input_policy())
 
 
-def _adjudication_policy() -> AdjudicationPolicy:
-    return AdjudicationPolicy(
+def _adjudication_service() -> AdjudicationSealService:
+    return AdjudicationSealService(
         error=CohortEvaluationError,
-        schema=ADJUDICATION_SCHEMA,
-        stable_group_id_pattern=STABLE_GROUP_ID_RE,
-        sha256_pattern=SHA256_RE,
-        code_pattern=CODE_RE,
-        maximum_code_items=MAX_CODE_ITEMS,
-        maximum_code_length=MAX_CODE_LENGTH,
-        verdict_fields=VERDICT_FIELDS,
-        verdict_value_sets=VERDICT_VALUE_SETS,
-        rubric_weights=RUBRIC_WEIGHTS,
-        hard_failure_codes=HARD_FAILURE_CODES,
-        query_classes=QUERY_CLASSES,
+        parse_timestamp=_parse_timestamp,
+        hash_value=sha256_value,
+        validate_embedded_digest=_validate_embedded_digest,
     )
 
 
 def _normalize_duplicate_of(value: Any, label: str) -> str | None:
     """Compatibility adapter for optional duplicate identity."""
-    return normalize_adjudication_duplicate(
-        value, label, CohortEvaluationError
-    )
+    return _adjudication_service().normalize_duplicate(value, label)
+
+
 def validate_adjudication(
     document: Mapping[str, Any],
     *,
@@ -247,11 +237,10 @@ def validate_adjudication(
     expected_count: int,
 ) -> dict[str, Any]:
     """Normalize a complete independent adjudication document."""
-    return normalize_adjudication(
+    return _adjudication_service().validate_adjudication(
         document,
         expected_roles=expected_roles,
         expected_count=expected_count,
-        policy=_adjudication_policy(),
     )
 
 
@@ -537,11 +526,17 @@ def _workflow_policy() -> EvaluationWorkflowPolicy:
 
 
 def _evaluation_api_policy() -> EvaluationApiPolicy:
+    adjudication = _adjudication_service()
     return EvaluationApiPolicy(
         workflow=_workflow_policy(),
         load_result_export=load_result_export,
         load_private_json=load_private_json,
         validate_adjudication=validate_adjudication,
+        validate_evidence_seal=adjudication.validate_evidence_seal,
+        bind_evidence_seal=adjudication.bind_evidence_seal,
+        bind_adjudication_ground_truth=(
+            adjudication.bind_adjudication_ground_truth
+        ),
         error=CohortEvaluationError,
     )
 
@@ -550,12 +545,14 @@ def evaluate_cohorts(
     *,
     result_paths: Mapping[str, Path],
     adjudication_path: Path,
+    evidence_seal_path: Path,
     expected_count: int = EXPECTED_ROLE_COUNT,
     required_evaluation_profile: str = "",
 ) -> dict[str, Any]:
     return run_cohort_evaluation(
         result_paths=result_paths,
         adjudication_path=adjudication_path,
+        evidence_seal_path=evidence_seal_path,
         expected_count=expected_count,
         required_evaluation_profile=required_evaluation_profile,
         policy=_evaluation_api_policy(),
