@@ -185,6 +185,25 @@ def _hourly_rows(
     return [], "unavailable", False, "No committed alert-intake telemetry table was available."
 
 
+def _hourly_observations(
+    rows: list[tuple[Any, Any]],
+    first_hour: dt.datetime,
+    window_end: dt.datetime,
+) -> dict[str, dt.datetime]:
+    """Retain the earliest in-window completion for each alert identity."""
+    observations: dict[str, dt.datetime] = {}
+    for row_index, (item_key, occurred_at) in enumerate(rows):
+        timestamp = _parse_timestamp(occurred_at)
+        if timestamp is None or timestamp < first_hour or timestamp >= window_end:
+            continue
+        identity = str(item_key or f"row-{row_index}")
+        previous = observations.get(identity)
+        if previous is not None and previous <= timestamp:
+            continue
+        observations[identity] = timestamp
+    return observations
+
+
 def load_hourly_alert_intake(
     db_path: Path,
     now: Optional[dt.datetime] = None,
@@ -209,16 +228,7 @@ def load_hourly_alert_intake(
     # Bootstrap/reconciliation events can repeat the same alert ID. Collapse
     # those copies before bucketing so a delayed duplicate cannot inflate a
     # second hour. The earliest completion is the canonical ingest time.
-    observations: dict[str, dt.datetime] = {}
-    for row_index, (item_key, occurred_at) in enumerate(rows):
-        timestamp = _parse_timestamp(occurred_at)
-        if timestamp is None or timestamp < first_hour or timestamp >= window_end:
-            continue
-        identity = str(item_key or f"row-{row_index}")
-        previous = observations.get(identity)
-        if previous is not None and previous <= timestamp:
-            continue
-        observations[identity] = timestamp
+    observations = _hourly_observations(rows, first_hour, window_end)
 
     for timestamp in observations.values():
         bucket_index = int((timestamp - first_hour).total_seconds() // 3600)
