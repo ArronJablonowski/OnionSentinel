@@ -18,11 +18,8 @@
     "relay/app/relay_health_application.py::main": {
       "max_complexity": 43,
       "max_lines": 221
-    },
-    "relay/app/storage_health.py::main": {
-      "max_complexity": 32
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "dcf86e4ae51dc5b285cfec8eb74cb0f9d0a7b225"
+  "source_release": "d0c9efcd61f5e815e080e26160254b93024e34a1"
 }
