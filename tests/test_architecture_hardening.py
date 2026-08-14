@@ -277,6 +277,26 @@ class ArchitectureHardeningTest(unittest.TestCase):
         self.assertIn("<string>--max-terminal-runs</string>", plist)
         self.assertIn("<string>--max-live-bytes</string>", plist)
 
+    def test_harness_maintenance_load_waits_for_bounded_database_preflight(self):
+        installer = (
+            ROOT / "n8n/bin/install-macstudio-stack.zsh"
+        ).read_text(encoding="utf-8")
+        preflight_call = (
+            'wait_for_harness_maintenance_readiness\n'
+            'launchctl load "$LAUNCHD_DIR/'
+            'com.arron.onion-sentinel.harness-maintenance.plist"'
+        )
+
+        self.assertIn("wait_for_harness_maintenance_readiness()", installer)
+        self.assertIn("for attempt in {1..30}; do", installer)
+        self.assertIn('if (( exit_code == 0 || exit_code == 1 )); then', installer)
+        self.assertIn('sleep 1', installer)
+        self.assertIn(
+            '"$STACK_DIR/logs/harness-maintenance-deploy-preflight.json"',
+            installer,
+        )
+        self.assertIn(preflight_call, installer)
+
     def test_pcap_query_module_tree_is_installed_before_compatibility_module(self):
         installer = (
             ROOT / "n8n/bin/install-macstudio-stack.zsh"

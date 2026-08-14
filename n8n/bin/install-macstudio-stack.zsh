@@ -330,6 +330,33 @@ release_ai_deployment_guard() {
   AI_DEPLOYMENT_GUARD_DIR=""
 }
 
+wait_for_harness_maintenance_readiness() {
+  local report_path="$STACK_DIR/logs/harness-maintenance-deploy-preflight.json"
+  local exit_code=2
+  local attempt
+  for attempt in {1..30}; do
+    if /usr/bin/python3 \
+      "$STACK_DIR/bin/maintain-investigation-harness.py" \
+      --stack-dir "$STACK_DIR" \
+      --report "$report_path" >/dev/null
+    then
+      exit_code=0
+    else
+      exit_code=$?
+    fi
+    # Exit 1 means the bounded dry run found additional maintenance work. The
+    # databases and query contract are ready, so RunAtLoad may safely apply it.
+    if (( exit_code == 0 || exit_code == 1 )); then
+      return 0
+    fi
+    if (( attempt < 30 )); then
+      /bin/sleep 1
+    fi
+  done
+  echo "Harness maintenance did not become database-ready (last exit $exit_code)." >&2
+  return 1
+}
+
 if ! start_ai_deployment_guard; then
   exit 3
 fi
@@ -1598,6 +1625,7 @@ launchctl load "$LAUNCHD_DIR/com.arron.soc.software-inventory.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.ac-hunter.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.web.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.web-guard.plist"
+wait_for_harness_maintenance_readiness
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.harness-maintenance.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.runtime-backup.plist"
 

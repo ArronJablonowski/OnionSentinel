@@ -1049,6 +1049,17 @@ monitor requires this report to be no more than two hours old whenever the
 harness database exists, fails on a blocked or invalid integrity state, and
 surfaces bounded follow-up/checkpoint pressure as a degraded advisory.
 
+During a guarded deployment, the installer runs the deployed command in dry-run
+mode before loading the `RunAtLoad` LaunchAgent. It retries a blocked exit `2`
+for a bounded startup window and accepts exits `0` or `1` as proof that the
+SQLite files and reconciliation query contract are ready. Probe output uses the
+separate owner-only
+`~/n8n-local/logs/harness-maintenance-deploy-preflight.json` report, so a
+transient deployment probe cannot replace the authoritative maintenance report.
+If readiness does not converge, installation fails before loading the
+maintenance LaunchAgent; the hourly schedule and destructive backup safeguards
+remain unchanged.
+
 For controlled cohort evaluation only, set
 `ONION_SENTINEL_EVALUATION_FREEZE_MEMORY=1` on the manually invoked analysis
 worker. The runner still reads the fixed pre-evaluation role/shared memory but
