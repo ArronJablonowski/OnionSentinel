@@ -359,6 +359,22 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_relay_pcap_service_has_bounded_state_machine_phases(self) -> None:
+        service = ROOT / "relay" / "app" / "relay_pcap_service.py"
+        expected = {
+            "_pcap_poll_context",
+            "_process_claimed_pcap_request",
+            "_schedule_pcap_retry",
+            "_pcap_run_summary",
+        }
+
+        self.assertTrue(expected <= top_level_function_names(service))
+        unlocked = top_level_function(service, "_process_pcap_requests_unlocked")
+        self.assertLessEqual(
+            (unlocked.end_lineno or unlocked.lineno) - unlocked.lineno + 1,
+            50,
+        )
+
     def test_relay_health_wrapper_supports_isolated_file_loader_import(self) -> None:
         wrapper = ROOT / "relay" / "app" / "relay_health_wrapper.py"
         script = (
