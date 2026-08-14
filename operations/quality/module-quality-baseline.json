@@ -1,9 +1,6 @@
 {
   "files": {},
   "functions": {
-    "onion-sentinel-dashboard/scripts/dashboard_pcap_components.py::render_pcap_evidence_markdown": {
-      "max_complexity": 22
-    },
     "operations/evaluate-analysis-replays.py::_classification_metrics": {
       "max_complexity": 32
     },
@@ -80,5 +77,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "305bde7343aa08cf7c7486b73ee62f7e9e4e9709"
+  "source_release": "3878c522390ca86948ed2033cdbe86fe27fad017"
 }
