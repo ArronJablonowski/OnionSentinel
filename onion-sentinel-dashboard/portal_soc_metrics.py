@@ -31,27 +31,11 @@ def metrics_query_plan(
     """Build the bounded summary or legacy metrics repository plan."""
     where_sql = " WHERE last_seen >= ?" if since else ""
     args: tuple[object, ...] = (since,) if since else ()
-    if summary_available:
-        source = "sqlite-summary"
-        grouped_sql = f"""
-            SELECT group_id, group_key, raw_alert_count, total_seen_count,
-                   last_seen, filter_status
-            FROM alert_group_summary
-            {where_sql}
-        """
-    else:
-        source = "sqlite"
-        grouped_sql = f"""
-            SELECT {group_expr} AS group_key,
-                   COUNT(*) AS raw_alert_count,
-                   COALESCE(SUM(MAX(1, COALESCE(seen_count, 1))), 0)
-                     AS total_seen_count,
-                   MAX(last_seen) AS last_seen,
-                   COALESCE(NULLIF(filter_status, ''), 'accepted') AS filter_status
-            FROM alerts
-            {where_sql}
-            GROUP BY group_key, filter_status
-        """
+    source, grouped_sql = _grouped_metrics_query(
+        group_expr,
+        summary_available,
+        where_sql,
+    )
     return SocMetricsQueryPlan(
         source=source,
         args=args,
@@ -77,6 +61,35 @@ def metrics_query_plan(
             "COALESCE(SUM(escalated_count), 0) FROM suppression_log"
         ),
     )
+
+
+def _grouped_metrics_query(
+    group_expr: str,
+    summary_available: bool,
+    where_sql: str,
+) -> tuple[str, str]:
+    if summary_available:
+        source = "sqlite-summary"
+        grouped_sql = f"""
+            SELECT group_id, group_key, raw_alert_count, total_seen_count,
+                   last_seen, filter_status
+            FROM alert_group_summary
+            {where_sql}
+        """
+    else:
+        source = "sqlite"
+        grouped_sql = f"""
+            SELECT {group_expr} AS group_key,
+                   COUNT(*) AS raw_alert_count,
+                   COALESCE(SUM(MAX(1, COALESCE(seen_count, 1))), 0)
+                     AS total_seen_count,
+                   MAX(last_seen) AS last_seen,
+                   COALESCE(NULLIF(filter_status, ''), 'accepted') AS filter_status
+            FROM alerts
+            {where_sql}
+            GROUP BY group_key, filter_status
+        """
+    return source, grouped_sql
 
 
 def exclude_group_rows(
