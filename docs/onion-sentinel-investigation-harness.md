@@ -1011,6 +1011,13 @@ model use, tool failures and policy rejections, coverage and truncation,
 evidence-source diversity, independent-review disagreement, distinct budget
 breaches, and memory-promotion outcomes.
 
+The evaluator and sealed cohort proof path recognize both skill-attestation
+generations. V1 integer-version advisory identities retain their exact public
+shape. V2 attestations remain job-digest-bound while preserving semantic skill
+versions, fixed selection reasons, bounded visible rejections, aggregate
+budgets, and the compatible native provider. Free-form reasons, malformed
+budgets, provider mismatches, or schema drift make the run unready for grading.
+
 Controlled accuracy grading fails closed unless every selected SOC Analyst and
 Incident Responder trace contains at least one successful tool call and every
 logged call is explicitly read-only. A zero-call or rejected-only ledger is a

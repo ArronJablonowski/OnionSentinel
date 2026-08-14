@@ -967,9 +967,11 @@ copy validation logic.
 `operations/trace_evaluation_skills.py` owns trace-level extraction and strict
 validation of the content-free skill-selection attestation. It validates the
 started-event payload, bounded canonical skill identities, registry availability,
-and exact job-digest binding through an injected hashing port. The legacy trace
-evaluator remains the composition root and preserves pre-attestation trace
-compatibility.
+and exact job-digest binding through an injected hashing port. V2 traces retain
+semantic versions, bounded selection and rejection reasons, aggregate budgets,
+and explicit native-provider compatibility without loading skill content. The
+legacy trace evaluator remains the composition root and preserves v1 and
+pre-attestation trace compatibility.
 
 `operations/trace_evaluation_storage.py` owns read-only SQLite admission and
 ledger loading for trace evaluation. It resolves only existing regular files,
@@ -1094,9 +1096,11 @@ read-only data and time ports.
 `operations/cohort_execution_skills.py` owns strict skill-selection
 attestation validation and its bounded public projection. It enforces exact
 skill identity fields, registry and content digests, selection limits,
-mandatory readiness, and advisory-only execution without loading a registry.
-The same module also validates the canonical, content-free skill summary in
-offline cohort exports so collection and grading share one proof boundary.
+mandatory readiness, and identity-only execution without loading a registry.
+Its version-aware projection preserves v1 exactly and carries v2 provider,
+selection/rejection reason, and aggregate-budget facts. The same module also
+validates the canonical, content-free skill summary in offline cohort exports
+so collection and grading share one proof boundary.
 
 `operations/cohort_evaluation_job_proof.py` owns deterministic dispatch
 identity, accepted/read-back/completed durable-job provenance, and the exact
