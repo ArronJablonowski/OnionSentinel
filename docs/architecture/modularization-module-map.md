@@ -3606,6 +3606,17 @@ copies all five implementation modules before the executable facade. External
 investigation systems remain read-only; allowlists, limits, timeouts,
 redaction, fail-closed behavior, HTTP schemas, and exit behavior are unchanged.
 
+`incident_evidence_inventory_contract.py` is the pure, package-free contract
+owner for bounded DHCP discovery and Software Inventory requests, cursors,
+responses, evidence provenance, source allowlists, LAN scope, pagination, and
+timestamp validation. `incident_evidence_broker.py` remains the forced-command
+transport and compatibility facade: it owns configuration, bounded process
+execution, transport envelopes and receipts, audit logging, error projection,
+CLI output, and exit behavior while re-exporting the inventory symbols used by
+existing callers. Dependencies flow from the broker to the pure contract only;
+the Pi installer copies the contract before the executable broker. No Relay or
+Security Onion runtime is changed by this repository-only split.
+
 ### Relay health supervision
 
 `relay_health_contract.py` owns environment/configuration defaults, persisted
