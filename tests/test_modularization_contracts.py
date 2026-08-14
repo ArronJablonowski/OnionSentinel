@@ -396,6 +396,16 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
                     50,
                 )
 
+    def test_relay_core_has_bounded_policy_phases(self) -> None:
+        core = ROOT / "relay" / "app" / "relay_core.py"
+        expected = {
+            "_prune_runtime_evidence_directory",
+            "_relay_root_capacity_policy",
+            "_webhook_failure_payload",
+        }
+
+        self.assertTrue(expected <= top_level_function_names(core))
+
     def test_relay_health_wrapper_supports_isolated_file_loader_import(self) -> None:
         wrapper = ROOT / "relay" / "app" / "relay_health_wrapper.py"
         script = (
