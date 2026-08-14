@@ -410,6 +410,7 @@ def _negative_evidence_allowed(result: Any, fact_state: str) -> bool:
     return (
         fact_state == "observed"
         and isinstance(result, dict)
+        and result.get("scope_exact") is True
         and result.get("rows") == []
     )
 
@@ -471,6 +472,7 @@ def _evaluation_result(
             passed == len(results)
             and len(results) > 0
             and evidence_passed == len(evidence_results)
+            and len(evidence_results) > 0
         ),
         "results": results,
         "evidence_results": evidence_results,

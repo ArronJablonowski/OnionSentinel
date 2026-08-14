@@ -129,8 +129,10 @@ unsupported sources, and a complete exact-scope empty result. The evaluator
 projects only case identity, category, fact state, and negative-evidence
 eligibility; it never echoes fixture rows or consumes their text as guidance.
 Only the successful, complete, non-truncated, evidence-referenced empty case
-permits scoped negative evidence. Every other gap remains `unverified` or
-`unavailable`, while interpretation cases remain explicitly `inferred`.
+with an explicit `scope_exact=true` collector attestation permits scoped
+negative evidence. An omitted evidence corpus fails the replay gate. Every
+other gap remains `unverified` or `unavailable`, while interpretation cases
+remain explicitly `inferred`.
 
 `skill-packs/dns-triage-v2.example.json` demonstrates the v2 boundary. Its
 verification flags are deliberately false because this package has not passed
