@@ -48,6 +48,24 @@ def broker_headers(config: dict) -> dict:
     return headers
 
 
+def _read_broker_response(req: request.Request, timeout, broker: dict) -> str:
+    try:
+        with request.urlopen(req, timeout=timeout) as response:
+            return read_bounded_http_body(
+                response,
+                webhook_int(broker, "response_max_bytes", 1024 * 1024),
+            ).decode("utf-8")
+    except HTTPError as exc:
+        try:
+            raise RuntimeError(
+                f"PCAP broker returned HTTP {exc.code}: {exc.reason}"
+            ) from exc
+        finally:
+            exc.close()
+    except URLError as exc:
+        raise RuntimeError(f"PCAP broker request failed: {exc.reason}") from exc
+
+
 def broker_request(config: dict, method: str, path: str, payload_data: dict | None = None) -> dict:
     broker = config.get("pcap_broker", {})
     base_url = str(broker.get("url") or "").rstrip("/")
@@ -61,16 +79,7 @@ def broker_request(config: dict, method: str, path: str, payload_data: dict | No
         headers=broker_headers(config),
         method=method,
     )
-    try:
-        with request.urlopen(req, timeout=timeout) as response:
-            body = read_bounded_http_body(
-                response,
-                webhook_int(broker, "response_max_bytes", 1024 * 1024),
-            ).decode("utf-8")
-    except HTTPError as exc:
-        raise RuntimeError(f"PCAP broker returned HTTP {exc.code}: {exc.reason}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"PCAP broker request failed: {exc.reason}") from exc
+    body = _read_broker_response(req, timeout, broker)
     try:
         parsed = json.loads(body or "{}")
     except json.JSONDecodeError as exc:
