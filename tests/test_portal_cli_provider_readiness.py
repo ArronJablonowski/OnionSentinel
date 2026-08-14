@@ -71,6 +71,57 @@ class CliProviderReadinessTest(unittest.TestCase):
         link.symlink_to(auth)
         self.assertIn("non-symlink", hermes_auth_readiness_error(link, 1000))
 
+    def test_hermes_auth_root_and_pool_shapes_have_exact_safe_errors(self) -> None:
+        cases = (
+            ([], "JSON root must be an object"),
+            ({"credential_pool": {"openai-codex": {}}}, "does not contain"),
+            ({"credential_pool": {"openai-codex": []}}, "does not contain"),
+            (
+                {"credential_pool": {"openai-codex": ["opaque-secret"]}},
+                "credential pool is invalid",
+            ),
+            (
+                {
+                    "credential_pool": {
+                        "openai-codex": [{"provider": " openai-codex "}]
+                    }
+                },
+                "",
+            ),
+            (
+                {
+                    "credential_pool": {
+                        "openai-codex": [{"provider": "other", "secret": "hidden"}]
+                    }
+                },
+                "credential pool is invalid",
+            ),
+        )
+        for payload, expected in cases:
+            with self.subTest(payload=payload):
+                error = hermes_auth_readiness_error(
+                    self._auth_file(payload), 2 * 1024 * 1024
+                )
+                self.assertIn(expected, error)
+                self.assertNotIn("opaque-secret", error)
+                self.assertNotIn("hidden", error)
+
+    def test_hermes_auth_invalid_json_and_empty_provider_are_fail_closed(self) -> None:
+        auth = self.root / "auth.json"
+        auth.write_bytes(b"{invalid\xff")
+        auth.chmod(0o600)
+        self.assertIn(
+            "not valid bounded JSON",
+            hermes_auth_readiness_error(auth, 2 * 1024 * 1024),
+        )
+        self.assertIn(
+            "does not contain",
+            hermes_auth_readiness_error(
+                self._auth_file({"providers": {"openai-codex": {}}}),
+                2 * 1024 * 1024,
+            ),
+        )
+
     def test_enabled_provider_checks_executable_then_hermes_auth(self) -> None:
         calls = []
         settings = {"hermes_agent_enabled": True, "hermes_agent_path": "hermes"}
