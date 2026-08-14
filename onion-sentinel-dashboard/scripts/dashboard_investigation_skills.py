@@ -90,30 +90,34 @@ def _trigger_html(match: object) -> str:
     return "".join(rows) or "<span>None recorded</span>"
 
 
+def _pivot_row(index: int, pivot: dict) -> str:
+    required = pivot.get("required") is True
+    requirement = "required" if required else "advisory"
+    label = "Required" if required else "Advisory"
+    return (
+        '<li class="settings-skill-pivot">'
+        f'<span class="settings-skill-step">{index}</span>'
+        '<span class="settings-skill-pivot-copy">'
+        f'<strong>{html.escape(str(pivot.get("step") or "Unnamed step"))}</strong>'
+        '<span class="settings-skill-pivot-meta">'
+        f'{html.escape(str(pivot.get("backend") or "unknown"))} · '
+        f'{html.escape(str(pivot.get("pack") or "unknown"))} · '
+        f'{html.escape(str(pivot.get("purpose") or "unknown").replace("_", " "))}'
+        "</span>"
+        f'<p>{html.escape(str(pivot.get("discriminator") or "No discriminator recorded."))}</p>'
+        "</span>"
+        f'<span class="settings-skill-requirement {requirement}">{label}</span>'
+        "</li>"
+    )
+
+
 def _pivot_html(raw_pivots: object) -> str:
     source = raw_pivots if isinstance(raw_pivots, list) else []
     rows: list[str] = []
     for index, pivot in enumerate(source, start=1):
         if not isinstance(pivot, dict):
             continue
-        required = pivot.get("required") is True
-        requirement = "required" if required else "advisory"
-        label = "Required" if required else "Advisory"
-        rows.append(
-            '<li class="settings-skill-pivot">'
-            f'<span class="settings-skill-step">{index}</span>'
-            '<span class="settings-skill-pivot-copy">'
-            f'<strong>{html.escape(str(pivot.get("step") or "Unnamed step"))}</strong>'
-            '<span class="settings-skill-pivot-meta">'
-            f'{html.escape(str(pivot.get("backend") or "unknown"))} · '
-            f'{html.escape(str(pivot.get("pack") or "unknown"))} · '
-            f'{html.escape(str(pivot.get("purpose") or "unknown").replace("_", " "))}'
-            "</span>"
-            f'<p>{html.escape(str(pivot.get("discriminator") or "No discriminator recorded."))}</p>'
-            "</span>"
-            f'<span class="settings-skill-requirement {requirement}">{label}</span>'
-            "</li>"
-        )
+        rows.append(_pivot_row(index, pivot))
     return "".join(rows)
 
 
