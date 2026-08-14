@@ -4599,17 +4599,6 @@
       ]
     },
     {
-      "path": "relay/app/relay.py",
-      "deployment": "relay-direct-copy",
-      "runtime_path": "/opt/so-alert-relay/app/relay.py",
-      "required_symbols": [
-        "PcapProgressReporter",
-        "WebhookPostError",
-        "main",
-        "process_pcap_requests"
-      ]
-    },
-    {
       "path": "relay/app/relay_core.py",
       "deployment": "relay-direct-copy",
       "runtime_path": "/opt/so-alert-relay/app/relay_core.py",
@@ -4617,6 +4606,43 @@
         "filter_dropped_alerts",
         "post_json_to_webhook",
         "run_ssh_pull"
+      ]
+    },
+    {
+      "path": "relay/app/relay_pcap_spool_policy.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/relay_pcap_spool_policy.py",
+      "required_symbols": [
+        "atomic_json_write",
+        "cleanup_stale_spool_artifacts",
+        "cleanup_stale_spool_partials",
+        "load_json_file",
+        "pcap_spool_dir",
+        "require_spool_capacity",
+        "sha256_file",
+        "spool_mount_ready",
+        "spool_usage"
+      ]
+    },
+    {
+      "path": "relay/app/relay_pcap_capture_policy.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/relay_pcap_capture_policy.py",
+      "required_symbols": [
+        "capture_protection_decision",
+        "require_capture_safe",
+        "security_onion_storage_status"
+      ]
+    },
+    {
+      "path": "relay/app/relay_pcap_streaming.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/relay_pcap_streaming.py",
+      "required_symbols": [
+        "stream_chunk_idle_timeout",
+        "stream_one_security_onion_chunk",
+        "streamed_spool_artifact",
+        "wait_for_stream_progress"
       ]
     },
     {
@@ -4660,14 +4686,169 @@
       ]
     },
     {
-      "path": "relay/app/relay_health_wrapper.py",
+      "path": "relay/app/relay.py",
       "deployment": "relay-direct-copy",
-      "runtime_path": "/opt/so-alert-relay/app/relay_health_wrapper.py",
+      "runtime_path": "/opt/so-alert-relay/app/relay.py",
       "required_symbols": [
-        "classify_child_diagnostic",
+        "PcapProgressReporter",
+        "WebhookPostError",
         "main",
-        "run_pcap_broker",
-        "sanitize_health_state"
+        "process_pcap_requests"
+      ]
+    },
+    {
+      "path": "relay/app/alert_outbox.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/alert_outbox.py",
+      "required_symbols": [
+        "claim",
+        "counts",
+        "enqueue",
+        "initialize",
+        "mark_delivered",
+        "mark_failure",
+        "move_to_dead_letter",
+        "pending",
+        "prune_delivered"
+      ]
+    },
+    {
+      "path": "relay/app/alert_delivery.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/alert_delivery.py",
+      "required_symbols": [
+        "AlertDeliveryError",
+        "deliver_ssh_batch",
+        "deliver_ssh_messages",
+        "delivery_enabled",
+        "delivery_mode",
+        "split_batches"
+      ]
+    },
+    {
+      "path": "relay/app/process_io.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/process_io.py",
+      "required_symbols": [
+        "BoundedProcessError",
+        "run_bounded_command"
+      ]
+    },
+    {
+      "path": "relay/app/incident_evidence_dhcp.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/incident_evidence_dhcp.py",
+      "required_symbols": [
+        "validate_dhcp_request"
+      ]
+    },
+    {
+      "path": "relay/app/incident_evidence_software.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/incident_evidence_software.py",
+      "required_symbols": [
+        "validate_software_cursor",
+        "validate_software_request",
+        "validate_software_response"
+      ]
+    },
+    {
+      "path": "relay/app/incident_evidence_transport.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/incident_evidence_transport.py",
+      "required_symbols": [
+        "receipt_identity",
+        "transport_envelope"
+      ]
+    },
+    {
+      "path": "relay/app/incident_evidence_broker.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/incident_evidence_broker.py",
+      "required_symbols": [
+        "emit",
+        "main"
+      ]
+    },
+    {
+      "path": "relay/app/live_osquery_broker.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/live_osquery_broker.py",
+      "required_symbols": [
+        "BrokerError",
+        "main"
+      ]
+    },
+    {
+      "path": "n8n/bin/live_osquery_contract_schema.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/live_osquery_contract_schema.py",
+      "required_symbols": [
+        "ALLOWED_TABLES",
+        "LiveOsqueryContractError",
+        "SCHEMA"
+      ]
+    },
+    {
+      "path": "n8n/bin/live_osquery_contract_query.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/live_osquery_contract_query.py",
+      "required_symbols": [
+        "normalize_query",
+        "projected_columns",
+        "query_row_limit"
+      ]
+    },
+    {
+      "path": "n8n/bin/live_osquery_contract_request.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/live_osquery_contract_request.py",
+      "required_symbols": [
+        "normalize_request",
+        "normalize_requests",
+        "normalize_target_aliases",
+        "validate_transport_payload"
+      ]
+    },
+    {
+      "path": "n8n/bin/live_osquery_contract_result.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/live_osquery_contract_result.py",
+      "required_symbols": [
+        "bounded_json_bytes",
+        "validate_result_artifact"
+      ]
+    },
+    {
+      "path": "n8n/bin/live_osquery_contract.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/live_osquery_contract.py",
+      "required_symbols": [
+        "bounded_json_bytes",
+        "normalize_requests",
+        "validate_result_artifact",
+        "validate_transport_payload"
+      ]
+    },
+    {
+      "path": "relay/app/ac_hunter_broker.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/usr/local/libexec/onion-sentinel/ac_hunter_broker.py",
+      "required_symbols": [
+        "BrokerError",
+        "main"
+      ]
+    },
+    {
+      "path": "n8n/bin/ac_hunter_contract.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/usr/local/libexec/onion-sentinel/ac_hunter_contract.py",
+      "required_symbols": [
+        "AcHunterContractError",
+        "UpstreamRequest",
+        "compile_request",
+        "new_request_id",
+        "validate_relay_response"
       ]
     },
     {
@@ -4702,6 +4883,27 @@
         "run_pcap_broker",
         "run_relay",
         "run_storage_health"
+      ]
+    },
+    {
+      "path": "relay/app/relay_health_wrapper.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/relay_health_wrapper.py",
+      "required_symbols": [
+        "classify_child_diagnostic",
+        "main",
+        "run_pcap_broker",
+        "sanitize_health_state"
+      ]
+    },
+    {
+      "path": "relay/app/storage_health.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/storage_health.py",
+      "required_symbols": [
+        "env_int",
+        "main",
+        "run"
       ]
     }
   ],
