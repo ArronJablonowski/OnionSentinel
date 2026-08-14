@@ -119,6 +119,70 @@ class DashboardAiSettingsTests(unittest.TestCase):
         self.assertEqual(settings["agent_second_opinion_models"]["soc-analyst"], "ollama:reviewer:latest")
         self.assertEqual(settings["agent_adjudicator_models"]["soc-analyst"], "")
 
+    def test_cli_path_normalization_preserves_the_exact_runtime_allowlist(self) -> None:
+        normalize = self.settings_module._normalized_cli_path
+        valid_limit = "/" + ("a" * 1017) + "/codex"
+        self.assertEqual(len(valid_limit), 1024)
+        cases = (
+            (None, "codex"),
+            ("", "codex"),
+            (0, "codex"),
+            (" codex ", "codex"),
+            ("/usr/local/bin/codex", "/usr/local/bin/codex"),
+            ("/opt/onion-sentinel+tools/bin/codex", "/opt/onion-sentinel+tools/bin/codex"),
+            (valid_limit, valid_limit),
+            (valid_limit + "x", "codex"),
+            ("/usr/local/bin/not-codex", "codex"),
+            ("/usr/local/@scope/bin/codex", "codex"),
+            ("bin/codex", "codex"),
+            ("./codex", "codex"),
+            ("co\ndex", "codex"),
+            ("co\x00dex", "codex"),
+            ("co\x7fdex", "codex"),
+        )
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(normalize(value, "codex"), expected)
+
+    def test_cli_path_normalization_preserves_conversion_and_fallback_identity(self) -> None:
+        class Configured:
+            def __init__(self, *, truthy: bool, rendered: str) -> None:
+                self.truthy = truthy
+                self.rendered = rendered
+                self.bool_calls = 0
+                self.str_calls = 0
+
+            def __bool__(self) -> bool:
+                self.bool_calls += 1
+                return self.truthy
+
+            def __str__(self) -> str:
+                self.str_calls += 1
+                return self.rendered
+
+        configured = Configured(truthy=True, rendered=" /usr/local/bin/hermes ")
+        self.assertEqual(
+            self.settings_module._normalized_cli_path(configured, "hermes"),
+            "/usr/local/bin/hermes",
+        )
+        self.assertEqual((configured.bool_calls, configured.str_calls), (1, 1))
+
+        falsey = Configured(truthy=False, rendered="must-not-render")
+        self.assertEqual(
+            self.settings_module._normalized_cli_path(falsey, "hermes"),
+            "hermes",
+        )
+        self.assertEqual((falsey.bool_calls, falsey.str_calls), (1, 0))
+
+        class Basename(str):
+            pass
+
+        basename = Basename("hermes")
+        self.assertIs(
+            self.settings_module._normalized_cli_path("wrong", basename),
+            basename,
+        )
+
     def test_builder_reexports_contract_and_uses_runtime_path_override(self) -> None:
         for name in (
             "default_soc_ai_settings",
