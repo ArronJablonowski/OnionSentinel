@@ -344,6 +344,62 @@ class EndpointInventoryPaginationCliCharacterizationTests(unittest.TestCase):
             ],
         )
 
+    def test_main_preflight_never_retries_persists_or_writes_cache(self) -> None:
+        trace: list[list[object]] = []
+        previous = {"updated_at": "2026-08-09T20:32:59.752Z"}
+        receipt = {
+            "status": "ok",
+            "targets": 1,
+            "checked_at": "2026-08-14T16:00:00.000Z",
+        }
+
+        class Logger:
+            def log(self, level, event, **fields):
+                trace.append(["log", level, event, fields])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "endpoint-cache.json"
+            argv = [
+                str(SCRIPT),
+                "--config", str(root / "config.json"),
+                "--cache", str(cache),
+                "--log", str(root / "collector.jsonl"),
+                "--preflight",
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    self.module, "SecurityJsonlLogger", return_value=Logger()
+                ),
+                mock.patch.object(self.module, "open_collector_lock", return_value=93),
+                mock.patch.object(self.module.fcntl, "flock"),
+                mock.patch.object(self.module, "load_cache", return_value=previous),
+                mock.patch.object(
+                    self.module, "load_live_osquery_config", return_value={}
+                ),
+                mock.patch.object(self.module, "preflight", return_value=receipt) as run,
+                mock.patch.object(self.module, "collect_with_retries") as collect,
+                mock.patch.object(self.module, "atomic_write") as write,
+                mock.patch.object(self.module.os, "close") as close,
+            ):
+                status = self.module.main()
+
+        self.assertEqual(status, 0)
+        run.assert_called_once_with({})
+        collect.assert_not_called()
+        write.assert_not_called()
+        close.assert_called_once_with(93)
+        self.assertEqual(
+            trace,
+            [[
+                "log",
+                "info",
+                "endpoint_software_inventory.preflight_completed",
+                {"targets": 1},
+            ]],
+        )
+
     def test_invalid_cli_bounds_exit_before_logger_or_lock(self) -> None:
         for option, value in (("--attempts", "0"), ("--retry-delay-seconds", "3601")):
             with (

@@ -135,6 +135,67 @@ class EndpointSoftwareInventoryTests(unittest.TestCase):
             self.assertEqual(raised.exception.reason_code, expected_code)
             self.assertNotIn("raw remote detail", str(raised.exception))
 
+    def test_preflight_uses_only_fixed_identity_query_and_redacted_receipt(self):
+        moment = self.module.dt.datetime(
+            2026, 8, 14, 16, 0, tzinfo=self.module.dt.timezone.utc
+        )
+        calls = []
+
+        def query(config, alias, sql, purpose, case_id):
+            calls.append((config, alias, sql, purpose, case_id))
+            return [{"hostname": "must-not-cross-preflight-boundary.example"}]
+
+        with (
+            mock.patch.object(
+                self.module, "scheduled_inventory_approved", return_value=True
+            ),
+            mock.patch.object(self.module, "_query", side_effect=query),
+            mock.patch.object(self.module, "utc_now", return_value=moment),
+        ):
+            receipt = self.module.preflight(self.config())
+
+        self.assertEqual(
+            calls,
+            [
+                (
+                    self.config(),
+                    "studio",
+                    "SELECT hostname FROM system_info LIMIT 1;",
+                    "Operator-safe scheduled inventory preflight",
+                    "scheduled-endpoint-preflight-20260814",
+                )
+            ],
+        )
+        self.assertEqual(
+            receipt,
+            {
+                "status": "ok",
+                "targets": 1,
+                "checked_at": "2026-08-14T16:00:00.000Z",
+            },
+        )
+        self.assertNotIn("hostname", json.dumps(receipt))
+
+    def test_preflight_rejects_ambiguous_identity_without_row_disclosure(self):
+        with (
+            mock.patch.object(
+                self.module, "scheduled_inventory_approved", return_value=True
+            ),
+            mock.patch.object(
+                self.module,
+                "_query",
+                return_value=[
+                    {"hostname": "first-sensitive-host.example"},
+                    {"hostname": "second-sensitive-host.example"},
+                ],
+            ),
+            self.assertRaises(self.module.EndpointInventoryError) as raised,
+        ):
+            self.module.preflight(self.config())
+
+        self.assertEqual(raised.exception.reason_code, "ambiguous_identity")
+        self.assertNotIn("sensitive-host", str(raised.exception))
+
     def test_cache_is_private_and_main_collector_accepts_live_provenance(self):
         value = {
             "schema": self.module.SCHEMA,
