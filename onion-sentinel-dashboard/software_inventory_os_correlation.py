@@ -38,6 +38,10 @@ def _valid_at(asset: dict, when: dt.datetime) -> bool:
     return valid_from <= when and (valid_until is None or when < valid_until)
 
 
+def _normalized_asset_field(asset: dict, key: str) -> str:
+    return str(asset.get(key) or "").strip().lower()
+
+
 def _trusted_asset(
     assets: dict[str, dict],
     asset_label: str,
@@ -46,11 +50,11 @@ def _trusted_asset(
     asset = assets.get(asset_label)
     if (
         not isinstance(asset, dict)
-        or str(asset.get("state") or "").strip().lower() != "current"
-        or str(asset.get("confidence") or "").strip().lower() != "high"
-        or str(asset.get("source_type") or "").strip().lower()
+        or _normalized_asset_field(asset, "state") != "current"
+        or _normalized_asset_field(asset, "confidence") != "high"
+        or _normalized_asset_field(asset, "source_type")
         == "zeek-dhcp-observation"
-        or str(asset.get("current_ip_source") or "").strip().lower()
+        or _normalized_asset_field(asset, "current_ip_source")
         == "zeek-dhcp"
         or not _valid_at(asset, when)
     ):
