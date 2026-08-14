@@ -534,6 +534,12 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
     def test_relay_health_sanitization_has_bounded_projection_phases(self) -> None:
         sanitization = ROOT / "relay" / "app" / "relay_health_sanitization.py"
         expected = {
+            "_base_health_state",
+            "_optional_health_timestamps",
+            "_optional_health_summaries",
+            "_optional_health_returncode",
+            "_health_http_status",
+            "_optional_pcap_failure_state",
             "_sanitize_pcap_scalar_fields",
             "_pcap_detail_projection",
             "_sanitize_storage_section",
@@ -548,6 +554,7 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
             "sanitize_pcap_summary",
             "sanitize_storage_summary",
             "sanitized_child_result",
+            "sanitize_health_state",
         ):
             function = top_level_function(sanitization, name)
             with self.subTest(name=name):

@@ -1254,6 +1254,60 @@ class RelayHealthWrapperTest(unittest.TestCase):
         self.assertEqual(previous["consecutive_failures"], 4)
         self.assertEqual(len(outcome["telegram_messages"]), 1)
 
+    def test_health_state_sanitizer_preserves_bounded_projection_order(self) -> None:
+        sentinel = "STATE_LEAK_SENTINEL_5f2a1b"
+        raw = {
+            "status": "failed",
+            "last_failure": "2026-08-14  09:00:00Z",
+            "last_success": "invalid",
+            "consecutive_failures": True,
+            "failure_notification_sent": 1,
+            "last_started_at": "2026-08-14  09:01:00Z",
+            "last_pcap_unproven_at": "invalid",
+            "last_summary": (
+                "pcap_broker=failed(7); connection reset "
+                f"{sentinel}; HTTP 502"
+            ),
+            "last_pcap_unproven_summary": f"pcap_broker=ok; {sentinel}",
+            "last_returncode": 256,
+            "last_http_status": f"502{sentinel}",
+            "pcap_failure_unresolved": True,
+            "last_pcap_unproven_reason": "capture_protection_hold",
+            "unknown": sentinel,
+        }
+        before = dict(raw)
+
+        state = self.wrapper.sanitize_health_state(raw)
+
+        self.assertEqual(raw, before)
+        self.assertEqual(state, {
+            "status": "failed",
+            "last_failure": "2026-08-14  09:00:00Z",
+            "last_success": None,
+            "consecutive_failures": 0,
+            "failure_notification_sent": False,
+            "last_started_at": "2026-08-14  09:01:00Z",
+            "last_summary": (
+                "pcap_broker=failed(7); diagnostic=connection_reset; "
+                "http_status=502"
+            ),
+            "last_pcap_unproven_summary": "pcap_broker=ok",
+            "last_http_status": 502,
+            "pcap_failure_unresolved": True,
+            "last_pcap_unproven_reason": "capture_protection_hold",
+        })
+        self.assertNotIn(sentinel, json.dumps(state, sort_keys=True))
+        self.assertEqual(
+            self.wrapper.sanitize_health_state(None),
+            {
+                "status": "unknown",
+                "last_failure": None,
+                "last_success": None,
+                "consecutive_failures": 0,
+                "failure_notification_sent": False,
+            },
+        )
+
     def test_storage_output_paths_and_failures_are_sanitized(self) -> None:
         sentinel = "STORAGE_LEAK_SENTINEL_f67d91"
         storage_summary = {
