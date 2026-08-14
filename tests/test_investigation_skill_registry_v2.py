@@ -258,6 +258,19 @@ class InvestigationSkillRegistryV2Tests(unittest.TestCase):
             {"skill_conflict"},
         )
 
+        one_way = snapshot([
+            record(first, conflicts=[second["artifact_digest"]]),
+            record(second),
+        ])
+        one_way_result = registry.select_registry(
+            one_way, provider="codex-cli", **kwargs
+        )
+        self.assertEqual(one_way_result["selected"], [])
+        self.assertEqual(
+            {item["id"] for item in one_way_result["rejected"]},
+            {first["id"], second["id"]},
+        )
+
         external = registry.select_registry(
             conflicted, provider="hermes-agent", **kwargs
         )
