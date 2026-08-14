@@ -820,6 +820,52 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 expected_count=10,
             )
 
+    def test_evidence_seal_binds_each_role_specific_frozen_plan(self) -> None:
+        self._write_fixture_documents(expected_count=10)
+        role_plans = {}
+        for role, path in (
+            ("incident-responder", self.ir_path),
+            ("soc-analyst", self.soc_path),
+        ):
+            result = json.loads(path.read_text(encoding="utf-8"))
+            role_plans[role] = {
+                "cohort_id": result["cohort_id"],
+                "frozen_plan_sha256": result["frozen_plan_sha256"],
+            }
+        seal = self._evidence_seal(expected_count=10)
+        seal["role_plans"] = role_plans
+        seal.pop("seal_sha256")
+        seal["seal_sha256"] = evaluator.sha256_value(seal)
+        self._write_private(self.evidence_seal_path, seal)
+
+        report = evaluator.evaluate_cohorts(
+            result_paths={
+                "incident-responder": self.ir_path,
+                "soc-analyst": self.soc_path,
+            },
+            adjudication_path=self.adjudication_path,
+            evidence_seal_path=self.evidence_seal_path,
+            expected_count=10,
+        )
+        self.assertEqual(report["independent_evidence_seal"]["role_plans"], role_plans)
+
+        seal["role_plans"]["soc-analyst"]["frozen_plan_sha256"] = "9" * 64
+        seal.pop("seal_sha256")
+        seal["seal_sha256"] = evaluator.sha256_value(seal)
+        self._write_private(self.evidence_seal_path, seal)
+        with self.assertRaisesRegex(
+            evaluator.CohortEvaluationError, "role plan does not match"
+        ):
+            evaluator.evaluate_cohorts(
+                result_paths={
+                    "incident-responder": self.ir_path,
+                    "soc-analyst": self.soc_path,
+                },
+                adjudication_path=self.adjudication_path,
+                evidence_seal_path=self.evidence_seal_path,
+                expected_count=10,
+            )
+
     def test_evidence_seal_fails_closed_on_tamper_drift_order_and_lateness(
         self,
     ) -> None:
