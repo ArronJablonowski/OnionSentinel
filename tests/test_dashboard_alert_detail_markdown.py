@@ -78,6 +78,59 @@ class AlertDetailMarkdownTests(unittest.TestCase):
         self.assertIn('<col class="enrichment-col-tags">', rendered)
         self.assertIn("<td>192.0.2.1</td>", rendered)
 
+    def test_table_renderer_preserves_short_and_separator_boundaries(self) -> None:
+        self.assertEqual(self.renderer.render_table([]), "")
+        self.assertEqual(self.renderer.render_table(["| only |"]), "")
+        self.assertEqual(
+            self.renderer.render_table(["| H1 | H2 |", "| --- | --- |"]),
+            '<div class="table-wrap"><table><thead><tr><th>H1</th><th>H2</th>'
+            "</tr></thead><tbody><tr><td>---</td><td>---</td></tr></tbody>"
+            "</table></div>",
+        )
+        self.assertEqual(
+            self.renderer.render_table(
+                ["| H1 | H2 |", "| --- | --- |", "| a | b |"]
+            ),
+            '<div class="table-wrap"><table><thead><tr><th>H1</th><th>H2</th>'
+            "</tr></thead><tbody><tr><td>a</td><td>b</td></tr></tbody>"
+            "</table></div>",
+        )
+
+    def test_table_renderer_keeps_invalid_separator_and_ragged_rows_as_data(self) -> None:
+        rendered = self.renderer.render_table(
+            [
+                "| **Name** | Link |",
+                "| -- | not-a-separator |",
+                "| <unsafe> | [site](https://example.test) | extra |",
+            ]
+        )
+        self.assertEqual(
+            rendered,
+            '<div class="table-wrap"><table><thead><tr><th><strong>Name</strong></th>'
+            "<th>Link</th></tr></thead><tbody>"
+            "<tr><td>--</td><td>not-a-separator</td></tr>"
+            '<tr><td>&lt;unsafe&gt;</td><td><a href="https://example.test" '
+            'target="_blank" rel="noopener">site</a></td><td>extra</td></tr>'
+            "</tbody></table></div>",
+        )
+
+    def test_skipped_enrichment_header_uses_only_the_skipped_table_classes(self) -> None:
+        rendered = self.renderer.render_table(
+            [
+                "| SOURCE | Indicator | Reason | Limit Note |",
+                "| --- | --- | --- | --- |",
+                "| unit | example | bounded | none |",
+            ]
+        )
+        self.assertTrue(
+            rendered.startswith(
+                '<div class="table-wrap public-enrichment-table '
+                'public-enrichment-skipped-table"><table><thead>'
+            )
+        )
+        self.assertNotIn("<colgroup>", rendered)
+        self.assertNotIn("public-enrichment-records-table", rendered)
+
     def test_front_matter_code_lists_quotes_and_empty_input_are_deterministic(self) -> None:
         rendered = self.renderer.markdown_to_html(
             "---\ntype: report\n---\n\n# Unit\n\n1. first\n2. second\n\n"
