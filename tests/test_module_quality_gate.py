@@ -1,11 +1,14 @@
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
+from contextlib import redirect_stderr, redirect_stdout
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +50,225 @@ def baseline(files=None, functions=None):
 
 
 class ModuleQualityGateTests(unittest.TestCase):
+    def main_args(self, **updates):
+        values = {
+            "root": Path("/quality-root"),
+            "policy": Path("/quality-policy.json"),
+            "baseline": Path("/quality-baseline.json"),
+            "json": False,
+            "print_current_baseline": False,
+            "update_baseline": False,
+        }
+        values.update(updates)
+        return SimpleNamespace(**values)
+
+    def invoke_main(self, args, report):
+        calls = []
+        configured_policy = {"configured": "policy"}
+        configured_baseline = {"configured": "baseline"}
+        metrics = {"files": {"a.py": {}}, "functions": {"a.py::f": {}}}
+        candidate = {"schema": "candidate", "files": {}, "functions": {}}
+
+        def read_object(path):
+            calls.append(("read_object", str(path)))
+            return {"path": str(path)}
+
+        def validate_policy(value):
+            calls.append(("validate_policy", value["path"]))
+            return configured_policy
+
+        def selected_sources(root, policy_value):
+            calls.append(("selected_sources", str(root), policy_value))
+            return ["a.py"]
+
+        def source_metrics(root, names):
+            calls.append(("source_metrics", str(root), tuple(names)))
+            return metrics
+
+        def git_release(root):
+            calls.append(("git_release", str(root)))
+            return "release-sha"
+
+        def candidate_baseline(metrics_value, policy_value, release):
+            calls.append(
+                ("candidate_baseline", metrics_value, policy_value, release)
+            )
+            return candidate
+
+        def validate_baseline(value):
+            calls.append(("validate_baseline", value["path"]))
+            return configured_baseline
+
+        def evaluate(root, policy_value, baseline_value):
+            calls.append(
+                ("evaluate", str(root), policy_value, baseline_value)
+            )
+            return report
+
+        def atomic_json(path, value):
+            calls.append(("atomic_json", str(path), value))
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(quality, "parse_args", return_value=args), \
+             mock.patch.object(quality, "read_object", side_effect=read_object), \
+             mock.patch.object(quality, "validate_policy", side_effect=validate_policy), \
+             mock.patch.object(quality, "selected_sources", side_effect=selected_sources), \
+             mock.patch.object(quality, "source_metrics", side_effect=source_metrics), \
+             mock.patch.object(quality, "git_release", side_effect=git_release), \
+             mock.patch.object(quality, "candidate_baseline", side_effect=candidate_baseline), \
+             mock.patch.object(quality, "validate_baseline", side_effect=validate_baseline), \
+             mock.patch.object(quality, "evaluate", side_effect=evaluate), \
+             mock.patch.object(quality, "atomic_json", side_effect=atomic_json), \
+             redirect_stdout(stdout), redirect_stderr(stderr):
+            result = quality.main()
+        return result, stdout.getvalue(), stderr.getvalue(), calls, candidate
+
+    def test_main_print_current_baseline_returns_before_baseline_read(self) -> None:
+        args = self.main_args(print_current_baseline=True)
+        report = {
+            "ok": True,
+            "files_scanned": 1,
+            "functions_scanned": 1,
+            "failures": [],
+            "warnings": [],
+            "metrics": {},
+        }
+
+        result, stdout, stderr, calls, candidate = self.invoke_main(args, report)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            stdout,
+            json.dumps(candidate, indent=2, sort_keys=True) + "\n",
+        )
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            [item[0] for item in calls],
+            [
+                "read_object",
+                "validate_policy",
+                "selected_sources",
+                "source_metrics",
+                "git_release",
+                "candidate_baseline",
+            ],
+        )
+
+    def test_main_preserves_json_healthy_and_failure_rendering(self) -> None:
+        healthy = {
+            "ok": True,
+            "files_scanned": 7,
+            "functions_scanned": 11,
+            "failures": [],
+            "warnings": [{"kind": "warning"}, {"kind": "warning"}],
+            "metrics": {"private": "omit"},
+        }
+        result, stdout, stderr, calls, _ = self.invoke_main(
+            self.main_args(),
+            healthy,
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            stdout,
+            "module quality gate passed: 7 files, 11 Python functions, "
+            "2 ratcheting warnings\n",
+        )
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            [item[0] for item in calls[-3:]],
+            ["read_object", "validate_baseline", "evaluate"],
+        )
+
+        failed = {
+            "ok": False,
+            "files_scanned": 3,
+            "functions_scanned": 5,
+            "failures": [
+                {
+                    "kind": "module_lines",
+                    "name": "large.py",
+                    "measured": 21,
+                    "allowed": 20,
+                },
+                {"kind": "import_cycle", "name": "a -> b -> a"},
+            ],
+            "warnings": [],
+            "metrics": {"private": "omit"},
+        }
+        result, stdout, stderr, _, _ = self.invoke_main(
+            self.main_args(),
+            failed,
+        )
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(
+            stderr,
+            "module_lines: large.py measured=21 allowed=20\n"
+            "import_cycle: a -> b -> a\n",
+        )
+
+        result, stdout, stderr, _, _ = self.invoke_main(
+            self.main_args(json=True),
+            failed,
+        )
+        self.assertEqual(result, 1)
+        self.assertEqual(stderr, "")
+        public = {key: value for key, value in failed.items() if key != "metrics"}
+        self.assertEqual(stdout, json.dumps(public, indent=2, sort_keys=True) + "\n")
+        self.assertNotIn("private", stdout)
+
+    def test_main_preserves_baseline_update_and_error_boundaries(self) -> None:
+        healthy = {
+            "ok": True,
+            "files_scanned": 1,
+            "functions_scanned": 2,
+            "failures": [],
+            "warnings": [],
+            "metrics": {},
+        }
+        result, stdout, stderr, calls, candidate = self.invoke_main(
+            self.main_args(update_baseline=True),
+            healthy,
+        )
+        self.assertEqual((result, stderr), (0, ""))
+        self.assertIn("module quality gate passed", stdout)
+        self.assertEqual(calls[-1], ("atomic_json", "/quality-baseline.json", candidate))
+        self.assertEqual(calls[-2][0], "evaluate")
+
+        failed = dict(healthy, ok=False)
+        result, stdout, stderr, calls, _ = self.invoke_main(
+            self.main_args(update_baseline=True),
+            failed,
+        )
+        self.assertEqual(result, 2)
+        self.assertEqual(stdout, "")
+        self.assertEqual(
+            stderr,
+            "module quality configuration error: refusing baseline update "
+            "because current debt exceeds the baseline\n",
+        )
+        self.assertNotIn("atomic_json", [item[0] for item in calls])
+
+        with mock.patch.object(quality, "parse_args", return_value=self.main_args()), \
+             mock.patch.object(
+                 quality,
+                 "read_object",
+                 side_effect=quality.QualityConfigError("bad-policy"),
+             ), redirect_stdout(io.StringIO()) as stdout, \
+             redirect_stderr(io.StringIO()) as stderr:
+            result = quality.main()
+        self.assertEqual(result, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(
+            stderr.getvalue(),
+            "module quality configuration error: bad-policy\n",
+        )
+
+        with mock.patch.object(quality, "parse_args", side_effect=RuntimeError("outside")):
+            with self.assertRaisesRegex(RuntimeError, "outside"):
+                quality.main()
+
     def test_dependency_graph_uses_longest_unique_alias_and_skips_self(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
