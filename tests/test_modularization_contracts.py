@@ -375,6 +375,27 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
             50,
         )
 
+    def test_relay_application_has_bounded_lifecycle_phases(self) -> None:
+        application = ROOT / "relay" / "app" / "relay_application.py"
+        expected = {
+            "_drain_ssh_alert_outbox",
+            "_drain_webhook_alert_outbox",
+            "_parse_relay_args",
+            "_run_pull_cycle",
+            "_pull_cycle_result",
+        }
+
+        self.assertTrue(expected <= top_level_function_names(application))
+        for name in ("drain_alert_outbox", "main"):
+            function = top_level_function(application, name)
+            with self.subTest(name=name):
+                self.assertLessEqual(
+                    (function.end_lineno or function.lineno)
+                    - function.lineno
+                    + 1,
+                    50,
+                )
+
     def test_relay_health_wrapper_supports_isolated_file_loader_import(self) -> None:
         wrapper = ROOT / "relay" / "app" / "relay_health_wrapper.py"
         script = (
