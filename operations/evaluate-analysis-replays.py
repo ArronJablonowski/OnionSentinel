@@ -430,41 +430,44 @@ def _classification_metrics(results: list[dict[str, Any]], field: str) -> dict[s
     }
 
 
+def _calibration_bin(
+    results: list[dict[str, Any]], bin_index: int, weighted_gap: float,
+) -> tuple[dict[str, Any] | None, float]:
+    lower = bin_index / 10
+    upper = (bin_index + 1) / 10
+    members = [
+        item
+        for item in results
+        if lower <= item["confidence_score"] <= upper
+        and (bin_index == 9 or item["confidence_score"] < upper)
+    ]
+    if not members:
+        return None, weighted_gap
+    mean_confidence = sum(item["confidence_score"] for item in members) / len(members)
+    accuracy = sum(1 for item in members if item["exact_factored_verdict"]) / len(members)
+    gap = abs(mean_confidence - accuracy)
+    weighted_gap += gap * len(members) / len(results)
+    return {
+        "lower": lower,
+        "upper": upper,
+        "count": len(members),
+        "mean_confidence": round(mean_confidence, 6),
+        "accuracy": round(accuracy, 6),
+        "gap": round(gap, 6),
+    }, weighted_gap
+
+
 def _calibration_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
     if not results:
         return {"brier_score": None, "expected_calibration_error": None, "bins": []}
     bins = []
     weighted_gap = 0.0
     for bin_index in range(10):
-        lower = bin_index / 10
-        upper = (bin_index + 1) / 10
-        members = [
-            item
-            for item in results
-            if lower <= item["confidence_score"] <= upper
-            and (bin_index == 9 or item["confidence_score"] < upper)
-        ]
-        if not members:
-            continue
-        mean_confidence = sum(item["confidence_score"] for item in members) / len(members)
-        accuracy = sum(1 for item in members if item["exact_factored_verdict"]) / len(members)
-        gap = abs(mean_confidence - accuracy)
-        weighted_gap += gap * len(members) / len(results)
-        bins.append(
-            {
-                "lower": lower,
-                "upper": upper,
-                "count": len(members),
-                "mean_confidence": round(mean_confidence, 6),
-                "accuracy": round(accuracy, 6),
-                "gap": round(gap, 6),
-            }
-        )
+        bin_metrics, weighted_gap = _calibration_bin(results, bin_index, weighted_gap)
+        if bin_metrics is not None:
+            bins.append(bin_metrics)
     return {
-        "brier_score": round(
-            sum(item["confidence_brier"] for item in results) / len(results),
-            6,
-        ),
+        "brier_score": round(sum(item["confidence_brier"] for item in results) / len(results), 6),
         "expected_calibration_error": round(weighted_gap, 6),
         "bins": bins,
     }
