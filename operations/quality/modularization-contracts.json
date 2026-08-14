@@ -421,6 +421,28 @@
       ]
     },
     {
+      "path": "operations/cohort_evidence_sealing.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/cohort_evidence_sealing.py",
+      "required_symbols": [
+        "EvidenceSealingPolicy",
+        "validate_ground_truth_draft",
+        "validate_frozen_manifests",
+        "build_evidence_seal"
+      ]
+    },
+    {
+      "path": "operations/seal-independent-cohort-evidence.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/seal-independent-cohort-evidence.py",
+      "required_symbols": [
+        "CohortEvidenceSealError",
+        "build_parser",
+        "seal_evidence",
+        "main"
+      ]
+    },
+    {
       "path": "operations/cohort_evaluation_adjudication_service.py",
       "deployment": "repository-only",
       "runtime_path": "operations/cohort_evaluation_adjudication_service.py",
@@ -525,6 +547,7 @@
       "required_symbols": [
         "RESULT_SCHEMA",
         "ADJUDICATION_SCHEMA",
+        "EVIDENCE_DRAFT_SCHEMA",
         "EVIDENCE_SEAL_SCHEMA",
         "CONTROLLED_EVALUATION_PROFILE",
         "RUBRIC_WEIGHTS",

@@ -237,12 +237,34 @@ selector.
 Before either cohort is dispatched, an independent reviewer must create an
 owner-only evidence seal using schema
 `onion-sentinel-independent-evidence-seal-v1`. The canonical embedded digest
-binds the exact frozen source, ordered identity/detection digests, methodology,
-and every case's labels, confidence, evidence-basis/timeline/attribution
-digests, required query classes, and telemetry gaps. Its timezone-aware
-`sealed_at` must precede every admitted dispatch. Later adjudication must match
-the sealed ground truth exactly; a boolean independence assertion is not proof.
-Pass that private artifact explicitly when grading:
+binds both roles' exact frozen-plan hashes, the shared frozen source, ordered
+identity/detection digests, methodology, and every case's labels, confidence,
+evidence-basis/timeline/attribution digests, required query classes, and
+telemetry gaps. Its timezone-aware `sealed_at` must precede every admitted
+dispatch. Later adjudication must match the sealed ground truth exactly; a
+boolean independence assertion is not proof.
+
+Prepare an owner-only, digest-bound ground-truth draft using schema
+`onion-sentinel-independent-evidence-draft-v1` and an owner-only methodology
+file. After both matched imported-row manifests are frozen, but before either
+is queued, create the non-replaceable seal:
+
+```bash
+python3 operations/seal-independent-cohort-evidence.py \
+  --manifest incident-responder=/path/to/private/ir-manifest.json \
+  --manifest soc-analyst=/path/to/private/soc-manifest.json \
+  --ground-truth /path/to/private/independent-ground-truth.json \
+  --methodology /path/to/private/independent-methodology.md \
+  --expected-count 10 \
+  --output /path/to/private/independent-evidence-seal.json
+```
+
+The command accepts only owner-only inputs, verifies both manifests are
+pristine and unattempted, requires identical source/order/detection and
+execution contracts, derives each role plan from the validated manifests,
+writes atomically with mode 0600, and refuses an existing output. It never
+accepts result exports or dispatches work. Pass that private artifact explicitly
+when grading:
 
 ```bash
 python3 operations/evaluate-investigation-cohort.py \

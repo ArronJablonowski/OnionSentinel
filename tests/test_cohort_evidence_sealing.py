@@ -142,8 +142,9 @@ class CohortEvidenceSealingTests(unittest.TestCase):
     def _ground_truth(self, member: dict) -> dict:
         return {
             "labels": {
-                "event_status": "actionable",
-                "detection_validity": "valid",
+                "detection_outcome": "true_positive_malicious",
+                "event_status": "observed",
+                "detection_validity": "matched_intent",
                 "activity_disposition": "malicious",
                 "handling": "contain",
                 "duplicate_of": None,
@@ -153,7 +154,7 @@ class CohortEvidenceSealingTests(unittest.TestCase):
             "evidence_basis_sha256": "d" * 64,
             "scope_timeline_sha256": "e" * 64,
             "attribution_sha256": "f" * 64,
-            "required_query_classes": ["alerts", "events"],
+            "required_query_classes": ["suricata", "network_flow"],
             "telemetry_gap_codes": [],
         }
 

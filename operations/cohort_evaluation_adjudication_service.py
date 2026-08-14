@@ -20,6 +20,7 @@ from cohort_evidence_seal import (
 from cohort_evaluation_contracts import (
     ADJUDICATION_SCHEMA,
     CODE_RE,
+    COHORT_ID_RE,
     EVIDENCE_SEAL_SCHEMA,
     HARD_FAILURE_CODES,
     MAX_CODE_ITEMS,
@@ -28,6 +29,7 @@ from cohort_evaluation_contracts import (
     RUBRIC_WEIGHTS,
     SHA256_RE,
     STABLE_GROUP_ID_RE,
+    SUPPORTED_ROLES,
     VERDICT_FIELDS,
     VERDICT_VALUE_SETS,
 )
@@ -63,6 +65,8 @@ class AdjudicationSealService:
         return EvidenceSealPolicy(
             error=self.error,
             schema=EVIDENCE_SEAL_SCHEMA,
+            roles=SUPPORTED_ROLES,
+            cohort_id_pattern=COHORT_ID_RE,
             stable_group_id_pattern=STABLE_GROUP_ID_RE,
             sha256_pattern=SHA256_RE,
             parse_timestamp=self.parse_timestamp,

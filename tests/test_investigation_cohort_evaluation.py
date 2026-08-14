@@ -696,13 +696,22 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         *,
         expected_count: int = evaluator.EXPECTED_ROLE_COUNT,
         sealed_at: str = "2026-07-25T00:00:30Z",
+        evaluation_profile: str = "",
     ) -> dict:
         adjudication = self._adjudication(expected_count=expected_count)
-        result = self._result_export(
-            "incident-responder",
-            "ir-newest-unit",
-            expected_count=expected_count,
-        )
+        results = {
+            role: self._result_export(
+                role,
+                cohort_id,
+                expected_count=expected_count,
+                evaluation_profile=evaluation_profile,
+            )
+            for role, cohort_id in (
+                ("incident-responder", "ir-newest-unit"),
+                ("soc-analyst", "soc-newest-unit"),
+            )
+        }
+        result = results["incident-responder"]
         detections = [
             {
                 "rank": member["rank"],
@@ -727,6 +736,13 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 "ordered_identity_sha256"
             ],
             "ordered_detection_sha256": evaluator.sha256_value(detections),
+            "role_plans": {
+                role: {
+                    "cohort_id": value["cohort_id"],
+                    "frozen_plan_sha256": value["frozen_plan_sha256"],
+                }
+                for role, value in results.items()
+            },
             "cases": [
                 {
                     "rank": rank,
@@ -1067,6 +1083,10 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 "soc-newest-unit",
                 evaluation_profile=profile,
             ),
+        )
+        self._write_private(
+            self.evidence_seal_path,
+            self._evidence_seal(evaluation_profile=profile),
         )
         report = evaluator.evaluate_cohorts(
             result_paths={

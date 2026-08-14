@@ -1131,9 +1131,22 @@ projections without file access.
 `operations/cohort_evidence_seal.py` owns the canonical independent-evidence
 seal and its temporal binding. It validates an owner-only caller-loaded,
 embedded-digest document that fixes every ordered case's ground truth and
-evidence-basis digests, binds it to the exact paired frozen cohort, proves the
-seal predates every admitted dispatch, and rejects later adjudication drift.
-It performs no file access, evidence collection, result loading, or scoring.
+evidence-basis digests, binds both role-specific frozen plans and the exact
+paired frozen cohort, proves the seal predates every admitted dispatch, and
+rejects later adjudication drift. It performs no file access, evidence
+collection, result loading, or scoring.
+
+`operations/cohort_evidence_sealing.py` owns pure pre-dispatch ground-truth
+draft validation and matched-manifest binding. It admits only pristine,
+unattempted, read-only imported-row manifests; recomputes ordered identity and
+detection projections; binds role-specific frozen plans; and builds the
+canonical evidence seal without result access or dispatch capability.
+
+`operations/seal-independent-cohort-evidence.py` is the owner-only sealing CLI.
+It loads validated private manifests, the digest-bound independent ground-truth
+draft, and a bounded methodology file; composes the pure sealing policy;
+self-validates the result with the grading policy; and atomically creates a
+non-replaceable 0600 artifact. Its stdout contains only bounded receipt fields.
 
 `operations/cohort_evaluation_adjudication_service.py` is the composition
 adapter for independent adjudication and evidence-seal policy. It injects the
