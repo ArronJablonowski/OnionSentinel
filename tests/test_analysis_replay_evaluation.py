@@ -764,6 +764,124 @@ class AnalysisReplayEvaluationTests(unittest.TestCase):
             evaluator._classification_metrics(results, "kind")
         self.assertIsInstance(results[0]["fields"]["kind"]["expected"], BadString)
 
+    def test_calibration_metrics_preserves_bounds_values_order_and_scan_count(self):
+        class IterationRecorder(list):
+            def __init__(self, values):
+                super().__init__(values)
+                self.iterations = 0
+
+            def __iter__(self):
+                self.iterations += 1
+                return super().__iter__()
+
+        scores = [
+            (0.0, False),
+            (0.099, True),
+            (0.1, True),
+            (0.199, False),
+            (0.5, True),
+            (0.999, True),
+            (1.0, False),
+            (-0.1, True),
+            (1.1, False),
+        ]
+        results = IterationRecorder(
+            [
+                {
+                    "confidence_score": score,
+                    "exact_factored_verdict": correct,
+                    "confidence_brier": (index + 1) / 10,
+                }
+                for index, (score, correct) in enumerate(scores)
+            ]
+        )
+        original = copy.deepcopy(list(results))
+        initial_iterations = results.iterations
+
+        metrics = evaluator._calibration_metrics(results)
+        metric_iterations = results.iterations - initial_iterations
+
+        self.assertEqual(list(results), original)
+        self.assertEqual(metric_iterations, 11)
+        self.assertEqual(
+            list(metrics),
+            ["brier_score", "expected_calibration_error", "bins"],
+        )
+        self.assertEqual(metrics["brier_score"], 0.5)
+        self.assertEqual(metrics["expected_calibration_error"], 0.344556)
+        self.assertEqual(
+            metrics["bins"],
+            [
+                {
+                    "lower": 0.0,
+                    "upper": 0.1,
+                    "count": 2,
+                    "mean_confidence": 0.0495,
+                    "accuracy": 0.5,
+                    "gap": 0.4505,
+                },
+                {
+                    "lower": 0.1,
+                    "upper": 0.2,
+                    "count": 2,
+                    "mean_confidence": 0.1495,
+                    "accuracy": 0.5,
+                    "gap": 0.3505,
+                },
+                {
+                    "lower": 0.5,
+                    "upper": 0.6,
+                    "count": 1,
+                    "mean_confidence": 0.5,
+                    "accuracy": 1.0,
+                    "gap": 0.5,
+                },
+                {
+                    "lower": 0.9,
+                    "upper": 1.0,
+                    "count": 2,
+                    "mean_confidence": 0.9995,
+                    "accuracy": 0.5,
+                    "gap": 0.4995,
+                },
+            ],
+        )
+        for item in metrics["bins"]:
+            self.assertEqual(
+                list(item),
+                ["lower", "upper", "count", "mean_confidence", "accuracy", "gap"],
+            )
+
+    def test_calibration_metrics_preserves_empty_freshness_and_failure_order(self):
+        first = evaluator._calibration_metrics([])
+        second = evaluator._calibration_metrics([])
+        self.assertEqual(
+            first,
+            {
+                "brier_score": None,
+                "expected_calibration_error": None,
+                "bins": [],
+            },
+        )
+        self.assertIsNot(first, second)
+        self.assertIsNot(first["bins"], second["bins"])
+
+        with self.assertRaises(KeyError) as error:
+            evaluator._calibration_metrics([{"confidence_brier": 0.0}])
+        self.assertEqual(error.exception.args, ("confidence_score",))
+
+        with self.assertRaises(KeyError) as error:
+            evaluator._calibration_metrics(
+                [{"confidence_score": 0.5, "confidence_brier": 0.0}]
+            )
+        self.assertEqual(error.exception.args, ("exact_factored_verdict",))
+
+        with self.assertRaises(KeyError) as error:
+            evaluator._calibration_metrics(
+                [{"confidence_score": 1.1, "exact_factored_verdict": True}]
+            )
+        self.assertEqual(error.exception.args, ("confidence_brier",))
+
     def test_checked_in_replays_are_exact_with_deterministic_guard(self):
         suite = evaluator.load_suite(FIXTURE_PATH)
         results = [
