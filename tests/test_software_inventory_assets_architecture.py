@@ -402,6 +402,153 @@ class SoftwareInventoryAssetsArchitectureTests(unittest.TestCase):
                 os_correlation._trusted_asset(
                     {"studio": asset}, "studio", NOW
                 )
+
+    def test_endpoint_candidate_direct_projection_contract_is_exact(self) -> None:
+        self.assertEqual(
+            str(inspect.signature(os_correlation._endpoint_candidate)),
+            "(item: 'object', now: 'dt.datetime', assets: 'dict[str, dict]') -> 'tuple[str, dt.datetime, tuple[str, str], dict[str, object]] | None'",
+        )
+        item = self.endpoint()
+        before = copy.deepcopy(item)
+        assets = {"studio": self.asset()}
+        trusted_asset = assets["studio"]
+        with (
+            mock.patch.object(
+                os_correlation,
+                "_trusted_asset",
+                return_value=trusted_asset,
+            ) as trusted,
+            mock.patch.object(
+                os_correlation, "_utc_iso", return_value="observed:utc"
+            ) as utc_iso,
+            mock.patch.object(
+                os_correlation, "_freshness", return_value="current"
+            ) as freshness,
+        ):
+            result = os_correlation._endpoint_candidate(
+                item, NOW, assets
+            )
+
+        last_seen = item["_last_seen"].astimezone(dt.timezone.utc)
+        self.assertEqual(
+            result,
+            (
+                "studio",
+                last_seen,
+                ("macos", "macos 26.0"),
+                {
+                    "operating_system_type": "macOS",
+                    "operating_system_version": "macOS 26.0",
+                    "operating_system_source": "osquery_manager.result:host.os",
+                    "operating_system_observed_at": "observed:utc",
+                    "operating_system_freshness": "current",
+                },
+            ),
+        )
+        self.assertEqual(item, before)
+        trusted.assert_called_once_with(assets, "studio", last_seen)
+        utc_iso.assert_called_once_with(last_seen)
+        freshness.assert_called_once_with(item, NOW)
+
+    def test_endpoint_candidate_gate_access_order_is_exact(self) -> None:
+        events: list[tuple[object, ...]] = []
+
+        class TracedDict(dict):
+            def get(self, key: object, default: object = None) -> object:
+                events.append(("get", key, default))
+                return super().get(key, default)
+
+            def __getitem__(self, key: object) -> object:
+                events.append(("getitem", key))
+                return super().__getitem__(key)
+
+        base = self.endpoint()
+        cases = (
+            ({**base, "asset_label": ""}, 3),
+            ({**base, "source": "other"}, 4),
+            ({**base, "operating_system_source": "other"}, 5),
+            ({**base, "operating_system_confidence": "medium"}, 6),
+            ({**base, "operating_system_type": ""}, 6),
+            ({**base, "operating_system_version": ""}, 6),
+        )
+        expected_keys = (
+            "asset_label",
+            "operating_system_type",
+            "operating_system_version",
+            "source",
+            "operating_system_source",
+            "operating_system_confidence",
+        )
+        for value, access_count in cases:
+            with self.subTest(value=value):
+                events.clear()
+                item = TracedDict(value)
+                with (
+                    mock.patch.object(os_correlation, "_parse_timestamp") as parse,
+                    mock.patch.object(os_correlation, "_trusted_asset") as trusted,
+                    mock.patch.object(os_correlation, "_utc_iso") as utc_iso,
+                    mock.patch.object(os_correlation, "_freshness") as freshness,
+                ):
+                    self.assertIsNone(
+                        os_correlation._endpoint_candidate(item, NOW, {})
+                    )
+                self.assertEqual(
+                    events,
+                    [("get", key, None) for key in expected_keys[:access_count]],
+                )
+                parse.assert_not_called()
+                trusted.assert_not_called()
+                utc_iso.assert_not_called()
+                freshness.assert_not_called()
+
+        with mock.patch.object(os_correlation, "_trusted_asset") as trusted:
+            self.assertIsNone(
+                os_correlation._endpoint_candidate("not-a-dict", NOW, {})
+            )
+        trusted.assert_not_called()
+
+    def test_endpoint_candidate_timestamp_and_trust_boundaries_are_exact(self) -> None:
+        parsed = NOW - dt.timedelta(minutes=15)
+        item = self.endpoint(_last_seen="not-a-datetime")
+        assets = {"studio": self.asset()}
+        with (
+            mock.patch.object(
+                os_correlation, "_parse_timestamp", return_value=parsed
+            ) as parse,
+            mock.patch.object(
+                os_correlation, "_trusted_asset", return_value=None
+            ) as trusted,
+        ):
+            self.assertIsNone(
+                os_correlation._endpoint_candidate(item, NOW, assets)
+            )
+        parse.assert_called_once_with(
+            item["last_seen"], "operating_system_observed_at"
+        )
+        trusted.assert_called_once_with(assets, "studio", parsed)
+
+        with (
+            mock.patch.object(
+                os_correlation,
+                "_parse_timestamp",
+                side_effect=os_correlation.InventoryStateError("invalid"),
+            ) as parse,
+            mock.patch.object(os_correlation, "_trusted_asset") as trusted,
+        ):
+            self.assertIsNone(
+                os_correlation._endpoint_candidate(item, NOW, assets)
+            )
+        parse.assert_called_once()
+        trusted.assert_not_called()
+
+        future = NOW + dt.timedelta(minutes=5, microseconds=1)
+        with mock.patch.object(os_correlation, "_trusted_asset") as trusted:
+            self.assertIsNone(
+                os_correlation._endpoint_candidate(
+                    self.endpoint(_last_seen=future), NOW, assets
+                )
+            )
+        trusted.assert_not_called()
         self.assertEqual(
             str(
                 inspect.signature(
