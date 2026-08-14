@@ -245,10 +245,7 @@ def _field_result(expected: dict[str, Any], actual: dict[str, Any], field: str) 
     }
 
 
-def _case_field_results(
-    expected: dict[str, Any],
-    primary: dict[str, Any],
-) -> tuple[dict[str, dict[str, Any]], bool]:
+def _case_field_results(expected: dict[str, Any], primary: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], bool]:
     fields = {
         field: _field_result(expected, primary, field)
         for field in (*FACTORED_FIELDS, "detection_outcome")
@@ -264,10 +261,7 @@ def _case_field_results(
 
 
 def _reviewer_analysis(
-    runner: Any,
-    case: dict[str, Any],
-    prompt_package: dict[str, Any],
-    primary: dict[str, Any],
+    runner: Any, case: dict[str, Any], prompt_package: dict[str, Any], primary: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, Any | None]:
     reviewer = None
     comparison = None
@@ -279,10 +273,7 @@ def _reviewer_analysis(
     return reviewer, comparison
 
 
-def _unsupported_evidence_refs(
-    case: dict[str, Any],
-    primary: dict[str, Any],
-) -> list[str]:
+def _unsupported_evidence_refs(case: dict[str, Any], primary: dict[str, Any]) -> list[str]:
     evidence_used = primary.get("evidence_used") if isinstance(primary.get("evidence_used"), list) else []
     has_evidence_catalog = isinstance(case.get("allowed_evidence_refs"), list)
     allowed_refs = {
@@ -295,10 +286,7 @@ def _unsupported_evidence_refs(
     ]
 
 
-def _risk_flags(
-    expected: dict[str, Any],
-    primary: dict[str, Any],
-) -> tuple[bool, bool]:
+def _risk_flags(expected: dict[str, Any], primary: dict[str, Any]) -> tuple[bool, bool]:
     expected_handling = str(expected.get("handling") or "")
     actual_handling = str(primary.get("handling") or "")
     expected_disposition = str(expected.get("activity_disposition") or "")
@@ -362,19 +350,65 @@ def evaluate_case(
     }
 
 
-def _classification_metrics(results: list[dict[str, Any]], field: str) -> dict[str, Any]:
-    labels = sorted(
-        {
-            str(item["fields"][field]["expected"])
-            for item in results
-            if field in item["fields"]
-        }
-        | {
-            str(item["fields"][field]["actual"])
-            for item in results
-            if field in item["fields"]
-        }
+def _true_positive_count(results: list[dict[str, Any]], field: str, label: str) -> int:
+    return sum(
+        1
+        for item in results
+        if field in item["fields"]
+        and str(item["fields"][field]["expected"]) == label
+        and str(item["fields"][field]["actual"]) == label
     )
+
+
+def _false_positive_count(results: list[dict[str, Any]], field: str, label: str) -> int:
+    return sum(
+        1
+        for item in results
+        if field in item["fields"]
+        and str(item["fields"][field]["expected"]) != label
+        and str(item["fields"][field]["actual"]) == label
+    )
+
+
+def _false_negative_count(results: list[dict[str, Any]], field: str, label: str) -> int:
+    return sum(
+        1
+        for item in results
+        if field in item["fields"]
+        and str(item["fields"][field]["expected"]) == label
+        and str(item["fields"][field]["actual"]) != label
+    )
+
+
+def _classification_label_metrics(
+    results: list[dict[str, Any]], field: str, label: str,
+) -> dict[str, Any]:
+    true_positive = _true_positive_count(results, field, label)
+    false_positive = _false_positive_count(results, field, label)
+    false_negative = _false_negative_count(results, field, label)
+    precision = true_positive / (true_positive + false_positive) if true_positive + false_positive else None
+    recall = true_positive / (true_positive + false_negative) if true_positive + false_negative else None
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if precision is not None and recall is not None and precision + recall
+        else None
+    )
+    return {
+        "support": true_positive + false_negative,
+        "precision": round(precision, 6) if precision is not None else None,
+        "recall": round(recall, 6) if recall is not None else None,
+        "f1": round(f1, 6) if f1 is not None else None,
+    }
+
+
+def _classification_labels(results: list[dict[str, Any]], field: str) -> list[str]:
+    expected = {str(item["fields"][field]["expected"]) for item in results if field in item["fields"]}
+    actual = {str(item["fields"][field]["actual"]) for item in results if field in item["fields"]}
+    return sorted(expected | actual)
+
+
+def _classification_metrics(results: list[dict[str, Any]], field: str) -> dict[str, Any]:
+    labels = _classification_labels(results, field)
     confusion: dict[str, Counter[str]] = defaultdict(Counter)
     per_label = {}
     for item in results:
@@ -384,40 +418,7 @@ def _classification_metrics(results: list[dict[str, Any]], field: str) -> dict[s
         actual = str(item["fields"][field]["actual"])
         confusion[expected][actual] += 1
     for label in labels:
-        true_positive = sum(
-            1
-            for item in results
-            if field in item["fields"]
-            and str(item["fields"][field]["expected"]) == label
-            and str(item["fields"][field]["actual"]) == label
-        )
-        false_positive = sum(
-            1
-            for item in results
-            if field in item["fields"]
-            and str(item["fields"][field]["expected"]) != label
-            and str(item["fields"][field]["actual"]) == label
-        )
-        false_negative = sum(
-            1
-            for item in results
-            if field in item["fields"]
-            and str(item["fields"][field]["expected"]) == label
-            and str(item["fields"][field]["actual"]) != label
-        )
-        precision = true_positive / (true_positive + false_positive) if true_positive + false_positive else None
-        recall = true_positive / (true_positive + false_negative) if true_positive + false_negative else None
-        f1 = (
-            2 * precision * recall / (precision + recall)
-            if precision is not None and recall is not None and precision + recall
-            else None
-        )
-        per_label[label] = {
-            "support": true_positive + false_negative,
-            "precision": round(precision, 6) if precision is not None else None,
-            "recall": round(recall, 6) if recall is not None else None,
-            "f1": round(f1, 6) if f1 is not None else None,
-        }
+        per_label[label] = _classification_label_metrics(results, field, label)
     total = sum(sum(counts.values()) for counts in confusion.values())
     correct = sum(confusion[label][label] for label in labels)
     return {
