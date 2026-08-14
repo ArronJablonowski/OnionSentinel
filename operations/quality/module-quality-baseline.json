@@ -1,9 +1,6 @@
 {
   "files": {},
   "functions": {
-    "operations/evaluate-analysis-replays.py::summarize": {
-      "max_complexity": 27
-    },
     "relay/app/ac_hunter_broker.py::_load_config": {
       "max_complexity": 22
     },
@@ -68,5 +65,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "ef0b8c1f23fb8b6c43c9250296e8923c7cf5e090"
+  "source_release": "a5fa7a542424761ee13db42376f27f4750e99bc7"
 }
