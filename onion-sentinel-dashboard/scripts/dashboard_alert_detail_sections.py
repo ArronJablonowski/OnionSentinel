@@ -108,22 +108,33 @@ def alert_summary_markdown(row: object) -> str:
     ])
 
 
-def alert_identity_markdown(row: object, source_text: str = "") -> str:
-    """Generate the fixed identity card from authoritative group state."""
+def _identity_generated(row: object, source_text: str) -> object:
+    """Resolve identity-card generation time from source text or group state."""
     generated_match = re.search(
         r"^(?:generated_at:\s*|[-*]\s+\*\*Generated:\*\*\s*)([^\n]+)",
         source_text or "",
         flags=re.IGNORECASE | re.MULTILINE,
     )
-    generated = generated_match.group(1).strip().strip("\"'") if generated_match else (
+    return generated_match.group(1).strip().strip("\"'") if generated_match else (
         row_value(row, "timestamp") or row_value(row, "last_seen") or "n/a"
     )
+
+
+def _identity_endpoints(row: object) -> tuple[str, str]:
+    """Project source and destination after reading their paired fields."""
     source_ip = row_value(row, "source_ip") or "n/a"
     source_port = row_value(row, "source_port")
     destination_ip = row_value(row, "destination_ip") or "n/a"
     destination_port = row_value(row, "destination_port")
     source_endpoint = f"{source_ip}:{source_port}" if source_port not in (None, "", "n/a") else str(source_ip)
     destination_endpoint = f"{destination_ip}:{destination_port}" if destination_port not in (None, "", "n/a") else str(destination_ip)
+    return source_endpoint, destination_endpoint
+
+
+def alert_identity_markdown(row: object, source_text: str = "") -> str:
+    """Generate the fixed identity card from authoritative group state."""
+    generated = _identity_generated(row, source_text)
+    source_endpoint, destination_endpoint = _identity_endpoints(row)
     status = row_value(row, "filter_status") or "accepted"
     return "\n".join([
         f'# [{severity_label_from_row(row).upper()}] {row_value(row, "rule_name") or "Security Onion Alert"}', "",
