@@ -19,9 +19,6 @@
       "max_complexity": 43,
       "max_lines": 221
     },
-    "relay/app/relay_health_contract.py::classify_child_diagnostic": {
-      "max_complexity": 22
-    },
     "relay/app/relay_health_sanitization.py::sanitize_pcap_summary": {
       "max_complexity": 20
     },
@@ -36,5 +33,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "3b2c536b9c40523c43a5781cf104265359ecfb3a"
+  "source_release": "52453e5f9490c7c78b5b243f54f17c39ed08a677"
 }
