@@ -118,30 +118,51 @@ def compose_latest_running_update_action(
 ) -> tuple[str, str] | None:
     for action_id in UPDATE_ACTION_IDS:
         status = sources.read_action_status(action_id)
-        if status.get("state") != "running":
-            continue
-        pid = status.get("pid")
-        try:
-            running = sources.process_running(pid)
-        except Exception:
-            running = False
-        if not running:
-            continue
-        label = str(
-            status.get("label") or sources.action_labels.get(action_id) or action_id
-        )
-        timestamp = status.get("started_at") or status.get("updated_at")
-        try:
-            parsed = sources.parse_timestamp(timestamp).astimezone() if timestamp else None
-        except Exception:
-            parsed = None
-        exact = sources.format_timestamp(parsed) if parsed else "unknown time"
-        detail = (
-            f"{label} is currently running as PID {pid or 'unknown'}; started at "
-            f"{exact}. The Updates metric will refresh availability after the action completes."
-        )
-        return _short_action_label(label, "running"), detail
+        running = _running_update_action(sources, action_id, status)
+        if running is not None:
+            return running
     return None
+
+
+def _running_update_action(
+    sources: UpdateHealthSources,
+    action_id: str,
+    status: dict,
+) -> tuple[str, str] | None:
+    if status.get("state") != "running":
+        return None
+    pid = status.get("pid")
+    try:
+        running = sources.process_running(pid)
+    except Exception:
+        running = False
+    if not running:
+        return None
+    label = str(
+        status.get("label") or sources.action_labels.get(action_id) or action_id
+    )
+    exact = _running_update_timestamp(sources, status)
+    detail = (
+        f"{label} is currently running as PID {pid or 'unknown'}; started at "
+        f"{exact}. The Updates metric will refresh availability after the action completes."
+    )
+    return _short_action_label(label, "running"), detail
+
+
+def _running_update_timestamp(
+    sources: UpdateHealthSources,
+    status: dict,
+) -> str:
+    timestamp = status.get("started_at") or status.get("updated_at")
+    try:
+        parsed = (
+            sources.parse_timestamp(timestamp).astimezone()
+            if timestamp
+            else None
+        )
+    except Exception:
+        parsed = None
+    return sources.format_timestamp(parsed) if parsed else "unknown time"
 
 
 def _failure_record(
