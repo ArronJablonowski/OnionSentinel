@@ -303,6 +303,27 @@ def next_run_label(runtime: Any, value: str | None, enabled: bool) -> tuple[str,
         return value, value
 
 
+def _cron_job_summary(runtime: Any, job: dict) -> tuple[Any, bool]:
+    is_enabled = bool(job.get("enabled")) and str(
+        job.get("state", "")
+    ).lower() not in {"paused", "disabled"}
+    next_label, sort_key = runtime.next_run_label(
+        job.get("next_run_at"), is_enabled
+    )
+    return runtime.CronJobSummary(
+        jid=str(job.get("id") or job.get("job_id") or "unknown"),
+        name=str(job.get("name") or "Unnamed cron"),
+        schedule=runtime.schedule_label(job),
+        next_run=next_label,
+        enabled=is_enabled,
+        state=str(
+            job.get("state") or ("scheduled" if is_enabled else "disabled")
+        ),
+        last_status=str(job.get("last_status") or "never"),
+        sort_key=sort_key,
+    ), is_enabled
+
+
 def load_cron_summaries(runtime: Any) -> tuple[list[Any], list[Any]]:
     try:
         data = runtime.json.loads(runtime.CRON_JOBS_FILE.read_text())
@@ -311,24 +332,7 @@ def load_cron_summaries(runtime: Any) -> tuple[list[Any], list[Any]]:
     enabled_jobs: list[Any] = []
     disabled_jobs: list[Any] = []
     for job in data.get("jobs", []):
-        is_enabled = bool(job.get("enabled")) and str(
-            job.get("state", "")
-        ).lower() not in {"paused", "disabled"}
-        next_label, sort_key = runtime.next_run_label(
-            job.get("next_run_at"), is_enabled
-        )
-        summary = runtime.CronJobSummary(
-            jid=str(job.get("id") or job.get("job_id") or "unknown"),
-            name=str(job.get("name") or "Unnamed cron"),
-            schedule=runtime.schedule_label(job),
-            next_run=next_label,
-            enabled=is_enabled,
-            state=str(
-                job.get("state") or ("scheduled" if is_enabled else "disabled")
-            ),
-            last_status=str(job.get("last_status") or "never"),
-            sort_key=sort_key,
-        )
+        summary, is_enabled = _cron_job_summary(runtime, job)
         (enabled_jobs if is_enabled else disabled_jobs).append(summary)
     enabled_jobs.sort(key=lambda job: (job.sort_key, job.name.lower()))
     disabled_jobs.sort(key=lambda job: job.name.lower())
