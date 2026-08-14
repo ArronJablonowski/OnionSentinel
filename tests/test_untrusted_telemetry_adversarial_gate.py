@@ -205,6 +205,11 @@ class UntrustedTelemetryAdversarialGateTests(unittest.TestCase):
             self.assertNotIn(forbidden, portal_value)
         self.assertEqual(portal_text("abcdef", max_characters=4), "abc…")
 
+    def test_valid_unicode_and_large_existing_reports_are_unchanged(self) -> None:
+        valid = "Evidence Café — 例 🧅\n" + ("bounded-existing-report " * 12_000)
+        self.assertEqual(portal_text(valid), valid)
+        self.assertEqual(dashboard_text(valid), valid)
+
     def test_gate_and_boundary_modules_are_in_the_production_contract(self) -> None:
         installer = (ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh").read_text(
             encoding="utf-8"
