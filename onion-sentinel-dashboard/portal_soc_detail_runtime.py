@@ -86,6 +86,12 @@ def soc_alert_validate_detail_layout_html(r: Any, detail_html: str) -> list[str]
             f"Report layout version is {version}; expected {r.SOC_ALERT_DETAIL_LAYOUT_VERSION}. "
             "The dashboard must be rebuilt from the current report template."
         )
+    issues.extend(_detail_layout_marker_issues(r, detail_html))
+    return list(dict.fromkeys(issues))
+
+
+def _detail_layout_marker_issues(r: Any, detail_html: str) -> list[str]:
+    issues = []
     positions = []
     for label, marker in r.SOC_ALERT_DETAIL_LAYOUT_MARKERS:
         count = (detail_html or "").count(marker)
@@ -95,7 +101,7 @@ def soc_alert_validate_detail_layout_html(r: Any, detail_html: str) -> list[str]
     present = [position for position in positions if position >= 0]
     if present != sorted(present):
         issues.append("Required report sections are not in the canonical order.")
-    return list(dict.fromkeys(issues))
+    return issues
 
 
 def soc_alert_layout_error_html(r: Any, issues: list[str]) -> str:
