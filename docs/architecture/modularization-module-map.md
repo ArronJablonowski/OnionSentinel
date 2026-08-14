@@ -3647,6 +3647,16 @@ aggregation, performance metrics, and Markdown rendering. These are leaf
 modules; none imports the executable or gains access to live alerts,
 credentials, query execution, or production persistence.
 
+## Offline Analysis Replay Evaluation
+
+`operations/evaluate-analysis-replays.py` remains the repository-only CLI and
+compatibility surface for replay-suite admission, detection reconstruction,
+runtime normalization, field metrics, calibration, private report writes, and
+exit behavior. `operations/analysis_replay_summary.py` is the side-effect-free
+report-composition leaf. It receives factored fields and metric callables from
+the facade, preserves the report schema and result identities, and owns no
+credentials, production state, model invocation, or investigation transport.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:

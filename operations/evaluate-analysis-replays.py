@@ -25,6 +25,7 @@ DEFAULT_RUNNER = ROOT / "n8n" / "bin" / "run-local-ai-analysis.py"
 DEFAULT_FIXTURES = ROOT / "operations" / "fixtures" / "analysis-replays.json"
 DEFAULT_DETECTION_VALIDATOR = ROOT / "n8n" / "bin" / "detection_validation.py"
 DEFAULT_DETECTION_PLAYBOOKS = ROOT / "n8n" / "config" / "detection_playbooks.json"
+DEFAULT_SUMMARY_MODULE = ROOT / "operations" / "analysis_replay_summary.py"
 REPLAY_SCHEMA = "onion-sentinel-analysis-replays-v1"
 MAX_REPLAY_BYTES = 32 * 1024 * 1024
 MAX_CASES = 10000
@@ -55,13 +56,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_module(path: Path):
-    spec = importlib.util.spec_from_file_location("onion_sentinel_replay_runner", path)
+def load_module(path: Path, module_name: str = "onion_sentinel_replay_runner"):
+    spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load analysis runner: {path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+SUMMARY_MODULE = load_module(DEFAULT_SUMMARY_MODULE, "onion_sentinel_replay_summary")
 
 
 def _suite_metadata(payload: object) -> tuple[list[Any], object, object]:
@@ -474,68 +478,13 @@ def _calibration_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def summarize(suite: dict[str, Any], results: list[dict[str, Any]]) -> dict[str, Any]:
-    field_metrics = {
-        field: _classification_metrics(results, field)
-        for field in (*FACTORED_FIELDS, "detection_outcome")
-        if any(field in item["fields"] for item in results)
-    }
-    reviewer_cases = [item for item in results if isinstance(item.get("reviewer"), dict)]
-    reviewer_correct = 0
-    primary_correct_on_reviewer_cases = 0
-    for item in reviewer_cases:
-        expected = {
-            field: data["expected"]
-            for field, data in item["fields"].items()
-            if field in FACTORED_FIELDS
-        }
-        reviewer_correct += int(
-            bool(expected)
-            and all(item["reviewer"].get(field) == value for field, value in expected.items())
-        )
-        primary_correct_on_reviewer_cases += int(item["exact_factored_verdict"])
-    return {
-        "schema": "onion-sentinel-analysis-replay-report-v1",
-        "suite_name": suite.get("suite_name"),
-        "suite_version": suite.get("version"),
-        "case_count": len(results),
-        "exact_factored_verdicts": sum(1 for item in results if item["exact_factored_verdict"]),
-        "exact_factored_accuracy": round(
-            sum(1 for item in results if item["exact_factored_verdict"]) / len(results),
-            6,
-        ),
-        "dangerous_dismissals": [
-            item["case_id"] for item in results if item["dangerous_dismissal"]
-        ],
-        "over_escalations": [
-            item["case_id"] for item in results if item["over_escalation"]
-        ],
-        "schema_repair_cases": [
-            item["case_id"] for item in results if item["schema_repaired"]
-        ],
-        "unsupported_evidence_reference_cases": {
-            item["case_id"]: item["unsupported_evidence_refs"]
-            for item in results
-            if item["unsupported_evidence_refs"]
-        },
-        "deterministic_guard_cases": [
-            item["case_id"]
-            for item in results
-            if isinstance(item.get("deterministic_guard"), dict)
-            and (
-                item["deterministic_guard"].get("override_applied")
-                or item["deterministic_guard"].get("confidence_cap") is not None
-            )
-        ],
-        "field_metrics": field_metrics,
-        "calibration": _calibration_metrics(results),
-        "reviewer": {
-            "case_count": len(reviewer_cases),
-            "primary_exact": primary_correct_on_reviewer_cases,
-            "reviewer_exact": reviewer_correct,
-            "net_exact_gain": reviewer_correct - primary_correct_on_reviewer_cases,
-        },
-        "cases": results,
-    }
+    return SUMMARY_MODULE.summarize(
+        suite,
+        results,
+        FACTORED_FIELDS,
+        _classification_metrics,
+        _calibration_metrics,
+    )
 
 
 def atomic_private_text(path: Path, value: str) -> None:
