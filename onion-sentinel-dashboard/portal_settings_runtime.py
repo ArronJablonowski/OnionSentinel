@@ -141,16 +141,30 @@ def normalize_soc_ai_settings(
     return runtime.normalize_ai_settings(payload, policy)
 
 
+def _configured_maxmind_database_path(
+    settings: dict,
+    database_type: str,
+    setting_key: str,
+    default_path: str,
+) -> str:
+    configured = str(settings.get(setting_key) or "").strip()
+    if database_type == "city" and not configured:
+        configured = str(settings.get("maxmind_geoip_db_path") or "").strip()
+    return configured or default_path
+
+
 def maxmind_geoip_database_status(
     runtime: Any, settings: dict, database_type: str = "city"
 ) -> dict:
     if database_type not in runtime.MAXMIND_GEOIP_DATABASE_SETTINGS:
         raise ValueError(f"Unsupported MaxMind database type: {database_type}")
     setting_key, default_path = runtime.MAXMIND_GEOIP_DATABASE_SETTINGS[database_type]
-    configured = str(settings.get(setting_key) or "").strip()
-    if database_type == "city" and not configured:
-        configured = str(settings.get("maxmind_geoip_db_path") or "").strip()
-    configured = configured or default_path
+    configured = _configured_maxmind_database_path(
+        settings,
+        database_type,
+        setting_key,
+        default_path,
+    )
     path = runtime.Path(configured).expanduser()
     status = {
         "database_type": database_type,
