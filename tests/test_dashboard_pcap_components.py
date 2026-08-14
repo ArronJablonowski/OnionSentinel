@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +35,242 @@ class DashboardPcapComponentsTests(unittest.TestCase):
         self.assertIn("| Status | None |", html)
         self.assertNotIn(".pcap", html.lower())
         self.assertNotIn(".pcapng", html.lower())
+
+    def test_empty_renderer_unpacks_status_before_analysis_and_cells(self) -> None:
+        trace: list[tuple[object, ...]] = []
+
+        class StatusProbe:
+            def __iter__(self):
+                trace.append(("status_iter",))
+                return iter(("none", "None", "No evidence"))
+
+        class AnalysisProbe(dict[str, object]):
+            def __len__(self) -> int:
+                trace.append(("analysis_len",))
+                return super().__len__()
+
+        def cell(value: object, max_len: int = 420) -> str:
+            trace.append(("cell", value, max_len))
+            return f"C[{value}]"
+
+        with mock.patch.object(self.components, "_cell", side_effect=cell):
+            rendered = self.components.render_pcap_evidence_markdown(
+                StatusProbe(),
+                AnalysisProbe(),
+            )
+
+        self.assertEqual(
+            trace,
+            [
+                ("status_iter",),
+                ("analysis_len",),
+                ("cell", "None", 420),
+                ("cell", "No evidence", 420),
+            ],
+        )
+        self.assertEqual(
+            rendered,
+            "\n".join(
+                [
+                    "## Parsed PCAP Evidence",
+                    "",
+                    "| Field | Value |",
+                    "| --- | --- |",
+                    "| Status | C[None] |",
+                    "| Detail | C[No evidence] |",
+                    "",
+                    "No parsed Zeek/TShark PCAP summary is available for this alert group yet.",
+                ]
+            ),
+        )
+
+    def test_unavailable_parsers_preserve_header_lookup_and_path_order(self) -> None:
+        trace: list[tuple[object, ...]] = []
+
+        class MappingProbe(dict[str, object]):
+            def __init__(self, label: str, **values: object) -> None:
+                super().__init__(values)
+                self.label = label
+
+            def get(self, key: str, default: object = None) -> object:
+                trace.append(("get", self.label, key, default))
+                return super().get(key, default)
+
+        class AnalysisProbe(MappingProbe):
+            def __len__(self) -> int:
+                trace.append(("analysis_len",))
+                return super().__len__()
+
+        class FilesProbe(list[object]):
+            def __len__(self) -> int:
+                trace.append(("files_len",))
+                return super().__len__()
+
+        class NameProbe:
+            @property
+            def name(self) -> str:
+                trace.append(("path_name",))
+                return "unit-analysis.json"
+
+        request = MappingProbe("request", request_id="request-7")
+        zeek = MappingProbe("zeek", available=False, reason="zeek-offline")
+        tshark = MappingProbe("tshark", available=False, reason="tshark-offline")
+        files = FilesProbe([{"name": "one"}, {"name": "two"}])
+        analysis = AnalysisProbe(
+            "analysis",
+            request=request,
+            zeek=zeek,
+            tshark=tshark,
+            pcap_files=files,
+            generated_at="stored-time",
+            artifact_state="parsed",
+            _analysis_path="/private/unit-analysis.json",
+        )
+
+        def cell(value: object, max_len: int = 420) -> str:
+            trace.append(("cell", value, max_len))
+            return f"C[{value}]"
+
+        def path(value: str) -> NameProbe:
+            trace.append(("path", value))
+            return NameProbe()
+
+        with (
+            mock.patch.object(self.components, "_cell", side_effect=cell),
+            mock.patch.object(self.components, "Path", side_effect=path),
+        ):
+            rendered = self.components.render_pcap_evidence_markdown(
+                ("failed", "Failed", "Parser unavailable"),
+                analysis,
+            )
+
+        self.assertIn("| Request ID | C[request-7] |", rendered)
+        self.assertIn("| Generated at | C[stored-time] |", rendered)
+        self.assertIn("| PCAP files parsed | 2 |", rendered)
+        self.assertIn("Zeek unavailable: C[zeek-offline]", rendered)
+        self.assertIn("TShark unavailable: C[tshark-offline]", rendered)
+        self.assertEqual(
+            trace,
+            [
+                ("analysis_len",),
+                ("get", "analysis", "request", None),
+                ("get", "analysis", "request", None),
+                ("get", "analysis", "zeek", None),
+                ("get", "analysis", "zeek", None),
+                ("get", "analysis", "tshark", None),
+                ("get", "analysis", "tshark", None),
+                ("get", "analysis", "pcap_files", None),
+                ("get", "analysis", "pcap_files", None),
+                ("get", "analysis", "generated_at", None),
+                ("cell", "Failed", 420),
+                ("cell", "Parser unavailable", 420),
+                ("get", "request", "request_id", None),
+                ("cell", "request-7", 420),
+                ("cell", "stored-time", 420),
+                ("get", "analysis", "artifact_state", None),
+                ("cell", "parsed", 420),
+                ("files_len",),
+                ("get", "analysis", "_analysis_path", None),
+                ("path", "/private/unit-analysis.json"),
+                ("path_name",),
+                ("cell", "unit-analysis.json", 420),
+                ("get", "zeek", "available", None),
+                ("get", "zeek", "reason", None),
+                ("cell", "zeek-offline", 420),
+                ("get", "tshark", "available", None),
+                ("get", "tshark", "reason", None),
+                ("cell", "tshark-offline", 420),
+            ],
+        )
+
+    def test_available_parser_sections_preserve_bounds_and_sample_admission(self) -> None:
+        trace: list[tuple[object, ...]] = []
+
+        class MappingProbe(dict[str, object]):
+            def __init__(self, label: str, **values: object) -> None:
+                super().__init__(values)
+                self.label = label
+
+            def get(self, key: str, default: object = None) -> object:
+                trace.append(("get", self.label, key, default))
+                return super().get(key, default)
+
+        class SliceProbe(list[object]):
+            def __init__(self, label: str, values: list[object]) -> None:
+                super().__init__(values)
+                self.label = label
+
+            def __getitem__(self, item: object) -> object:
+                trace.append(("slice", self.label, item))
+                return super().__getitem__(item)
+
+        category_keys = (
+            "top_connections",
+            "dns_queries",
+            "tls_sni",
+            "http_hosts",
+            "notices",
+            "weird",
+        )
+        zeek_values = {
+            key: SliceProbe(key, list(range(12)))
+            for key in category_keys
+        }
+        zeek = MappingProbe(
+            "zeek",
+            available=True,
+            record_counts={"conn.log": 2},
+            **zeek_values,
+        )
+        admitted_sample = MappingProbe(
+            "sample",
+            pcap="/private/admitted.pcap",
+            protocol_hierarchy="frame/ip",
+            conversations="tcp conversation",
+        )
+        excluded_sample = MappingProbe(
+            "excluded",
+            pcap="/private/excluded.pcap",
+            protocol_hierarchy="excluded",
+            conversations="excluded",
+        )
+        samples = SliceProbe("samples", ["skip", admitted_sample, excluded_sample])
+        tshark = MappingProbe("tshark", available=True, samples=samples)
+        analysis = {
+            "request": {},
+            "zeek": zeek,
+            "tshark": tshark,
+            "pcap_files": [{}],
+        }
+
+        def bounded(value: object, language: str = "json", max_len: int = 1800) -> str:
+            trace.append(("bounded", value, language, max_len))
+            return f"B[{language}]"
+
+        with mock.patch.object(
+            self.components,
+            "_bounded_block",
+            side_effect=bounded,
+        ):
+            rendered = self.components.render_pcap_evidence_markdown(
+                ("analyzed", "Analyzed", "Available"),
+                analysis,
+            )
+
+        self.assertIn("#### admitted.pcap", rendered)
+        self.assertNotIn("excluded.pcap", rendered)
+        bounded_calls = [event for event in trace if event[0] == "bounded"]
+        self.assertEqual(len(bounded_calls), 8)
+        for key in category_keys:
+            self.assertIn(("slice", key, slice(None, 10, None)), trace)
+        self.assertIn(("slice", "samples", slice(None, 2, None)), trace)
+        self.assertEqual(
+            bounded_calls[-2:],
+            [
+                ("bounded", "frame/ip", "text", 1800),
+                ("bounded", "tcp conversation", "text", 1800),
+            ],
+        )
 
     def test_renders_bounded_zeek_and_tshark_summary(self) -> None:
         record = {
