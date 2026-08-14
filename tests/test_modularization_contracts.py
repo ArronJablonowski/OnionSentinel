@@ -266,6 +266,33 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
         self.assertIn(contract_install, installer)
         self.assertLess(installer.index(contract_install), installer.index(broker_install))
 
+    def test_incident_evidence_diagnostics_are_installed_before_facade(self) -> None:
+        relay_app = ROOT / "relay" / "app"
+        diagnostics = relay_app / "incident_evidence_diagnostics.py"
+        broker = relay_app / "incident_evidence_broker.py"
+        installer = (ROOT / "relay" / "bin" / "install-pi-relay.sh").read_text(
+            encoding="utf-8"
+        )
+        diagnostics_install = (
+            'install -o soalert -g soalert -m 0644 '
+            '"$REPO_DIR/relay/app/incident_evidence_diagnostics.py"'
+        )
+        broker_install = (
+            'install -o soalert -g soalert -m 0755 '
+            '"$REPO_DIR/relay/app/incident_evidence_broker.py"'
+        )
+
+        self.assertTrue(diagnostics.is_file())
+        self.assertIn(
+            "from incident_evidence_diagnostics import (",
+            broker.read_text(encoding="utf-8"),
+        )
+        self.assertIn(diagnostics_install, installer)
+        self.assertLess(
+            installer.index(diagnostics_install),
+            installer.index(broker_install),
+        )
+
     def test_relay_health_wrapper_supports_isolated_file_loader_import(self) -> None:
         wrapper = ROOT / "relay" / "app" / "relay_health_wrapper.py"
         script = (

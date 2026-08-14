@@ -3623,6 +3623,13 @@ inventory contract without a cycle; the Pi installer copies both contracts
 before the executable broker. No Relay or Security Onion runtime is changed by
 these repository-only splits.
 
+`incident_evidence_diagnostics.py` owns the fail-closed projection of untrusted
+upstream stdout and stderr: printable one-line normalization, UTF-8 byte bounds,
+allowlisted inner error fields, and the stable two-hop failure envelope. It has
+no filesystem, process, credential, or network authority. The broker re-exports
+its compatibility helpers and remains the only process/CLI composition owner.
+The Pi installer copies diagnostics before the broker.
+
 ### Relay health supervision
 
 `relay_health_contract.py` owns environment/configuration defaults, persisted
