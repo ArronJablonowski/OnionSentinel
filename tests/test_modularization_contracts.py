@@ -426,6 +426,23 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
                     50,
                 )
 
+    def test_relay_process_io_has_bounded_lifecycle_phases(self) -> None:
+        process_io = ROOT / "relay" / "app" / "process_io.py"
+        expected = {
+            "_start_bounded_process",
+            "_register_process_control_channels",
+            "_drain_process_control_channels",
+            "_terminate_process_group",
+            "_close_process_control_channels",
+        }
+
+        self.assertTrue(expected <= top_level_function_names(process_io))
+        function = top_level_function(process_io, "run_bounded_command")
+        self.assertLessEqual(
+            (function.end_lineno or function.lineno) - function.lineno + 1,
+            50,
+        )
+
     def test_relay_health_wrapper_supports_isolated_file_loader_import(self) -> None:
         wrapper = ROOT / "relay" / "app" / "relay_health_wrapper.py"
         script = (
