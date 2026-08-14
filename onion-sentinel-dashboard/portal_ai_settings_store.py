@@ -10,6 +10,13 @@ from typing import ContextManager
 from portal_atomic_json_store import write_owner_only_json
 
 
+_AGENT_ASSIGNMENT_FIELDS = (
+    "agent_models",
+    "agent_second_opinion_models",
+    "agent_adjudicator_models",
+)
+
+
 @dataclass(frozen=True)
 class AiSettingsStoreSources:
     path: Path
@@ -87,9 +94,17 @@ def save_soc_ai_settings(
     payload: object,
 ) -> tuple[bool, dict]:
     with sources.lock:
-        ok, normalized = sources.normalize(
-            payload if isinstance(payload, dict) else {}
-        )
+        incoming = dict(payload) if isinstance(payload, dict) else {}
+        if sources.path.exists():
+            readable, raw = _read_raw_settings(sources)
+            if not readable:
+                return False, raw
+            ok, current = sources.normalize(raw)
+            if not ok:
+                return False, current
+            for field in _AGENT_ASSIGNMENT_FIELDS:
+                incoming[field] = current[field]
+        ok, normalized = sources.normalize(incoming)
         if not ok:
             return False, normalized
         ready, readiness_error = sources.readiness(normalized)

@@ -77,12 +77,19 @@ class AiSettingsStoreTest(unittest.TestCase):
         self.assertFalse(response["ok"])
         self.assertIn("Could not read", response["error"])
         before = self.path.read_text()
+        self.path.write_text(json.dumps({}), encoding="utf-8")
         blocked = AiSettingsStoreSources(
             **{**self.sources.__dict__, "readiness": lambda settings: (False, "not ready")}
         )
         saved, response = save_soc_ai_settings(blocked, {})
         self.assertFalse(saved)
         self.assertEqual(response["error"], "not ready")
+        self.assertEqual(self.path.read_text(), "{}")
+
+        self.path.write_text(before, encoding="utf-8")
+        saved, response = save_soc_ai_settings(self.sources, {})
+        self.assertFalse(saved)
+        self.assertIn("Could not read", response["error"])
         self.assertEqual(self.path.read_text(), before)
 
     def test_failed_atomic_replace_preserves_original_and_cleans_staged_document(self) -> None:

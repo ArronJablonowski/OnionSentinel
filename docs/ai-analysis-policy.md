@@ -508,6 +508,10 @@ The Settings page exposes independent provider controls:
 - If an assigned route is later disabled, normalization assigns that role to
   the first still-enabled Ollama model, or GPT CLI when it is the only enabled
   route. At least one route must remain enabled.
+- Global provider, policy, and GeoIP saves preserve the current per-agent
+  assignment transaction before normalizing it against the new enabled roster.
+  Assignment changes use the role-specific save boundary, so a stale Settings
+  form cannot overwrite a newer primary, reviewer, or adjudicator selection.
 
 For the active SOC Analyst, the configured second-opinion route runs only when
 the validated primary result reports low confidence, classifies the detection
