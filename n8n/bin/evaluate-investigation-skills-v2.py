@@ -28,8 +28,12 @@ DEFAULT_SECURITY_ONION_WRAPPER = (
     ROOT.parent / "security-onion" / "bin" / "export-incident-evidence"
 )
 TEMPLATE_PACKS = {
+    "alert-group-history": "alert_context",
+    "alert-group-selected-anchor": "alert_context",
     "dns-alert-context": "dns_activity",
     "dns-zeek-context": "dns_activity",
+    "flow-window-anchor": "network_flow",
+    "flow-window-timeline": "cross_sensor_timeline",
     "http-event-context": "zeek_http",
     "http-zeek-context": "zeek_http",
     "icmp-event-context": "network_flow",

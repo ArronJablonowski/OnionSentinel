@@ -10,6 +10,8 @@ a typed broker using the deployed field catalog and fixed target scope.
 
 | Pack | Minimum evidence | Useful pivots | Important alternative |
 | --- | --- | --- | --- |
+| Alert/group context | exact selected event, trusted timestamp, group dimensions and member identities | exact anchor, bounded group drilldown, per-member tuple and rule attribution | newest group member differs from earlier/later observations or broad grouping combines unrelated events |
+| Flow/window expansion | trusted anchor, role-safe tuple, bounded authorization envelope | narrow flow anchor, then bounded cross-sensor windows with unchanged filters | monitoring, maintenance, retention gaps, asymmetric routing |
 | DNS | alert/flow time, client, resolver, qname/qtype when present | Zeek DNS, Suricata DNS, answer history, NXDOMAIN ratio, related TLS/HTTP | normal discovery, CDN, update, security tooling |
 | TLS | five-tuple/time, SNI/cert/JA3 when present | Zeek SSL, cert chain, DNS history, flow duration/bytes, CTI | shared CDN/VPS, interception, normal client diversity |
 | HTTP | flow/time, host/URI/method/user agent | Zeek HTTP, DNS, TLS upgrade, file metadata, bounded body metadata | updates, telemetry, automation, scanners |
@@ -65,6 +67,14 @@ All candidate manifests pin the output fact-state set to `observed`,
 `inferred`, `unverified`, and `unavailable`. This keeps absent or inaccessible
 telemetry distinct from a confirmed negative observation across every protocol
 and data-source pack.
+
+Two foundational candidates cover the pre-protocol investigation boundary.
+Alert/group validation treats the exact selected alert separately from grouped
+history; a grouped view's newest member is never projected onto other members.
+Flow/window expansion begins at the trusted anchor and widens only inside the
+broker-owned authorization envelope, without changing observable or tuple
+meaning. Both candidates use the governed `alert_context`, `network_flow`, and
+`cross_sensor_timeline` projections and remain inactive and unpromotable.
 
 `skill-packs/dns-triage-v2.example.json` demonstrates the v2 boundary. Its
 verification flags are deliberately false because this package has not passed

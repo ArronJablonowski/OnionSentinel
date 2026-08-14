@@ -1,0 +1,45 @@
+{
+  "schema": "onion-sentinel-investigation-skill-manifest-v2",
+  "id": "foundation.alert-context.validation",
+  "version": "2.0.0-candidate.1",
+  "artifact_digest": "a7908641b649d54c77984af86ae595405aa6773708e82f9c688106c759fea4ef",
+  "lineage": {"source_revision": "88ce94e", "predecessor_digest": ""},
+  "compatibility": {"harness_contract": "onion-sentinel-harness-job-envelope-v1", "policy_schema": "onion-sentinel-investigation-harness-policy-v1", "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"},
+  "maintainer": {"owner": "Onion Sentinel", "reviewed_at": "2026-08-14T19:20:00Z", "reviewer": "pending"},
+  "roles": ["soc-analyst", "incident-responder", "threat-hunter"],
+  "match": {"tasks": ["grouped-detection-validation"], "protocols": ["any"], "alert_families": ["grouped-detection"], "data_sources": ["elastic"]},
+  "objective": "Validate the exact selected alert before separately assessing bounded grouped history, preserving event-level attribution and refusing to project the latest group member onto earlier or later observations.",
+  "capabilities": ["security-onion.events.query"],
+  "safety": {"read_only": true, "active_operation": false, "sensitivity": "moderate", "requires_approval": false},
+  "budgets": {"max_queries": 3, "max_rows": 1000, "max_bytes": 1048576, "timeout_seconds": 90},
+  "preconditions": ["an exact selected alert identity and trusted timestamp exist", "group membership criteria and bounded group window are attributable", "deployed alert-context field catalog is available"],
+  "required_evidence": ["exact selected event identity timestamp rule identity and tuple", "grouping dimensions and the identity of each grouped observation considered", "successful query coverage row count truncation and evidence references"],
+  "query_templates": [
+    {
+      "id": "alert-group-selected-anchor",
+      "backend": "elastic",
+      "language": "query-dsl",
+      "purpose": "Retrieve the exact trusted alert anchor and its event-native identity before interpreting any aggregate or group history.",
+      "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"],
+      "expected_fields": ["@timestamp", "event.dataset", "event.id", "rule.id", "rule.uuid", "rule.name", "source.ip", "source.port", "destination.ip", "destination.port", "network.transport", "network.community_id"]
+    },
+    {
+      "id": "alert-group-history",
+      "backend": "elastic",
+      "language": "query-dsl",
+      "purpose": "Drill down from bounded grouping dimensions to individual alert documents without treating the newest member as representative of the group.",
+      "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"],
+      "expected_fields": ["@timestamp", "event.dataset", "event.id", "rule.id", "rule.uuid", "rule.name", "source.ip", "destination.ip", "network.community_id"]
+    }
+  ],
+  "output_contract": {"schema": "onion-sentinel-skill-result-v1", "coverage_required": true, "truncation_required": true, "evidence_refs_required": true, "fact_states": ["observed", "inferred", "unverified", "unavailable"]},
+  "alternative_hypotheses": ["one selected event is benign while other group members differ materially", "a repeated benign service or approved test explains the group", "the grouping dimensions combine unrelated event tuples or assets", "a consistent malicious campaign explains independently corroborated members"],
+  "stop_conditions": ["the selected event and every relied-on group member have attributable evidence", "grouping ambiguity prevents a group-wide conclusion and is reported as unverified", "the next bounded drilldown has low expected information value", "a query budget or deadline is exhausted"],
+  "confidence_limiters": ["group criteria or document identities are unavailable", "the grouped view exposes only the newest member", "the bounded window omits earlier or later group observations", "query coverage or truncation prevents complete group assessment"],
+  "known_false_positive_patterns": ["authorized vulnerability scanning", "repeated health checks or service discovery", "known software update traffic", "multiple unrelated assets sharing a broad rule name"],
+  "verification": {"unit_tests": false, "replay_cases": 0, "independent_query_review": false, "adversarial_tests": false, "human_approved": false},
+  "references": [
+    {"title": "Security Onion 2.4 Alerts grouped and detailed views", "url": "https://docs.securityonion.net/en/2.4/alerts.html", "product_version": "2.4", "retrieved_at": "2026-08-14T19:20:00Z"},
+    {"title": "Elastic Common Schema field reference", "url": "https://www.elastic.co/guide/en/ecs/current/ecs-field-reference.html", "product_version": "9.4.0 as reviewed", "retrieved_at": "2026-08-14T19:20:00Z"}
+  ]
+}

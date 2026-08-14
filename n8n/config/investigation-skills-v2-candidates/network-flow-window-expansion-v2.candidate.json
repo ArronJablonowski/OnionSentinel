@@ -1,0 +1,46 @@
+{
+  "schema": "onion-sentinel-investigation-skill-manifest-v2",
+  "id": "network.flow.window-expansion",
+  "version": "2.0.0-candidate.1",
+  "artifact_digest": "793d76b0b4b58ba9ce31a0482bb0a846f5d4e8a7053b67b0434693ec41b1f0ab",
+  "lineage": {"source_revision": "88ce94e", "predecessor_digest": ""},
+  "compatibility": {"harness_contract": "onion-sentinel-harness-job-envelope-v1", "policy_schema": "onion-sentinel-investigation-harness-policy-v1", "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"},
+  "maintainer": {"owner": "Onion Sentinel", "reviewed_at": "2026-08-14T19:20:00Z", "reviewer": "pending"},
+  "roles": ["soc-analyst", "incident-responder", "threat-hunter"],
+  "match": {"tasks": ["flow-window-expansion"], "protocols": ["any"], "alert_families": ["network-flow"], "data_sources": ["elastic", "oql"]},
+  "objective": "Anchor a network flow with role-safe tuple semantics, then expand time in bounded steps only while each wider window has expected information value and remains inside the trusted authorization envelope.",
+  "capabilities": ["security-onion.events.query", "security-onion.oql.query"],
+  "safety": {"read_only": true, "active_operation": false, "sensitivity": "moderate", "requires_approval": false},
+  "budgets": {"max_queries": 4, "max_rows": 2000, "max_bytes": 2097152, "timeout_seconds": 120},
+  "preconditions": ["a trusted alert timestamp and bounded authorization envelope exist", "at least one attributable observable or event tuple exists", "cross-sensor role semantics and deployed field catalogs are available"],
+  "required_evidence": ["anchor window tuple role semantics and correlation key provenance", "each attempted window with exact filters status hit count and coverage", "successful query bounds truncation telemetry gaps and evidence references"],
+  "query_templates": [
+    {
+      "id": "flow-window-anchor",
+      "backend": "elastic",
+      "language": "query-dsl",
+      "purpose": "Establish the narrowest useful flow window around the trusted alert using only authorized observables and a role-safe event tuple.",
+      "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"],
+      "expected_fields": ["@timestamp", "event.dataset", "event.duration", "source.ip", "source.port", "source.bytes", "destination.ip", "destination.port", "destination.bytes", "network.transport", "network.protocol", "network.direction", "network.community_id", "network.bytes", "network.packets"]
+    },
+    {
+      "id": "flow-window-timeline",
+      "backend": "oql",
+      "language": "oql",
+      "purpose": "Expand to a bounded cross-sensor timeline without changing authorized observables, tuple meaning, or the trusted outer time envelope.",
+      "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"],
+      "expected_fields": ["@timestamp", "event.dataset", "event.id", "rule.id", "rule.uuid", "source.ip", "source.port", "destination.ip", "destination.port", "network.transport", "network.protocol", "network.direction", "network.community_id"]
+    }
+  ],
+  "output_contract": {"schema": "onion-sentinel-skill-result-v1", "coverage_required": true, "truncation_required": true, "evidence_refs_required": true, "fact_states": ["observed", "inferred", "unverified", "unavailable"]},
+  "alternative_hypotheses": ["a single expected client-server exchange explains the anchor", "periodic maintenance discovery or monitoring explains repeated flows", "sensor retention parser or asymmetric-routing gaps hide related activity", "a sustained or recurring malicious sequence explains corroborated windows"],
+  "stop_conditions": ["the anchor and discriminating temporal pattern are corroborated", "a wider window repeats the same evidence without changing a hypothesis", "the trusted authorization envelope would be exceeded", "a query budget or deadline is exhausted"],
+  "confidence_limiters": ["community ID or role-safe tuple attribution is unavailable", "one or more windows are partial failed truncated or unavailable", "sensor coverage or retention changes across attempted windows", "encrypted traffic limits application-level interpretation"],
+  "known_false_positive_patterns": ["periodic monitoring and health checks", "backup synchronization and software updates", "long-lived administrative or messaging sessions", "load balancers proxies and shared service infrastructure"],
+  "verification": {"unit_tests": false, "replay_cases": 0, "independent_query_review": false, "adversarial_tests": false, "human_approved": false},
+  "references": [
+    {"title": "Security Onion 2.4 Dashboards and Onion Query Language", "url": "https://docs.securityonion.net/en/2.4/dashboards.html", "product_version": "2.4", "retrieved_at": "2026-08-14T19:20:00Z"},
+    {"title": "Elastic Common Schema network field set", "url": "https://www.elastic.co/guide/en/ecs/current/ecs-network.html", "product_version": "9.4.0 as reviewed", "retrieved_at": "2026-08-14T19:20:00Z"},
+    {"title": "Elastic Common Schema source fields", "url": "https://www.elastic.co/docs/reference/ecs/ecs-source", "product_version": "9.4.0 as reviewed", "retrieved_at": "2026-08-14T19:20:00Z"}
+  ]
+}

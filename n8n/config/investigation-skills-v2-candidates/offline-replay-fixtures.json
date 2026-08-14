@@ -9,6 +9,8 @@
     "pcap-derived": ["packet_count", "icmp_types", "icmp_codes", "size_distribution", "timing_summary", "capture_limits"]
   },
   "cases": [
+    {"id":"grouped-alert-context-soc","role":"soc-analyst","context":{"task":"grouped-detection-validation","protocol":"any","alert_family":"grouped-detection","data_source":"elastic"},"permitted_capabilities":["security-onion.events.query"],"expected_selected":["foundation.alert-context.validation"]},
+    {"id":"flow-window-expansion-ir","role":"incident-responder","context":{"task":"flow-window-expansion","protocol":"any","alert_family":"network-flow","data_source":"oql"},"permitted_capabilities":["security-onion.events.query","security-onion.oql.query"],"expected_selected":["network.flow.window-expansion"]},
     {"id":"dns-elastic-soc","role":"soc-analyst","context":{"task":"alert-triage","protocol":"dns","alert_family":"dns","data_source":"elastic"},"permitted_capabilities":["security-onion.events.query","security-onion.oql.query","suricata.events.read","zeek.derived.query"],"expected_selected":["network.dns.triage"]},
     {"id":"tls-zeek-ir","role":"incident-responder","context":{"task":"incident-response","protocol":"tls","alert_family":"certificate","data_source":"zeek.ssl"},"permitted_capabilities":["security-onion.events.query","security-onion.oql.query","suricata.events.read","zeek.derived.query","threat-intel.lookup"],"expected_selected":["network.tls.triage"]},
     {"id":"http-oql-hunt","role":"threat-hunter","context":{"task":"threat-hunt","protocol":"http","alert_family":"web","data_source":"oql"},"permitted_capabilities":["security-onion.events.query","security-onion.oql.query","suricata.events.read","zeek.derived.query"],"expected_selected":["network.http.triage"]},
