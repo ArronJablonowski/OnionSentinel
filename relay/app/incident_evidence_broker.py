@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import hashlib
 import re
 import syslog
 import uuid
@@ -25,6 +24,16 @@ from incident_evidence_software import (
     _software_text,
     _validate_software_record,
 )
+from incident_evidence_transport import (
+    CORRELATION_ID_RE,
+    HEX_64_RE,
+    TRANSPORT_AUDIT_CONTRACT,
+    TRANSPORT_RECEIPT_CONTRACT,
+    _canonical_digest,
+    _receipt_counters_valid,
+    receipt_identity,
+    transport_envelope,
+)
 from process_io import BoundedProcessError, run_bounded_command
 
 
@@ -33,21 +42,12 @@ MAX_TRANSPORT_REQUEST_BYTES = 20 * 1024
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_ERROR_FIELD_BYTES = 500
 DEFAULT_CONFIG = Path("/etc/so-alert-relay/incident-evidence.json")
-HEX_64_RE = re.compile(r"[0-9a-f]{64}")
-TRANSPORT_AUDIT_CONTRACT = "onion-sentinel-evidence-transport-v1"
-TRANSPORT_RECEIPT_CONTRACT = "onion-sentinel-evidence-receipt-v1"
-CORRELATION_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 AUDIT_OPERATIONS = {
     "incident_evidence",
     "investigation_pivots",
     DHCP_DISCOVERY_OPERATION,
     SOFTWARE_INVENTORY_OPERATION,
 }
-
-
-def _canonical_digest(value: object) -> str:
-    encoded = json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _audit_value(value: object) -> str:
@@ -74,81 +74,15 @@ def _audit_log(event: str, audit: dict, **fields: object) -> None:
 
 
 def _transport_envelope(value: object) -> tuple[dict, dict]:
-    if not isinstance(value, dict):
-        raise ValueError("request root must be an object")
-    if value.get("transport_contract") == TRANSPORT_AUDIT_CONTRACT:
-        if set(value) != {
-            "transport_contract", "correlation_id", "request_digest", "payload"
-        }:
-            raise ValueError("transport envelope fields are invalid")
-        payload = value.get("payload")
-        correlation_id = value.get("correlation_id")
-        request_digest = value.get("request_digest")
-        if (
-            not isinstance(payload, dict)
-            or not isinstance(correlation_id, str)
-            or not CORRELATION_ID_RE.fullmatch(correlation_id)
-            or not isinstance(request_digest, str)
-            or not HEX_64_RE.fullmatch(request_digest)
-            or request_digest != _canonical_digest(payload)
-        ):
-            raise ValueError("transport envelope failed validation")
-    else:
-        payload = value
-        correlation_id = uuid.uuid4().hex
-        request_digest = _canonical_digest(payload)
-    if len(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()) > MAX_REQUEST_BYTES:
-        raise ValueError("request payload exceeds the broker byte limit")
-    audit = {
-        "transport_contract": TRANSPORT_AUDIT_CONTRACT,
-        "correlation_id": correlation_id,
-        "request_digest": request_digest,
-    }
-    return payload, {**audit, "payload": payload}
-
-
-def _receipt_counters_valid(receipt: dict) -> bool:
-    return not any(
-        not isinstance(receipt.get(field), int)
-        or isinstance(receipt.get(field), bool)
-        or receipt.get(field) < 0
-        for field in (
-            "elastic_search_count",
-            "osquery_query_count",
-            "helper_invocation_count",
-        )
+    return transport_envelope(
+        value,
+        maximum_payload_bytes=MAX_REQUEST_BYTES,
+        uuid_factory=uuid.uuid4,
     )
 
 
 def _receipt_identity(response: dict, audit: dict) -> dict:
-    receipt = response.get("audit_receipt")
-    if not isinstance(receipt, dict) or set(receipt) != {
-        "receipt_contract",
-        "correlation_id",
-        "request_digest",
-        "response_payload_digest",
-        "elastic_search_count",
-        "osquery_query_count",
-        "helper_invocation_count",
-        "read_only",
-        "terminal_status",
-    }:
-        raise ValueError("Security Onion response omitted its audit receipt")
-    without_receipt = {
-        key: value for key, value in response.items() if key != "audit_receipt"
-    }
-    if (
-        receipt.get("receipt_contract") != TRANSPORT_RECEIPT_CONTRACT
-        or receipt.get("correlation_id") != audit["correlation_id"]
-        or receipt.get("request_digest") != audit["request_digest"]
-        or receipt.get("response_payload_digest") != _canonical_digest(without_receipt)
-        or receipt.get("read_only") is not True
-        or receipt.get("terminal_status")
-        != ("complete" if response.get("complete") is True else "partial")
-        or not _receipt_counters_valid(receipt)
-    ):
-        raise ValueError("Security Onion audit receipt failed validation")
-    return receipt
+    return receipt_identity(response, audit)
 
 
 def _expected_control_searches(response: dict) -> int:

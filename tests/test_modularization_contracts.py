@@ -574,12 +574,8 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
         broker = ROOT / "relay" / "app" / "incident_evidence_broker.py"
         dhcp = ROOT / "relay" / "app" / "incident_evidence_dhcp.py"
         software = ROOT / "relay" / "app" / "incident_evidence_software.py"
+        transport = ROOT / "relay" / "app" / "incident_evidence_transport.py"
         broker_phases = {
-            "_audited_transport_fields",
-            "_transport_payload_size",
-            "_receipt_fields",
-            "_receipt_contract_matches",
-            "_receipt_terminal_matches",
             "_receipt_identity",
             "_validate_receipt_accounting",
             "_admit_transport_request",
@@ -590,6 +586,15 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
             "_run_upstream",
             "_decode_upstream_response",
             "_validate_upstream_response",
+        }
+        transport_phases = {
+            "_audited_transport_fields",
+            "_transport_payload_size",
+            "_receipt_fields",
+            "_receipt_contract_matches",
+            "_receipt_terminal_matches",
+            "transport_envelope",
+            "receipt_identity",
         }
         software_phases = {
             "_validate_record_identity",
@@ -602,6 +607,7 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
         }
 
         self.assertTrue(broker_phases <= top_level_function_names(broker))
+        self.assertTrue(transport_phases <= top_level_function_names(transport))
         self.assertTrue(dhcp.is_file())
         self.assertTrue(software.is_file())
         self.assertTrue(software_phases <= top_level_function_names(software))
@@ -631,6 +637,10 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
         )
         self.assertLess(
             installer.index("incident_evidence_software.py"),
+            installer.index("incident_evidence_broker.py"),
+        )
+        self.assertLess(
+            installer.index("incident_evidence_transport.py"),
             installer.index("incident_evidence_broker.py"),
         )
 

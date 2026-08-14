@@ -3593,10 +3593,14 @@ anchor and disk-threshold projection, and wrapped webhook rejection parsing.
 
 `incident_evidence_broker.py` remains the forced-command compatibility facade
 for bounded, read-only Security Onion incident evidence. Its phases separately
-own transport admission, special-request classification and validation,
-configuration loading, fixed SSH command projection, bounded upstream
-execution, response decoding, receipt/contract validation, terminal auditing,
-and exit behavior. `incident_evidence_dhcp.py` owns the DHCP discovery request,
+own special-request classification and validation, configuration loading,
+fixed SSH command projection, bounded upstream execution, response decoding,
+receipt accounting, terminal auditing, and exit behavior.
+`incident_evidence_transport.py` is the inward leaf owner for strict legacy and
+audited envelope admission, canonical request/response digests, correlation
+identity, byte ceilings, and read-only terminal audit-receipt validation; the
+broker retains thin compatibility wrappers for its historical private seams.
+`incident_evidence_dhcp.py` owns the DHCP discovery request,
 window, and result-size contract. `incident_evidence_software.py` owns Software
 Inventory request, cursor, record, operating-system provenance, pagination,
 response, and query-audit validation. The broker re-exports both historical
