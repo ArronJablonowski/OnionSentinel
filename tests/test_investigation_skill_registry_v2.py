@@ -65,6 +65,25 @@ def record(
     }
 
 
+def evaluation(value: dict[str, object]) -> dict[str, object]:
+    verification = value["verification"]
+    return {
+        "schema": "onion-sentinel-investigation-skill-evaluation-v1",
+        "manifest_digest": value["artifact_digest"],
+        "evaluation_digest": "e" * 64,
+        "source_revision": value["lineage"]["source_revision"],
+        "reviewer": value["maintainer"]["reviewer"],
+        "approver": "soc-platform-owner",
+        "evaluated_at": "2026-08-14T18:00:00Z",
+        "unit_test_count": 12,
+        "replay_case_count": verification["replay_cases"],
+        "independent_query_review": verification["independent_query_review"],
+        "adversarial_tests": verification["adversarial_tests"],
+        "human_approved": verification["human_approved"],
+        "outcome": "pass",
+    }
+
+
 def signer(payload: bytes) -> dict[str, str]:
     return {
         "algorithm": "external-ed25519",
@@ -106,6 +125,25 @@ def context() -> dict[str, str]:
 
 
 class InvestigationSkillRegistryV2Tests(unittest.TestCase):
+    def test_active_record_requires_digest_bound_independent_evaluation(self) -> None:
+        value = manifest("network.dns.evaluated")
+        evaluated = {**record(value), "evaluation": evaluation(value)}
+
+        sealed = snapshot([evaluated])
+        self.assertEqual(
+            sealed["records"][0]["evaluation"]["manifest_digest"],
+            value["artifact_digest"],
+        )
+
+        missing = record(value)
+        with self.assertRaisesRegex(ValueError, "evaluation attestation"):
+            snapshot([missing])
+
+        mismatched = copy.deepcopy(evaluated)
+        mismatched["evaluation"]["manifest_digest"] = "f" * 64
+        with self.assertRaisesRegex(ValueError, "evaluation attestation"):
+            snapshot([mismatched])
+
     def test_signed_active_snapshot_validates_without_mutation(self) -> None:
         value = snapshot([record(manifest("network.dns.primary"))])
         before = copy.deepcopy(value)
