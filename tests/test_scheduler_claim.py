@@ -59,6 +59,7 @@ class SchedulerClaimTests(unittest.TestCase):
         durable_intent: bool = True,
         job_type: str = "ai_analysis",
         allowed_levels: tuple[str, ...] = ("critical", "high"),
+        allowed_incident_levels: tuple[str, ...] = ("critical", "high"),
         payload: dict[str, object] | None = None,
         state: SchedulerClaimState | None = None,
     ) -> SchedulerClaimRequest:
@@ -73,6 +74,7 @@ class SchedulerClaimTests(unittest.TestCase):
             durable_intent=durable_intent,
             controlled=controlled,
             allowed_analysis_levels=allowed_levels,
+            allowed_incident_levels=allowed_incident_levels,
             state=state or SchedulerClaimState(),
         )
 
@@ -174,6 +176,69 @@ class SchedulerClaimTests(unittest.TestCase):
         self.assertEqual(completed.args[2], "completed")
         self.assertEqual(completed.kwargs["lease_token"], "lease-1")
         self.assertIn("below configured threshold", self.events[-1])
+
+    def test_automatic_incident_job_below_its_floor_fails_closed(self) -> None:
+        self.transition = ClaimedAiLease(
+            "lease-ir",
+            job_payload={"agent_role": "incident-responder"},
+            job_type="incident_response_analysis",
+            resolved_key="group-1",
+            job_id=7,
+        )
+        self.sources.report_status.return_value = self.transition
+        self.sources.load_claimed_job.return_value = (
+            {
+                "agent_role": "incident-responder",
+                "manual_reanalysis": False,
+            },
+            "alert-1",
+            "group-1",
+            "low",
+        )
+
+        result = acquire_scheduler_claim(
+            self.sources,
+            self.request(
+                job_type="incident_response_analysis",
+                allowed_levels=("critical", "high", "medium", "low"),
+                allowed_incident_levels=("critical", "high", "medium"),
+            ),
+        )
+
+        self.assertEqual(result.disposition, "retired")
+        retired = self.sources.report_status.call_args_list[-1]
+        self.assertEqual(retired.args[2], "failed")
+        self.assertIn("automatic incident response skipped", retired.args[3])
+        self.assertIs(retired.kwargs["retryable"], False)
+
+    def test_manual_incident_job_bypasses_automatic_floor(self) -> None:
+        self.transition = ClaimedAiLease(
+            "lease-ir",
+            job_payload={"agent_role": "incident-responder"},
+            job_type="incident_response_analysis",
+            resolved_key="group-1",
+            job_id=7,
+        )
+        self.sources.report_status.return_value = self.transition
+        self.sources.load_claimed_job.return_value = (
+            {
+                "agent_role": "incident-responder",
+                "manual_reanalysis": True,
+            },
+            "alert-1",
+            "group-1",
+            "low",
+        )
+
+        result = acquire_scheduler_claim(
+            self.sources,
+            self.request(
+                job_type="incident_response_analysis",
+                allowed_incident_levels=("critical",),
+            ),
+        )
+
+        self.assertEqual(result.disposition, "claimed")
 
 
 if __name__ == "__main__":

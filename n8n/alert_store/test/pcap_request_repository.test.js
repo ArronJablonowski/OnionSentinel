@@ -31,6 +31,10 @@ function harness({gets = [], alls = []} = {}) {
     ),
     recordMetric: async (...args) => calls.push({name: 'metric', args}),
     readCaptureLossThreshold: () => 5,
+    readPcapThreshold: () => 'medium',
+    severityRank: Object.freeze({
+      informational: 0, low: 1, medium: 2, high: 3, critical: 4,
+    }),
     requeueStaleClaims: async () => calls.push({name: 'stale'}),
     priorityMaxWaitSeconds: 1200,
     captureRetentionSeconds: 3600,
@@ -76,12 +80,32 @@ test('list preserves status bounds, priority aging, retention, and stale recover
   assert.equal(query.params.at(-1), 100);
 });
 
-test('bulk requeue deduplicates, bounds, and resets failed requests only', async () => {
+test('pending claim retires only automatic requests below the current PCAP floor', async () => {
+  const env = harness({alls: [[{request_id: 'p1', status: 'pending'}]]});
+
+  await env.repository.listRequests(new URLSearchParams('status=pending'));
+
+  const retirement = env.calls.find(
+    ({name, sql}) => name === 'run' && /policy_skipped/.test(sql),
+  );
+  assert.ok(retirement);
+  assert.match(retirement.sql, /requested_by = 'alert-store-auto-pcap'/);
+  assert.match(retirement.sql, /COALESCE\(g\.triage_level/);
+  assert.deepEqual(retirement.params.slice(0, 3), [
+    'Automatic PCAP analysis skipped below configured medium threshold',
+    '2026-08-09  12:00:00Z',
+    '2026-08-09  12:00:00Z',
+  ]);
+});
+
+test('bulk requeue explicitly overrides failed or policy-skipped requests', async () => {
   const ids = Array.from({length: 510}, (_, index) => `p${index}`);
   const env = harness({alls: [[]]});
   await env.repository.requeueRequests({request_ids: [...ids, 'p1']});
   const update = env.calls.find(({name}) => name === 'run');
-  assert.match(update.sql, /WHERE status = 'failed'/);
+  assert.match(update.sql, /status = 'failed'/);
+  assert.match(update.sql, /outcome = 'policy_skipped'/);
+  assert.match(update.sql, /requested_by = 'alert-store-explicit-requeue'/);
   assert.equal(update.params.length, 501);
   assert.equal(new Set(update.params.slice(1)).size, 500);
 });
