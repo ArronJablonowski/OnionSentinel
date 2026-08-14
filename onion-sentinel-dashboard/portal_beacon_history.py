@@ -59,8 +59,7 @@ def _entry(
     timestamp: dt.datetime,
     format_timestamp: FormatTimestamp,
 ) -> dict[str, object]:
-    previous = raw.get("relay_previous_failure")
-    previous = previous if isinstance(previous, dict) else None
+    previous = _previous_failure(raw)
     return {
         "timestamp": format_timestamp(timestamp.astimezone(), timespec="milliseconds"),
         "timestamp_utc": format_timestamp(timestamp, timespec="milliseconds", utc_z=True),
@@ -73,9 +72,20 @@ def _entry(
         "posted_webhook_alerts": raw.get("posted_webhook_alerts"),
         "rule_name": raw.get("rule_name") or raw.get("first_rule") or "",
         "http_status": _http_status(raw),
-        "error": raw.get("error") or (previous or {}).get("summary") or "",
+        "error": _entry_error(raw, previous),
         "previous_failure": previous,
     }
+
+
+def _previous_failure(raw: dict[str, object]) -> dict[str, object] | None:
+    previous = raw.get("relay_previous_failure")
+    return previous if isinstance(previous, dict) else None
+
+
+def _entry_error(
+    raw: dict[str, object], previous: dict[str, object] | None
+) -> object:
+    return raw.get("error") or (previous or {}).get("summary") or ""
 
 
 def _entries(
