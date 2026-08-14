@@ -48,6 +48,27 @@ def _exact_source_pdf(
     return None
 
 
+def _recursive_pdf_relative(
+    src: Path,
+    category: str,
+    root: Path,
+) -> Path | None:
+    if (
+        any(part == "__MACOSX" for part in src.parts)
+        or src.name.startswith("._")
+        or not src.is_file()
+    ):
+        return None
+    rel = src.relative_to(root)
+    if (
+        category == "CheatSheets"
+        and rel.parts
+        and rel.parts[0] == "SANS_Posters"
+    ):
+        return None
+    return rel
+
+
 def _recursive_source_pdf(
     resource_id: str,
     sources: ResourceSources,
@@ -56,14 +77,8 @@ def _recursive_source_pdf(
         if not root.exists():
             continue
         for src in root.rglob("*.pdf"):
-            if (
-                any(part == "__MACOSX" for part in src.parts)
-                or src.name.startswith("._")
-                or not src.is_file()
-            ):
-                continue
-            rel = src.relative_to(root)
-            if category == "CheatSheets" and rel.parts and rel.parts[0] == "SANS_Posters":
+            rel = _recursive_pdf_relative(src, category, root)
+            if rel is None:
                 continue
             if resource_library_id_for(src) == resource_id:
                 return src, category, rel
