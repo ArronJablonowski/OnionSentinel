@@ -1,6 +1,7 @@
 """Content-free investigation-skill identity attestation."""
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping
 
 from harness_policy import (
@@ -10,6 +11,56 @@ from harness_policy import (
     INVESTIGATION_SKILL_ADVISORY_MODE,
     INVESTIGATION_SKILL_UNAVAILABLE_MODE,
     MAX_ATTESTED_INVESTIGATION_SKILLS,
+)
+
+
+V2_SELECTION_SCHEMA = "onion-sentinel-investigation-skill-selection-v2"
+V2_ENFORCEMENT = "identity_only_no_execution"
+_V2_VERSION_RE = re.compile(
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-[0-9A-Za-z.-]+)?"
+)
+_V2_PROVIDERS = frozenset({"codex-cli", "ollama"})
+_V2_SELECTION_REASONS = frozenset(
+    {"exact_match_capability_and_promotion_gates_satisfied"}
+)
+_V2_REJECTION_REASONS = frozenset(
+    {
+        "aggregate_budget_exceeded",
+        "artifact_revoked",
+        "capability_not_permitted",
+        "compatibility_mismatch",
+        "dependency_unavailable",
+        "exact_match_failed",
+        "lifecycle_state_unavailable",
+        "manifest_validation_failed",
+        "promotion_gates_incomplete",
+        "role_mismatch",
+        "skill_conflict",
+        "unsupported_provider",
+    }
+)
+_V2_BUDGET_FIELDS = (
+    "max_queries",
+    "max_rows",
+    "max_bytes",
+    "timeout_seconds",
+)
+_V2_FIELDS = frozenset(
+    {
+        "schema",
+        "mode",
+        "registry_version",
+        "registry_digest",
+        "provider",
+        "provider_compatible",
+        "selected",
+        "selected_count",
+        "truncated",
+        "rejected",
+        "aggregate_budget",
+        "enforcement",
+    }
 )
 
 
@@ -24,6 +75,8 @@ def investigation_skill_selection_attestation(
         raise HarnessIntegrityError(
             "investigation skill selection must be an object"
         )
+    if raw.get("schema") == V2_SELECTION_SCHEMA:
+        return _v2_attestation(raw)
     registry_version = _registry_version(raw)
     registry_sha256 = _registry_digest(raw)
     _require_advisory_shadow_mode(raw)
@@ -50,6 +103,173 @@ def investigation_skill_selection_attestation(
         "truncated": truncated,
         "advisory_mode": advisory_mode,
     }
+
+
+def _v2_attestation(raw: Mapping[str, Any]) -> dict[str, Any]:
+    if frozenset(raw) != _V2_FIELDS:
+        raise HarnessIntegrityError(
+            "v2 investigation skill selection field set is invalid"
+        )
+    registry_version = _registry_version(raw)
+    registry_sha256 = _v2_registry_digest(raw)
+    provider, compatible = _v2_provider(raw)
+    projected = _v2_selected_identities(raw)
+    selected_count, truncated = _selection_summary(raw, projected)
+    rejected = _v2_rejections(raw)
+    budget = _v2_budget(raw)
+    if raw.get("enforcement") != V2_ENFORCEMENT:
+        raise HarnessIntegrityError(
+            "v2 investigation skills must remain identity-only"
+        )
+    if not compatible and projected:
+        raise HarnessIntegrityError(
+            "incompatible v2 provider selection must be empty"
+        )
+    projected.sort(
+        key=lambda item: (
+            str(item["id"]),
+            str(item["version"]),
+            str(item["skill_sha256"]),
+        )
+    )
+    return {
+        "framework_version": 2,
+        "registry_version": registry_version,
+        "registry_sha256": registry_sha256,
+        "provider": provider,
+        "provider_compatible": compatible,
+        "selected": projected,
+        "selected_count": selected_count,
+        "truncated": truncated,
+        "rejected": rejected,
+        "aggregate_budget": budget,
+        "advisory_mode": V2_ENFORCEMENT,
+    }
+
+
+def _v2_registry_digest(raw: Mapping[str, Any]) -> str:
+    value = raw.get("registry_digest")
+    if not isinstance(value, str) or not DIGEST_RE.fullmatch(value):
+        raise HarnessIntegrityError(
+            "v2 investigation skill registry digest is invalid"
+        )
+    return value
+
+
+def _v2_provider(raw: Mapping[str, Any]) -> tuple[str, bool]:
+    provider = raw.get("provider")
+    compatible = raw.get("provider_compatible")
+    if not isinstance(provider, str) or not IDENTIFIER_RE.fullmatch(provider):
+        raise HarnessIntegrityError("v2 investigation skill provider is invalid")
+    if not isinstance(compatible, bool):
+        raise HarnessIntegrityError(
+            "v2 investigation skill provider compatibility is invalid"
+        )
+    if compatible != (provider in _V2_PROVIDERS):
+        raise HarnessIntegrityError(
+            "v2 investigation skill provider compatibility is inconsistent"
+        )
+    return provider, compatible
+
+
+def _v2_selected_identities(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
+    selected = raw.get("selected")
+    if (
+        not isinstance(selected, list)
+        or len(selected) > MAX_ATTESTED_INVESTIGATION_SKILLS
+    ):
+        raise HarnessIntegrityError(
+            "v2 investigation skill selection exceeds its bounded list"
+        )
+    projected = [_v2_selected_identity(item) for item in selected]
+    identities = {(item["id"], item["version"]) for item in projected}
+    if len(identities) != len(projected):
+        raise HarnessIntegrityError(
+            "selected v2 investigation skill identities must be unique"
+        )
+    return projected
+
+
+def _v2_selected_identity(item: object) -> dict[str, Any]:
+    if not isinstance(item, Mapping):
+        raise HarnessIntegrityError(
+            "selected v2 investigation skill identity must be an object"
+        )
+    skill_id = item.get("id")
+    version = item.get("version")
+    digest = item.get("artifact_digest")
+    reason = item.get("selection_reason")
+    if not isinstance(skill_id, str) or not IDENTIFIER_RE.fullmatch(skill_id):
+        raise HarnessIntegrityError("selected v2 investigation skill id is invalid")
+    if not isinstance(version, str) or not _V2_VERSION_RE.fullmatch(version):
+        raise HarnessIntegrityError(
+            "selected v2 investigation skill version is invalid"
+        )
+    if not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest):
+        raise HarnessIntegrityError(
+            "selected v2 investigation skill digest is invalid"
+        )
+    if reason not in _V2_SELECTION_REASONS:
+        raise HarnessIntegrityError(
+            "selected v2 investigation skill selection reason is invalid"
+        )
+    return {
+        "id": skill_id,
+        "version": version,
+        "skill_sha256": digest,
+        "selection_reason": reason,
+    }
+
+
+def _v2_rejections(raw: Mapping[str, Any]) -> list[dict[str, str]]:
+    rejected = raw.get("rejected")
+    if not isinstance(rejected, list) or len(rejected) > 64:
+        raise HarnessIntegrityError(
+            "v2 investigation skill rejections are invalid"
+        )
+    projected = [_v2_rejection(item) for item in rejected]
+    if len({(item["id"], item["reason"]) for item in projected}) != len(projected):
+        raise HarnessIntegrityError(
+            "v2 investigation skill rejections must be unique"
+        )
+    return sorted(projected, key=lambda item: (item["id"], item["reason"]))
+
+
+def _v2_rejection(item: object) -> dict[str, str]:
+    if not isinstance(item, Mapping) or frozenset(item) != {"id", "reason"}:
+        raise HarnessIntegrityError(
+            "v2 investigation skill rejection is invalid"
+        )
+    skill_id = item.get("id")
+    reason = item.get("reason")
+    if (
+        not isinstance(skill_id, str)
+        or not IDENTIFIER_RE.fullmatch(skill_id)
+        or reason not in _V2_REJECTION_REASONS
+    ):
+        raise HarnessIntegrityError(
+            "v2 investigation skill rejection is invalid"
+        )
+    return {"id": skill_id, "reason": reason}
+
+
+def _v2_budget(raw: Mapping[str, Any]) -> dict[str, int]:
+    value = raw.get("aggregate_budget")
+    if not isinstance(value, Mapping) or frozenset(value) != frozenset(
+        _V2_BUDGET_FIELDS
+    ):
+        raise HarnessIntegrityError(
+            "v2 investigation skill aggregate budget is invalid"
+        )
+    projected: dict[str, int] = {}
+    for field in _V2_BUDGET_FIELDS:
+        item = value.get(field)
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            raise HarnessIntegrityError(
+                "v2 investigation skill aggregate budget is invalid"
+            )
+        projected[field] = item
+    return projected
 
 
 def _unavailable_attestation() -> dict[str, Any]:

@@ -10,11 +10,16 @@ from harness_policy_primitives import HARNESS_SCHEMA
 
 
 EXECUTION_CONTRACT_SCHEMA = "onion-sentinel-harness-execution-contract-v1"
+EXECUTION_CONTRACT_SCHEMA_V2 = "onion-sentinel-harness-execution-contract-v2"
 _RELEASE_RE = re.compile(r"^[a-f0-9]{40}$")
 _DIGEST_RE = re.compile(r"^[a-f0-9]{64}$")
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,239}$")
 _POLICY_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,127}$")
 _SKILL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SKILL_VERSION_V2_RE = re.compile(
+    r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-[0-9A-Za-z.-]+)?$"
+)
 _REASONING_LEVELS = frozenset({"low", "medium", "high", "xhigh"})
 _EXTERNAL_PROVIDERS = frozenset({"hermes-agent", "openclaw"})
 _CONTRACT_FIELDS = frozenset(
@@ -31,6 +36,33 @@ _CONTRACT_FIELDS = frozenset(
 )
 _ROUTE_FIELDS = frozenset({"route", "provider", "model", "reasoning_level"})
 _SKILL_FIELDS = frozenset({"id", "version", "sha256"})
+_CONTRACT_FIELDS_V2 = _CONTRACT_FIELDS | {"skill_selection"}
+_SKILL_FIELDS_V2 = _SKILL_FIELDS | {"selection_reason"}
+_SELECTION_FIELDS_V2 = frozenset(
+    {
+        "provider",
+        "provider_compatible",
+        "selected_count",
+        "truncated",
+        "rejected",
+        "aggregate_budget",
+        "enforcement",
+    }
+)
+_BUDGET_FIELDS = (
+    "max_queries", "max_rows", "max_bytes", "timeout_seconds",
+)
+_SELECTION_REASON = "exact_match_capability_and_promotion_gates_satisfied"
+_REJECTION_REASONS = frozenset(
+    {
+        "aggregate_budget_exceeded", "artifact_revoked",
+        "capability_not_permitted", "compatibility_mismatch",
+        "dependency_unavailable", "exact_match_failed",
+        "lifecycle_state_unavailable", "manifest_validation_failed",
+        "promotion_gates_incomplete", "role_mismatch", "skill_conflict",
+        "unsupported_provider",
+    }
+)
 
 
 def _canonical_json(value: Any) -> str:
@@ -128,6 +160,113 @@ def _skill_versions(attestation: Mapping[str, Any]) -> list[dict[str, Any]]:
     return projected
 
 
+def _skill_version_entry_v2(item: Any) -> dict[str, Any]:
+    if not isinstance(item, Mapping):
+        raise ValueError("v2 skill version entry is invalid")
+    version = item.get("version")
+    reason = item.get("selection_reason")
+    if not isinstance(version, str) or not _SKILL_VERSION_V2_RE.fullmatch(version):
+        raise ValueError("v2 skill version entry is invalid")
+    if reason != _SELECTION_REASON:
+        raise ValueError("v2 skill selection reason is invalid")
+    return {
+        "id": _skill_id(item.get("id")),
+        "version": version,
+        "sha256": _skill_digest(item.get("skill_sha256")),
+        "selection_reason": reason,
+    }
+
+
+def _skill_versions_v2(attestation: Mapping[str, Any]) -> list[dict[str, Any]]:
+    selected = attestation.get("selected")
+    if not isinstance(selected, list):
+        raise ValueError("v2 skill version selection is invalid")
+    projected = [_skill_version_entry_v2(item) for item in selected]
+    projected.sort(key=lambda value: (value["id"], value["version"]))
+    if len({(item["id"], item["version"]) for item in projected}) != len(projected):
+        raise ValueError("v2 skill version selection contains duplicates")
+    if attestation.get("selected_count") != len(projected):
+        raise ValueError("v2 skill version selection count does not match")
+    return projected
+
+
+def _selection_budget(value: Any) -> dict[str, int]:
+    if not isinstance(value, Mapping) or frozenset(value) != frozenset(_BUDGET_FIELDS):
+        raise ValueError("v2 skill aggregate budget is invalid")
+    projected: dict[str, int] = {}
+    for field in _BUDGET_FIELDS:
+        item = value.get(field)
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            raise ValueError("v2 skill aggregate budget is invalid")
+        projected[field] = item
+    return projected
+
+
+def _selection_rejections(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list) or len(value) > 64:
+        raise ValueError("v2 skill selection rejections are invalid")
+    projected: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, Mapping) or frozenset(item) != {"id", "reason"}:
+            raise ValueError("v2 skill selection rejection is invalid")
+        skill_id = _skill_id(item.get("id"))
+        reason = item.get("reason")
+        if reason not in _REJECTION_REASONS:
+            raise ValueError("v2 skill selection rejection is invalid")
+        projected.append({"id": skill_id, "reason": reason})
+    if projected != sorted(projected, key=lambda item: (item["id"], item["reason"])):
+        raise ValueError("v2 skill selection rejections are not sorted")
+    if len({(item["id"], item["reason"]) for item in projected}) != len(projected):
+        raise ValueError("v2 skill selection rejections contain duplicates")
+    return projected
+
+
+def _skill_selection_v2(
+    attestation: Mapping[str, Any], primary: Mapping[str, str] | None,
+) -> dict[str, Any]:
+    if attestation.get("framework_version") != 2:
+        raise ValueError("v2 skill framework version is invalid")
+    provider = _selection_provider(attestation, primary)
+    count, truncated = _selection_summary_v2(attestation)
+    return {
+        "provider": provider,
+        "provider_compatible": True,
+        "selected_count": count,
+        "truncated": truncated,
+        "rejected": _selection_rejections(attestation.get("rejected")),
+        "aggregate_budget": _selection_budget(attestation.get("aggregate_budget")),
+        "enforcement": "identity_only_no_execution",
+    }
+
+
+def _selection_provider(
+    attestation: Mapping[str, Any], primary: Mapping[str, str] | None,
+) -> str:
+    provider = attestation.get("provider")
+    compatible = attestation.get("provider_compatible")
+    if (
+        not isinstance(provider, str)
+        or provider not in {"codex-cli", "ollama"}
+        or compatible is not True
+        or primary is None
+        or primary.get("provider") != provider
+    ):
+        raise ValueError("v2 skills require a compatible native provider")
+    return provider
+
+
+def _selection_summary_v2(attestation: Mapping[str, Any]) -> tuple[int, bool]:
+    count = attestation.get("selected_count")
+    truncated = attestation.get("truncated")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError("v2 skill selected count is invalid")
+    if not isinstance(truncated, bool):
+        raise ValueError("v2 skill truncation flag is invalid")
+    if attestation.get("advisory_mode") != "identity_only_no_execution":
+        raise ValueError("v2 skill enforcement is invalid")
+    return count, truncated
+
+
 def build_execution_contract(
     *,
     source_revision: str,
@@ -145,13 +284,29 @@ def build_execution_contract(
         raise ValueError("policy version is invalid")
     if not isinstance(skill_attestation, Mapping):
         raise ValueError("skill version attestation is invalid")
+    primary = _native_route_identity(assigned_route, "assigned route")
+    reviewer = _native_route_identity(reviewer_route, "reviewer route")
+    if skill_attestation.get("framework_version") == 2:
+        skill_versions = _skill_versions_v2(skill_attestation)
+        selection = _skill_selection_v2(skill_attestation, primary)
+        return {
+            "schema": EXECUTION_CONTRACT_SCHEMA_V2,
+            "source_revision": revision,
+            "harness_version": HARNESS_SCHEMA,
+            "policy_version": version,
+            "primary": primary,
+            "reviewer": reviewer,
+            "skill_registry": _skill_registry(skill_attestation),
+            "skill_versions": skill_versions,
+            "skill_selection": selection,
+        }
     return {
         "schema": EXECUTION_CONTRACT_SCHEMA,
         "source_revision": revision,
         "harness_version": HARNESS_SCHEMA,
         "policy_version": version,
-        "primary": _native_route_identity(assigned_route, "assigned route"),
-        "reviewer": _native_route_identity(reviewer_route, "reviewer route"),
+        "primary": primary,
+        "reviewer": reviewer,
         "skill_registry": _skill_registry(skill_attestation),
         "skill_versions": _skill_versions(skill_attestation),
     }
@@ -188,8 +343,29 @@ def _validated_skills(value: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-def _validate_contract_header(value: Mapping[str, Any]) -> None:
-    if value.get("schema") != EXECUTION_CONTRACT_SCHEMA:
+def _validated_skills_v2(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ValueError("v2 execution contract skill versions are invalid")
+    normalized: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping) or frozenset(item) != _SKILL_FIELDS_V2:
+            raise ValueError("v2 execution contract skill version field set is invalid")
+        converted = {
+            "id": item.get("id"),
+            "version": item.get("version"),
+            "skill_sha256": item.get("sha256"),
+            "selection_reason": item.get("selection_reason"),
+        }
+        normalized.append(_skill_version_entry_v2(converted))
+    if normalized != sorted(normalized, key=lambda item: (item["id"], item["version"])):
+        raise ValueError("v2 execution contract skill versions are not sorted")
+    if len({(item["id"], item["version"]) for item in normalized}) != len(normalized):
+        raise ValueError("v2 execution contract skill versions contain duplicates")
+    return normalized
+
+
+def _validate_contract_header(value: Mapping[str, Any], schema: str) -> None:
+    if value.get("schema") != schema:
         raise ValueError("execution contract schema is invalid")
     if value.get("harness_version") != HARNESS_SCHEMA:
         raise ValueError("execution contract harness version is invalid")
@@ -214,13 +390,40 @@ def _validate_contract_registry(value: Any) -> None:
 
 def validate_execution_contract(value: Any) -> dict[str, Any]:
     """Validate an already-materialized execution contract without fallback."""
-    if not isinstance(value, Mapping) or frozenset(value) != _CONTRACT_FIELDS:
+    if not isinstance(value, Mapping):
         raise ValueError("execution contract field set is invalid")
-    _validate_contract_header(value)
+    schema = value.get("schema")
+    fields = _CONTRACT_FIELDS_V2 if schema == EXECUTION_CONTRACT_SCHEMA_V2 else _CONTRACT_FIELDS
+    if frozenset(value) != fields:
+        raise ValueError("execution contract field set is invalid")
+    if schema not in {EXECUTION_CONTRACT_SCHEMA, EXECUTION_CONTRACT_SCHEMA_V2}:
+        raise ValueError("execution contract schema is invalid")
+    _validate_contract_header(value, schema)
     _validate_contract_registry(value.get("skill_registry"))
-    _validated_route(value.get("primary"), "primary", optional=False)
+    primary = _validated_route(value.get("primary"), "primary", optional=False)
     _validated_route(value.get("reviewer"), "reviewer", optional=True)
-    _validated_skills(value.get("skill_versions"))
+    if schema == EXECUTION_CONTRACT_SCHEMA_V2:
+        skills = _validated_skills_v2(value.get("skill_versions"))
+        selection = value.get("skill_selection")
+        if not isinstance(selection, Mapping) or frozenset(selection) != _SELECTION_FIELDS_V2:
+            raise ValueError("v2 execution contract skill selection field set is invalid")
+        normalized = _skill_selection_v2(
+            {
+                "framework_version": 2,
+                "provider": selection.get("provider"),
+                "provider_compatible": selection.get("provider_compatible"),
+                "selected_count": selection.get("selected_count"),
+                "truncated": selection.get("truncated"),
+                "rejected": selection.get("rejected"),
+                "aggregate_budget": selection.get("aggregate_budget"),
+                "advisory_mode": selection.get("enforcement"),
+            },
+            primary,
+        )
+        if normalized != dict(selection) or normalized["selected_count"] != len(skills):
+            raise ValueError("v2 execution contract skill selection is invalid")
+    else:
+        _validated_skills(value.get("skill_versions"))
     return dict(value)
 
 

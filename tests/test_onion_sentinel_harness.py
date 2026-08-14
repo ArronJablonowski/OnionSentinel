@@ -890,6 +890,70 @@ class OnionSentinelHarnessTests(unittest.TestCase):
                 HARNESS.HarnessPolicy.from_dict(different_policy_document),
             )
 
+    def test_v2_skill_decision_is_durable_and_provider_bound(self) -> None:
+        prompt = self.prompt_package()
+        prompt["investigation_skills"] = {
+            "schema": "onion-sentinel-investigation-skill-selection-v2",
+            "mode": "active",
+            "registry_version": 8,
+            "registry_digest": "a" * 64,
+            "provider": "codex-cli",
+            "provider_compatible": True,
+            "selected": [{
+                "id": "dns-triage",
+                "version": "2.3.1",
+                "artifact_digest": "b" * 64,
+                "selection_reason": "exact_match_capability_and_promotion_gates_satisfied",
+            }],
+            "selected_count": 1,
+            "truncated": False,
+            "rejected": [
+                {"id": "legacy-dns", "reason": "artifact_revoked"},
+            ],
+            "aggregate_budget": {
+                "max_queries": 4,
+                "max_rows": 400,
+                "max_bytes": 4000,
+                "timeout_seconds": 40,
+            },
+            "enforcement": "identity_only_no_execution",
+        }
+        envelope = self.envelope("v2-skill-contract-run", prompt_package=prompt)
+        contract = json.loads(envelope.execution_contract_json)
+
+        self.assertEqual(
+            contract["schema"],
+            "onion-sentinel-harness-execution-contract-v2",
+        )
+        self.assertEqual(contract["skill_selection"]["provider"], "codex-cli")
+        self.assertEqual(
+            contract["skill_selection"]["rejected"],
+            [{"id": "legacy-dns", "reason": "artifact_revoked"}],
+        )
+        self.assertEqual(
+            contract["skill_versions"][0]["selection_reason"],
+            "exact_match_capability_and_promotion_gates_satisfied",
+        )
+        row = HARNESS.HarnessStore(self.db_path).start_run(
+            envelope,
+            HARNESS.HarnessPolicy.from_dict(self.policy_document()),
+        )
+        self.assertEqual(json.loads(row["execution_contract_json"]), contract)
+
+        incompatible = json.loads(json.dumps(prompt))
+        incompatible["investigation_skills"].update({
+            "provider": "ollama",
+            "provider_compatible": True,
+        })
+        with self.assertRaisesRegex(
+            ValueError,
+            "compatible native provider",
+        ):
+            self.envelope(
+                "v2-provider-mismatch-run",
+                prompt_package=incompatible,
+            )
+
     def test_skill_selection_attestation_rejects_inconsistent_count(
         self,
     ) -> None:
