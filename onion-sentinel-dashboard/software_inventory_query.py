@@ -203,6 +203,33 @@ def _public_record(
     return public
 
 
+def _empty_summary() -> dict[str, object]:
+    return {
+        "records": 0,
+        "products": 0,
+        "assets": 0,
+        "installed": 0,
+        "observed": 0,
+        "inferred": 0,
+        "current": 0,
+        "recent": 0,
+        "historical": 0,
+        "expired": 0,
+    }
+
+
+def _empty_coverage() -> dict[str, object]:
+    return {
+        "authoritative_denominator": None,
+        "denominator_status": "unknown",
+        "osquery_ready": None,
+        "fresh_endpoint_inventories": 0,
+        "network_observed_assets": 0,
+        "coverage_gaps": None,
+        "labeled_visible_records": 0,
+        "asset_label_inventory_complete": False,
+        "asset_os_correlated_records": 0,
+    }
 
 
 def _empty_payload(
@@ -225,29 +252,8 @@ def _empty_payload(
             "last_error": error,
             "source_statuses": {},
         },
-        "summary": {
-            "records": 0,
-            "products": 0,
-            "assets": 0,
-            "installed": 0,
-            "observed": 0,
-            "inferred": 0,
-            "current": 0,
-            "recent": 0,
-            "historical": 0,
-            "expired": 0,
-        },
-        "coverage": {
-            "authoritative_denominator": None,
-            "denominator_status": "unknown",
-            "osquery_ready": None,
-            "fresh_endpoint_inventories": 0,
-            "network_observed_assets": 0,
-            "coverage_gaps": None,
-            "labeled_visible_records": 0,
-            "asset_label_inventory_complete": False,
-            "asset_os_correlated_records": 0,
-        },
+        "summary": _empty_summary(),
+        "coverage": _empty_coverage(),
         "filters": filters,
         "platforms": [],
         "page": {
