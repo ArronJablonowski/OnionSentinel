@@ -578,6 +578,13 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
     def test_relay_health_application_has_bounded_lifecycle_phases(self) -> None:
         application = ROOT / "relay" / "app" / "relay_health_application.py"
         expected = {
+            "_pcap_status_summaries",
+            "_pcap_status_counters",
+            "_pcap_workflow_state",
+            "_pcap_workflow",
+            "_pcap_recovery_summary",
+            "_pcap_recovery_has_invalid_fields",
+            "_pcap_recovery_contract_valid",
             "_parse_component",
             "_run_alert_component",
             "_run_pcap_component",
@@ -591,11 +598,19 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
         }
 
         self.assertTrue(expected <= top_level_function_names(application))
-        function = top_level_function(application, "main")
-        self.assertLessEqual(
-            (function.end_lineno or function.lineno) - function.lineno + 1,
-            50,
-        )
+        for name in (
+            "build_pcap_status_event",
+            "pcap_result_proves_broker_recovery",
+            "main",
+        ):
+            function = top_level_function(application, name)
+            with self.subTest(name=name):
+                self.assertLessEqual(
+                    (function.end_lineno or function.lineno)
+                    - function.lineno
+                    + 1,
+                    50,
+                )
 
     def test_incident_evidence_broker_has_bounded_contract_phases(self) -> None:
         broker = ROOT / "relay" / "app" / "incident_evidence_broker.py"

@@ -914,6 +914,37 @@ class RelayHealthWrapperTest(unittest.TestCase):
         self.assertEqual(event["pcap_workflow"]["processed"], 0)
         self.assertEqual(event["pcap_workflow"]["operational_failures"], 0)
 
+    def test_pcap_recovery_requires_exact_flags_and_strict_counters(self) -> None:
+        valid = {
+            "ok": True,
+            "enabled": True,
+            "broker_contacted": True,
+            "processed": 0,
+            "operational_failures": 0,
+        }
+        rejected = (
+            {**valid, "ok": 1},
+            {**valid, "enabled": 1},
+            {**valid, "broker_contacted": 1},
+            {**valid, "deferred": None},
+            {**valid, "locked": 0},
+            {**valid, "processed": True},
+            {**valid, "operational_failures": False},
+            {**valid, "operational_failures": 1},
+            {**valid, "invalid_fields": ["processed"]},
+        )
+
+        self.assertTrue(self.wrapper.pcap_result_proves_broker_recovery(
+            completed(0, stdout=json.dumps(valid) + "\n")
+        ))
+        for summary in rejected:
+            with self.subTest(summary=summary):
+                self.assertFalse(
+                    self.wrapper.pcap_result_proves_broker_recovery(
+                        completed(0, stdout=json.dumps(summary) + "\n")
+                    )
+                )
+
     def test_pcap_failure_output_is_rebuilt_from_strict_allowlists(self) -> None:
         sentinel = "PCAP_OUTPUT_LEAK_SENTINEL_7f9c2e"
         raw_summary = {
