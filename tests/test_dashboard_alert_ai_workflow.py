@@ -62,6 +62,89 @@ class DashboardAlertAiWorkflowTests(unittest.TestCase):
         self.assertFalse(recognized)
         self.assertIn("Unrecognized severity mystery", reason)
 
+    def test_backlog_eligibility_preserves_exact_admission_reasons(self) -> None:
+        eligible_reason = "Queued for the scheduled assigned-model analysis worker"
+        cases = (
+            (
+                {
+                    "alert_id": "phase-one",
+                    "member_alert_ids": ["config-two", "codex-three"],
+                    "filter_status": "accepted",
+                    "triage_level": "critical",
+                },
+                "informational",
+                (
+                    False,
+                    "Test/validation alert is intentionally excluded from automatic assigned-model analysis",
+                ),
+            ),
+            (
+                {
+                    "alert_id": "phase-one",
+                    "member_alert_ids": ["real-two", "codex-three"],
+                    "filter_status": "accepted",
+                    "triage_level": "critical",
+                },
+                "informational",
+                (True, eligible_reason),
+            ),
+            (
+                {"alert_id": "real", "filter_status": " dropped ", "triage_level": "high"},
+                "informational",
+                (
+                    False,
+                    "Filter status dropped is not eligible for automatic assigned-model analysis",
+                ),
+            ),
+            (
+                {"alert_id": "real", "filter_status": "   ", "triage_level": "high"},
+                "informational",
+                (
+                    False,
+                    "Filter status blank is not eligible for automatic assigned-model analysis",
+                ),
+            ),
+            (
+                {"alert_id": "real", "filter_status": "", "triage_level": "high"},
+                "informational",
+                (True, eligible_reason),
+            ),
+            (
+                {
+                    "alert_id": "real",
+                    "filter_status": "suppressed",
+                    "triage_level": "",
+                    "severity_label": " HIGH ",
+                },
+                "medium",
+                (True, eligible_reason),
+            ),
+            (
+                {"alert_id": "real", "filter_status": "accepted", "triage_level": "   "},
+                "low",
+                (
+                    False,
+                    "Unrecognized severity blank is not eligible for automatic assigned-model analysis",
+                ),
+            ),
+            (
+                {"alert_id": "real", "filter_status": "accepted", "triage_level": "low"},
+                "medium",
+                (False, "Below configured Medium automatic AI-analysis minimum"),
+            ),
+            (
+                {"alert_id": "real", "filter_status": "accepted", "triage_level": "critical"},
+                "disabled",
+                (False, "Below configured Disabled automatic AI-analysis minimum"),
+            ),
+        )
+        for row, threshold, expected in cases:
+            with self.subTest(row=row, threshold=threshold):
+                self.assertEqual(
+                    self.workflow.row_is_ai_backlog_eligible(row, threshold),
+                    expected,
+                )
+
     def test_running_and_completed_artifacts_take_precedence_over_threshold(self) -> None:
         row = {"alert_id": "low-1", "filter_status": "accepted", "triage_level": "low"}
         running = self.workflow.ai_workflow_status_for_row(
