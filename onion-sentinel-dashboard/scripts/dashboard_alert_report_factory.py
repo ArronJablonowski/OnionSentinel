@@ -236,6 +236,42 @@ def report_detail_html(
     return text, services.finalize_detail_report_html(rendered, timeline, layout.issues)
 
 
+def _alert_report_model(
+    row: object, source: Path, rel_source: str, size: int, alert_ts: float, alert_group: object, rendered_html: str, text: str,
+    status: str, reason: str, repeat_count: int, criticality: str, network: ReportNetworkIdentity, title: str, report_rule_name: str,
+    raw_alert_count: int, total_seen_count: int, ai_status: StatusTuple, enrichment_status: tuple[str, str, str, int, int, int], pcap_status: StatusTuple, workflow: ReportWorkflowEvidence,
+) -> AlertReport:
+    """Project normalized report state into the complete public view model."""
+    return AlertReport(
+        title=title, source=source, rel_source=rel_source, mtime=alert_ts, size=size,
+        digest=hashlib.sha1(str(alert_group).encode("utf-8")).hexdigest()[:12],
+        rendered_html=rendered_html,
+        summary=f"{status}: {reason}. Seen {repeat_count} time(s). {summarize_markdown(text, 160)}",
+        criticality=criticality,
+        criticality_rank=CRITICALITY_ORDER.get(criticality.lower(), CRITICALITY_ORDER["informational"]),
+        alert_source=network.alert_source or "n/a",
+        filter_status=str(first_value(row_item(row, "filter_status"), fallback="accepted")),
+        source_ip=network.source_ip, source_port=network.source_port,
+        destination_ip=network.destination_ip, destination_port=network.destination_port,
+        source_endpoint=endpoint_label(network.source_ip, network.source_port),
+        destination_endpoint=endpoint_label(network.destination_ip, network.destination_port),
+        rule_id=network.rule_id, rule_name=report_rule_name, raw_alert_count=raw_alert_count,
+        total_seen_count=total_seen_count, repeat_count=repeat_count,
+        first_seen=str(row_item(row, "first_seen") or "n/a"),
+        last_seen=str(row_item(row, "last_seen") or "n/a"), alert_group_key=str(alert_group),
+        alert_ts=alert_ts, ai_status_key=ai_status[0], ai_status_label=ai_status[1],
+        ai_status_detail=ai_status[2], enrichment_status_key=enrichment_status[0],
+        enrichment_status_label=enrichment_status[1], enrichment_status_detail=enrichment_status[2],
+        enrichment_record_count=enrichment_status[3], enrichment_skip_count=enrichment_status[4],
+        enrichment_error_count=enrichment_status[5], pcap_status_key=pcap_status[0],
+        pcap_status_label=pcap_status[1], pcap_status_detail=pcap_status[2],
+        tuning_recommendation=str(workflow.ai_response.get("tuning_recommendation") or "none").strip().lower(),
+        tuning_reason=str(workflow.ai_response.get("tuning_reason") or "").strip(),
+        recommended_tuning_actions=tuning_actions(workflow.ai_response),
+        ai_analysis=workflow.ai_analysis if isinstance(workflow.ai_analysis, dict) else {},
+    )
+
+
 def build_alert_report(
     row: object,
     markdown_by_alert_id: dict[str, tuple[Path, str, object]],
@@ -277,31 +313,8 @@ def build_alert_report(
     ai_status = workflow.ai_status
     enrichment_status = workflow.enrichment_status
     pcap_status = workflow.pcap_status
-    return AlertReport(
-        title=title, source=source, rel_source=rel_source, mtime=alert_ts, size=size,
-        digest=hashlib.sha1(str(alert_group).encode("utf-8")).hexdigest()[:12],
-        rendered_html=rendered_html,
-        summary=f"{status}: {reason}. Seen {repeat_count} time(s). {summarize_markdown(text, 160)}",
-        criticality=criticality,
-        criticality_rank=CRITICALITY_ORDER.get(criticality.lower(), CRITICALITY_ORDER["informational"]),
-        alert_source=network.alert_source or "n/a",
-        filter_status=str(first_value(row_item(row, "filter_status"), fallback="accepted")),
-        source_ip=network.source_ip, source_port=network.source_port,
-        destination_ip=network.destination_ip, destination_port=network.destination_port,
-        source_endpoint=endpoint_label(network.source_ip, network.source_port),
-        destination_endpoint=endpoint_label(network.destination_ip, network.destination_port),
-        rule_id=network.rule_id, rule_name=report_rule_name, raw_alert_count=raw_alert_count,
-        total_seen_count=total_seen_count, repeat_count=repeat_count,
-        first_seen=str(row_item(row, "first_seen") or "n/a"),
-        last_seen=str(row_item(row, "last_seen") or "n/a"), alert_group_key=str(alert_group),
-        alert_ts=alert_ts, ai_status_key=ai_status[0], ai_status_label=ai_status[1],
-        ai_status_detail=ai_status[2], enrichment_status_key=enrichment_status[0],
-        enrichment_status_label=enrichment_status[1], enrichment_status_detail=enrichment_status[2],
-        enrichment_record_count=enrichment_status[3], enrichment_skip_count=enrichment_status[4],
-        enrichment_error_count=enrichment_status[5], pcap_status_key=pcap_status[0],
-        pcap_status_label=pcap_status[1], pcap_status_detail=pcap_status[2],
-        tuning_recommendation=str(workflow.ai_response.get("tuning_recommendation") or "none").strip().lower(),
-        tuning_reason=str(workflow.ai_response.get("tuning_reason") or "").strip(),
-        recommended_tuning_actions=tuning_actions(workflow.ai_response),
-        ai_analysis=workflow.ai_analysis if isinstance(workflow.ai_analysis, dict) else {},
+    return _alert_report_model(
+        row, source, rel_source, size, alert_ts, alert_group, rendered_html, text,
+        status, reason, repeat_count, criticality, network, title, report_rule_name,
+        raw_alert_count, total_seen_count, ai_status, enrichment_status, pcap_status, workflow,
     )
