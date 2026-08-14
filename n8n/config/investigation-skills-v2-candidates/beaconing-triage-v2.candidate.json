@@ -1,9 +1,9 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.beaconing.triage",
-  "version": "2.0.0-candidate.1",
-  "artifact_digest": "f208af74747e42b1fc4fea9f18ea627ef7f8c02162960019e694e2fa15e7ae74",
-  "lineage": {"source_revision": "dbbfb5f", "predecessor_digest": ""},
+  "version": "2.0.0-candidate.2",
+  "artifact_digest": "80ddb871fc07bd40562e998d39906e0f13fe00a66052ae5382cd598eca52d81a",
+  "lineage": {"source_revision": "4d10442", "predecessor_digest": "f208af74747e42b1fc4fea9f18ea627ef7f8c02162960019e694e2fa15e7ae74"},
   "compatibility": {"harness_contract": "onion-sentinel-harness-job-envelope-v1", "policy_schema": "onion-sentinel-investigation-harness-policy-v1", "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"},
   "maintainer": {"owner": "Onion Sentinel", "reviewed_at": "2026-08-14T19:25:00Z", "reviewer": "pending"},
   "roles": ["soc-analyst", "incident-responder", "threat-hunter"],
@@ -14,6 +14,9 @@
   "budgets": {"max_queries": 5, "max_rows": 2500, "max_bytes": 2621440, "timeout_seconds": 150},
   "preconditions": ["a trusted endpoint or peer and anchor time exist", "multiple bounded windows fit inside the authorization envelope", "deployed flow and timeline field catalogs are available"],
   "required_evidence": ["timestamp series exact window filters and successful coverage", "peer tuple duration byte packet and outcome distributions", "asset process DNS TLS or HTTP context when available"],
+  "positive_evidence": ["covered multi-window observations show repeatable intervals with stable attributable peer and transfer characteristics", "cross-sensor application context contradicts expected scheduled-service explanations"],
+  "negative_evidence": ["successful covered windows tie the periodic traffic to an approved updater monitor or persistent application", "interval and volume variation plus user or service context refute an automated beacon hypothesis"],
+  "escalation_pivots": ["compare an adjacent bounded flow window without changing filters", "correlate DNS TLS HTTP and process context for the same peer", "request human review when sample coverage is too short for periodicity claims"],
   "query_templates": [
     {"id": "beacon-flow-series", "backend": "elastic", "language": "query-dsl", "purpose": "Collect bounded flow timestamps and volumes for one authorized endpoint-peer relationship.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "event.outcome", "event.duration", "source.ip", "source.port", "destination.ip", "destination.port", "network.transport", "network.community_id", "network.bytes", "network.packets"]},
     {"id": "beacon-cross-sensor", "backend": "oql", "language": "oql", "purpose": "Correlate periodic flow observations with bounded DNS protocol alert and endpoint context.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "event.id", "rule.id", "source.ip", "destination.ip", "destination.domain", "tls.server.name", "network.transport", "network.community_id", "dns.question.name", "process.name"]}

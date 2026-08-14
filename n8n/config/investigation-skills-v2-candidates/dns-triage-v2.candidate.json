@@ -1,9 +1,9 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.dns.triage",
-  "version": "2.0.0-candidate.3",
-  "artifact_digest": "2aa8af850db934a9c9c0ea874cf7c0561e6f2c4d7cf6b9a202dc629135b3d08b",
-  "lineage": {"source_revision": "5d22395", "predecessor_digest": "81a87dc6efb9966d840098815abf93405a2fa66aae20252b95551435d86f0ca3"},
+  "version": "2.0.0-candidate.4",
+  "artifact_digest": "fa5ae649d4665101f1080fed48e25271fafced085e0b1225cf43efce32e50362",
+  "lineage": {"source_revision": "4d10442", "predecessor_digest": "2aa8af850db934a9c9c0ea874cf7c0561e6f2c4d7cf6b9a202dc629135b3d08b"},
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
     "policy_schema": "onion-sentinel-investigation-harness-policy-v1",
@@ -23,6 +23,9 @@
   "budgets": {"max_queries": 4, "max_rows": 1000, "max_bytes": 1048576, "timeout_seconds": 90},
   "preconditions": ["bounded event time exists", "at least one endpoint or DNS identifier exists", "deployed field catalog is available"],
   "required_evidence": ["alert identity", "sensor and time scope", "query coverage and truncation"],
+  "positive_evidence": ["attributable DNS questions answers and response patterns corroborate the suspicious resolution hypothesis", "related bounded flow or TLS context confirms use of the resolved infrastructure"],
+  "negative_evidence": ["successful complete DNS queries show only approved resolver and domain behavior for the exact scope", "covered response history supports expected discovery update CDN or security-tool activity without contradictory evidence"],
+  "escalation_pivots": ["correlate exact DNS answers with bounded TLS or HTTP flows", "measure the attributable question and response pattern in an adjacent covered window", "request domain or asset-owner review when resolver policy is unavailable"],
   "query_templates": [
     {
       "id": "dns-alert-context",

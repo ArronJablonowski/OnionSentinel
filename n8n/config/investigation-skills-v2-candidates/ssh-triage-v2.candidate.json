@@ -1,11 +1,11 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.ssh.triage",
-  "version": "2.0.0-candidate.3",
-  "artifact_digest": "630c037af79e3e2a3f76f8440ae781b9709cadd459d25a11d8580a8f714cc35a",
+  "version": "2.0.0-candidate.4",
+  "artifact_digest": "74034feb359ee06acaeedc32329ac802247c219812c8091120a9f1c83de0c98b",
   "lineage": {
-    "source_revision": "5d22395",
-    "predecessor_digest": "616e2f099089dbc2360d92313ef9b8562ffd71e2422e3c229fb48010495baf56"
+    "source_revision": "4d10442",
+    "predecessor_digest": "630c037af79e3e2a3f76f8440ae781b9709cadd459d25a11d8580a8f714cc35a"
   },
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
@@ -73,6 +73,19 @@
     "alert identity",
     "bounded SSH flow and time scope",
     "direction and session coverage"
+  ],
+  "positive_evidence": [
+    "attributable authentication direction duration and transfer context corroborate unauthorized remote access",
+    "bounded peer or host telemetry links the SSH session to suspicious follow-on behavior"
+  ],
+  "negative_evidence": [
+    "successful complete session context matches approved administration backup or automation",
+    "covered authentication and peer history refute the suspected unauthorized-access hypothesis"
+  ],
+  "escalation_pivots": [
+    "correlate the exact session with historical host authentication and process telemetry",
+    "compare the attributable peer and duration in an adjacent bounded window",
+    "request system-owner confirmation when authorization context is unavailable"
   ],
   "query_templates": [
     {

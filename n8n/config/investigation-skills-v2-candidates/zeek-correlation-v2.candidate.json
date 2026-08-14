@@ -1,11 +1,11 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "source.zeek.correlation",
-  "version": "2.0.0-candidate.3",
-  "artifact_digest": "493aacd7e11ec33621fe3b382725446991d2b8f53cf76d4bb9df0adf7cf1658c",
+  "version": "2.0.0-candidate.4",
+  "artifact_digest": "c3687aa8961649103f60ad82cd4b800b805059f5c22842cdc56116b5a83b563b",
   "lineage": {
-    "source_revision": "5d22395",
-    "predecessor_digest": "2f7ab156abae080a684d6127dc0535e6794e5652d2e5713bf2303da924b2b3ce"
+    "source_revision": "4d10442",
+    "predecessor_digest": "493aacd7e11ec33621fe3b382725446991d2b8f53cf76d4bb9df0adf7cf1658c"
   },
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
@@ -72,6 +72,19 @@
     "bounded time and endpoint scope",
     "UID community ID or five tuple",
     "sensor and parser coverage"
+  ],
+  "positive_evidence": [
+    "the same attributable UID or community ID links connection and protocol observations",
+    "correlated protocol records independently corroborate the hypothesized sequence"
+  ],
+  "negative_evidence": [
+    "successful complete correlation shows only expected protocol activity for the exact tuple and window",
+    "covered parser and sensor evidence refutes the suspected cross-log relationship"
+  ],
+  "escalation_pivots": [
+    "anchor the exact Zeek connection by UID community ID or role-safe tuple",
+    "retrieve only protocol records linked to the validated anchor",
+    "investigate parser retention or asymmetric-routing gaps before interpreting absence"
   ],
   "query_templates": [
     {

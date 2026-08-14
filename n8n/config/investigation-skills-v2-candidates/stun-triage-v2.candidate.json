@@ -1,9 +1,9 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.stun.triage",
-  "version": "2.0.0-candidate.1",
-  "artifact_digest": "623013a2822d564f8bbd02c415086cf7e20a3d8b113f7100a59a847ec3740c86",
-  "lineage": {"source_revision": "dbbfb5f", "predecessor_digest": ""},
+  "version": "2.0.0-candidate.2",
+  "artifact_digest": "f210b08056c21fff00ad9c06c72c6e9bcc401801923540828d6ca699cfeaab6b",
+  "lineage": {"source_revision": "4d10442", "predecessor_digest": "623013a2822d564f8bbd02c415086cf7e20a3d8b113f7100a59a847ec3740c86"},
   "compatibility": {"harness_contract": "onion-sentinel-harness-job-envelope-v1", "policy_schema": "onion-sentinel-investigation-harness-policy-v1", "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"},
   "maintainer": {"owner": "Onion Sentinel", "reviewed_at": "2026-08-14T19:25:00Z", "reviewer": "pending"},
   "roles": ["soc-analyst", "incident-responder", "threat-hunter"],
@@ -14,6 +14,9 @@
   "budgets": {"max_queries": 4, "max_rows": 1500, "max_bytes": 1572864, "timeout_seconds": 120},
   "preconditions": ["a bounded STUN event or flow identity exists", "originator responder semantics are attributable", "deployed Zeek STUN and flow field catalogs are available"],
   "required_evidence": ["STUN method class transaction and address metadata when available", "bounded tuple timing direction bytes and peer history", "application or asset context and sensor coverage"],
+  "positive_evidence": ["attributable STUN methods and peers form an unauthorized relay or discovery pattern", "flow and application context corroborate suspicious peer setup beyond ordinary NAT traversal"],
+  "negative_evidence": ["successful covered STUN and flow queries match an approved conferencing or WebRTC application", "peer frequency method class and transfer pattern remain within the documented service baseline"],
+  "escalation_pivots": ["correlate the STUN transaction with bounded flow duration and peer history", "identify the attributable application or managed asset policy", "request review before treating shared public STUN infrastructure as malicious"],
   "query_templates": [
     {"id": "stun-session-context", "backend": "zeek", "language": "broker-parameters", "purpose": "Retrieve bounded Zeek STUN and STUN NAT metadata with originator-responder semantics.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "source.ip", "source.port", "destination.ip", "destination.port", "network.transport", "network.community_id", "stun.class", "stun.id", "stun.method", "stun.lan.addresses", "stun.wan.addresses", "stun.wan.ports"]},
     {"id": "stun-flow-context", "backend": "elastic", "language": "query-dsl", "purpose": "Correlate the STUN session with bounded flow duration volume and direction.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "event.duration", "source.ip", "source.port", "destination.ip", "destination.port", "network.transport", "network.direction", "network.community_id", "network.bytes", "network.packets"]}

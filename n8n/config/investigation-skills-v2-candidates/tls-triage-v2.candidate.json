@@ -1,11 +1,11 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.tls.triage",
-  "version": "2.0.0-candidate.3",
-  "artifact_digest": "f9597c48487a749545b1394f4eee3ab9b2ab06c52cdd9299a64513baf04e0eb7",
+  "version": "2.0.0-candidate.4",
+  "artifact_digest": "415166001d99ae05b52f74b1e4759a5a01bd1f4f9a8af294186f7ac96fe32762",
   "lineage": {
-    "source_revision": "5d22395",
-    "predecessor_digest": "f3945eaf26f6f146b42df03ca036908e17afbd6029556e1479a8f77f04465dee"
+    "source_revision": "4d10442",
+    "predecessor_digest": "f9597c48487a749545b1394f4eee3ab9b2ab06c52cdd9299a64513baf04e0eb7"
   },
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
@@ -73,6 +73,19 @@
     "alert identity",
     "bounded flow and time scope",
     "TLS identity fields and query coverage"
+  ],
+  "positive_evidence": [
+    "attributable SNI certificate fingerprint validation or client fingerprint corroborates the suspicious TLS hypothesis",
+    "bounded DNS flow or CTI context independently supports malicious infrastructure use"
+  ],
+  "negative_evidence": [
+    "successful complete TLS context matches approved interception CDN or application behavior",
+    "covered certificate and peer history refute the suspected identity or infrastructure claim"
+  ],
+  "escalation_pivots": [
+    "correlate exact SNI and certificate identity with DNS and flow history",
+    "compare the attributable peer and fingerprint in an adjacent bounded window",
+    "request certificate or application-owner review when chain or SNI evidence is unavailable"
   ],
   "query_templates": [
     {

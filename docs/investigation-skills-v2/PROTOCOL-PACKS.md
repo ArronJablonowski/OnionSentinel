@@ -37,6 +37,15 @@ validated scope, row and byte bounds, truncation, telemetry gaps, evidence
 references, alternative hypotheses, and the smallest useful next pivot. Empty
 results are never generalized beyond their exact successful scope.
 
+Each pack separately defines `positive_evidence`, `negative_evidence`, and
+`escalation_pivots`. Positive evidence is an admitted observation that supports
+the scoped hypothesis. Negative evidence must come from a successful,
+complete, non-truncated observation over the exact declared target, tuple, and
+time window; unavailable, unverified, failed, partial, or mapping-drifted data
+remains a gap and cannot be used as a negative. Escalation pivots are bounded
+discriminators, not authority: the broker still owns capability intersection,
+target and time bounds, query compilation, approval, and execution.
+
 ## Delivery sequence
 
 1. Promote DNS, TLS, HTTP, SSH, ICMP, Suricata intent, and Zeek correlation

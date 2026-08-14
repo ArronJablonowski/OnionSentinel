@@ -1,11 +1,11 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "source.suricata.rule-intent",
-  "version": "2.0.0-candidate.3",
-  "artifact_digest": "fcab0439f3fe135588d4bf113ff7ef09ee56528c3b7f341e3ee185d7f123670c",
+  "version": "2.0.0-candidate.4",
+  "artifact_digest": "96b09ce702c7f61fef65a3061eff61e9758034794c74e0d8e87cb74aac0a6334",
   "lineage": {
-    "source_revision": "5d22395",
-    "predecessor_digest": "5fb8c6ff017a3426b47c68ef79f25b1ca223573687b5399e57d4a70e17900ae8"
+    "source_revision": "4d10442",
+    "predecessor_digest": "fcab0439f3fe135588d4bf113ff7ef09ee56528c3b7f341e3ee185d7f123670c"
   },
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
@@ -68,6 +68,19 @@
     "exact SID revision and event identity",
     "bounded triggering flow",
     "rule metadata provenance"
+  ],
+  "positive_evidence": [
+    "the exact deployed SID revision and triggering fields corroborate the rule's discriminating condition",
+    "bounded flow and cross-sensor context support malicious intent beyond syntactic rule truth"
+  ],
+  "negative_evidence": [
+    "successful exact-rule and flow validation attributes the match to approved benign activity",
+    "covered context refutes the rule-intent hypothesis without contradictory observations"
+  ],
+  "escalation_pivots": [
+    "retrieve exact deployed rule metadata and revision provenance",
+    "correlate the triggering tuple through bounded network-flow and protocol context",
+    "request detection-owner review when rule text revision or tuning state is unavailable"
   ],
   "query_templates": [
     {

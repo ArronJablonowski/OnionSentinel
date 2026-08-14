@@ -1,9 +1,9 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.doh.triage",
-  "version": "2.0.0-candidate.1",
-  "artifact_digest": "19e8f9812b3ea4bdf148c4267b5913a5ee437de71fc809f6d883c15e532cf1d5",
-  "lineage": {"source_revision": "dbbfb5f", "predecessor_digest": ""},
+  "version": "2.0.0-candidate.2",
+  "artifact_digest": "291135483dd22d1fa6706b9d3b3ac590f713d3a6d1e3e367a5b87ec87c7346d2",
+  "lineage": {"source_revision": "4d10442", "predecessor_digest": "19e8f9812b3ea4bdf148c4267b5913a5ee437de71fc809f6d883c15e532cf1d5"},
   "compatibility": {"harness_contract": "onion-sentinel-harness-job-envelope-v1", "policy_schema": "onion-sentinel-investigation-harness-policy-v1", "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"},
   "maintainer": {"owner": "Onion Sentinel", "reviewed_at": "2026-08-14T19:25:00Z", "reviewer": "pending"},
   "roles": ["soc-analyst", "incident-responder", "threat-hunter"],
@@ -14,6 +14,9 @@
   "budgets": {"max_queries": 5, "max_rows": 2000, "max_bytes": 2097152, "timeout_seconds": 120},
   "preconditions": ["a trusted client endpoint and bounded HTTPS flow window exist", "TLS HTTP or QUIC metadata is attributable", "deployed DNS TLS and HTTP field catalogs are available"],
   "required_evidence": ["TLS or QUIC server identity and flow tuple", "HTTP method URI or media metadata when observable", "conventional DNS baseline resolver policy and telemetry coverage"],
+  "positive_evidence": ["visible HTTP metadata identifies a standards-conformant DNS-over-HTTPS exchange to an attributable resolver", "resolver identity and repeated client behavior contradict approved endpoint policy with corroborating flow evidence"],
+  "negative_evidence": ["successful covered telemetry attributes the service to an approved resolver and client policy", "visible HTTPS metadata does not support DoH and conventional DNS activity explains the same bounded client window"],
+  "escalation_pivots": ["correlate TLS or QUIC identity with visible HTTP metadata", "compare conventional DNS activity for the exact client and window", "obtain current endpoint resolver policy before escalating suspected bypass"],
   "query_templates": [
     {"id": "doh-tls-context", "backend": "zeek", "language": "broker-parameters", "purpose": "Identify the bounded TLS or QUIC service endpoint without inferring encrypted DNS payload content.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "source.ip", "source.port", "destination.ip", "destination.port", "network.transport", "network.protocol", "network.community_id", "ssl.server_name", "ssl.validation_status", "tls.server.hash.sha256"]},
     {"id": "doh-http-context", "backend": "zeek", "language": "broker-parameters", "purpose": "Retrieve bounded HTTP metadata that can support or refute a DoH exchange when visible.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "source.ip", "destination.ip", "network.community_id", "http.method", "http.status_code", "http.uri", "http.virtual_host", "http.request.body.length", "http.response.body.length"]},

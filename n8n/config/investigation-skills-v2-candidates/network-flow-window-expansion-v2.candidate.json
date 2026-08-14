@@ -1,9 +1,9 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.flow.window-expansion",
-  "version": "2.0.0-candidate.1",
-  "artifact_digest": "793d76b0b4b58ba9ce31a0482bb0a846f5d4e8a7053b67b0434693ec41b1f0ab",
-  "lineage": {"source_revision": "88ce94e", "predecessor_digest": ""},
+  "version": "2.0.0-candidate.2",
+  "artifact_digest": "550cb05a3ca33fea0c841ddd3880959e8bd5ebe57bf4be8b45e067d69d461bc5",
+  "lineage": {"source_revision": "4d10442", "predecessor_digest": "793d76b0b4b58ba9ce31a0482bb0a846f5d4e8a7053b67b0434693ec41b1f0ab"},
   "compatibility": {"harness_contract": "onion-sentinel-harness-job-envelope-v1", "policy_schema": "onion-sentinel-investigation-harness-policy-v1", "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"},
   "maintainer": {"owner": "Onion Sentinel", "reviewed_at": "2026-08-14T19:20:00Z", "reviewer": "pending"},
   "roles": ["soc-analyst", "incident-responder", "threat-hunter"],
@@ -14,6 +14,9 @@
   "budgets": {"max_queries": 4, "max_rows": 2000, "max_bytes": 2097152, "timeout_seconds": 120},
   "preconditions": ["a trusted alert timestamp and bounded authorization envelope exist", "at least one attributable observable or event tuple exists", "cross-sensor role semantics and deployed field catalogs are available"],
   "required_evidence": ["anchor window tuple role semantics and correlation key provenance", "each attempted window with exact filters status hit count and coverage", "successful query bounds truncation telemetry gaps and evidence references"],
+  "positive_evidence": ["the same attributable tuple or community ID recurs across covered expanded windows", "cross-sensor events corroborate the hypothesized sequence without role or filter drift"],
+  "negative_evidence": ["a successful complete wider window contains no additional matching documents for the exact authorized filters", "covered flow context supports a bounded expected-service explanation without contradictory events"],
+  "escalation_pivots": ["expand one bounded step inside the trusted envelope", "correlate the role-safe tuple through the cross-sensor timeline", "stop and request review if expansion would change filters or exceed authority"],
   "query_templates": [
     {
       "id": "flow-window-anchor",

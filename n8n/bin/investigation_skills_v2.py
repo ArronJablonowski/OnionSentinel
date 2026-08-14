@@ -39,7 +39,8 @@ REQUIRED_FIELDS = {
     "schema", "id", "version", "artifact_digest", "lineage",
     "compatibility", "maintainer", "roles", "match", "objective",
     "capabilities", "safety", "budgets", "preconditions",
-    "required_evidence", "query_templates", "output_contract",
+    "required_evidence", "positive_evidence", "negative_evidence",
+    "escalation_pivots", "query_templates", "output_contract",
     "alternative_hypotheses", "stop_conditions", "confidence_limiters",
     "known_false_positive_patterns", "verification", "references",
 }
@@ -274,8 +275,10 @@ def _validate_manifest_output(raw: dict[str, Any]) -> None:
     }:
         raise ValueError("skill output contract is unsafe")
     for name in (
-        "preconditions", "required_evidence", "alternative_hypotheses",
-        "stop_conditions", "confidence_limiters", "known_false_positive_patterns",
+        "preconditions", "required_evidence", "positive_evidence",
+        "negative_evidence", "escalation_pivots", "alternative_hypotheses",
+        "stop_conditions", "confidence_limiters",
+        "known_false_positive_patterns",
     ):
         _bounded_strings(raw.get(name), name)
 

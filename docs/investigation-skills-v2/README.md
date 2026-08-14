@@ -85,6 +85,17 @@ collection gap. Packs may not collapse unverified or unavailable evidence into
 negative evidence, and consumers must retain the state with each projected
 fact.
 
+Every candidate also declares three distinct bounded guidance sets.
+`positive_evidence` identifies admitted observations that would support the
+pack's hypothesis. `negative_evidence` identifies observations that weigh
+against it, but only when the underlying query completed successfully over its
+exact declared scope with complete coverage. A failed, partial, truncated,
+mapping-incompatible, unavailable, or unverified observation is a visible gap,
+never negative evidence. `escalation_pivots` lists the smallest bounded next
+steps that could discriminate among remaining hypotheses. Those pivots are
+advice only: they cannot grant a capability, widen target or time scope, select
+an executor, or bypass broker authorization and approval.
+
 ## Promotion and rollback
 
 Promotion requires schema validation, unit tests, replay corpus results,

@@ -8,7 +8,8 @@
     "schema", "id", "version", "artifact_digest", "lineage",
     "compatibility", "maintainer", "roles", "match", "objective",
     "capabilities", "safety", "budgets", "preconditions",
-    "required_evidence", "query_templates", "output_contract",
+    "required_evidence", "positive_evidence", "negative_evidence",
+    "escalation_pivots", "query_templates", "output_contract",
     "alternative_hypotheses", "stop_conditions", "confidence_limiters",
     "known_false_positive_patterns", "verification", "references"
   ],
@@ -78,6 +79,9 @@
     },
     "preconditions": {"$ref": "#/$defs/stringSet"},
     "required_evidence": {"$ref": "#/$defs/stringSet"},
+    "positive_evidence": {"$ref": "#/$defs/stringSet"},
+    "negative_evidence": {"$ref": "#/$defs/stringSet"},
+    "escalation_pivots": {"$ref": "#/$defs/stringSet"},
     "query_templates": {
       "type": "array", "minItems": 1, "maxItems": 12,
       "items": {

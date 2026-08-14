@@ -1,11 +1,11 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.icmp.triage",
-  "version": "2.0.0-candidate.3",
-  "artifact_digest": "4cfef3f595b1e55cbc2cfe233e1e163b92d04dbf58e3a311c9c2066a8cb6bd42",
+  "version": "2.0.0-candidate.4",
+  "artifact_digest": "7dfd7d61a78db45ef8c83967b5b98e51ee987b77caac7b41dc355253c0fd056e",
   "lineage": {
-    "source_revision": "5d22395",
-    "predecessor_digest": "b8ea5179f150af99f680b135c02cb7b0604efc09c345a0243b1ebda7b5ab3527"
+    "source_revision": "4d10442",
+    "predecessor_digest": "4cfef3f595b1e55cbc2cfe233e1e163b92d04dbf58e3a311c9c2066a8cb6bd42"
   },
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
@@ -74,6 +74,19 @@
     "exact alert and rule identity",
     "bounded ICMP time and peer scope",
     "type code size and cadence coverage"
+  ],
+  "positive_evidence": [
+    "attributable type code size cadence and direction corroborate the alert's discriminating behavior",
+    "bounded peer history or derived packet summary confirms behavior inconsistent with approved diagnostics"
+  ],
+  "negative_evidence": [
+    "successful complete context matches approved monitoring diagnostics or network-appliance behavior",
+    "covered type code cadence and size observations refute the suspected tunnel or heartbeat pattern"
+  ],
+  "escalation_pivots": [
+    "validate the exact Suricata rule identity and triggering tuple",
+    "correlate bounded flow and derived-PCAP type code size and timing summaries",
+    "obtain network-owner confirmation before escalating diagnostic ICMP"
   ],
   "query_templates": [
     {

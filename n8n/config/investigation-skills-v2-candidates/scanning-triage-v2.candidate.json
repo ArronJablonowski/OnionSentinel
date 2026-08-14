@@ -1,9 +1,9 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.scan.triage",
-  "version": "2.0.0-candidate.1",
-  "artifact_digest": "1bcce00e03ba1efd12b695968dece3daacff36f971895f5f9f5d527f276331ec",
-  "lineage": {"source_revision": "dbbfb5f", "predecessor_digest": ""},
+  "version": "2.0.0-candidate.2",
+  "artifact_digest": "9bcea64e0fbffbea39aecde8b9c506f7a8f285a8bf68bdaac213e55a73fc96be",
+  "lineage": {"source_revision": "4d10442", "predecessor_digest": "1bcce00e03ba1efd12b695968dece3daacff36f971895f5f9f5d527f276331ec"},
   "compatibility": {"harness_contract": "onion-sentinel-harness-job-envelope-v1", "policy_schema": "onion-sentinel-investigation-harness-policy-v1", "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"},
   "maintainer": {"owner": "Onion Sentinel", "reviewed_at": "2026-08-14T19:25:00Z", "reviewer": "pending"},
   "roles": ["soc-analyst", "incident-responder", "threat-hunter"],
@@ -14,6 +14,9 @@
   "budgets": {"max_queries": 4, "max_rows": 2000, "max_bytes": 2097152, "timeout_seconds": 120},
   "preconditions": ["a trusted source or destination and bounded window exist", "tuple role semantics are known or reported unavailable", "deployed alert and flow field catalogs are available"],
   "required_evidence": ["bounded unique peer and port counts with exact filters", "connection outcomes direction timing and sensor coverage", "rule context asset authorization and attributable evidence references"],
+  "positive_evidence": ["covered observations show broad peer or port enumeration with attributable response patterns", "alert and flow context corroborate unauthorized discovery against multiple targets"],
+  "negative_evidence": ["successful covered queries constrain activity to approved scanner targets and windows", "response and asset context match documented health checks or service discovery without contrary evidence"],
+  "escalation_pivots": ["compare exact destination breadth and outcomes in an adjacent bounded window", "retrieve attributable alert context for the same actor and tuple", "obtain asset-owner or change-window confirmation before a hostile-intent conclusion"],
   "query_templates": [
     {"id": "scan-flow-summary", "backend": "elastic", "language": "query-dsl", "purpose": "Measure bounded peer and port breadth plus response and byte patterns for one authorized observable.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "event.outcome", "source.ip", "source.port", "destination.ip", "destination.port", "network.transport", "network.direction", "network.community_id", "network.bytes", "network.packets"]},
     {"id": "scan-alert-context", "backend": "suricata", "language": "broker-parameters", "purpose": "Correlate exact alert identities without treating a scan signature as proof of hostile intent.", "parameters": ["observables", "event_tuple", "start_time", "end_time", "aggregation"], "expected_fields": ["@timestamp", "event.dataset", "event.id", "rule.id", "rule.uuid", "rule.name", "source.ip", "destination.ip", "network.transport", "network.community_id"]}

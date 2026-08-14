@@ -1,9 +1,9 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "foundation.alert-context.validation",
-  "version": "2.0.0-candidate.1",
-  "artifact_digest": "a7908641b649d54c77984af86ae595405aa6773708e82f9c688106c759fea4ef",
-  "lineage": {"source_revision": "88ce94e", "predecessor_digest": ""},
+  "version": "2.0.0-candidate.2",
+  "artifact_digest": "ec7da854fad7525c5e194747f1204e240895500fd35f026a13fde4679a69bb04",
+  "lineage": {"source_revision": "4d10442", "predecessor_digest": "a7908641b649d54c77984af86ae595405aa6773708e82f9c688106c759fea4ef"},
   "compatibility": {"harness_contract": "onion-sentinel-harness-job-envelope-v1", "policy_schema": "onion-sentinel-investigation-harness-policy-v1", "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"},
   "maintainer": {"owner": "Onion Sentinel", "reviewed_at": "2026-08-14T19:20:00Z", "reviewer": "pending"},
   "roles": ["soc-analyst", "incident-responder", "threat-hunter"],
@@ -14,6 +14,9 @@
   "budgets": {"max_queries": 3, "max_rows": 1000, "max_bytes": 1048576, "timeout_seconds": 90},
   "preconditions": ["an exact selected alert identity and trusted timestamp exist", "group membership criteria and bounded group window are attributable", "deployed alert-context field catalog is available"],
   "required_evidence": ["exact selected event identity timestamp rule identity and tuple", "grouping dimensions and the identity of each grouped observation considered", "successful query coverage row count truncation and evidence references"],
+  "positive_evidence": ["the selected document identity and exact rule tuple are independently corroborated", "multiple attributable group members exhibit the same discriminating behavior within covered windows"],
+  "negative_evidence": ["a successful complete drilldown shows the selected behavior is isolated to one member", "attributable group members match an approved benign service or test without contradictory observations"],
+  "escalation_pivots": ["retrieve exact group-member documents whose tuple or rule identity differs", "correlate the selected tuple across a bounded network-flow window", "request human review when group attribution remains ambiguous"],
   "query_templates": [
     {
       "id": "alert-group-selected-anchor",

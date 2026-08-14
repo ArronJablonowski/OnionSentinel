@@ -252,6 +252,30 @@ class InvestigationSkillsV2ProjectionTests(unittest.TestCase):
                     self.assertGreaterEqual(len(raw[field]), 2)
                 self.assertEqual(skills.validate_manifest(raw), raw)
 
+    def test_evidence_and_escalation_semantics_fail_closed(self) -> None:
+        mutations = (
+            (
+                lambda raw: raw.update(positive_evidence=[]),
+                "positive_evidence must be a non-empty bounded list",
+            ),
+            (
+                lambda raw: raw.update(negative_evidence=[]),
+                "negative_evidence must be a non-empty bounded list",
+            ),
+            (
+                lambda raw: raw.update(escalation_pivots=[]),
+                "escalation_pivots must be a non-empty bounded list",
+            ),
+        )
+        for mutate, message in mutations:
+            raw = candidate()
+            mutate(raw)
+            raw["artifact_digest"] = skills.artifact_digest(raw)
+            with self.subTest(message=message):
+                with self.assertRaises(ValueError) as raised:
+                    skills.validate_manifest(raw)
+                self.assertEqual(str(raised.exception), message)
+
     def test_lineage_compatibility_maintainer_verification_and_references_fail_closed(self) -> None:
         mutations = (
             (lambda raw: raw.update(lineage={}), "manifest lineage is invalid"),
