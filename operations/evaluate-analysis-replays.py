@@ -64,11 +64,7 @@ def load_module(path: Path):
     return module
 
 
-def load_suite(path: Path) -> dict[str, Any]:
-    raw = path.read_bytes()
-    if len(raw) > MAX_REPLAY_BYTES:
-        raise ValueError("analysis replay suite exceeds its byte limit")
-    payload = json.loads(raw.decode("utf-8"))
+def _suite_metadata(payload: object) -> tuple[list[Any], object, object]:
     if not isinstance(payload, dict) or payload.get("schema") != REPLAY_SCHEMA:
         raise ValueError("unsupported analysis replay suite schema")
     cases = payload.get("cases")
@@ -82,42 +78,67 @@ def load_suite(path: Path) -> dict[str, Any]:
         raise ValueError("response_defaults must be an object")
     if prompt_defaults is not None and not isinstance(prompt_defaults, dict):
         raise ValueError("prompt_defaults must be an object")
-    identifiers = set()
-    for index, case in enumerate(cases):
-        if not isinstance(case, dict):
-            raise ValueError(f"cases[{index}] must be an object")
-        case_id = str(case.get("case_id") or "").strip()
-        if not case_id or case_id in identifiers:
-            raise ValueError(f"cases[{index}].case_id is missing or duplicated")
-        identifiers.add(case_id)
-        if not isinstance(case.get("expected"), dict):
-            raise ValueError(f"{case_id}.expected must be an object")
-        if not isinstance(case.get("primary_response"), dict):
-            raise ValueError(f"{case_id}.primary_response must be an object")
-        if not isinstance(case.get("prompt_package"), dict):
-            raise ValueError(f"{case_id}.prompt_package must be an object")
-        fixture = case.get("detection_validation_fixture")
-        if fixture is not None:
-            if not isinstance(fixture, dict):
-                raise ValueError(f"{case_id}.detection_validation_fixture must be an object")
-            if not str(fixture.get("rule") or "") or not str(fixture.get("sid") or ""):
-                raise ValueError(f"{case_id}.detection_validation_fixture is missing rule identity")
-            packets = fixture.get("packets")
-            if not isinstance(packets, list) or not packets or len(packets) > 100:
-                raise ValueError(f"{case_id}.detection_validation_fixture packets are invalid")
-        case["primary_response"] = {
+    return cases, response_defaults, prompt_defaults
+
+
+def _validate_detection_fixture(case_id: str, fixture: object) -> None:
+    if not isinstance(fixture, dict):
+        raise ValueError(f"{case_id}.detection_validation_fixture must be an object")
+    if not str(fixture.get("rule") or "") or not str(fixture.get("sid") or ""):
+        raise ValueError(f"{case_id}.detection_validation_fixture is missing rule identity")
+    packets = fixture.get("packets")
+    if not isinstance(packets, list) or not packets or len(packets) > 100:
+        raise ValueError(f"{case_id}.detection_validation_fixture packets are invalid")
+
+
+def _validate_replay_case(case: object, index: int, identifiers: set[str]) -> None:
+    if not isinstance(case, dict):
+        raise ValueError(f"cases[{index}] must be an object")
+    case_id = str(case.get("case_id") or "").strip()
+    if not case_id or case_id in identifiers:
+        raise ValueError(f"cases[{index}].case_id is missing or duplicated")
+    identifiers.add(case_id)
+    if not isinstance(case.get("expected"), dict):
+        raise ValueError(f"{case_id}.expected must be an object")
+    if not isinstance(case.get("primary_response"), dict):
+        raise ValueError(f"{case_id}.primary_response must be an object")
+    if not isinstance(case.get("prompt_package"), dict):
+        raise ValueError(f"{case_id}.prompt_package must be an object")
+    fixture = case.get("detection_validation_fixture")
+    if fixture is not None:
+        _validate_detection_fixture(case_id, fixture)
+
+
+def _apply_replay_defaults(
+    case: dict[str, Any],
+    response_defaults: object,
+    prompt_defaults: object,
+) -> None:
+    case["primary_response"] = {
+        **copy.deepcopy(response_defaults or {}),
+        **case["primary_response"],
+    }
+    case["prompt_package"] = {
+        **copy.deepcopy(prompt_defaults or {}),
+        **case["prompt_package"],
+    }
+    if isinstance(case.get("reviewer_response"), dict):
+        case["reviewer_response"] = {
             **copy.deepcopy(response_defaults or {}),
-            **case["primary_response"],
+            **case["reviewer_response"],
         }
-        case["prompt_package"] = {
-            **copy.deepcopy(prompt_defaults or {}),
-            **case["prompt_package"],
-        }
-        if isinstance(case.get("reviewer_response"), dict):
-            case["reviewer_response"] = {
-                **copy.deepcopy(response_defaults or {}),
-                **case["reviewer_response"],
-            }
+
+
+def load_suite(path: Path) -> dict[str, Any]:
+    raw = path.read_bytes()
+    if len(raw) > MAX_REPLAY_BYTES:
+        raise ValueError("analysis replay suite exceeds its byte limit")
+    payload = json.loads(raw.decode("utf-8"))
+    cases, response_defaults, prompt_defaults = _suite_metadata(payload)
+    identifiers: set[str] = set()
+    for index, case in enumerate(cases):
+        _validate_replay_case(case, index, identifiers)
+        _apply_replay_defaults(case, response_defaults, prompt_defaults)
     return payload
 
 
