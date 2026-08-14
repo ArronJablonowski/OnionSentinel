@@ -29,16 +29,25 @@ from application_log_filesystem import (
 
 def _resolve_member(spec: LogSpec, root: Path, requested: str, home: Path) -> tuple[str, str]:
     if spec.family:
-        members, _count, _size = _family_members(root)
-        if not members:
-            raise ApplicationLogError(404, "Log file does not exist")
-        member = requested or str(members[0]["id"])
-        if not ENSURE_STACK_RE.fullmatch(member):
-            raise ApplicationLogError(404, "Unknown log member")
-        if not any(item["id"] == member for item in members):
-            raise ApplicationLogError(404, "Unknown or unavailable log member")
-        return member, member
+        return _resolve_family_member(root, requested)
+    return _resolve_fixed_member(spec, requested, home)
 
+
+def _resolve_family_member(root: Path, requested: str) -> tuple[str, str]:
+    members, _count, _size = _family_members(root)
+    if not members:
+        raise ApplicationLogError(404, "Log file does not exist")
+    member = requested or str(members[0]["id"])
+    if not ENSURE_STACK_RE.fullmatch(member):
+        raise ApplicationLogError(404, "Unknown log member")
+    if not any(item["id"] == member for item in members):
+        raise ApplicationLogError(404, "Unknown or unavailable log member")
+    return member, member
+
+
+def _resolve_fixed_member(
+    spec: LogSpec, requested: str, home: Path
+) -> tuple[str, str]:
     backups = spec.backups
     if spec.id == "alert-store-application":
         _size, backups = _alert_store_policy(home)
