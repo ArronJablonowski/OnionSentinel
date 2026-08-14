@@ -53,9 +53,6 @@
       "max_complexity": 44,
       "max_lines": 273
     },
-    "relay/app/relay_pcap_transport.py::capture_protection_decision": {
-      "max_complexity": 18
-    },
     "relay/app/relay_pcap_transport.py::streamed_spool_artifact": {
       "max_complexity": 30,
       "max_lines": 138
@@ -65,5 +62,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "16aed67166180c1b270fdfa5b810690e11d558c7"
+  "source_release": "23fdabfc375c4f65036e5c95b8f65779bb4609f0"
 }
