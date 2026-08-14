@@ -73,10 +73,60 @@ def _bounded_block(value: object, language: str = "json", max_len: int = 1800) -
     return f"```{language}\n{text or 'n/a'}\n```"
 
 
+def _zeek_summary_lines(zeek: dict[str, Any]) -> list[str]:
+    """Project the bounded Zeek section without changing evidence order."""
+    lines = ["### Zeek Summary", ""]
+    if not zeek.get("available"):
+        lines.append(f"- Zeek unavailable: {_cell(zeek.get('reason'))}")
+        return lines
+
+    record_counts = zeek.get("record_counts") if isinstance(zeek.get("record_counts"), dict) else {}
+    lines.extend([f"- Record counts: `{json.dumps(record_counts, sort_keys=True)}`", ""])
+    for title, key in (
+        ("Top Connections", "top_connections"),
+        ("DNS Queries", "dns_queries"),
+        ("TLS SNI", "tls_sni"),
+        ("HTTP Hosts", "http_hosts"),
+        ("Notices", "notices"),
+        ("Weird Activity", "weird"),
+    ):
+        values = zeek.get(key) if isinstance(zeek.get(key), list) else []
+        lines.extend([f"#### {title}", "", _bounded_block(values[:10]), ""])
+    return lines
+
+
+def _tshark_corroboration_lines(tshark: dict[str, Any]) -> list[str]:
+    """Project bounded TShark samples while preserving admission semantics."""
+    lines = ["### TShark Corroboration", ""]
+    if not tshark.get("available"):
+        lines.append(f"- TShark unavailable: {_cell(tshark.get('reason'))}")
+        return lines
+
+    samples = tshark.get("samples") if isinstance(tshark.get("samples"), list) else []
+    if not samples:
+        lines.append("No bounded TShark samples were produced.")
+    for sample in samples[:2]:
+        if not isinstance(sample, dict):
+            continue
+        lines.extend(
+            [
+                f"#### {Path(str(sample.get('pcap') or 'capture')).name}",
+                "",
+                "**Protocol hierarchy**",
+                "",
+                _bounded_block(str(sample.get("protocol_hierarchy") or ""), "text"),
+                "",
+                "**Conversations**",
+                "",
+                _bounded_block(str(sample.get("conversations") or ""), "text"),
+                "",
+            ]
+        )
+    return lines
+
+
 def render_pcap_evidence_markdown(
-    pcap_status: tuple[str, str, str],
-    pcap_analysis: dict[str, Any] | None,
-    generated_at: str = "",
+    pcap_status: tuple[str, str, str], pcap_analysis: dict[str, Any] | None, generated_at: str = ""
 ) -> str:
     """Render LLM-safe packet evidence for the Detailed Alert Report."""
     _status_key, status_label, status_detail = pcap_status
@@ -112,49 +162,9 @@ def render_pcap_evidence_markdown(
         f"| PCAP files parsed | {len(pcap_files)} |",
         f"| Analysis artifact | {_cell(Path(str(pcap_analysis.get('_analysis_path') or '')).name or 'n/a')} |",
         "",
-        "### Zeek Summary",
-        "",
     ]
-    if not zeek.get("available"):
-        lines.append(f"- Zeek unavailable: {_cell(zeek.get('reason'))}")
-    else:
-        record_counts = zeek.get("record_counts") if isinstance(zeek.get("record_counts"), dict) else {}
-        lines.extend([f"- Record counts: `{json.dumps(record_counts, sort_keys=True)}`", ""])
-        for title, key in (
-            ("Top Connections", "top_connections"),
-            ("DNS Queries", "dns_queries"),
-            ("TLS SNI", "tls_sni"),
-            ("HTTP Hosts", "http_hosts"),
-            ("Notices", "notices"),
-            ("Weird Activity", "weird"),
-        ):
-            values = zeek.get(key) if isinstance(zeek.get(key), list) else []
-            lines.extend([f"#### {title}", "", _bounded_block(values[:10]), ""])
-
-    lines.extend(["### TShark Corroboration", ""])
-    if not tshark.get("available"):
-        lines.append(f"- TShark unavailable: {_cell(tshark.get('reason'))}")
-    else:
-        samples = tshark.get("samples") if isinstance(tshark.get("samples"), list) else []
-        if not samples:
-            lines.append("No bounded TShark samples were produced.")
-        for sample in samples[:2]:
-            if not isinstance(sample, dict):
-                continue
-            lines.extend(
-                [
-                    f"#### {Path(str(sample.get('pcap') or 'capture')).name}",
-                    "",
-                    "**Protocol hierarchy**",
-                    "",
-                    _bounded_block(str(sample.get("protocol_hierarchy") or ""), "text"),
-                    "",
-                    "**Conversations**",
-                    "",
-                    _bounded_block(str(sample.get("conversations") or ""), "text"),
-                    "",
-                ]
-            )
+    lines.extend(_zeek_summary_lines(zeek))
+    lines.extend(_tshark_corroboration_lines(tshark))
 
     lines.extend(
         [
