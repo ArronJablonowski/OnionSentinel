@@ -1,11 +1,11 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.http.triage",
-  "version": "2.0.0-candidate.2",
-  "artifact_digest": "30560faa9e9bc61c18a61e1f3154a11180b41bbe1057ce9b51498a72063f4ce9",
+  "version": "2.0.0-candidate.3",
+  "artifact_digest": "c44c597818ce93e8c0217711d4e5af8181d3f719f49d1e81ac4557bb0f75672b",
   "lineage": {
-    "source_revision": "59ef4ad",
-    "predecessor_digest": "31225aa0dde0283f7dda8307106b2a0afdb58640d82cde85539965fc777daa9b"
+    "source_revision": "5d22395",
+    "predecessor_digest": "30560faa9e9bc61c18a61e1f3154a11180b41bbe1057ce9b51498a72063f4ce9"
   },
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
@@ -125,7 +125,8 @@
     "schema": "onion-sentinel-skill-result-v1",
     "coverage_required": true,
     "truncation_required": true,
-    "evidence_refs_required": true
+    "evidence_refs_required": true,
+    "fact_states": ["observed", "inferred", "unverified", "unavailable"]
   },
   "alternative_hypotheses": [
     "software update or telemetry",

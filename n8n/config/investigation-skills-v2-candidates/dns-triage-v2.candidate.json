@@ -1,9 +1,9 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.dns.triage",
-  "version": "2.0.0-candidate.2",
-  "artifact_digest": "81a87dc6efb9966d840098815abf93405a2fa66aae20252b95551435d86f0ca3",
-  "lineage": {"source_revision": "59ef4ad", "predecessor_digest": "77b794032b151502accc553d2c3af4810f0db58dfbd32b2787a7ce36d0e1e59a"},
+  "version": "2.0.0-candidate.3",
+  "artifact_digest": "2aa8af850db934a9c9c0ea874cf7c0561e6f2c4d7cf6b9a202dc629135b3d08b",
+  "lineage": {"source_revision": "5d22395", "predecessor_digest": "81a87dc6efb9966d840098815abf93405a2fa66aae20252b95551435d86f0ca3"},
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
     "policy_schema": "onion-sentinel-investigation-harness-policy-v1",
@@ -41,7 +41,7 @@
       "expected_fields": ["@timestamp", "source.ip", "destination.ip", "network.community_id", "dns.query.name", "dns.query.type", "dns.response.code_name", "dns.resolved_ip"]
     }
   ],
-  "output_contract": {"schema": "onion-sentinel-skill-result-v1", "coverage_required": true, "truncation_required": true, "evidence_refs_required": true},
+  "output_contract": {"schema": "onion-sentinel-skill-result-v1", "coverage_required": true, "truncation_required": true, "evidence_refs_required": true, "fact_states": ["observed", "inferred", "unverified", "unavailable"]},
   "alternative_hypotheses": ["normal service discovery", "software update or telemetry", "CDN or shared infrastructure", "security product lookup", "malicious resolution or tunneling"],
   "stop_conditions": ["the discriminating question is answered with corroborated evidence", "the next pivot has low expected information value", "a budget or deadline is exhausted"],
   "confidence_limiters": ["missing resolver visibility", "retention gap", "truncated results", "encrypted DNS", "NAT or shared resolver attribution"],

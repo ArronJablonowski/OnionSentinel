@@ -61,6 +61,11 @@ replay is only the start of verification. It does not replace deployed-version
 mapping comparison, representative sanitized result replay, independent query
 review, shadow measurement, or human approval.
 
+All candidate manifests pin the output fact-state set to `observed`,
+`inferred`, `unverified`, and `unavailable`. This keeps absent or inaccessible
+telemetry distinct from a confirmed negative observation across every protocol
+and data-source pack.
+
 `skill-packs/dns-triage-v2.example.json` demonstrates the v2 boundary. Its
 verification flags are deliberately false because this package has not passed
 the required replay, review, or human promotion gates. It is structurally

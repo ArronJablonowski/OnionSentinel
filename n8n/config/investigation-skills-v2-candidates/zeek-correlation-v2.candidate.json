@@ -1,11 +1,11 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "source.zeek.correlation",
-  "version": "2.0.0-candidate.2",
-  "artifact_digest": "2f7ab156abae080a684d6127dc0535e6794e5652d2e5713bf2303da924b2b3ce",
+  "version": "2.0.0-candidate.3",
+  "artifact_digest": "493aacd7e11ec33621fe3b382725446991d2b8f53cf76d4bb9df0adf7cf1658c",
   "lineage": {
-    "source_revision": "59ef4ad",
-    "predecessor_digest": "cfbba2b0dddd2bffc0e30802fb52b1d6cfd7b8eb1eff6821066695244bdfcdab"
+    "source_revision": "5d22395",
+    "predecessor_digest": "2f7ab156abae080a684d6127dc0535e6794e5652d2e5713bf2303da924b2b3ce"
   },
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
@@ -125,7 +125,8 @@
     "schema": "onion-sentinel-skill-result-v1",
     "coverage_required": true,
     "truncation_required": true,
-    "evidence_refs_required": true
+    "evidence_refs_required": true,
+    "fact_states": ["observed", "inferred", "unverified", "unavailable"]
   },
   "alternative_hypotheses": [
     "normal protocol activity",

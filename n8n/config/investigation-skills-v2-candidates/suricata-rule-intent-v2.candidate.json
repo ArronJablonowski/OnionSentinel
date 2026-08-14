@@ -1,11 +1,11 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "source.suricata.rule-intent",
-  "version": "2.0.0-candidate.2",
-  "artifact_digest": "5fb8c6ff017a3426b47c68ef79f25b1ca223573687b5399e57d4a70e17900ae8",
+  "version": "2.0.0-candidate.3",
+  "artifact_digest": "fcab0439f3fe135588d4bf113ff7ef09ee56528c3b7f341e3ee185d7f123670c",
   "lineage": {
-    "source_revision": "59ef4ad",
-    "predecessor_digest": "39b4f200ff555f046a5bc8bb6722864949657dfa29a9f297d27f78230c5332ce"
+    "source_revision": "5d22395",
+    "predecessor_digest": "5fb8c6ff017a3426b47c68ef79f25b1ca223573687b5399e57d4a70e17900ae8"
   },
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
@@ -119,7 +119,8 @@
     "schema": "onion-sentinel-skill-result-v1",
     "coverage_required": true,
     "truncation_required": true,
-    "evidence_refs_required": true
+    "evidence_refs_required": true,
+    "fact_states": ["observed", "inferred", "unverified", "unavailable"]
   },
   "alternative_hypotheses": [
     "rule accurately matched benign activity",

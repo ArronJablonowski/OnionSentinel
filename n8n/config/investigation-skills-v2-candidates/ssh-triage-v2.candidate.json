@@ -1,11 +1,11 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.ssh.triage",
-  "version": "2.0.0-candidate.2",
-  "artifact_digest": "616e2f099089dbc2360d92313ef9b8562ffd71e2422e3c229fb48010495baf56",
+  "version": "2.0.0-candidate.3",
+  "artifact_digest": "630c037af79e3e2a3f76f8440ae781b9709cadd459d25a11d8580a8f714cc35a",
   "lineage": {
-    "source_revision": "59ef4ad",
-    "predecessor_digest": "ce4a47bfea1b8862a1415be83be84a05c256176b3f8f9e77a3f8bf09241ee445"
+    "source_revision": "5d22395",
+    "predecessor_digest": "616e2f099089dbc2360d92313ef9b8562ffd71e2422e3c229fb48010495baf56"
   },
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
@@ -124,7 +124,8 @@
     "schema": "onion-sentinel-skill-result-v1",
     "coverage_required": true,
     "truncation_required": true,
-    "evidence_refs_required": true
+    "evidence_refs_required": true,
+    "fact_states": ["observed", "inferred", "unverified", "unavailable"]
   },
   "alternative_hypotheses": [
     "authorized administration",

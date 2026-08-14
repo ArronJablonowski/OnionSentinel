@@ -95,12 +95,13 @@
     },
     "output_contract": {
       "type": "object", "additionalProperties": false,
-      "required": ["schema", "coverage_required", "truncation_required", "evidence_refs_required"],
+      "required": ["schema", "coverage_required", "truncation_required", "evidence_refs_required", "fact_states"],
       "properties": {
         "schema": {"const": "onion-sentinel-skill-result-v1"},
         "coverage_required": {"const": true},
         "truncation_required": {"const": true},
-        "evidence_refs_required": {"const": true}
+        "evidence_refs_required": {"const": true},
+        "fact_states": {"const": ["observed", "inferred", "unverified", "unavailable"]}
       }
     },
     "alternative_hypotheses": {"$ref": "#/$defs/stringSet"},

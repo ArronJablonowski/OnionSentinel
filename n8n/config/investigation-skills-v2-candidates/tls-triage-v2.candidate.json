@@ -1,11 +1,11 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.tls.triage",
-  "version": "2.0.0-candidate.2",
-  "artifact_digest": "f3945eaf26f6f146b42df03ca036908e17afbd6029556e1479a8f77f04465dee",
+  "version": "2.0.0-candidate.3",
+  "artifact_digest": "f9597c48487a749545b1394f4eee3ab9b2ab06c52cdd9299a64513baf04e0eb7",
   "lineage": {
-    "source_revision": "59ef4ad",
-    "predecessor_digest": "efb0a1f6c23785212f55957af2316c7c24afc507f1f91387faef87a4a510bb25"
+    "source_revision": "5d22395",
+    "predecessor_digest": "f3945eaf26f6f146b42df03ca036908e17afbd6029556e1479a8f77f04465dee"
   },
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
@@ -126,7 +126,8 @@
     "schema": "onion-sentinel-skill-result-v1",
     "coverage_required": true,
     "truncation_required": true,
-    "evidence_refs_required": true
+    "evidence_refs_required": true,
+    "fact_states": ["observed", "inferred", "unverified", "unavailable"]
   },
   "alternative_hypotheses": [
     "shared CDN or cloud service",

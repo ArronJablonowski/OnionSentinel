@@ -77,6 +77,14 @@ contradictions, gaps, confidence limiters, and next discriminators. Skills do
 not emit a final malware verdict or perform persistence. The harness reconciles
 skill outputs into its evidence and hypothesis ledgers.
 
+Every v2 candidate pins the complete fact-state vocabulary in its output
+contract. `observed` requires direct admitted evidence; `inferred` requires an
+evidence-linked interpretation; `unverified` preserves a claim that lacks
+enough support; and `unavailable` records a source, mapping, retention, or
+collection gap. Packs may not collapse unverified or unavailable evidence into
+negative evidence, and consumers must retain the state with each projected
+fact.
+
 ## Promotion and rollback
 
 Promotion requires schema validation, unit tests, replay corpus results,

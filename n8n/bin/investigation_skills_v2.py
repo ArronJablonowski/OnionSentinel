@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 
 SCHEMA = "onion-sentinel-investigation-skill-manifest-v2"
 RESULT_SCHEMA = "onion-sentinel-skill-result-v1"
+FACT_STATES = ["observed", "inferred", "unverified", "unavailable"]
 MAX_MANIFEST_BYTES = 256 * 1024
 MAX_SELECTED = 4
 DIGEST_RE = re.compile(r"[a-f0-9]{64}")
@@ -269,6 +270,7 @@ def _validate_manifest_output(raw: dict[str, Any]) -> None:
         "coverage_required": True,
         "truncation_required": True,
         "evidence_refs_required": True,
+        "fact_states": FACT_STATES,
     }:
         raise ValueError("skill output contract is unsafe")
     for name in (

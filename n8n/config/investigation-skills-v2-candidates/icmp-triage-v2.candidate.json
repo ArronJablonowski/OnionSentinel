@@ -1,11 +1,11 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.icmp.triage",
-  "version": "2.0.0-candidate.2",
-  "artifact_digest": "b8ea5179f150af99f680b135c02cb7b0604efc09c345a0243b1ebda7b5ab3527",
+  "version": "2.0.0-candidate.3",
+  "artifact_digest": "4cfef3f595b1e55cbc2cfe233e1e163b92d04dbf58e3a311c9c2066a8cb6bd42",
   "lineage": {
-    "source_revision": "59ef4ad",
-    "predecessor_digest": "d3bec1ade636204994c847e58264361c957ef5fede25cb1bd4ae9fc754a069c5"
+    "source_revision": "5d22395",
+    "predecessor_digest": "b8ea5179f150af99f680b135c02cb7b0604efc09c345a0243b1ebda7b5ab3527"
   },
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
@@ -123,7 +123,8 @@
     "schema": "onion-sentinel-skill-result-v1",
     "coverage_required": true,
     "truncation_required": true,
-    "evidence_refs_required": true
+    "evidence_refs_required": true,
+    "fact_states": ["observed", "inferred", "unverified", "unavailable"]
   },
   "alternative_hypotheses": [
     "network diagnostics",
