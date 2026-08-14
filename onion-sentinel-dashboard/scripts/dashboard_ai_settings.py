@@ -47,6 +47,16 @@ _STRUCTURED_SETTING_KEYS = frozenset({
 })
 
 
+def _invalid_absolute_cli_path(configured: str, path: Path, basename: str) -> bool:
+    return (
+        (path.is_absolute() and path.name != basename)
+        or (
+            path.is_absolute()
+            and not re.fullmatch(r"/[A-Za-z0-9._/+-]+", configured)
+        )
+    )
+
+
 def default_soc_ai_settings(environ: Mapping[str, str] | None = None) -> dict:
     """Return safe model-routing defaults for dashboard rendering."""
     environment = os.environ if environ is None else environ
@@ -98,8 +108,7 @@ def _normalized_cli_path(value: object, basename: str) -> str:
         not configured
         or len(configured) > 1024
         or bool(re.search(r"[\x00-\x1f\x7f]", configured))
-        or (path.is_absolute() and path.name != basename)
-        or (path.is_absolute() and not re.fullmatch(r"/[A-Za-z0-9._/+-]+", configured))
+        or _invalid_absolute_cli_path(configured, path, basename)
         or (not path.is_absolute() and configured != basename)
     )
     return basename if invalid else configured
