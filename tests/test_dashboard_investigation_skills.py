@@ -129,6 +129,136 @@ class DashboardInvestigationSkillsTests(unittest.TestCase):
         self.assertIn("blocked &lt;safely&gt;", rendered)
         self.assertNotIn("data-investigation-skill=", rendered)
 
+    def test_catalog_renderer_preserves_lookup_and_projection_order(self) -> None:
+        trace: list[tuple[object, ...]] = []
+
+        class TextProbe:
+            def __init__(self, label: str, value: str) -> None:
+                self.label = label
+                self.value = value
+
+            def __bool__(self) -> bool:
+                trace.append(("bool", self.label))
+                return True
+
+            def __str__(self) -> str:
+                trace.append(("str", self.label))
+                return self.value
+
+        class SkillsProbe(list[object]):
+            def __iter__(self):
+                trace.append(("iterate_skills",))
+                return super().__iter__()
+
+        class RegistryProbe(dict[str, object]):
+            def get(self, key: str, default: object = None) -> object:
+                trace.append(("get", key, default))
+                return super().get(key, default)
+
+        first = {"name": "first"}
+        second = {"name": "second"}
+        skills = SkillsProbe(["skip", first, 7, second])
+        registry = RegistryProbe(
+            skills=skills,
+            mode=TextProbe("mode", "shadow<mode>"),
+            registry_sha256=TextProbe("digest", "digest<value>"),
+            error=TextProbe("error", "  blocked<reason>  "),
+        )
+        config = object()
+
+        def skill_html(skill: dict[str, object], mode: str, candidate: object) -> str:
+            trace.append(("skill_html", skill["name"], mode, candidate))
+            return f'<row id="{skill["name"]}">'
+
+        def escape(*args: object, **kwargs: object) -> str:
+            trace.append(("escape", args, kwargs))
+            return f"E[{args[0]}]"
+
+        with (
+            mock.patch.object(
+                self.catalog,
+                "_skill_html",
+                side_effect=skill_html,
+            ),
+            mock.patch.object(
+                self.catalog.html,
+                "escape",
+                side_effect=escape,
+            ),
+        ):
+            rendered = self.catalog.render_investigation_skill_catalog(
+                registry,
+                config,
+            )
+
+        self.assertIn("E[2 shadow<mode>]", rendered)
+        self.assertIn('<row id="first"><row id="second">', rendered)
+        self.assertIn("E[digest<value>]", rendered)
+        self.assertIn("E[blocked<reason>]", rendered)
+        self.assertEqual(
+            trace,
+            [
+                ("get", "skills", None),
+                ("get", "skills", None),
+                ("get", "mode", None),
+                ("bool", "mode"),
+                ("str", "mode"),
+                ("iterate_skills",),
+                ("skill_html", "first", "shadow<mode>", config),
+                ("skill_html", "second", "shadow<mode>", config),
+                ("get", "registry_sha256", None),
+                ("bool", "digest"),
+                ("str", "digest"),
+                ("escape", ("digest<value>",), {"quote": True}),
+                ("escape", ("digest<value>",), {}),
+                ("get", "error", None),
+                ("bool", "error"),
+                ("str", "error"),
+                ("escape", ("blocked<reason>",), {}),
+                ("escape", ("2 shadow<mode>",), {}),
+            ],
+        )
+
+    def test_catalog_renderer_rejects_non_dict_without_mapping_access(self) -> None:
+        class MappingProbe:
+            def get(self, key: str, default: object = None) -> object:
+                raise AssertionError("non-dict registry must remain unread")
+
+        rendered = self.catalog.render_investigation_skill_catalog(
+            MappingProbe(),
+            object(),
+        )
+
+        self.assertIn("Unavailable", rendered)
+        self.assertIn("Digest unavailable", rendered)
+        self.assertNotIn("data-investigation-skill=", rendered)
+
+    def test_catalog_renderer_stops_before_metadata_after_skill_failure(self) -> None:
+        trace: list[str] = []
+
+        class RegistryProbe(dict[str, object]):
+            def get(self, key: str, default: object = None) -> object:
+                trace.append(key)
+                return super().get(key, default)
+
+        registry = RegistryProbe(skills=[{"id": "first"}], mode="active")
+        with (
+            mock.patch.object(
+                self.catalog,
+                "_skill_html",
+                side_effect=RuntimeError("synthetic catalog failure"),
+            ),
+            mock.patch.object(
+                self.catalog.html,
+                "escape",
+                side_effect=AssertionError("metadata escaping must remain skipped"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "synthetic catalog failure"),
+        ):
+            self.catalog.render_investigation_skill_catalog(registry, object())
+
+        self.assertEqual(trace, ["skills", "skills", "mode"])
+
     def test_pivot_html_preserves_positions_lookup_and_escape_order(self) -> None:
         trace: list[tuple[object, ...]] = []
 
