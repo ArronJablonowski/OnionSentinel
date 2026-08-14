@@ -542,6 +542,57 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
             50,
         )
 
+    def test_incident_evidence_broker_has_bounded_contract_phases(self) -> None:
+        broker = ROOT / "relay" / "app" / "incident_evidence_broker.py"
+        software = ROOT / "relay" / "app" / "incident_evidence_software.py"
+        broker_phases = {
+            "_receipt_identity",
+            "_validate_receipt_accounting",
+            "_admit_transport_request",
+            "_request_kinds",
+            "_validate_special_request",
+            "_load_broker_config",
+            "_upstream_command",
+            "_run_upstream",
+            "_decode_upstream_response",
+            "_validate_upstream_response",
+        }
+        software_phases = {
+            "_validate_record_identity",
+            "_validate_asset_reference",
+            "_validate_operating_system",
+            "_validate_record_observations",
+            "_validate_response_identity",
+            "_validate_response_page",
+            "_validate_query_audit",
+        }
+
+        self.assertTrue(broker_phases <= top_level_function_names(broker))
+        self.assertTrue(software.is_file())
+        self.assertTrue(software_phases <= top_level_function_names(software))
+        for path, name in (
+            (broker, "_validate_receipt"),
+            (broker, "main"),
+            (software, "_validate_software_record"),
+            (software, "validate_software_response"),
+        ):
+            function = top_level_function(path, name)
+            with self.subTest(path=path.name, name=name):
+                self.assertLessEqual(
+                    (function.end_lineno or function.lineno)
+                    - function.lineno
+                    + 1,
+                    50,
+                )
+
+        installer = (
+            ROOT / "relay" / "bin" / "install-pi-relay.sh"
+        ).read_text()
+        self.assertLess(
+            installer.index("incident_evidence_software.py"),
+            installer.index("incident_evidence_broker.py"),
+        )
+
     def test_relay_health_wrapper_supports_isolated_file_loader_import(self) -> None:
         wrapper = ROOT / "relay" / "app" / "relay_health_wrapper.py"
         script = (
