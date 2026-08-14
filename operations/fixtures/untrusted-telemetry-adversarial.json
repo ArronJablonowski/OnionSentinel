@@ -8,17 +8,17 @@
       "backend": "elastic",
       "purpose": "Synthetic adversarial schema probe.",
       "parameters": {
-        "pack": "alert_context"
-      },
-      "command": "fixture-shell-command",
-      "query_dsl": {
-        "query": {
-          "match_all": {}
+        "pack": "alert_context",
+        "query_dsl": {
+          "query": {
+            "match_all": {}
+          }
         }
-      }
+      },
+      "command": "fixture-shell-command"
     },
     "oversized_content_length": "50001",
-    "malicious_encoding": "prefix-\ud800-suffix\u0000-control",
+    "malicious_encoding": "prefix-\ud800-suffix\u0000-control-\u202e-bidi",
     "secret_disclosure": {
       "summary": "password=fixture-value-not-a-secret",
       "api_token": "fixture-value-not-a-secret",

@@ -27,6 +27,8 @@ Important documents:
   and visual regression workflow.
 - `dashboard-service-boundary.md`: strict ownership boundary between the
   independently served Onion Sentinel UI and the separate Hermes LAN Portal.
+- `security/untrusted-telemetry-threat-model.md`: enforced prompt-injection,
+  parser, tool-schema, presentation, secret, and egress threat model and gate.
 - `ac-hunter-deep-review.md`: read-only AC Hunter integration, fixed
   Mac-to-Relay-to-AC-Hunter path, secret boundaries, trust bootstrap,
   validation, and rollback.

@@ -7,6 +7,7 @@ import html
 import json
 
 from portal_claim_evidence_renderer import render_claim_evidence
+from portal_untrusted_text import normalize_untrusted_text
 
 
 @dataclass(frozen=True)
@@ -42,7 +43,7 @@ def _metadata(case: dict, analysis: dict, report: dict, callbacks) -> str:
 
 def _empty_report(case: dict, metadata: str) -> tuple[str, int]:
     state = str(case.get("agent_status") or "queued").replace("_", " ")
-    error = str(case.get("latest_error") or "").strip()
+    error = normalize_untrusted_text(case.get("latest_error")).strip()
     message = error if error else f"Incident Responder analysis is {state}."
     return (
         '<section class="ir-investigation-report">'
@@ -179,7 +180,7 @@ def _result_preview(query: dict, empty_message: str) -> str:
 
 
 def _query_error(query: dict) -> str:
-    error = str(query.get("error") or "").strip()
+    error = normalize_untrusted_text(query.get("error")).strip()
     return (
         f'<p class="ir-query-error"><b>Error:</b> {html.escape(error)}</p>'
         if error
@@ -235,7 +236,7 @@ def _live_query_block(position: int, query: dict, report: dict, callbacks) -> st
     text = callbacks.html_text
     count = callbacks.nonnegative_int
     finding = callbacks.linked_finding(report, query.get("query_digest"))
-    purpose = str(query.get("purpose") or "").strip()
+    purpose = normalize_untrusted_text(query.get("purpose")).strip()
     return (
         f'<article class="ir-query-record" data-query-purpose="{html.escape(purpose, quote=True)}" '
         f'data-query-finding="{html.escape(finding, quote=True)}">'
@@ -264,7 +265,7 @@ def _live_audit(response: dict, report: dict, callbacks) -> tuple[str, int]:
         for position, query in enumerate(queries[:32], 1)
         if isinstance(query, dict)
     ]
-    error = str(audit.get("error") or "").strip()
+    error = normalize_untrusted_text(audit.get("error")).strip()
     error_html = (
         f'<p class="ir-query-error"><b>Collection note:</b> {html.escape(error)}</p>'
         if error

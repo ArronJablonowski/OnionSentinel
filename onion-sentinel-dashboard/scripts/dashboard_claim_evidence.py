@@ -1,6 +1,8 @@
 """Pure Markdown projection for validated claim-evidence graphs."""
 from __future__ import annotations
 
+from dashboard_untrusted_text import normalize_untrusted_text
+
 
 def _text(value: object, fallback: str = "n/a") -> str:
     normalized = " ".join(str(value or "").split()).strip()
@@ -91,4 +93,4 @@ def claim_evidence_markdown(response: dict) -> str:
     if not claims:
         lines.extend(["No validated material claim bindings were recorded.", ""])
     lines.extend(_history_lines(graph.get("review_history")))
-    return "\n".join(lines).rstrip()
+    return normalize_untrusted_text("\n".join(lines).rstrip())

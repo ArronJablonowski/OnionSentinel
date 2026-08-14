@@ -189,6 +189,7 @@ Before commit and push, run:
 
 ```bash
 python3 operations/check-module-quality.py
+python3 operations/run-untrusted-telemetry-gate.py
 ./operations/secret-scan.zsh
 git diff --check
 zsh -n n8n/bin/*.zsh operations/*.zsh

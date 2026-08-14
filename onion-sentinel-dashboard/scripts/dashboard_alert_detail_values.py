@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import re
 
+from dashboard_untrusted_text import normalize_untrusted_text
+
 
 def json_object(value: object) -> dict:
     """Return a JSON object from a dictionary or encoded string."""
@@ -58,6 +60,7 @@ def markdown_cell(value: object, max_len: int = 420) -> str:
         rendered = json.dumps(value, sort_keys=True)
     else:
         rendered = str(value)
+    rendered = normalize_untrusted_text(rendered)
     rendered = re.sub(r"\s+", " ", rendered).strip()
     rendered = rendered.replace("|", "\\|")
     return (rendered[: max_len - 1] + "…") if len(rendered) > max_len else rendered

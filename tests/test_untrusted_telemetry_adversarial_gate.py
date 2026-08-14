@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import html
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -30,6 +31,8 @@ from portal_post_intake import prepare_post_intake  # noqa: E402
 from portal_request_routes import classify_post_route  # noqa: E402
 import dashboard_alert_detail_ai as dashboard_ai  # noqa: E402
 from dashboard_alert_detail_markdown import markdown_to_html  # noqa: E402
+from dashboard_untrusted_text import normalize_untrusted_text as dashboard_text  # noqa: E402
+from portal_untrusted_text import normalize_untrusted_text as portal_text  # noqa: E402
 from onion_sentinel.analysis.evidence import hosted_projection  # noqa: E402
 from onion_sentinel.analysis.providers import ollama, openclaw  # noqa: E402
 from onion_sentinel.analysis.query import request as query_request  # noqa: E402
@@ -98,6 +101,14 @@ class UntrustedTelemetryAdversarialGateTests(unittest.TestCase):
                 time_envelope={}, authorization_context={}, policy=QUERY_POLICY,
                 dependencies=_query_dependencies(), error_type=QueryContractError,
             )
+        parameter_injection = dict(self.cases["query_injection"])
+        parameter_injection.pop("command")
+        with self.assertRaisesRegex(QueryContractError, "elastic parameters"):
+            query_request.normalize(
+                parameter_injection, round_number=1, position=1,
+                time_envelope={}, authorization_context={}, policy=QUERY_POLICY,
+                dependencies=_query_dependencies(), error_type=QueryContractError,
+            )
 
     def test_request_size_and_traversal_fail_before_read_or_file_access(self) -> None:
         route = classify_post_route(
@@ -134,7 +145,7 @@ class UntrustedTelemetryAdversarialGateTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "loopback Ollama"):
             openclaw.validate_route(
                 "ollama/fixture", {"ollama_url": self.cases["unsafe_egress"]},
-                model_pattern=__import__("re").compile(r"^[a-z]+/[a-z]+$"),
+                model_pattern=re.compile(r"^[a-z]+/[a-z]+$"),
                 uses_ollama_runtime=lambda _model: True,
                 provider_prefix="ollama/",
                 supported_urls=frozenset({"http://127.0.0.1:11434"}),
@@ -166,6 +177,8 @@ class UntrustedTelemetryAdversarialGateTests(unittest.TestCase):
         )
         encoded = rendered.encode("utf-8")
         self.assertNotIn(b"<script", encoded.lower())
+        self.assertNotIn("\x00", rendered)
+        self.assertIn("\N{REPLACEMENT CHARACTER}", rendered)
 
         markdown = dashboard_ai.ai_analysis_report_markdown({
             "response": {
@@ -179,6 +192,29 @@ class UntrustedTelemetryAdversarialGateTests(unittest.TestCase):
         dashboard_html = markdown_to_html(markdown)
         dashboard_encoded = dashboard_html.encode("utf-8")
         self.assertNotIn(b"<script", dashboard_encoded.lower())
+        self.assertNotIn("\x00", dashboard_html)
+        self.assertIn("\N{REPLACEMENT CHARACTER}", dashboard_html)
+
+    def test_text_boundaries_share_exact_control_and_bound_semantics(self) -> None:
+        malicious = self.cases["malicious_encoding"]
+        portal_value = portal_text(malicious)
+        dashboard_value = dashboard_text(malicious)
+        self.assertEqual(portal_value, dashboard_value)
+        self.assertEqual(portal_value.encode("utf-8").decode("utf-8"), portal_value)
+        for forbidden in ("\ud800", "\x00", "\u202e"):
+            self.assertNotIn(forbidden, portal_value)
+        self.assertEqual(portal_text("abcdef", max_characters=4), "abc…")
+
+    def test_gate_and_boundary_modules_are_in_the_production_contract(self) -> None:
+        installer = (ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(installer.count("portal_untrusted_text.py"), 2)
+        self.assertEqual(installer.count("dashboard_untrusted_text.py"), 2)
+        deployment = (ROOT / "docs" / "product-deployment-requirements.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("run-untrusted-telemetry-gate.py", deployment)
 
 
 if __name__ == "__main__":

@@ -884,6 +884,14 @@
       ]
     },
     {
+      "path": "operations/run-untrusted-telemetry-gate.py",
+      "deployment": "repository-only",
+      "runtime_path": "operations/run-untrusted-telemetry-gate.py",
+      "required_symbols": [
+        "main"
+      ]
+    },
+    {
       "path": "n8n/bin/local_ai_runtime_contract.py",
       "deployment": "direct-copy",
       "runtime_path": "$STACK_DIR/bin/local_ai_runtime_contract.py",
@@ -4087,6 +4095,14 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_untrusted_text.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_untrusted_text.py",
+      "required_symbols": [
+        "normalize_untrusted_text"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_investigation_audit_renderer.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_investigation_audit_renderer.py",
@@ -4315,6 +4331,14 @@
         "markdown_to_html",
         "render_table",
         "strip_markdown_front_matter"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_untrusted_text.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_untrusted_text.py",
+      "required_symbols": [
+        "normalize_untrusted_text"
       ]
     },
     {

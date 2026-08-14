@@ -2304,6 +2304,12 @@ correction history. It makes competing hypotheses, contradictions, decisive
 missing evidence, original claims, corrected claims, and adjudication evidence
 visible without gaining evidence access or mutation authority.
 
+`portal_untrusted_text.py` is the portal presentation-boundary owner for
+bounded, UTF-8-encodable untrusted text. It replaces invalid surrogates,
+terminal controls, and bidi instruction controls without decoding or executing
+evidence. Incident report runtime and direct renderer escape paths depend on
+this leaf; it has no HTTP, persistence, query, model, or credential authority.
+
 `portal_investigation_audit_renderer.py` owns escaped presentation of the
 broker-authorized interactive pivot trail. It expands stable investigation
 purposes, bounds rounds and trusted queries, renders backend-specific OQL, KQL,
@@ -2512,6 +2518,12 @@ matter removal, nested collapsible-section state, and deterministic HTML
 rendering. Small state methods replace the former 153-line parser function;
 the builder directly re-exports its established helper names so report and
 detail contracts remain stable.
+
+`dashboard_untrusted_text.py` owns the equivalent bounded Unicode admission for
+the separately deployed dashboard-builder process. The Markdown renderer and
+AI/claim projections use it before publication. Keeping the leaf beside the
+direct-executed scripts avoids a hidden parent-path dependency while preserving
+the same no-execution policy as the portal boundary.
 
 `dashboard_alert_detail_layout.py` owns the versioned canonical section order,
 display labels, legacy aliases, immutable layout result, heading

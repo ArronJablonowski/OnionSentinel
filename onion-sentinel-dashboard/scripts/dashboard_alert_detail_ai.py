@@ -6,6 +6,7 @@ import json
 from dashboard_claim_evidence import claim_evidence_markdown
 from dashboard_alert_detail_values import markdown_cell
 from dashboard_time_format import normalize_iso_display_text
+from dashboard_untrusted_text import normalize_untrusted_text
 
 
 def truthy_or(value: object, fallback: object) -> object:
@@ -32,11 +33,15 @@ def explicit_field(parent: dict, key: str) -> object:
 def markdown_bullets(value: object) -> str:
     """Render a scalar or list as a non-empty Markdown bullet list."""
     if isinstance(value, list):
-        items = [str(item).strip() for item in value if str(item).strip()]
+        items = [
+            normalize_untrusted_text(item).strip()
+            for item in value
+            if normalize_untrusted_text(item).strip()
+        ]
         return "\n".join(f"- {item}" for item in items) if items else "- n/a"
     if value in (None, "", [], {}):
         return "- n/a"
-    return f"- {value}"
+    return f"- {normalize_untrusted_text(value)}"
 
 
 def related_group_lines(correlation: dict) -> list[str]:
@@ -142,15 +147,15 @@ def ai_analysis_output_markdown(analysis: dict | None) -> str:
         f"- **Escalation needed:** {explicit_field(response, 'escalation_needed')}",
         f"- **Hosted second opinion recommended:** {explicit_field(response, 'hosted_second_opinion_recommended')}",
     ]
-    return "\n".join(lines)
+    return normalize_untrusted_text("\n".join(lines))
 
 
 def ai_analysis_report_markdown(analysis: dict | None) -> str:
     """Render AI output followed by model provenance."""
-    return "\n\n".join([
+    return normalize_untrusted_text("\n\n".join([
         ai_analysis_output_markdown(analysis),
         ai_model_used_markdown(analysis),
-    ])
+    ]))
 
 
 def complete_ai_response_json_markdown(analysis: dict | None) -> str:

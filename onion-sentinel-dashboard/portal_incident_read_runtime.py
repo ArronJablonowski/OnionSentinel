@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from portal_untrusted_text import normalize_untrusted_text
+
 
 def soc_incidents_query_response(r: Any, query: dict[str, list[str]]) -> tuple[int, dict]:
     """Return one bounded page of durable Incident Response cases."""
@@ -24,7 +26,8 @@ def soc_incident_review_state(
 
 
 def incident_html_text(r: Any, value: object, fallback: str = "n/a") -> str:
-    return r.html.escape(str(value or "").strip() or fallback)
+    rendered = normalize_untrusted_text(value).strip()
+    return r.html.escape(rendered or normalize_untrusted_text(fallback))
 
 
 def incident_nonnegative_int(r: Any, value: object) -> int:
@@ -35,7 +38,7 @@ def incident_nonnegative_int(r: Any, value: object) -> int:
 
 
 def _bounded_finding(value: object) -> str:
-    finding = str(value or "").strip()
+    finding = normalize_untrusted_text(value, max_characters=360).strip()
     return finding if len(finding) <= 360 else f"{finding[:357].rstrip()}…"
 
 
@@ -62,7 +65,7 @@ def _section_linked_finding(report: dict[str, object], digest: str) -> str:
         values = report.get(key)
         items = values if isinstance(values, list) else [values]
         for item in items:
-            raw_finding = str(item or "").strip()
+            raw_finding = normalize_untrusted_text(item).strip()
             if digest in raw_finding:
                 return _bounded_finding(raw_finding)
     return ""
@@ -89,7 +92,7 @@ def incident_html_list(
     for item in items[:100]:
         text = (
             r.json.dumps(item, sort_keys=True, default=str)
-            if isinstance(item, (dict, list)) else str(item)
+            if isinstance(item, (dict, list)) else normalize_untrusted_text(item)
         )
         if text.strip():
             rendered.append(f"<li>{r.html.escape(text.strip())}</li>")
