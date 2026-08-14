@@ -95,36 +95,67 @@ def cleanup_remote_artifact(config: dict, request_id: str) -> None:
         raise RuntimeError("Mac artifact cleanup returned an invalid response")
 
 
-def upload_pcap_artifact_via_rsync(
-    config: dict,
+def _relay_spool_metadata(
     pcap_request: dict,
     export_result: dict,
-    progress: PcapProgressReporter | None = None,
-) -> dict:
-    request_id = safe_transfer_id(export_result.get("request_id") or pcap_request.get("request_id"))
+) -> tuple[str, int, str, str]:
+    request_id = safe_transfer_id(
+        export_result.get("request_id") or pcap_request.get("request_id")
+    )
     expected_size = int(export_result.get("artifact_size_bytes") or 0)
     expected_sha256 = str(export_result.get("artifact_sha256") or "").lower()
     relay_spool_path = str(export_result.get("relay_spool_path") or "").strip()
-    if relay_spool_path:
-        artifact_path = Path(relay_spool_path).resolve(strict=False)
-        spool_root = pcap_spool_dir(config).resolve(strict=False)
-        if artifact_path.parent != spool_root or artifact_path.name != f"{request_id}.tar":
-            raise RuntimeError("relay stream artifact escaped the configured spool")
-        if not artifact_path.is_file() or artifact_path.stat().st_size != expected_size:
-            raise RuntimeError("relay stream artifact is missing or incomplete")
-        if sha256_file(artifact_path) != expected_sha256:
-            raise RuntimeError("relay stream artifact sha256 did not match its checkpoint")
-    else:
-        raise RuntimeError("read-only streamed PCAP result is missing its relay spool path")
+    return request_id, expected_size, expected_sha256, relay_spool_path
+
+
+def _validated_relay_spool_artifact(
+    config: dict,
+    pcap_request: dict,
+    export_result: dict,
+) -> tuple[str, int, str, Path]:
+    request_id, expected_size, expected_sha256, relay_spool_path = (
+        _relay_spool_metadata(pcap_request, export_result)
+    )
+    if not relay_spool_path:
+        raise RuntimeError(
+            "read-only streamed PCAP result is missing its relay spool path"
+        )
+    artifact_path = Path(relay_spool_path).resolve(strict=False)
+    spool_root = pcap_spool_dir(config).resolve(strict=False)
+    if artifact_path.parent != spool_root or artifact_path.name != f"{request_id}.tar":
+        raise RuntimeError("relay stream artifact escaped the configured spool")
+    if not artifact_path.is_file() or artifact_path.stat().st_size != expected_size:
+        raise RuntimeError("relay stream artifact is missing or incomplete")
+    if sha256_file(artifact_path) != expected_sha256:
+        raise RuntimeError(
+            "relay stream artifact sha256 did not match its checkpoint"
+        )
+    return request_id, expected_size, expected_sha256, artifact_path
+
+
+def _rsync_delivery_plan(
+    config: dict,
+    request_id: str,
+    export_result: dict,
+    artifact_path: Path,
+    expected_size: int,
+) -> tuple[str, str, list[str], int, int]:
     transfer = mac_transfer_config(config)
     remote_dir = remote_artifact_dir(config, request_id)
-    remote_name = Path(str(export_result.get("artifact_path") or artifact_path.name)).name
+    remote_name = Path(
+        str(export_result.get("artifact_path") or artifact_path.name)
+    ).name
     remote_path = f"{remote_dir}/{remote_name}"
-    rsync_ssh = " ".join(remote_shell_quote(part) for part in mac_ssh_base(config)[:-1])
+    rsync_ssh = " ".join(
+        remote_shell_quote(part) for part in mac_ssh_base(config)[:-1]
+    )
     # remote_dir is already restricted to safe relative path segments. Avoid
     # shell quoting inside the rsync target because rsync passes it through to
     # the remote server and some implementations treat quotes as path bytes.
-    target = f"{str(transfer.get('user')).strip()}@{str(transfer.get('host')).strip()}:{remote_dir}/"
+    target = (
+        f"{str(transfer.get('user')).strip()}@"
+        f"{str(transfer.get('host')).strip()}:{remote_dir}/"
+    )
     maximum_bps = rsync_max_bytes_per_second(config)
     # rsync expresses --bwlimit in KiB/s. Throttle the sending process on the
     # relay so cached artifacts cannot burst at line rate across a mirrored
@@ -142,41 +173,119 @@ def upload_pcap_artifact_via_rsync(
         str(artifact_path),
         target,
     ]
-    timeout = transfer_timeout(config, expected_size)
+    return (
+        remote_dir,
+        remote_path,
+        command,
+        transfer_timeout(config, expected_size),
+        maximum_bps,
+    )
+
+
+def _run_rsync_transfer_attempt(
+    config: dict,
+    request_id: str,
+    expected_size: int,
+    remote_dir: str,
+    command: list[str],
+    timeout: int,
+    progress: PcapProgressReporter | None,
+) -> None:
+    mkdir_proc = run_mac_ssh(
+        config,
+        f"onion-sentinel-pcap-intake prepare {request_id} {expected_size}",
+        timeout=60,
+    )
+    if mkdir_proc.returncode != 0:
+        raise RuntimeError(
+            mkdir_proc.stderr.strip()
+            or f"failed to create Mac artifact dir {remote_dir}"
+        )
+    if progress:
+        progress.update("relay_to_mac", expected_size)
+    raw_proc = process_io.run_bounded_command(
+        command,
+        timeout_seconds=timeout,
+        max_stdout_bytes=1024 * 1024,
+        max_stderr_bytes=1024 * 1024,
+    )
+    stdout = raw_proc.stdout.decode("utf-8", errors="replace")
+    stderr = raw_proc.stderr.decode("utf-8", errors="replace")
+    if raw_proc.returncode != 0:
+        raise RuntimeError(
+            stderr.strip() or stdout.strip() or f"rsync exited {raw_proc.returncode}"
+        )
+    if progress:
+        progress.update("verifying", expected_size, lambda: expected_size)
+
+
+def _cleanup_rejected_mac_artifact(
+    config: dict,
+    request_id: str,
+    verify_error: RuntimeError,
+) -> None:
+    try:
+        cleanup_remote_artifact(config, request_id)
+    except RuntimeError as cleanup_error:
+        raise RuntimeError(
+            f"{verify_error}; failed to clean rejected Mac artifact: {cleanup_error}"
+        ) from verify_error
+
+
+def _require_unchanged_relay_artifact(
+    artifact_path: Path,
+    expected_size: int,
+    expected_sha256: str,
+    verify_error: RuntimeError,
+) -> None:
+    if (
+        artifact_path.stat().st_size != expected_size
+        or sha256_file(artifact_path) != expected_sha256
+    ):
+        raise RuntimeError(
+            "relay artifact changed after Mac verification failure"
+        ) from verify_error
+
+
+def upload_pcap_artifact_via_rsync(
+    config: dict,
+    pcap_request: dict,
+    export_result: dict,
+    progress: PcapProgressReporter | None = None,
+) -> dict:
+    request_id, expected_size, expected_sha256, artifact_path = (
+        _validated_relay_spool_artifact(config, pcap_request, export_result)
+    )
+    remote_dir, remote_path, command, timeout, maximum_bps = _rsync_delivery_plan(
+        config,
+        request_id,
+        export_result,
+        artifact_path,
+        expected_size,
+    )
     for attempt in range(2):
-        mkdir_proc = run_mac_ssh(
+        _run_rsync_transfer_attempt(
             config,
-            f"onion-sentinel-pcap-intake prepare {request_id} {expected_size}",
-            timeout=60,
-        )
-        if mkdir_proc.returncode != 0:
-            raise RuntimeError(mkdir_proc.stderr.strip() or f"failed to create Mac artifact dir {remote_dir}")
-        if progress:
-            progress.update("relay_to_mac", expected_size)
-        raw_proc = process_io.run_bounded_command(
+            request_id,
+            expected_size,
+            remote_dir,
             command,
-            timeout_seconds=timeout,
-            max_stdout_bytes=1024 * 1024,
-            max_stderr_bytes=1024 * 1024,
+            timeout,
+            progress,
         )
-        stdout = raw_proc.stdout.decode("utf-8", errors="replace")
-        stderr = raw_proc.stderr.decode("utf-8", errors="replace")
-        if raw_proc.returncode != 0:
-            raise RuntimeError(stderr.strip() or stdout.strip() or f"rsync exited {raw_proc.returncode}")
-        if progress:
-            progress.update("verifying", expected_size, lambda: expected_size)
         try:
             verify_remote_artifact(config, remote_path, expected_size, expected_sha256)
             break
         except RuntimeError as verify_error:
-            try:
-                cleanup_remote_artifact(config, request_id)
-            except RuntimeError as cleanup_error:
-                raise RuntimeError(f"{verify_error}; failed to clean rejected Mac artifact: {cleanup_error}") from verify_error
+            _cleanup_rejected_mac_artifact(config, request_id, verify_error)
             if attempt:
                 raise
-            if artifact_path.stat().st_size != expected_size or sha256_file(artifact_path) != expected_sha256:
-                raise RuntimeError("relay artifact changed after Mac verification failure") from verify_error
+            _require_unchanged_relay_artifact(
+                artifact_path,
+                expected_size,
+                expected_sha256,
+                verify_error,
+            )
     return {
         "ok": True,
         "status": "artifact_rsynced",
@@ -279,20 +388,34 @@ def retry_pcap_request(
     )
 
 
+_PCAP_OUTCOME_RULES = (
+    ("no_packets_available", ("no matching packet",), ()),
+    ("expired", (), ("retention", "expired")),
+    ("oversize", ("exceed",), ("size", "artifact")),
+    ("timeout", (), ("timeout", "timed out")),
+    ("checksum_failed", (), ("sha256", "checksum")),
+    ("rejected", (), ("unsupported", "has been removed", "rejected")),
+    (
+        "transport_failed",
+        (),
+        ("rsync", "artifact upload", "connection", "ssh", "spool filesystem"),
+    ),
+)
+
+
+def _pcap_outcome_rule_matches(
+    detail: str,
+    required_terms: tuple[str, ...],
+    alternative_terms: tuple[str, ...],
+) -> bool:
+    return all(term in detail for term in required_terms) and (
+        not alternative_terms or any(term in detail for term in alternative_terms)
+    )
+
+
 def pcap_outcome_from_error(error: object) -> str:
     detail = str(error or "").lower()
-    if "no matching packet" in detail:
-        return "no_packets_available"
-    if "retention" in detail or "expired" in detail:
-        return "expired"
-    if "exceed" in detail and ("size" in detail or "artifact" in detail):
-        return "oversize"
-    if "timeout" in detail or "timed out" in detail:
-        return "timeout"
-    if "sha256" in detail or "checksum" in detail:
-        return "checksum_failed"
-    if "unsupported" in detail or "has been removed" in detail or "rejected" in detail:
-        return "rejected"
-    if any(term in detail for term in ("rsync", "artifact upload", "connection", "ssh", "spool filesystem")):
-        return "transport_failed"
+    for outcome, required_terms, alternative_terms in _PCAP_OUTCOME_RULES:
+        if _pcap_outcome_rule_matches(detail, required_terms, alternative_terms):
+            return outcome
     return "failed"
