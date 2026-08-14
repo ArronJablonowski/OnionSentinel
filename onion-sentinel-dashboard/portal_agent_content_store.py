@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
@@ -155,6 +156,16 @@ def read_agent_memory(
             HTTPStatus.INTERNAL_SERVER_ERROR,
             f"Could not read {label}: {exc}",
         )
+    return _memory_success(key, label, path, content, metadata)
+
+
+def _memory_success(
+    key: str,
+    label: str,
+    path: Path,
+    content: str,
+    metadata: os.stat_result,
+) -> tuple[int, dict]:
     modified_at = (
         dt.datetime.fromtimestamp(metadata.st_mtime)
         .astimezone()
