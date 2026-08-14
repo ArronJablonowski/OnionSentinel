@@ -239,6 +239,89 @@ class IncidentReadServiceTests(unittest.TestCase):
         self.assertEqual(response["query_count"], 7)
         self.assertEqual(response["review"]["analysis_id"], "analysis-unit")
 
+    def test_detail_preserves_connection_and_composition_owner_order(self) -> None:
+        trace = []
+
+        @contextmanager
+        def connect():
+            trace.append(("connect-enter",))
+            yield self.conn
+            trace.append(("connect-exit",))
+
+        def parse(analysis):
+            owner = "primary" if analysis is self.detail_records.analysis else "prior"
+            trace.append(("parse", owner, analysis))
+            return {"owner": owner}
+
+        sources = self.replace(
+            connect=connect,
+            load_detail_records=lambda conn, case_id: (
+                trace.append(("load", conn, case_id)) or self.detail_records
+            ),
+            parse_analysis_response=parse,
+            review_defaults=lambda: trace.append(("defaults",)) or {"default": True},
+            compose_review_state=lambda *args: (
+                trace.append(("review", args)) or {"review": True}
+            ),
+            render_incident_report=lambda *args: (
+                trace.append(("incident-render", args)) or ("incident-html", 9)
+            ),
+            render_prior_analysis=lambda *args: (
+                trace.append(("prior-render", args)) or "prior-html"
+            ),
+            compose_detail_payload=lambda *args: (
+                trace.append(("payload", args)) or {"payload": list(args)}
+            ),
+        )
+
+        status, response = incident_detail_response(sources, " IR-Unit ")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [event[0] for event in trace],
+            [
+                "connect-enter", "load", "connect-exit", "parse", "parse",
+                "defaults", "review", "incident-render", "prior-render", "payload",
+            ],
+        )
+        self.assertEqual(trace[1][2], "ir-unit")
+        self.assertEqual(trace[3][1], "primary")
+        self.assertEqual(trace[4][1], "prior")
+        review_args = trace[6][1]
+        self.assertIs(review_args[0], self.detail_records.case)
+        self.assertIs(review_args[1], self.detail_records.analysis)
+        self.assertEqual(review_args[2], {"owner": "primary"})
+        self.assertEqual(review_args[6], {"default": True})
+        self.assertIs(review_args[7], self.sources.row_callbacks)
+        self.assertEqual(
+            response["payload"],
+            [
+                "ir-unit", self.detail_records.case, {"owner": "primary"},
+                {"review": True}, "incident-html", "prior-html", 9,
+            ],
+        )
+
+    def test_detail_downstream_errors_remain_outside_database_error_mapping(self) -> None:
+        trace = []
+
+        @contextmanager
+        def connect():
+            trace.append("enter")
+            yield self.conn
+            trace.append("exit")
+
+        def fail_after_load(analysis):
+            raise sqlite3.OperationalError("parse failed")
+
+        sources = self.replace(
+            connect=connect,
+            parse_analysis_response=fail_after_load,
+        )
+
+        with self.assertRaisesRegex(sqlite3.OperationalError, "parse failed"):
+            incident_detail_response(sources, "ir-unit")
+        self.assertEqual(trace, ["enter", "exit"])
+
     def test_detail_rejects_invalid_identity_before_database_access(self) -> None:
         sources = self.replace(
             connect=lambda: self.fail("database should not be opened")
