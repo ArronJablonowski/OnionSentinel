@@ -43,12 +43,6 @@
     "relay/app/relay_health_sanitization.py::sanitized_child_result": {
       "max_complexity": 21
     },
-    "relay/app/relay_pcap_delivery.py::pcap_outcome_from_error": {
-      "max_complexity": 17
-    },
-    "relay/app/relay_pcap_delivery.py::upload_pcap_artifact_via_rsync": {
-      "max_complexity": 26
-    },
     "relay/app/relay_pcap_service.py::_process_pcap_requests_unlocked": {
       "max_complexity": 44,
       "max_lines": 273
@@ -58,5 +52,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "1c67092df7eb69d5d7e930dfde318c8b91f639ca"
+  "source_release": "6dd11b1068e0f04f2f8bec223c0d4cd0c4996bc2"
 }
