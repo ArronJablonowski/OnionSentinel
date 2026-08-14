@@ -662,6 +662,108 @@ class AnalysisReplayEvaluationTests(unittest.TestCase):
                 evaluator.evaluate_case(FakeRunner, reviewer_case)
         self.assertEqual(normalize.call_count, 2)
 
+    def test_classification_metrics_preserves_schema_values_and_scan_count(self):
+        class IterationRecorder(list):
+            def __init__(self, values):
+                super().__init__(values)
+                self.iterations = 0
+
+            def __iter__(self):
+                self.iterations += 1
+                return super().__iter__()
+
+        results = IterationRecorder(
+            [
+                {"fields": {"kind": {"expected": "A", "actual": "A"}}},
+                {"fields": {"kind": {"expected": "A", "actual": "B"}}},
+                {"fields": {"kind": {"expected": "B", "actual": "B"}}},
+                {"fields": {"kind": {"expected": None, "actual": "B"}}},
+                {"fields": {"other": {"expected": "ignored", "actual": "ignored"}}},
+            ]
+        )
+        original = copy.deepcopy(list(results))
+        initial_iterations = results.iterations
+
+        metrics = evaluator._classification_metrics(results, "kind")
+        metric_iterations = results.iterations - initial_iterations
+
+        self.assertEqual(list(results), original)
+        self.assertEqual(metric_iterations, 12)
+        self.assertEqual(
+            list(metrics),
+            ["total", "correct", "accuracy", "confusion", "per_label"],
+        )
+        self.assertEqual(metrics["total"], 4)
+        self.assertEqual(metrics["correct"], 2)
+        self.assertEqual(metrics["accuracy"], 0.5)
+        self.assertEqual(
+            metrics["confusion"],
+            {
+                "A": {"A": 1, "B": 1},
+                "B": {"B": 1},
+                "None": {"B": 1},
+            },
+        )
+        self.assertEqual(
+            metrics["per_label"],
+            {
+                "A": {
+                    "support": 2,
+                    "precision": 1.0,
+                    "recall": 0.5,
+                    "f1": 0.666667,
+                },
+                "B": {
+                    "support": 1,
+                    "precision": 0.333333,
+                    "recall": 1.0,
+                    "f1": 0.5,
+                },
+                "None": {
+                    "support": 1,
+                    "precision": None,
+                    "recall": 0.0,
+                    "f1": None,
+                },
+            },
+        )
+        self.assertEqual(list(metrics["confusion"]), ["A", "B", "None"])
+        self.assertEqual(list(metrics["per_label"]), ["A", "B", "None"])
+        for label in metrics["per_label"]:
+            self.assertEqual(
+                list(metrics["per_label"][label]),
+                ["support", "precision", "recall", "f1"],
+            )
+
+    def test_classification_metrics_preserves_empty_freshness_and_failures(self):
+        empty = evaluator._classification_metrics([], "kind")
+        missing = evaluator._classification_metrics([{"fields": {}}], "kind")
+        self.assertEqual(
+            empty,
+            {
+                "total": 0,
+                "correct": 0,
+                "accuracy": None,
+                "confusion": {},
+                "per_label": {},
+            },
+        )
+        self.assertEqual(missing, empty)
+        self.assertIsNot(missing, empty)
+        self.assertIsNot(missing["confusion"], empty["confusion"])
+        self.assertIsNot(missing["per_label"], empty["per_label"])
+
+        class BadString:
+            def __str__(self):
+                raise LookupError("string-stop")
+
+        results = [
+            {"fields": {"kind": {"expected": BadString(), "actual": "A"}}},
+        ]
+        with self.assertRaisesRegex(LookupError, "string-stop"):
+            evaluator._classification_metrics(results, "kind")
+        self.assertIsInstance(results[0]["fields"]["kind"]["expected"], BadString)
+
     def test_checked_in_replays_are_exact_with_deterministic_guard(self):
         suite = evaluator.load_suite(FIXTURE_PATH)
         results = [
