@@ -186,6 +186,138 @@ class AlertDetailSectionTests(unittest.TestCase):
         self.assertEqual(trace.count(("seen_count", None)), 1)
         self.assertEqual(trace.count(("raw_alert_count", "n/a")), 1)
 
+    def test_identity_preserves_callback_and_conversion_order(self) -> None:
+        row = object()
+        trace: list[tuple[object, ...]] = []
+
+        class TextProbe:
+            def __init__(self, name: str, text: str) -> None:
+                self.name = name
+                self.text = text
+
+            def __str__(self) -> str:
+                trace.append(("str", self.name))
+                return self.text
+
+        class SeverityProbe:
+            def upper(self) -> str:
+                trace.append(("upper",))
+                return "HIGH"
+
+        values = {
+            "timestamp": "",
+            "last_seen": "last",
+            "source_ip": TextProbe("source-ip", "10.0.0.1"),
+            "source_port": TextProbe("source-port", "1234"),
+            "destination_ip": TextProbe("destination-ip", "203.0.113.8"),
+            "destination_port": None,
+            "filter_status": TextProbe("status", "accepted"),
+            "rule_name": "Rule",
+            "alert_id": "alert-1",
+            "routing": "soc",
+            "triage_score": 42,
+            "traffic_direction": "outbound",
+        }
+
+        def traced_row_value(candidate: object, key: str, default: object = None) -> object:
+            trace.append(("row", candidate, key, default))
+            return values.get(key, default)
+
+        def traced_search(pattern: str, text: object, *, flags: int = 0) -> None:
+            trace.append(("search", pattern, text, flags))
+            return None
+
+        def traced_severity(candidate: object) -> SeverityProbe:
+            trace.append(("severity", candidate))
+            return SeverityProbe()
+
+        def traced_normalize(value: object) -> str:
+            trace.append(("normalize", value))
+            return f"time:{value}"
+
+        with (
+            mock.patch.object(self.sections.re, "search", side_effect=traced_search),
+            mock.patch.object(self.sections, "row_value", side_effect=traced_row_value),
+            mock.patch.object(self.sections, "severity_label_from_row", side_effect=traced_severity),
+            mock.patch.object(self.sections, "normalize_iso_display_text", side_effect=traced_normalize),
+        ):
+            identity = self.sections.alert_identity_markdown(row, "source")
+
+        self.assertEqual(
+            identity,
+            "\n".join([
+                "# [HIGH] Rule", "",
+                "- **Generated:** time:last",
+                "- **Alert ID:** alert-1",
+                "- **Workflow status:** accepted",
+                "- **Filter status:** accepted",
+                "- **Route:** soc",
+                "- **Score:** 42",
+                "- **Direction:** outbound",
+                "- **Traffic:** 10.0.0.1:1234 -> 203.0.113.8",
+            ]),
+        )
+        self.assertEqual(
+            trace,
+            [
+                (
+                    "search",
+                    r"^(?:generated_at:\s*|[-*]\s+\*\*Generated:\*\*\s*)([^\n]+)",
+                    "source",
+                    self.sections.re.IGNORECASE | self.sections.re.MULTILINE,
+                ),
+                ("row", row, "timestamp", None),
+                ("row", row, "last_seen", None),
+                ("row", row, "source_ip", None),
+                ("row", row, "source_port", None),
+                ("row", row, "destination_ip", None),
+                ("row", row, "destination_port", None),
+                ("str", "source-ip"),
+                ("str", "source-port"),
+                ("str", "destination-ip"),
+                ("row", row, "filter_status", None),
+                ("severity", row),
+                ("upper",),
+                ("row", row, "rule_name", None),
+                ("normalize", "last"),
+                ("row", row, "alert_id", None),
+                ("str", "status"),
+                ("str", "status"),
+                ("row", row, "routing", None),
+                ("row", row, "triage_score", "n/a"),
+                ("row", row, "traffic_direction", None),
+            ],
+        )
+
+    def test_identity_generated_match_skips_row_timestamp_fallbacks(self) -> None:
+        trace: list[tuple[object, ...]] = []
+
+        class GeneratedText(str):
+            def strip(self, chars: str | None = None) -> "GeneratedText":
+                trace.append(("strip", chars))
+                return GeneratedText(super().strip(chars))
+
+        class MatchProbe:
+            def group(self, index: int) -> GeneratedText:
+                trace.append(("group", index))
+                return GeneratedText('  "generated"  ')
+
+        def traced_row_value(row: object, key: str, default: object = None) -> object:
+            trace.append(("row", key, default))
+            return default
+
+        with (
+            mock.patch.object(self.sections.re, "search", return_value=MatchProbe()),
+            mock.patch.object(self.sections, "row_value", side_effect=traced_row_value),
+            mock.patch.object(self.sections, "normalize_iso_display_text", side_effect=lambda value: str(value)),
+        ):
+            identity = self.sections.alert_identity_markdown({}, "generated_at: ignored")
+
+        self.assertIn("- **Generated:** generated", identity)
+        self.assertEqual(trace[:3], [("group", 1), ("strip", None), ("strip", "\"'")])
+        self.assertNotIn(("row", "timestamp", None), trace)
+        self.assertNotIn(("row", "last_seen", None), trace)
+
     def test_triage_notes_and_raw_logs_preserve_legacy_and_ai_evidence(self) -> None:
         triage = self.sections.triage_reasons_markdown(
             {"triage": {"reasons": ["rare destination", "rare destination", "high score"]}},
