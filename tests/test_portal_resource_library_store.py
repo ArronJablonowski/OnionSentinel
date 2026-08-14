@@ -8,6 +8,178 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD = ROOT / "onion-sentinel-dashboard"
+if str(DASHBOARD) not in sys.path:
+    sys.path.insert(0, str(DASHBOARD))
+
+import portal_resource_library_store as store  # noqa: E402
+
+
+class FakeRoot:
+    def __init__(self, label, events, *, exists=True, sources=(), failure=None):
+        self.label = label
+        self.events = events
+        self.exists_value = exists
+        self.sources = list(sources)
+        self.failure = failure
+
+    def exists(self):
+        self.events.append(("root.exists", self.label))
+        if self.failure == "exists":
+            raise RuntimeError(f"{self.label} exists failed")
+        return self.exists_value
+
+    def rglob(self, pattern):
+        self.events.append(("root.rglob", self.label, pattern))
+        if self.failure == "rglob":
+            raise RuntimeError(f"{self.label} rglob failed")
+        return iter(self.sources)
+
+
+class FakeSource:
+    def __init__(
+        self,
+        label,
+        events,
+        *,
+        parts,
+        name,
+        is_file=True,
+        rel=None,
+        identity="miss",
+    ):
+        self.label = label
+        self.events = events
+        self.parts_value = tuple(parts)
+        self.name_value = name
+        self.is_file_value = is_file
+        self.rel = Path(rel or name)
+        self.identity = identity
+
+    @property
+    def parts(self):
+        self.events.append(("source.parts", self.label))
+        return self.parts_value
+
+    @property
+    def name(self):
+        self.events.append(("source.name", self.label))
+        return self.name_value
+
+    def is_file(self):
+        self.events.append(("source.is_file", self.label))
+        return self.is_file_value
+
+    def relative_to(self, root):
+        self.events.append(("source.relative_to", self.label, root.label))
+        return self.rel
+
+
+class RecursivePdfLookupTests(unittest.TestCase):
+    def test_recursive_lookup_preserves_filter_and_selection_order(self):
+        events = []
+        macos = FakeSource(
+            "macos", events,
+            parts=("root", "__MACOSX", "hidden.pdf"),
+            name="hidden.pdf",
+        )
+        dot_file = FakeSource(
+            "dot", events,
+            parts=("root", "._hidden.pdf"),
+            name="._hidden.pdf",
+        )
+        non_file = FakeSource(
+            "non-file", events,
+            parts=("root", "folder.pdf"),
+            name="folder.pdf",
+            is_file=False,
+        )
+        poster = FakeSource(
+            "poster", events,
+            parts=("root", "SANS_Posters", "poster.pdf"),
+            name="poster.pdf",
+            rel="SANS_Posters/poster.pdf",
+            identity="target",
+        )
+        mismatch = FakeSource(
+            "mismatch", events,
+            parts=("root", "mismatch.pdf"),
+            name="mismatch.pdf",
+            identity="other",
+        )
+        target = FakeSource(
+            "target", events,
+            parts=("root", "target.pdf"),
+            name="target.pdf",
+            rel="nested/target.pdf",
+            identity="target",
+        )
+        missing = FakeRoot("missing", events, exists=False)
+        cheats = FakeRoot(
+            "cheats", events,
+            sources=(macos, dot_file, non_file, poster),
+        )
+        docs = FakeRoot("docs", events, sources=(mismatch, target))
+        untouched = FakeRoot("untouched", events, failure="exists")
+
+        def identity(source):
+            events.append(("resource_id", source.label))
+            return source.identity
+
+        with mock.patch.object(store, "resource_library_id_for", side_effect=identity):
+            result = store._recursive_source_pdf(
+                "target",
+                [
+                    ("Missing", missing),
+                    ("CheatSheets", cheats),
+                    ("Docs", docs),
+                    ("Untouched", untouched),
+                ],
+            )
+
+        self.assertEqual(result, (target, "Docs", Path("nested/target.pdf")))
+        self.assertEqual(
+            events,
+            [
+                ("root.exists", "missing"),
+                ("root.exists", "cheats"),
+                ("root.rglob", "cheats", "*.pdf"),
+                ("source.parts", "macos"),
+                ("source.parts", "dot"),
+                ("source.name", "dot"),
+                ("source.parts", "non-file"),
+                ("source.name", "non-file"),
+                ("source.is_file", "non-file"),
+                ("source.parts", "poster"),
+                ("source.name", "poster"),
+                ("source.is_file", "poster"),
+                ("source.relative_to", "poster", "cheats"),
+                ("root.exists", "docs"),
+                ("root.rglob", "docs", "*.pdf"),
+                ("source.parts", "mismatch"),
+                ("source.name", "mismatch"),
+                ("source.is_file", "mismatch"),
+                ("source.relative_to", "mismatch", "docs"),
+                ("resource_id", "mismatch"),
+                ("source.parts", "target"),
+                ("source.name", "target"),
+                ("source.is_file", "target"),
+                ("source.relative_to", "target", "docs"),
+                ("resource_id", "target"),
+            ],
+        )
+
+    def test_recursive_lookup_preserves_root_exception_boundaries(self):
+        events = []
+        with self.assertRaisesRegex(RuntimeError, "exists failed"):
+            store._recursive_source_pdf(
+                "target",
+                [("Docs", FakeRoot("broken", events, failure="exists"))],
+            )
+        with self.assertRaisesRegex(RuntimeError, "rglob failed"):
+            store._recursive_source_pdf(
+                "target",
+                [("Docs", FakeRoot("broken", events, failure="rglob"))],
+            )
 
 
 def load_portal():
