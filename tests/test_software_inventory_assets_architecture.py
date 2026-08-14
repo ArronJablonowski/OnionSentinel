@@ -15,6 +15,7 @@ if str(DASHBOARD) not in sys.path:
     sys.path.insert(0, str(DASHBOARD))
 
 import software_inventory_assets as inventory_assets
+import software_inventory_asset_labels as asset_labels
 
 
 NOW = dt.datetime(2026, 8, 12, 12, 0, tzinfo=dt.timezone.utc)
@@ -107,6 +108,130 @@ class SoftwareInventoryAssetsArchitectureTests(unittest.TestCase):
         self.assertEqual(
             str(inspect.signature(inventory_assets.apply_asset_labels)),
             "(items: 'object', assets: 'object', *, inventory_complete: 'bool', maximum_assets: 'int' = 5000) -> 'int'",
+        )
+
+    def test_asset_operating_system_direct_contract_is_exact(self) -> None:
+        self.assertEqual(
+            str(inspect.signature(asset_labels._asset_operating_system)),
+            "(item: 'dict', asset: 'dict') -> 'None'",
+        )
+
+        item: dict[str, object] = {}
+        self.assertIsNone(asset_labels._asset_operating_system(item, {}))
+        self.assertEqual(
+            item,
+            {
+                "operating_system_type": "",
+                "operating_system_version": "",
+            },
+        )
+
+        item = {
+            "operating_system_type": " \t",
+            "operating_system_version": "Existing version",
+            "operating_system_source": "\n",
+        }
+        asset = {
+            "operating_system_type": "",
+            "platform": "  " + ("P" * 170) + "  ",
+            "operating_system_version": "  " + ("V" * 530) + "  ",
+            "confidence": " HIGH ",
+        }
+        self.assertIsNone(asset_labels._asset_operating_system(item, asset))
+        self.assertEqual(item["operating_system_type"], "P" * 160)
+        self.assertEqual(item["operating_system_version"], "Existing version")
+        self.assertEqual(item["operating_system_source"], "asset_inventory")
+        self.assertEqual(item["operating_system_confidence"], "high")
+
+        item = {
+            "operating_system_type": "Existing type",
+            "operating_system_version": "Existing version",
+            "operating_system_source": "existing-source",
+            "operating_system_confidence": "existing-confidence",
+        }
+        before = copy.deepcopy(item)
+        self.assertIsNone(
+            asset_labels._asset_operating_system(
+                item,
+                {
+                    "operating_system_type": "Replacement",
+                    "operating_system_version": "Replacement version",
+                    "confidence": "medium",
+                },
+            )
+        )
+        self.assertEqual(item, before)
+
+    def test_asset_operating_system_access_and_mutation_order_is_exact(self) -> None:
+        events: list[tuple[object, ...]] = []
+
+        class TracedValue:
+            def __init__(self, name: str, text: str) -> None:
+                self.name = name
+                self.text = text
+
+            def __bool__(self) -> bool:
+                events.append(("bool", self.name))
+                return True
+
+            def __str__(self) -> str:
+                events.append(("str", self.name))
+                return self.text
+
+        class TracedDict(dict):
+            def __init__(self, name: str, value: dict[str, object]) -> None:
+                self.name = name
+                super().__init__(value)
+
+            def get(self, key: object, default: object = None) -> object:
+                events.append(("get", self.name, key, default))
+                return super().get(key, default)
+
+            def __setitem__(self, key: object, value: object) -> None:
+                events.append(("set", self.name, key, value))
+                super().__setitem__(key, value)
+
+        item = TracedDict(
+            "item",
+            {
+                "operating_system_type": " ",
+                "operating_system_version": "preserved",
+                "operating_system_source": " ",
+            },
+        )
+        asset = TracedDict(
+            "asset",
+            {
+                "operating_system_type": "",
+                "platform": TracedValue("platform", " MacOS "),
+                "operating_system_version": TracedValue(
+                    "version", " Version 26 "
+                ),
+                "confidence": TracedValue("confidence", " HIGH "),
+            },
+        )
+
+        self.assertIsNone(asset_labels._asset_operating_system(item, asset))
+        self.assertEqual(
+            events,
+            [
+                ("get", "asset", "operating_system_type", None),
+                ("get", "asset", "platform", None),
+                ("bool", "platform"),
+                ("str", "platform"),
+                ("get", "asset", "operating_system_version", None),
+                ("bool", "version"),
+                ("str", "version"),
+                ("get", "item", "operating_system_type", None),
+                ("set", "item", "operating_system_type", "MacOS"),
+                ("get", "item", "operating_system_version", None),
+                ("get", "item", "operating_system_source", None),
+                ("set", "item", "operating_system_source", "asset_inventory"),
+                ("get", "asset", "confidence", None),
+                ("bool", "confidence"),
+                ("str", "confidence"),
+                ("set", "item", "operating_system_confidence", "high"),
+            ],
         )
         self.assertEqual(
             str(
