@@ -61,6 +61,44 @@ def _incident_list_payload(
     }
 
 
+def _incident_detail_payload(
+    sources: IncidentReadServiceSources,
+    normalized_case_id: str,
+    records: object,
+) -> dict:
+    response = sources.parse_analysis_response(records.analysis)
+    prior_response = sources.parse_analysis_response(records.prior_analysis)
+    review = sources.compose_review_state(
+        records.case,
+        records.analysis,
+        response,
+        records.review.evidence_updated_at,
+        records.review.reviewer,
+        records.review.adjudication,
+        sources.review_defaults(),
+        sources.row_callbacks,
+    )
+    incident_html, query_count = sources.render_incident_report(
+        records.case,
+        response,
+        records.analysis,
+        review,
+    )
+    prior_html = sources.render_prior_analysis(
+        prior_response,
+        records.prior_analysis,
+    )
+    return sources.compose_detail_payload(
+        normalized_case_id,
+        records.case,
+        response,
+        review,
+        incident_html,
+        prior_html,
+        query_count,
+    )
+
+
 def incident_list_response(
     sources: IncidentReadServiceSources,
     query: dict[str, list[str]],
@@ -125,34 +163,8 @@ def incident_detail_response(
             f"Incident Response detail unavailable: {exc}", 503
         )
 
-    response = sources.parse_analysis_response(records.analysis)
-    prior_response = sources.parse_analysis_response(records.prior_analysis)
-    review = sources.compose_review_state(
-        records.case,
-        records.analysis,
-        response,
-        records.review.evidence_updated_at,
-        records.review.reviewer,
-        records.review.adjudication,
-        sources.review_defaults(),
-        sources.row_callbacks,
-    )
-    incident_html, query_count = sources.render_incident_report(
-        records.case,
-        response,
-        records.analysis,
-        review,
-    )
-    prior_html = sources.render_prior_analysis(
-        prior_response,
-        records.prior_analysis,
-    )
-    return 200, sources.compose_detail_payload(
+    return 200, _incident_detail_payload(
+        sources,
         normalized_case_id,
-        records.case,
-        response,
-        review,
-        incident_html,
-        prior_html,
-        query_count,
+        records,
     )
