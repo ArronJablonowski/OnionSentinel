@@ -3797,9 +3797,19 @@ hooks and configuration values are forwarded only for the duration of a call,
 preserving test and recovery overrides without cross-import state leakage. The
 Pi installer copies all three implementation modules before the wrapper.
 
-`storage_health.py` remains the read-only storage probe executable. Its bounded
-root-capacity, mount/SSD-capacity, and SMART phases retain the original probe
-order, failure ordering, JSON contract, and 0/1 exit semantics.
+`storage_health.py` remains the read-only storage owner and compatibility
+executable. Its bounded root-capacity, mount/SSD-capacity, and SMART phases
+retain the original probe order, failure ordering, JSON contract, and 0/1 exit
+semantics; `evaluate_storage` exposes the same result to the local readiness
+composition without parsing child output.
+
+`relay_readiness.py` owns the fixed eight-domain Relay-node readiness schema and
+local-only composition. Its bounded phases evaluate Pi power, SoC temperature,
+current-boot filesystem/media warnings, storage, timer/service state, local
+kernel routes, owner-only SSH credential metadata, and enabled broker config.
+It never opens SSH or application network connections, reads credential
+contents, or returns host/path/log values. The existing storage component and
+debounced health state remain its systemd and notification compatibility seam.
 
 ## Local Ollama Benchmark
 

@@ -75,7 +75,25 @@ install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/relay_health_sanitiza
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/relay_health_application.py" /opt/so-alert-relay/app/relay_health_application.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay_health_wrapper.py" /opt/so-alert-relay/app/relay_health_wrapper.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/storage_health.py" /opt/so-alert-relay/app/storage_health.py
-install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/config/config.example.json" /opt/so-alert-relay/app/config.json
+install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay_readiness.py" /opt/so-alert-relay/app/relay_readiness.py
+
+RELAY_APP_CONFIG=/opt/so-alert-relay/app/config.json
+if [[ -L "$RELAY_APP_CONFIG" ]] \
+  || [[ -e "$RELAY_APP_CONFIG" && ! -f "$RELAY_APP_CONFIG" ]]; then
+  echo "Refusing install: Relay app config must be a regular file." >&2
+  exit 1
+fi
+if [[ ! -f "$RELAY_APP_CONFIG" ]]; then
+  # Seed first install only. Upgrade and repair installs preserve live routing,
+  # transport, token, retention, and evidence-path configuration byte-for-byte.
+  install -o soalert -g soalert -m 0600 \
+    "$REPO_DIR/relay/config/config.example.json" \
+    "$RELAY_APP_CONFIG"
+  echo "Created disabled $RELAY_APP_CONFIG example." >&2
+else
+  chown soalert:soalert "$RELAY_APP_CONFIG"
+  chmod 0600 "$RELAY_APP_CONFIG"
+fi
 
 if [[ ! -f /etc/so-alert-relay/relay.env ]]; then
   # Do not overwrite live secrets during a repair install.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import importlib
 import json
 import stat
 import subprocess
@@ -85,6 +86,13 @@ class RelayReadinessTests(unittest.TestCase):
 
         def run(command):
             commands.append(tuple(command))
+            if "show" in command:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    "LoadState=loaded\nResult=success\n",
+                    "",
+                )
             return subprocess.CompletedProcess(command, 0, "active\n", "")
 
         config = {
@@ -153,6 +161,83 @@ class RelayReadinessTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in report["checks"]], list(module.CHECK_IDS))
         self.assertLess(len(json.dumps(report)), module.MAX_REPORT_BYTES)
 
+    def test_health_wrapper_sanitizer_allows_only_fixed_readiness_fields(self) -> None:
+        module = self.require_module()
+        sanitization = importlib.import_module("relay_health_sanitization")
+        report = {
+            "schema": "onion-sentinel-relay-readiness-v1",
+            "ok": True,
+            "checks": [
+                {
+                    "id": identifier,
+                    "status": "pass",
+                    "code": {
+                        "power": "power_ready",
+                        "thermal": "temperature_ready",
+                        "filesystem": "filesystem_ready",
+                        "storage": "storage_ready",
+                        "services": "services_ready",
+                        "routes": "routes_ready",
+                        "ssh": "ssh_ready",
+                        "brokers": "brokers_ready",
+                    }[identifier],
+                    "raw": "do-not-project",
+                }
+                for identifier in module.CHECK_IDS
+            ],
+            "host": "do-not-project",
+        }
+        sanitized = sanitization.sanitize_storage_summary(report)
+        self.assertIsNotNone(sanitized)
+        rendered = json.dumps(sanitized)
+        self.assertNotIn("do-not-project", rendered)
+        self.assertEqual(set(sanitized), {"schema", "ok", "checks"})
+        report["checks"][0]["code"] = "attacker-controlled"
+        self.assertIsNone(sanitization.sanitize_storage_summary(report))
+
+    def test_invalid_route_and_credential_metadata_fail_without_remote_commands(self) -> None:
+        module = self.require_module()
+        commands = []
+
+        def run(command):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        route = module.evaluate_route_health(
+            {"security_onion": {"host": "not-an-ip"}},
+            run,
+        )
+        self.assertEqual(route["code"], "route_config_invalid")
+        self.assertEqual(commands, [])
+        with tempfile.TemporaryDirectory() as tmp:
+            key = Path(tmp) / "key"
+            key.write_text("PRIVATE-SENTINEL", encoding="utf-8")
+            key.chmod(0o644)
+            ssh = module.evaluate_ssh_health(
+                {"security_onion": {"ssh_key": str(key)}}
+            )
+        self.assertEqual(ssh["code"], "ssh_metadata_invalid")
+
+    def test_cli_failure_is_fixed_schema_and_does_not_echo_bad_config(self) -> None:
+        sentinel = "do-not-echo-invalid-relay-config"
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.json"
+            config.write_text(sentinel, encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--config", str(config)],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn(sentinel, result.stdout + result.stderr)
+        self.assertNotIn(str(config), result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["schema"], "onion-sentinel-relay-readiness-v1")
+        self.assertFalse(report["ok"])
+
     def test_installer_wrapper_contract_and_runbooks_include_readiness_recovery(self) -> None:
         installer = INSTALLER.read_text(encoding="utf-8")
         contract = HEALTH_CONTRACT.read_text(encoding="utf-8")
@@ -165,6 +250,16 @@ class RelayReadinessTests(unittest.TestCase):
         self.assertIn("every five minutes", reliability)
         self.assertIn("Relay backup and restore", recovery)
         self.assertIn("Relay upgrade and rollback", recovery)
+
+    def test_relay_upgrade_preserves_live_application_config(self) -> None:
+        installer = INSTALLER.read_text(encoding="utf-8")
+        self.assertIn("RELAY_APP_CONFIG=/opt/so-alert-relay/app/config.json", installer)
+        self.assertIn('if [[ ! -f "$RELAY_APP_CONFIG" ]]; then', installer)
+        self.assertIn("Upgrade and repair installs preserve live routing", installer)
+        self.assertNotIn(
+            'install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/config/config.example.json" /opt/so-alert-relay/app/config.json',
+            installer,
+        )
 
 
 if __name__ == "__main__":

@@ -5104,8 +5104,23 @@
       "runtime_path": "/opt/so-alert-relay/app/storage_health.py",
       "required_symbols": [
         "env_int",
+        "evaluate_storage",
         "main",
         "run"
+      ]
+    },
+    {
+      "path": "relay/app/relay_readiness.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/relay_readiness.py",
+      "required_symbols": [
+        "build_report",
+        "evaluate_broker_health",
+        "evaluate_platform_health",
+        "evaluate_route_health",
+        "evaluate_service_health",
+        "evaluate_ssh_health",
+        "main"
       ]
     }
   ],

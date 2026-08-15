@@ -1104,10 +1104,54 @@ On the Pi:
 
 ```bash
 sudo apt update
-sudo apt install -y python3 openssh-client netcat-openbsd jq
+sudo apt install -y python3 openssh-client netcat-openbsd jq smartmontools raspi-utils
 cd /path/to/OnionSentinel
-sudo ./relay/bin/install-relay.sh
+sudo ./relay/bin/install-pi-relay.sh
 ```
+
+### Relay backup and restore
+
+Before a repair, OS upgrade, storage replacement, or Relay application update,
+stop only the Relay timers and copy these runtime-only assets to an
+operator-controlled encrypted backup target: `/etc/so-alert-relay`,
+`/opt/so-alert-relay/app/config.json`, `/opt/so-alert-relay/keys`, and
+`/opt/so-alert-relay/state`. Preserve owners, modes, ACLs, and timestamps. Never
+place the archive in Git, Linear, a command transcript, or the Mac application
+source tree. Record a content-free manifest containing relative names, byte
+counts, modes, owners, and SHA-256 digests; do not record file content.
+
+Restore into an isolated temporary root first. Require every listed object to
+be a regular file or directory (never a symlink/device), verify the manifest,
+run SQLite `PRAGMA quick_check` against each restored Relay state database, and
+confirm credential files remain owner-only without reading or printing them.
+Only after that drill passes should an operator restore to the Pi, run
+`install-pi-relay.sh`, execute the local-only readiness command below, and
+re-enable the three timers. Repeat this restore drill after every material
+configuration or key change and at least quarterly.
+
+### Relay upgrade and rollback
+
+Tag or record the exact prior source commit and save the encrypted runtime
+backup before installing an upgrade. `install-pi-relay.sh` replaces application
+code and systemd definitions but seeds `config.json` only when it is absent; an
+existing live config, env, keys, databases, outbox, PCAP spool, and evidence
+state are preserved. The installer rejects a symlink or non-regular app config.
+
+After installation, leave downstream systems untouched and run:
+
+```bash
+sudo -u soalert /usr/bin/python3 /opt/so-alert-relay/app/relay_readiness.py \
+  --config /opt/so-alert-relay/app/config.json
+sudo systemctl start so-storage-health.service
+systemctl is-active so-alert-poll.timer so-pcap-broker.timer so-storage-health.timer
+```
+
+For rollback, stop the timers, reinstall the recorded prior source commit, and
+restore runtime files only when their content-free manifest proves the current
+copy is damaged or incompatible. Re-run the isolated SQLite checks and local
+readiness probe before enabling timers. A rollback must not issue a Security
+Onion query, broker request, or evidence mutation merely to prove Relay-node
+readiness.
 
 Install the Security Onion SSH private key:
 

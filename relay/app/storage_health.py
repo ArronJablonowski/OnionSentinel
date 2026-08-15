@@ -133,7 +133,8 @@ def _smart_health(result: dict, failures: list[str]) -> None:
         failures.append(f"relay SSD temperature is at or above {MAX_TEMPERATURE_C} C")
 
 
-def main() -> int:
+def evaluate_storage() -> dict:
+    """Return the existing read-only storage result without printing it."""
     failures: list[str] = []
     result: dict = {"ok": False, "mount": str(MOUNT), "root_mount": str(ROOT_MOUNT), "device": DEVICE}
     _root_storage_health(result, failures)
@@ -141,6 +142,11 @@ def main() -> int:
     _smart_health(result, failures)
     result["failures"] = failures
     result["ok"] = not failures
+    return result
+
+
+def main() -> int:
+    result = evaluate_storage()
     print(json.dumps(result, sort_keys=True))
     return 0 if result["ok"] else 1
 

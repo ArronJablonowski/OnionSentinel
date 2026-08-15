@@ -35,7 +35,7 @@ RELAY_PCAP_COMMAND = os.environ.get(
 )
 RELAY_STORAGE_COMMAND = os.environ.get(
     "RELAY_STORAGE_COMMAND",
-    "/usr/bin/python3 /opt/so-alert-relay/app/storage_health.py",
+    "/usr/bin/python3 /opt/so-alert-relay/app/relay_readiness.py --config /opt/so-alert-relay/app/config.json",
 )
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()

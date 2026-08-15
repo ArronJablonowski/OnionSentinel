@@ -1,2 +1,4 @@
-# Read-only SMART access for the dedicated Onion Sentinel relay account.
+# Exact read-only hardware and kernel probes for the dedicated Relay account.
 soalert ALL=(root) NOPASSWD: /usr/sbin/smartctl -a -j /dev/sda
+soalert ALL=(root) NOPASSWD: /usr/bin/vcgencmd get_throttled
+soalert ALL=(root) NOPASSWD: /usr/bin/journalctl --dmesg --boot=0 --priority=warning..alert --no-pager --output=cat

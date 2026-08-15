@@ -4,6 +4,22 @@ from __future__ import annotations
 
 from relay_health_contract import *  # noqa: F401,F403
 
+READINESS_CHECK_IDS = (
+    "power", "thermal", "filesystem", "storage",
+    "services", "routes", "ssh", "brokers",
+)
+READINESS_CODES = frozenset({
+    "broker_config_invalid", "brokers_ready",
+    "filesystem_errors", "filesystem_probe_failed", "filesystem_ready",
+    "power_probe_failed", "power_ready", "power_throttled",
+    "probe_failed", "probe_missing",
+    "route_config_invalid", "routes_ready", "routes_unavailable",
+    "services_ready", "services_unavailable",
+    "ssh_metadata_invalid", "ssh_ready",
+    "storage_failed", "storage_ready",
+    "temperature_high", "temperature_probe_failed", "temperature_ready",
+})
+
 def sanitize_alert_summary(payload: object) -> dict | None:
     if not isinstance(payload, dict) or "alert_count" not in payload:
         return None
@@ -132,10 +148,37 @@ def _storage_failure_categories(failures: object) -> list[str] | None:
     return sorted({storage_failure_category(item) for item in failures})
 
 
+def _sanitize_readiness_checks(value: object) -> list[dict] | None:
+    if not isinstance(value, list) or len(value) != len(READINESS_CHECK_IDS):
+        return None
+    checks = []
+    for expected_id, item in zip(READINESS_CHECK_IDS, value):
+        if (
+            not isinstance(item, dict)
+            or item.get("id") != expected_id
+            or item.get("status") not in {"pass", "fail"}
+            or item.get("code") not in READINESS_CODES
+        ):
+            return None
+        checks.append({
+            "id": expected_id,
+            "status": item["status"],
+            "code": item["code"],
+        })
+    return checks
+
+
 def sanitize_storage_summary(payload: object) -> dict | None:
     if not isinstance(payload, dict) or not isinstance(payload.get("ok"), bool):
         return None
     summary = {"ok": payload["ok"]}
+    if payload.get("schema") == "onion-sentinel-relay-readiness-v1":
+        checks = _sanitize_readiness_checks(payload.get("checks"))
+        if checks is None:
+            return None
+        summary["schema"] = "onion-sentinel-relay-readiness-v1"
+        summary["checks"] = checks
+        return summary
     for section_name in ("root_storage", "storage"):
         section = _sanitize_storage_section(payload.get(section_name))
         if section:

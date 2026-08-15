@@ -20,7 +20,8 @@ replay a safely committed alert.
 | `app/alert_outbox.py` | `/opt/so-alert-relay/app/alert_outbox.py` | Durable, idempotent SQLite delivery outbox and poison-message dead letter. |
 | `app/alert_delivery.py` | `/opt/so-alert-relay/app/alert_delivery.py` | Bounded SSH batch transport with strict host-key pinning and per-item acknowledgements. |
 | `app/relay_health_wrapper.py` | `/opt/so-alert-relay/app/relay_health_wrapper.py` | Adds failure/recovery notification thresholding. |
-| `config/config.example.json` | `/opt/so-alert-relay/app/config.json` | Non-secret relay config. |
+| `app/relay_readiness.py` | `/opt/so-alert-relay/app/relay_readiness.py` | Bounded local-only power, thermal, kernel, storage, service, route, SSH-metadata, and broker-config readiness. |
+| `config/config.example.json` | `/opt/so-alert-relay/app/config.json` | Runtime relay config seeded only on first install and preserved across upgrades. |
 | `config/relay.example.env` | `/etc/so-alert-relay/relay.env` | Secret-bearing env template. Do not commit live copy. |
 | `systemd/so-alert-poll.service` | `/etc/systemd/system/so-alert-poll.service` | One alert poll/outbox/heartbeat execution. |
 | `systemd/so-alert-poll.timer` | `/etc/systemd/system/so-alert-poll.timer` | Runs alert polling every 5 minutes. |
@@ -48,6 +49,12 @@ The installer renders `__RELAY_ADMIN_USER__` from `SUDO_USER`. When installing
 from a direct root shell, set `ONION_SENTINEL_RELAY_ADMIN_USER` to the existing
 administrative account. The rendered rule permits only the forced live-OSQuery
 broker command to run as `soalert`.
+
+The installer never replaces an existing regular
+`/opt/so-alert-relay/app/config.json`. It rejects a symlink or non-regular
+object, preserves the live file across repair and upgrade installs, and
+normalizes it to `soalert:soalert 0600` because enabled broker sections may
+contain runtime tokens.
 
 Then install the Security Onion private key:
 
@@ -525,6 +532,21 @@ RELAY_FAILURE_NOTIFY_THRESHOLD=3
 Do not pass the rollback webhook token on the command line. If emergency HTTP
 rollback is enabled, `relay.py` reads `RELAY_WEBHOOK_TOKEN` from the service
 environment so process listings do not expose token material.
+
+## Read-only Relay readiness
+
+The storage timer runs `relay_readiness.py` through the existing debounced
+health wrapper every five minutes. The probe covers Pi power and thermal state,
+current-boot filesystem/media warnings, root and external storage, the three
+systemd timers, local route-table resolution, credential-file metadata, and
+broker configuration. It never starts SSH, ping, HTTP, or broker traffic and
+never reads credential content. Output is restricted to eight fixed check IDs,
+pass/fail status, and allowlisted categorical reason codes.
+
+```bash
+sudo -u soalert /usr/bin/python3 /opt/so-alert-relay/app/relay_readiness.py \
+  --config /opt/so-alert-relay/app/config.json
+```
 
 PCAP SSH runs under the service account used for the broker command. If the
 broker is invoked with `sudo`, make sure the Security Onion host key is present

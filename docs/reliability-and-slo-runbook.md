@@ -36,7 +36,7 @@ ingest transaction closes.
 | --- | --- | --- |
 | `so-alert-poll.service` | `so-alert-poll.timer`, every 5 minutes | Restricted export, durable outbox delivery, heartbeat. |
 | `so-pcap-broker.service` | `so-pcap-broker.timer`, one minute after the prior run completes | Sample `/nsm` telemetry, claim one request, stream bounded chunks to SSD, checksum, Mac transfer, completion. |
-| `so-storage-health.service` | `so-storage-health.timer`, hourly | External-mount identity, capacity, temperature, and read-only SMART health. |
+| `so-storage-health.service` | `so-storage-health.timer`, every five minutes | Local-only power/undervoltage, SoC temperature, kernel filesystem/media errors, external-mount identity/capacity/SMART, timer state, route-table readiness, SSH credential metadata, and broker configuration. |
 
 The legacy combined `so-alert-relay.timer` is disabled by the current installer
 and retained only for controlled rollback compatibility.
@@ -50,6 +50,25 @@ and resume with `--append-verify`.
 systemctl list-timers --all so-alert-poll.timer so-pcap-broker.timer so-storage-health.timer --no-pager
 systemctl status so-alert-poll.service so-pcap-broker.service so-storage-health.service --no-pager
 journalctl -u so-alert-poll.service -u so-pcap-broker.service -u so-storage-health.service -n 100 --no-pager
+```
+
+## Read-only Relay readiness
+
+`relay_readiness.py` is the storage timer's child probe. It never opens an SSH
+session, sends a packet, calls a broker, or reads key/host-pin content. It uses
+fixed, bounded local commands for Raspberry Pi throttling state, current-boot
+kernel warnings, systemd timer state, and kernel route lookup; it uses metadata
+only for credential files. Its output is a fixed eight-check schema containing
+only check IDs, pass/fail status, and allowlisted reason codes. The existing
+health wrapper sanitizes that schema and applies the same three-consecutive-run
+notification threshold and single recovery notification, so transient link or
+boot convergence does not flap alerts.
+
+Run it without touching downstream evidence systems:
+
+```bash
+sudo -u soalert /usr/bin/python3 /opt/so-alert-relay/app/relay_readiness.py \
+  --config /opt/so-alert-relay/app/config.json
 ```
 
 The runtime-only relay outbox records an alert before delivery, leases it while
@@ -489,7 +508,7 @@ Onion. Fresh Zeek capture-loss telemetry is a workload-protection gate: pending
 PCAP work is deferred before claim or between chunks when the latest worker
 maximum exceeds the Settings-page threshold (5 percent by default). Brief
 telemetry-only gaps receive a three-minute SLO grace period; a measured threshold
-breach still pauses qualification immediately. The broker timer uses a five-minute post-completion cooldown
+breach still pauses qualification immediately. The broker timer uses a one-minute post-completion cooldown
 and processes one request per invocation.
 Successful checksum-verified relay artifacts are deleted only after the durable
 alert-store completion acknowledgement. Retryable failures retain the relay SSD

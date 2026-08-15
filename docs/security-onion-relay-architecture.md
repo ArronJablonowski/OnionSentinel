@@ -261,8 +261,8 @@ is not blocked by PCAP state.
 
 Security Onion source reads are capped at 4 MiB/s by default, run under idle I/O
 priority and positive CPU niceness, and are limited to one active stream. The
-relay processes at most one PCAP request per invocation. Its timer waits five
-minutes after the prior oneshot exits before starting another cycle, preventing
+relay processes at most one PCAP request per invocation. Its timer waits one
+minute after the prior oneshot exits before starting another cycle, preventing
 long transfers from turning a nominal interval into continuous back-to-back
 capture scans.
 
@@ -271,15 +271,21 @@ Security Onion wrapper keeps reading while packet bytes are available; the
 relay stops only a stream that has produced no additional bytes for its
 configured idle interval.
 
-The systemd service calls `relay_health_wrapper.py`. The wrapper runs alert
-delivery and PCAP broker processing as independent sub-steps, records combined
-health state, sends a Telegram notification on first failure, suppresses
-repeated failure spam, and sends a recovery notification once both sub-steps
-succeed again. If alert delivery fails, PCAP broker processing is still
-attempted. If PCAP broker processing fails, alert delivery is still attempted.
-The wrapper exits nonzero when either sub-step fails so degraded service remains
-visible in systemd, journald, Telegram health state, and the dashboard health
-history.
+Each split systemd service calls `relay_health_wrapper.py` with its own
+component and state file. Alert delivery, PCAP broker work, and local Relay
+readiness therefore fail and recover independently. The wrapper treats the
+first two consecutive failures as transient, sends one notification when the
+configured sustained-failure threshold is reached, suppresses repeats, and
+sends one recovery notification after a proven success. Component failure
+remains visible in systemd, journald, Telegram health state, and dashboard
+health history without blocking the other timers.
+
+The storage timer invokes `relay_readiness.py`, a fixed-schema local-only probe
+covering power/undervoltage, SoC temperature, current-boot filesystem/media
+errors, root and external storage, timer/service state, kernel route lookup,
+SSH credential metadata, and broker configuration. It starts no SSH, ping,
+HTTP, or broker traffic and projects no host, path, key, pin, or kernel-log
+content.
 
 Current alert timer:
 
