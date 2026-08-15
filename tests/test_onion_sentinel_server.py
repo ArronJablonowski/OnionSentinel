@@ -92,13 +92,25 @@ class OnionSentinelServerTests(unittest.TestCase):
             _soc_review_origin_authorized=lambda: True,
         )
         observation = object()
+        principal = object()
         observer_runtime = SimpleNamespace(
             enabled=True,
             begin=mock.Mock(return_value=observation),
         )
+        session_runtime = SimpleNamespace(
+            resolve_session=mock.Mock(
+                return_value=SimpleNamespace(
+                    principal=principal,
+                    csrf_authorized=True,
+                )
+            )
+        )
+        handler._admin_session_id = lambda: "session-" + "s" * 36
+        headers["X-Onion-Sentinel-CSRF"] = "csrf-" + "c" * 38
         with (
             mock.patch.object(server, "CONTROLLED_EVALUATION_MODE", False),
             mock.patch.object(server, "ACCESS_OBSERVER", observer_runtime),
+            mock.patch.object(server, "HUMAN_SESSION_RUNTIME", session_runtime),
         ):
             server.begin_access_observation(
                 handler,
@@ -111,12 +123,50 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertEqual(
             observer_runtime.begin.call_args.kwargs,
             {
-                "principal": None,
+                "principal": principal,
                 "same_origin_authorized": True,
-                "csrf_authorized": False,
+                "csrf_authorized": True,
                 "request_id": "request-7",
             },
         )
+        session_runtime.resolve_session.assert_called_once()
+
+    def test_observe_login_and_logout_cookie_headers_preserve_legacy_default(self):
+        with mock.patch.object(
+            server.runtime,
+            "admin_session_cookie_header",
+            return_value="legacy-session-cookie",
+        ):
+            self.assertEqual(
+                server.admin_login_cookie_headers("legacy-id", None),
+                "legacy-session-cookie",
+            )
+            self.assertEqual(
+                server.admin_login_cookie_headers(
+                    "legacy-id", "csrf-" + "c" * 38
+                ),
+                [
+                    "legacy-session-cookie",
+                    "onion_sentinel_csrf=csrf-" + "c" * 38
+                    + "; Path=/; Max-Age=28800; SameSite=Strict",
+                ],
+            )
+        with mock.patch.object(
+            server.runtime,
+            "expired_admin_session_cookie_header",
+            return_value="expired-legacy-cookie",
+        ):
+            self.assertEqual(
+                server.admin_logout_cookie_headers(observe_enabled=False),
+                "expired-legacy-cookie",
+            )
+            self.assertEqual(
+                server.admin_logout_cookie_headers(observe_enabled=True),
+                [
+                    "expired-legacy-cookie",
+                    "onion_sentinel_csrf=; Path=/; Max-Age=0; SameSite=Strict",
+                ],
+            )
 
     def test_begin_observation_boundary_failure_never_escapes_dispatch(self):
         handler = SimpleNamespace(

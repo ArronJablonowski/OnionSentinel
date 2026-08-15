@@ -159,6 +159,34 @@ class _PostHarness:
 
 
 class PortalHttpHandlerTests(unittest.TestCase):
+    def test_redirect_emits_each_cookie_header_without_joining_values(self):
+        events: list[tuple[object, ...]] = []
+        handler = SimpleNamespace(
+            send_response=lambda status: events.append(("status", status)),
+            send_header=lambda key, value: events.append(
+                ("header", key, value)
+            ),
+            end_headers=lambda: events.append(("end",)),
+        )
+        runtime = SimpleNamespace(HTTPStatus=SimpleNamespace(FOUND=302))
+        adapter._redirect(
+            handler,
+            runtime,
+            "/admin",
+            {"Set-Cookie": ["session=one", "csrf=two"]},
+        )
+        self.assertEqual(
+            events,
+            [
+                ("status", 302),
+                ("header", "Location", "/admin"),
+                ("header", "Cache-Control", "no-store"),
+                ("header", "Set-Cookie", "session=one"),
+                ("header", "Set-Cookie", "csrf=two"),
+                ("end",),
+            ],
+        )
+
     def test_soc_review_write_authorization_matrix_and_trace_are_exact(self) -> None:
         cases = (
             ({}, False, ("Content-Type",), ()),
