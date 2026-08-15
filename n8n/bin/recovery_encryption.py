@@ -127,7 +127,10 @@ class RecoveryEncryption:
             or not MIN_SECRET_BYTES <= len(secret) <= MAX_SECRET_BYTES
             or any(marker in secret for marker in (b"\x00", b"\r", b"\n"))
         ):
-            raise ValueError("recovery encryption secret must be at least 32 bytes")
+            raise ValueError(
+                "recovery encryption secret must be at least 32 bytes of "
+                "single-line text"
+            )
         if key_source not in {"injected", "macos-keychain"}:
             raise ValueError("recovery encryption key source is invalid")
         if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", key_id) is None:
