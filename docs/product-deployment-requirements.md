@@ -226,3 +226,18 @@ Relay validation examples:
 ssh <relay_user>@10.88.8.8 'systemctl is-enabled so-alert-poll.timer so-pcap-broker.timer; systemctl is-active so-alert-poll.timer so-pcap-broker.timer'
 ssh <relay_user>@10.88.8.8 'sudo journalctl -u so-alert-poll.service -u so-pcap-broker.service -n 40 --no-pager'
 ```
+## Database governance
+
+Every source qualification and guarded release must validate the repository's
+complete database ownership and recovery inventory:
+
+```bash
+python3 operations/validate-database-governance.py
+```
+
+The command is source-only and never opens a runtime database. A nonzero exit
+blocks release. A zero exit with `catalog_valid_with_declared_gaps` means the
+catalog is complete and internally valid, but the listed gaps still block
+ARR-39 completion and any release claim that depends on them. Close each gap
+with characterization, production-shaped migration/restore proof, rollback,
+and the normal full qualification gate.
