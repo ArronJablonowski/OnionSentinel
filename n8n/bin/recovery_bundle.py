@@ -108,19 +108,28 @@ def _verify_manifest_file(
         raise RuntimeError(f"bundle hash validation failed for {name}")
 
 
+def _valid_file_encryption_metadata(
+    name: str,
+    metadata: object,
+) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    plaintext_bytes = metadata.get("plaintext_bytes")
+    plaintext_sha256 = metadata.get("plaintext_sha256")
+    return (
+        metadata.get("scheme") == ENCRYPTION_SCHEME
+        and metadata.get("plaintext_name") == BUNDLE_PAYLOADS[name]
+        and isinstance(plaintext_bytes, int)
+        and plaintext_bytes >= 0
+        and isinstance(plaintext_sha256, str)
+        and re.fullmatch(r"[a-f0-9]{64}", plaintext_sha256) is not None
+    )
+
+
 def _verify_manifest_files(bundle: Path, files: dict[str, object]) -> None:
     for name, metadata in files.items():
         path = _validated_manifest_path(bundle, name)
-        plaintext_name = BUNDLE_PAYLOADS[str(name)]
-        if not isinstance(metadata, dict) or (
-            metadata.get("scheme") != ENCRYPTION_SCHEME
-            or metadata.get("plaintext_name") != plaintext_name
-            or not isinstance(metadata.get("plaintext_bytes"), int)
-            or metadata["plaintext_bytes"] < 0
-            or not isinstance(metadata.get("plaintext_sha256"), str)
-            or re.fullmatch(r"[a-f0-9]{64}", metadata["plaintext_sha256"])
-            is None
-        ):
+        if not _valid_file_encryption_metadata(str(name), metadata):
             raise RuntimeError("recovery bundle encryption metadata is invalid")
         _verify_manifest_file(path, name, metadata)
     actual = {
@@ -139,10 +148,14 @@ def _validate_encryption_descriptor(manifest: dict[str, object]) -> None:
         "pbkdf2_iterations": PBKDF2_ITERATIONS,
         "authenticated": True,
         "key_source": encryption.get("key_source"),
+        "key_id": encryption.get("key_id"),
     }
     if (
         encryption != expected
         or encryption.get("key_source") not in {"injected", "macos-keychain"}
+        or not isinstance(encryption.get("key_id"), str)
+        or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", encryption["key_id"])
+        is None
     ):
         raise RuntimeError("recovery bundle encryption descriptor is invalid")
 

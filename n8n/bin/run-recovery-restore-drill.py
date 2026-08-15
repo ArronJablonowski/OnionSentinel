@@ -262,7 +262,7 @@ def __parse_args() -> argparse.Namespace:
     parser.add_argument("--docker", default="/usr/local/bin/docker")
     parser.add_argument(
         "--keychain-service",
-        default="com.arron.onion-sentinel.runtime-backup",
+        default="com.arron.onion-sentinel.runtime-backup.v1",
     )
     parser.add_argument("--keychain-account", default=getpass.getuser())
     parser.add_argument("--security", default="/usr/bin/security")
@@ -338,12 +338,16 @@ def __execute_restore_drill(
         service=getattr(
             args,
             "keychain_service",
-            "com.arron.onion-sentinel.runtime-backup",
+            "com.arron.onion-sentinel.runtime-backup.v1",
         ),
         account=getattr(args, "keychain_account", getpass.getuser()),
         security=getattr(args, "security", "/usr/bin/security"),
         openssl=getattr(args, "openssl", "/usr/bin/openssl"),
     )
+    if encryption.descriptor.get("key_id") != dict(
+        manifest["encryption"]
+    ).get("key_id"):
+        raise RuntimeError("recovery bundle key identifier does not match")
     with tempfile.TemporaryDirectory(
         prefix="onion-sentinel-recovery-plaintext-"
     ) as plaintext_temp:

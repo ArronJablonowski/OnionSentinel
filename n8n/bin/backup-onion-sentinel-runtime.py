@@ -451,8 +451,7 @@ def create_bundle(
     encryption: RecoveryEncryption,
 ) -> Path:
     sqlite_source, harness_source = __require_bundle_capacity(
-        stack_dir,
-        backup_root,
+        stack_dir, backup_root
     )
     stamp = dt.datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
     staging = backup_root / f".staging-{stamp}"
@@ -510,7 +509,7 @@ def main() -> int:
     parser.add_argument("--keep", type=int, default=7)
     parser.add_argument(
         "--keychain-service",
-        default="com.arron.onion-sentinel.runtime-backup",
+        default="com.arron.onion-sentinel.runtime-backup.v1",
     )
     parser.add_argument("--keychain-account", default=getpass.getuser())
     parser.add_argument("--security", default="/usr/bin/security")

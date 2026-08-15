@@ -21,6 +21,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "n8n" / "bin" / "run-recovery-restore-drill.py"
+INSTALLER = ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
 
 
 def load_module():
@@ -42,6 +43,7 @@ class FakeEncryption:
         "pbkdf2_iterations": TEST_PBKDF2_ITERATIONS,
         "authenticated": True,
         "key_source": "injected",
+        "key_id": "injected",
     }
 
     def __init__(self, events: list[str] | None = None):
@@ -85,6 +87,15 @@ class FixedDateTime(dt.datetime):
 
 
 class RecoveryRestoreWorkflowCharacterization(unittest.TestCase):
+    def test_installer_deploys_recovery_credential_boundary_modules(self) -> None:
+        installer = INSTALLER.read_text(encoding="utf-8")
+        for module in ("recovery_encryption.py", "recovery_bundle.py"):
+            self.assertIn(
+                f'cp "$REPO_DIR/n8n/bin/{module}" '
+                f'"$STACK_DIR/bin/{module}"',
+                installer,
+            )
+
     def test_public_surface_and_target_signatures_are_exact(self) -> None:
         names = sorted(name for name in dir(restore) if not name.startswith("__"))
         encoded = json.dumps(names, separators=(",", ":"), sort_keys=True).encode()

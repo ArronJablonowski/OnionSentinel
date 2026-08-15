@@ -390,18 +390,24 @@ transition without being followed.
 A separate daily LaunchAgent creates an atomic recovery
 bundle under `$HOME/n8n-local/recovery_backups` containing:
 
-- an independently verified SQLite backup;
-- an n8n PostgreSQL custom-format dump validated with `pg_restore --list`;
-- when the alert-store PostgreSQL shadow is enabled, a separate custom-format
-  shadow dump validated with `pg_restore --list`;
-- the local `.env`, n8n encryption configuration, model/prompt configuration,
-  and agent memories needed to decrypt and restore the operational runtime;
-- a manifest with byte counts, SHA-256 hashes, and the alert-row count.
+- an authenticated encrypted independently verified SQLite backup;
+- an authenticated encrypted n8n PostgreSQL custom-format dump validated with
+  `pg_restore --list`;
+- when the alert-store PostgreSQL shadow is enabled, a separate authenticated
+  encrypted custom-format shadow dump validated with `pg_restore --list`;
+- an authenticated encrypted runtime archive containing the local `.env`, n8n
+  encryption configuration, model/prompt configuration, and agent memories;
+- a content-free manifest with ciphertext/plaintext byte counts and SHA-256
+  hashes, reviewed plaintext names, the alert-row count, and a versioned
+  non-secret Keychain `key_id`.
 
 Recovery bundles are mode `0700` with files mode `0600`, retained for seven
-days, and never copied into Git. They contain secrets and operational data, so
-replicate them only to an operator-controlled encrypted backup target. A copy
-on the same Mac protects against application corruption, not host or disk loss.
+days, and never copied into Git. Payloads are encrypted before atomic
+publication with the versioned Keychain service documented in the disaster
+recovery runbook; the key is separately escrowed and never enters arguments,
+environment variables, logs, manifests, or source control. Replicate bundles
+only to an operator-controlled target over trusted transport. A copy on the
+same Mac protects against application corruption, not host or disk loss.
 
 ```bash
 # Create and verify a bundle immediately.
