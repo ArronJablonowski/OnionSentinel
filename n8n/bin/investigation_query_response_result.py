@@ -164,6 +164,36 @@ def _validate_result_hits(
     return status, hits
 
 
+def _historical_observable_fields(
+    expected_query: dict[str, Any],
+) -> list[str]:
+    return [
+        field
+        for kind, fields in pack_observable_fields("osquery_history").items()
+        if expected_query["observables"].get(kind)
+        for field in fields
+    ]
+
+
+def _validate_historical_discovery_status(
+    discovery: dict[str, object], result_status: str,
+) -> None:
+    discovery_status = discovery["status"]
+    compatible = discovery["mapping_compatible"] is True
+    if result_status == "ok" and (discovery_status != "ok" or not compatible):
+        raise InvestigationQueryContractError(
+            "successful historical OSQuery result has incompatible mapping"
+        )
+    if discovery_status != "ok" and result_status != discovery_status:
+        raise InvestigationQueryContractError(
+            "historical OSQuery result changed its schema failure status"
+        )
+    if discovery_status == "ok" and not compatible and result_status != "invalid_response":
+        raise InvestigationQueryContractError(
+            "historical OSQuery mapping drift was not failed closed"
+        )
+
+
 def _validate_historical_schema_discovery(
     value: dict[str, Any], expected_query: dict[str, Any], status: str,
 ) -> None:
@@ -174,32 +204,13 @@ def _validate_historical_schema_discovery(
                 "non-OSQuery result supplied historical schema discovery"
             )
         return
-    observable_fields = [
-        field
-        for kind, fields in pack_observable_fields("osquery_history").items()
-        if expected_query["observables"].get(kind)
-        for field in fields
-    ]
     validated = validate_historical_osquery_schema_discovery(
         discovery,
         index_scope=PACKS["osquery_history"]["indices"],
         projection_fields=PACKS["osquery_history"]["fields"],
-        observable_fields=observable_fields,
+        observable_fields=_historical_observable_fields(expected_query),
     )
-    discovery_status = validated["status"]
-    compatible = validated["mapping_compatible"] is True
-    if status == "ok" and (discovery_status != "ok" or not compatible):
-        raise InvestigationQueryContractError(
-            "successful historical OSQuery result has incompatible mapping"
-        )
-    if discovery_status != "ok" and status != discovery_status:
-        raise InvestigationQueryContractError(
-            "historical OSQuery result changed its schema failure status"
-        )
-    if discovery_status == "ok" and not compatible and status != "invalid_response":
-        raise InvestigationQueryContractError(
-            "historical OSQuery mapping drift was not failed closed"
-        )
+    _validate_historical_discovery_status(validated, status)
 
 
 def _validate_nonnegative(value: object, message: str) -> None:
