@@ -183,7 +183,13 @@ class RelayDatabaseSchemaTest(unittest.TestCase):
         contracts = (ROOT / "operations/quality/modularization-contracts.json").read_text(
             encoding="utf-8"
         )
-        self.assertIn(f'"$REPO_DIR/{source}" {runtime}', installer)
+        schema_install = f'"$REPO_DIR/{source}" {runtime}'
+        core_install = (
+            '"$REPO_DIR/relay/app/relay_core.py" '
+            "/opt/so-alert-relay/app/relay_core.py"
+        )
+        self.assertIn(schema_install, installer)
+        self.assertLess(installer.index(schema_install), installer.index(core_install))
         self.assertIn(f'"path": "{source}"', contracts)
         self.assertIn(f'"runtime_path": "{runtime}"', contracts)
 
