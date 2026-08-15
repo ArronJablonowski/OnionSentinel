@@ -37,6 +37,28 @@ def fields(index: int) -> dict[str, object]:
 
 
 class PortalAdminAuditStoreTests(unittest.TestCase):
+    def test_audit_signing_identity_is_distinct_and_operator_managed(self) -> None:
+        catalog = json.loads(
+            (ROOT / "operations/security/credential-governance.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        entries = {entry["id"]: entry for entry in catalog["entries"]}
+        audit_identity = entries["dashboard.admin-audit-signing"]
+        self.assertEqual(audit_identity["kind"], "host-local-signing-key")
+        self.assertEqual(
+            audit_identity["storage_class"], "mac-owner-runtime-file"
+        )
+        self.assertEqual(
+            audit_identity["bindings"], ["file:mac-admin-audit-signing-key"]
+        )
+        self.assertEqual(
+            audit_identity["allowed_actions"], ["dashboard.admin-audit-hmac"]
+        )
+        self.assertNotEqual(
+            audit_identity["bindings"], entries["dashboard.admin-session"]["bindings"]
+        )
+
     def test_missing_ledger_is_empty_and_append_is_owner_only_verified_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "private" / "admin-audit.jsonl"
