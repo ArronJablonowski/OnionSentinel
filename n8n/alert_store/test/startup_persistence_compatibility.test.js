@@ -69,7 +69,13 @@ test('backfill is one transaction and schema initialization retains order', asyn
   const owner = (name, method = 'install') => ({
     [method]: async () => { calls.push(name); return false; },
   });
+  const schemaVersion = {
+    prepareMigration: async () => { calls.push('version:prepare'); },
+    persistCurrent: async () => { calls.push('version:persist'); },
+    assertCurrent: async () => { calls.push('version:assert'); },
+  };
   const initDb = compatibility.createSchemaInitializer({
+    alertStoreSchemaVersion: schemaVersion,
     alertStoreSchemaFoundation: {
       configureRuntime: async () => { calls.push('configure'); return false; },
       installFoundation: async () => { calls.push('foundation'); },
@@ -82,6 +88,74 @@ test('backfill is one transaction and schema initialization retains order', asyn
   });
   await initDb();
   assert.deepEqual(calls, [
-    'configure', 'foundation', 'incident', 'review', 'notification', 'pcap', 'startup',
+    'configure', 'version:prepare', 'foundation', 'incident', 'review',
+    'notification', 'pcap', 'startup', 'version:persist',
   ]);
+});
+
+test('schema initialization rolls every owner back and never records a failed version', async () => {
+  const calls = [];
+  const compatibility = createStartupPersistenceCompatibility({
+    database: {
+      db: {all: (_sql, _params, callback) => callback(null, [])},
+      run: async () => undefined,
+      all: async () => [],
+      withTransaction: async (task) => {
+        calls.push('transaction:begin');
+        try {
+          await task();
+          calls.push('transaction:commit');
+        } catch (error) {
+          calls.push('transaction:rollback');
+          throw error;
+        }
+      },
+    },
+    identity: {stableGroupKey: () => 'key', stableGroupId: () => 'id'},
+    serialization: {parseJsonObject: JSON.parse},
+  });
+  const failure = new Error('incident migration failed');
+  const initDb = compatibility.createSchemaInitializer({
+    alertStoreSchemaVersion: {
+      prepareMigration: async () => calls.push('version:prepare'),
+      persistCurrent: async () => calls.push('unexpected:persist'),
+      assertCurrent: async () => undefined,
+    },
+    alertStoreSchemaFoundation: {
+      configureRuntime: async () => false,
+      installFoundation: async () => calls.push('foundation'),
+    },
+    incidentAnalysisSchema: {install: async () => { throw failure; }},
+    aiReviewSchema: {install: async () => calls.push('unexpected:review')},
+    notificationEnrichmentSchema: {install: async () => undefined},
+    pcapSchema: {install: async () => undefined},
+    startupPersistenceOrchestrator: {initialize: async () => undefined},
+  });
+  await assert.rejects(initDb(), (error) => error === failure);
+  assert.deepEqual(calls, [
+    'transaction:begin', 'version:prepare', 'foundation', 'transaction:rollback',
+  ]);
+});
+
+test('controlled evaluation asserts the persisted version without opening a transaction', async () => {
+  const calls = [];
+  const compatibility = createCompatibility().compatibility;
+  const initDb = compatibility.createSchemaInitializer({
+    alertStoreSchemaVersion: {
+      prepareMigration: async () => calls.push('unexpected:prepare'),
+      persistCurrent: async () => calls.push('unexpected:persist'),
+      assertCurrent: async () => calls.push('version:assert'),
+    },
+    alertStoreSchemaFoundation: {
+      configureRuntime: async () => { calls.push('configure'); return true; },
+      installFoundation: async () => calls.push('unexpected:foundation'),
+    },
+    incidentAnalysisSchema: {install: async () => undefined},
+    aiReviewSchema: {install: async () => undefined},
+    notificationEnrichmentSchema: {install: async () => undefined},
+    pcapSchema: {install: async () => undefined},
+    startupPersistenceOrchestrator: {initialize: async () => undefined},
+  });
+  await initDb();
+  assert.deepEqual(calls, ['configure', 'version:assert']);
 });
