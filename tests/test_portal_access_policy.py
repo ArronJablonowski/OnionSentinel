@@ -38,6 +38,7 @@ class PortalAccessPolicyTests(unittest.TestCase):
             "portal_admin_audit_store.py",
             "portal_access_observer.py",
             "portal_access_observer_runtime.py",
+            "onion_sentinel_access_adapter.py",
         ):
             with self.subTest(name=name):
                 self.assertIn(

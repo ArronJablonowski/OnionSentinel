@@ -31,9 +31,9 @@ import application_logs
 from cti_program_audit import program_audit_metrics
 from http_runtime import BoundedThreadingHTTPServer
 import onion_sentinel_application as _application
+import onion_sentinel_access_adapter as _access_adapter
 import onion_sentinel_release as _release
 import onion_sentinel_request_routes as _request_routes
-import portal_access_observer_runtime as _access_observer_runtime
 
 try:
     from security_jsonl_log import SecurityJsonlLogger
@@ -57,9 +57,7 @@ DEFAULT_PORT = 8766
 DEFAULT_DASHBOARD_ROOT = HOME / "SOC Alerts Web"
 RUNTIME_RELEASE_ENV_KEY = "ONION_SENTINEL_RELEASE_ID"
 DEFAULT_RUNTIME_ENV_PATH = HOME / "n8n-local" / ".env"
-RUNTIME_RELEASE_ID_RE = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9._-]{6,99}$"
-)
+RUNTIME_RELEASE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{6,99}$")
 MAX_RUNTIME_ENV_BYTES = 1024 * 1024
 APPLICATION_LOGGER = SecurityJsonlLogger(
     Path(
@@ -72,18 +70,8 @@ APPLICATION_LOGGER = SecurityJsonlLogger(
 )
 
 
-def _access_audit_failure(error_type: str) -> None:
-    APPLICATION_LOGGER.log(
-        "error",
-        "access.audit.append_failed",
-        error_type=error_type,
-    )
-
-
-ACCESS_OBSERVER = _access_observer_runtime.load_access_observer_runtime(
-    environ=os.environ,
-    home=HOME,
-    failure_sink=_access_audit_failure,
+ACCESS_OBSERVER = _access_adapter.build_access_observer(
+    environ=os.environ, home=HOME, application_logger=APPLICATION_LOGGER,
 )
 
 
@@ -368,36 +356,10 @@ def is_same_origin_json_request(headers: object) -> tuple[bool, int, str]:
 
 
 def begin_access_observation(handler: object, path: str) -> None:
-    """Attach one pre-body observe decision to a classified human write."""
-    handler._access_observation = None
-    if CONTROLLED_EVALUATION_MODE or not ACCESS_OBSERVER.enabled:
-        return
-    route = runtime.classify_post_route(
-        path,
-        cti_program_path=runtime.CTI_PROGRAM_API_PATH,
-        prompt_paths=runtime.SOC_SETTINGS_PROMPT_API_PATHS,
+    return _access_adapter.begin_access_observation(
+        handler, path, runtime=runtime, controlled_evaluation=CONTROLLED_EVALUATION_MODE,
+        observer=ACCESS_OBSERVER,
     )
-    if not route.accepted:
-        return
-    fetch_site = str(
-        handler.headers.get("Sec-Fetch-Site") or ""
-    ).strip().lower()
-    same_origin = bool(
-        fetch_site in {"", "same-origin"}
-        and handler._soc_review_origin_authorized()
-    )
-    try:
-        handler._access_observation = ACCESS_OBSERVER.begin(
-            route,
-            principal=None,
-            same_origin_authorized=same_origin,
-            csrf_authorized=False,
-            request_id=str(
-                getattr(handler, "application_request_id", "")
-            ),
-        )
-    except Exception as exc:
-        ACCESS_OBSERVER.record_boundary_failure(type(exc).__name__)
 
 
 def resolve_dashboard_target(root: Path, request_path: str) -> Path | None:
@@ -489,17 +451,10 @@ class OnionSentinelHandler(runtime.PortalHandler):
         super().log_message(fmt, *args)
 
     def send_response(self, code: int, message: str | None = None) -> None:
-        observation = getattr(self, "_access_observation", None)
-        if observation is not None:
-            self._access_observation = None
-            try:
-                ACCESS_OBSERVER.finalize(
-                    observation,
-                    http_status=int(code),
-                    occurred_at=runtime.now_iso_utc(),
-                )
-            except Exception as exc:
-                ACCESS_OBSERVER.record_boundary_failure(type(exc).__name__)
+        _access_adapter.finalize_access_observation(
+            self, code, runtime=runtime,
+            observer=ACCESS_OBSERVER,
+        )
         return super().send_response(code, message)
 
     def parse_request(self) -> bool:

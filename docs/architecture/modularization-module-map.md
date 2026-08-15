@@ -3587,6 +3587,11 @@ observation before body parsing, skips controlled-evaluation service identity
 requests, and finalizes exactly once from the first response status. Audit
 failure is observable but cannot change a legacy-compatible response.
 
+`onion_sentinel_access_adapter.py` owns the dedicated server's logger/runtime
+composition and the pre-body begin / first-response finalize hooks. Keeping
+these ports outside `onion_sentinel_server.py` leaves the stable executable and
+HTTP compatibility surface below the module-size warning threshold.
+
 ### Portal catalog runtime
 
 `portal_catalog_runtime.py` owns local-address discovery, report title/category

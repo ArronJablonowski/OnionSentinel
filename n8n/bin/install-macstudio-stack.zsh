@@ -268,6 +268,7 @@ import portal_access_policy
 import portal_access_enforcement
 import portal_access_observer
 import portal_access_observer_runtime
+import onion_sentinel_access_adapter
 import portal_admin_audit_chain
 import portal_admin_audit_store
 import portal_session_principal
@@ -1235,6 +1236,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_shell_page.py" "$DASHBO
 cp -R "$REPO_DIR/onion-sentinel-dashboard/assets/." "$DASHBOARD_RUNTIME_DIR/assets/"
 cp "$REPO_DIR/onion-sentinel-dashboard/onion_sentinel_release.py" "$DASHBOARD_RUNTIME_DIR/onion_sentinel_release.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/onion_sentinel_application.py" "$DASHBOARD_RUNTIME_DIR/onion_sentinel_application.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/onion_sentinel_access_adapter.py" "$DASHBOARD_RUNTIME_DIR/onion_sentinel_access_adapter.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/onion_sentinel_request_routes.py" "$DASHBOARD_RUNTIME_DIR/onion_sentinel_request_routes.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/onion_sentinel_server.py" "$DASHBOARD_RUNTIME_DIR/onion_sentinel_server.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/application_log_contract.py" "$DASHBOARD_RUNTIME_DIR/application_log_contract.py"

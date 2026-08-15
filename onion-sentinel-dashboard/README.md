@@ -11,6 +11,7 @@ dependency.
 | --- | --- |
 | `onion_sentinel_server.py` | Dedicated port `8766` compatibility surface and bounded HTTP server/handler. |
 | `onion_sentinel_application.py` | CLI validation, controlled-evaluation admission, and service lifecycle composition. |
+| `onion_sentinel_access_adapter.py` | Dedicated-server observe-mode request/response composition and safe failure logging. |
 | `onion_sentinel_request_routes.py` | Exact HEAD/GET/POST dispatch, health, authentication, logs, static, and SOC adapters. |
 | `onion_sentinel_release.py` | Literal owner-only runtime release identity loading without evaluating secrets. |
 | `report_portal.py` | Transitional SOC API implementation imported from the dedicated server; non-SOC routes are not exposed by `onion_sentinel_server.py`. |
