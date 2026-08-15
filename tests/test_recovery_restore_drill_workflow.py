@@ -32,6 +32,47 @@ def load_module():
 
 
 restore = load_module()
+TEST_SCHEME = "openssl-aes-256-cbc-pbkdf2-sha256+hmac-sha256-etm-v1"
+TEST_PBKDF2_ITERATIONS = 600_000
+
+
+class FakeEncryption:
+    descriptor = {
+        "scheme": TEST_SCHEME,
+        "pbkdf2_iterations": TEST_PBKDF2_ITERATIONS,
+        "authenticated": True,
+        "key_source": "injected",
+    }
+
+    def __init__(self, events: list[str] | None = None):
+        self.events = events
+
+    def decrypt_file(
+        self,
+        source: Path,
+        destination: Path,
+        *,
+        expected_plaintext_sha256: str,
+    ) -> dict[str, object]:
+        if self.events is not None:
+            self.events.append(f"decrypt:{source.name}")
+        payload = source.read_bytes()
+        if not payload.startswith(b"encrypted:"):
+            raise RuntimeError("fixture authentication failed")
+        plaintext = payload.removeprefix(b"encrypted:")
+        self.assert_digest(plaintext, expected_plaintext_sha256)
+        destination.write_bytes(plaintext)
+        destination.chmod(0o600)
+        return {
+            "scheme": TEST_SCHEME,
+            "plaintext_bytes": len(plaintext),
+            "plaintext_sha256": hashlib.sha256(plaintext).hexdigest(),
+        }
+
+    @staticmethod
+    def assert_digest(payload: bytes, expected: str) -> None:
+        if hashlib.sha256(payload).hexdigest() != expected:
+            raise RuntimeError("fixture plaintext digest mismatch")
 
 
 class FixedDateTime(dt.datetime):
@@ -53,6 +94,10 @@ class RecoveryRestoreWorkflowCharacterization(unittest.TestCase):
         )
         self.assertEqual(str(inspect.signature(restore.verify_bundle)), "(bundle: 'Path') -> 'dict[str, object]'")
         self.assertEqual(
+            str(inspect.signature(restore.decrypt_bundle_files)),
+            "(bundle: 'Path', manifest: 'dict[str, object]', destination: 'Path', encryption: 'RecoveryEncryption') -> 'dict[str, Path]'",
+        )
+        self.assertEqual(
             str(inspect.signature(restore.validate_harness_sqlite)),
             "(source: 'Path', temp_dir: 'Path') -> 'dict[str, object]'",
         )
@@ -65,23 +110,37 @@ class RecoveryRestoreWorkflowCharacterization(unittest.TestCase):
     def bundle(self, root: Path, *, extra_files: dict[str, bytes] | None = None) -> tuple[Path, dict]:
         bundle = root / "recovery-20260812T010203Z"
         bundle.mkdir(mode=0o700)
-        payloads = {
+        plaintexts = {
             "alerts.sqlite3": b"alerts",
             "n8n-postgres.dump": b"postgres",
             "runtime-secrets.tar.gz": b"runtime",
             **(extra_files or {}),
         }
-        for name, payload in payloads.items():
-            path = bundle / name
+        payloads = {
+            f"{name}.enc": b"encrypted:" + payload
+            for name, payload in plaintexts.items()
+        }
+        for encrypted_name, payload in payloads.items():
+            path = bundle / encrypted_name
             path.write_bytes(payload)
             path.chmod(0o600)
         manifest = {
+            "encryption": FakeEncryption.descriptor,
             "files": {
-                name: {"sha256": restore.sha256_file(bundle / name)}
-                for name in payloads
+                encrypted_name: {
+                    "scheme": TEST_SCHEME,
+                    "bytes": len(payloads[encrypted_name]),
+                    "sha256": restore.sha256_file(bundle / encrypted_name),
+                    "plaintext_name": encrypted_name.removesuffix(".enc"),
+                    "plaintext_bytes": len(plaintexts[encrypted_name.removesuffix(".enc")]),
+                    "plaintext_sha256": hashlib.sha256(
+                        plaintexts[encrypted_name.removesuffix(".enc")]
+                    ).hexdigest(),
+                }
+                for encrypted_name in payloads
             },
-            "sqlite": {"investigation_harness": {"present": "investigation-harness.sqlite3" in payloads}},
-            "postgres": {"alert_store_shadow": {"present": "alert-store-postgres.dump" in payloads}},
+            "sqlite": {"investigation_harness": {"present": "investigation-harness.sqlite3" in plaintexts}},
+            "postgres": {"alert_store_shadow": {"present": "alert-store-postgres.dump" in plaintexts}},
         }
         manifest_path = bundle / "manifest.json"
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -111,16 +170,52 @@ class RecoveryRestoreWorkflowCharacterization(unittest.TestCase):
     def test_bundle_validation_preserves_hash_and_required_file_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bundle, manifest = self.bundle(Path(tmp))
-            manifest["files"]["alerts.sqlite3"]["sha256"] = "0" * 64
+            manifest["files"]["alerts.sqlite3.enc"]["sha256"] = "0" * 64
             (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-            with self.assertRaisesRegex(RuntimeError, "^bundle hash validation failed for alerts.sqlite3$"):
+            with self.assertRaisesRegex(RuntimeError, "^bundle hash validation failed for alerts.sqlite3.enc$"):
                 restore.verify_bundle(bundle)
         with tempfile.TemporaryDirectory() as tmp:
             bundle, manifest = self.bundle(Path(tmp))
-            manifest["files"].pop("runtime-secrets.tar.gz")
+            manifest["files"].pop("runtime-secrets.tar.gz.enc")
             (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "^recovery bundle is missing required files$"):
                 restore.verify_bundle(bundle)
+
+    def test_authenticated_payloads_decrypt_to_exact_reviewed_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundle, manifest = self.bundle(
+                root,
+                extra_files={"investigation-harness.sqlite3": b"harness"},
+            )
+            destination = root / "plaintext"
+            destination.mkdir(mode=0o700)
+            events: list[str] = []
+            paths = restore.decrypt_bundle_files(
+                bundle,
+                manifest,
+                destination,
+                FakeEncryption(events),
+            )
+            self.assertEqual(
+                set(paths),
+                {
+                    "alerts.sqlite3",
+                    "investigation-harness.sqlite3",
+                    "n8n-postgres.dump",
+                    "runtime-secrets.tar.gz",
+                },
+            )
+            self.assertEqual(paths["alerts.sqlite3"].read_bytes(), b"alerts")
+            self.assertEqual(
+                events,
+                [
+                    "decrypt:alerts.sqlite3.enc",
+                    "decrypt:investigation-harness.sqlite3.enc",
+                    "decrypt:n8n-postgres.dump.enc",
+                    "decrypt:runtime-secrets.tar.gz.enc",
+                ],
+            )
 
     def postgres_case(self, root: Path, *, schema_kind: str = "n8n"):
         dump = root / "database.dump"
@@ -212,11 +307,27 @@ class RecoveryRestoreWorkflowCharacterization(unittest.TestCase):
             bundle = root / "recovery-20260812T010203Z"
             bundle.mkdir()
             args = argparse.Namespace(stack_dir=root, bundle=bundle, docker="/docker")
-            manifest = {"alert_rows": 2, "harness_runs": 7}
+            manifest = {
+                "alert_rows": 2,
+                "harness_runs": 7,
+                "encryption": FakeEncryption.descriptor,
+            }
             events: list[str] = []
             stdout = io.StringIO()
             with mock.patch.object(argparse.ArgumentParser, "parse_args", return_value=args), mock.patch.object(
                 restore, "verify_bundle", side_effect=lambda _path: events.append("verify") or manifest
+            ), mock.patch.object(
+                restore.RecoveryEncryption,
+                "from_keychain",
+                side_effect=lambda **_kwargs: events.append("keychain") or FakeEncryption(),
+            ), mock.patch.object(
+                restore,
+                "decrypt_bundle_files",
+                side_effect=lambda *_args: events.append("decrypt") or {
+                    "alerts.sqlite3": bundle / "alerts.sqlite3",
+                    "n8n-postgres.dump": bundle / "n8n-postgres.dump",
+                    "runtime-secrets.tar.gz": bundle / "runtime-secrets.tar.gz",
+                },
             ), mock.patch.object(
                 restore, "validate_sqlite", side_effect=lambda *_args: events.append("sqlite") or {"alert_rows": 2}
             ), mock.patch.object(
@@ -230,7 +341,7 @@ class RecoveryRestoreWorkflowCharacterization(unittest.TestCase):
             output = root / "logs/restore-drills/restore-drill-20260812T010203+0000.json"
             report = json.loads(output.read_text())
             self.assertEqual(code, 0)
-            self.assertEqual(events, ["verify", "sqlite", "archive", "postgres"])
+            self.assertEqual(events, ["verify", "keychain", "decrypt", "sqlite", "archive", "postgres"])
             self.assertEqual(postgres.call_count, 1)
             self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
             self.assertEqual(
@@ -246,6 +357,7 @@ class RecoveryRestoreWorkflowCharacterization(unittest.TestCase):
                     "postgres": {"network": "none"},
                     "alert_store_postgres_shadow": {"present": False},
                     "manifest_alert_rows": 2,
+                    "encryption": FakeEncryption.descriptor,
                     "runtime_seconds": 2.345,
                 },
             )
