@@ -6,147 +6,37 @@ from __future__ import annotations
 import argparse
 from contextlib import closing
 import datetime as dt
-import hashlib
+import getpass
 import json
 import os
 from pathlib import Path, PurePosixPath
 import secrets
 import shutil
 import sqlite3
-import stat
 import subprocess
 import tarfile
 import tempfile
 import time
+import sys
 
 
-ALLOWED_BUNDLE_FILES = frozenset(
-    {
-        "alerts.sqlite3",
-        "investigation-harness.sqlite3",
-        "n8n-postgres.dump",
-        "alert-store-postgres.dump",
-        "runtime-secrets.tar.gz",
-    }
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+from recovery_encryption import (
+    ENCRYPTION_SCHEME,
+    PBKDF2_ITERATIONS,
+    RecoveryEncryption,
 )
+from recovery_bundle import (
+    decrypt_bundle_files,
+    newest_bundle,
+    sha256_file,
+    verify_bundle,
+)
+
+
 CURRENT_HARNESS_SCHEMA_VERSION = 5
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def newest_bundle(root: Path) -> Path:
-    bundles = sorted(
-        path
-        for path in root.iterdir()
-        if (
-            not path.name.startswith(".")
-            and not path.is_symlink()
-            and path.is_dir()
-            and (path / "manifest.json").is_file()
-            and not (path / "manifest.json").is_symlink()
-        )
-    )
-    if not bundles:
-        raise RuntimeError("no eligible recovery bundle exists")
-    return bundles[-1]
-
-
-def __require_owner_only_bundle(bundle: Path) -> None:
-    bundle_metadata = bundle.lstat()
-    if (
-        bundle.is_symlink()
-        or not stat.S_ISDIR(bundle_metadata.st_mode)
-        or stat.S_IMODE(bundle_metadata.st_mode) & 0o077
-        or bundle_metadata.st_uid != os.getuid()
-    ):
-        raise RuntimeError("recovery bundle directory must be owner-only")
-
-
-def __load_owner_only_manifest(bundle: Path) -> dict[str, object]:
-    manifest_path = bundle / "manifest.json"
-    manifest_metadata = manifest_path.lstat()
-    if (
-        manifest_path.is_symlink()
-        or not stat.S_ISREG(manifest_metadata.st_mode)
-        or stat.S_IMODE(manifest_metadata.st_mode) & 0o077
-        or manifest_metadata.st_uid != os.getuid()
-    ):
-        raise RuntimeError("recovery bundle manifest must be owner-only")
-    return json.loads(manifest_path.read_text())
-
-
-def __validated_manifest_path(bundle: Path, name: object) -> Path:
-    pure_name = PurePosixPath(str(name))
-    if pure_name.is_absolute() or len(pure_name.parts) != 1 or str(name) not in ALLOWED_BUNDLE_FILES:
-        raise RuntimeError("recovery bundle manifest contains an unsafe file")
-    return bundle / str(name)
-
-
-def __verify_manifest_file(path: Path, name: object, metadata: object) -> None:
-    try:
-        path_metadata = path.lstat()
-    except FileNotFoundError:
-        raise RuntimeError(f"bundle hash validation failed for {name}") from None
-    if (
-        path.is_symlink()
-        or not stat.S_ISREG(path_metadata.st_mode)
-        or stat.S_IMODE(path_metadata.st_mode) & 0o077
-        or path_metadata.st_uid != os.getuid()
-        or sha256_file(path) != metadata.get("sha256")
-    ):
-        raise RuntimeError(f"bundle hash validation failed for {name}")
-
-
-def __verify_manifest_files(bundle: Path, files: dict[str, object]) -> None:
-    for name, metadata in files.items():
-        __verify_manifest_file(__validated_manifest_path(bundle, name), name, metadata)
-
-
-def __require_optional_manifest_match(
-    bundle: Path,
-    manifest: dict[str, object],
-    files: dict[str, object],
-    *,
-    section: str,
-    name: str,
-    message: str,
-) -> None:
-    metadata = dict(dict(manifest.get(section) or {}).get(
-        "investigation_harness" if section == "sqlite" else "alert_store_shadow"
-    ) or {})
-    present = (bundle / name).is_file()
-    if bool(metadata.get("present")) != present or bool(metadata.get("present")) != (name in files):
-        raise RuntimeError(message)
-
-
-def verify_bundle(bundle: Path) -> dict[str, object]:
-    __require_owner_only_bundle(bundle)
-    manifest = __load_owner_only_manifest(bundle)
-    files = dict(manifest.get("files") or {})
-    __verify_manifest_files(bundle, files)
-    required = {"alerts.sqlite3", "n8n-postgres.dump", "runtime-secrets.tar.gz"}
-    if not required.issubset(set(files)):
-        raise RuntimeError("recovery bundle is missing required files")
-    __require_optional_manifest_match(
-        bundle, manifest, files,
-        section="sqlite", name="investigation-harness.sqlite3",
-        message="recovery bundle harness manifest does not match its files",
-    )
-    __require_optional_manifest_match(
-        bundle, manifest, files,
-        section="postgres", name="alert-store-postgres.dump",
-        message=(
-            "recovery bundle alert-store PostgreSQL manifest does not match "
-            "its files"
-        ),
-    )
-    return manifest
 
 
 def __runtime_archive_member_state(
@@ -370,6 +260,13 @@ def __parse_args() -> argparse.Namespace:
     parser.add_argument("--stack-dir", type=Path, default=Path.home() / "n8n-local")
     parser.add_argument("--bundle", type=Path)
     parser.add_argument("--docker", default="/usr/local/bin/docker")
+    parser.add_argument(
+        "--keychain-service",
+        default="com.arron.onion-sentinel.runtime-backup",
+    )
+    parser.add_argument("--keychain-account", default=getpass.getuser())
+    parser.add_argument("--security", default="/usr/bin/security")
+    parser.add_argument("--openssl", default="/usr/bin/openssl")
     return parser.parse_args()
 
 
@@ -389,40 +286,47 @@ def __report_destination(stack_dir: Path) -> Path:
 
 
 def __validate_sqlite_backups(
-    bundle: Path, manifest: dict[str, object], report: dict[str, object],
+    payloads: dict[str, Path],
+    manifest: dict[str, object],
+    report: dict[str, object],
 ) -> None:
     with tempfile.TemporaryDirectory(prefix="onion-sentinel-restore-") as temp:
         temp_dir = Path(temp)
-        report["sqlite"] = validate_sqlite(bundle / "alerts.sqlite3", temp_dir)
-        harness_path = bundle / "investigation-harness.sqlite3"
+        report["sqlite"] = validate_sqlite(payloads["alerts.sqlite3"], temp_dir)
+        harness_path = payloads.get("investigation-harness.sqlite3")
         report["investigation_harness"] = (
             validate_harness_sqlite(harness_path, temp_dir)
-            if harness_path.is_file()
+            if harness_path is not None
             else {"present": False}
         )
     if int(report["sqlite"]["alert_rows"]) != int(manifest.get("alert_rows") or -1):
         raise RuntimeError("restored SQLite row count does not match bundle manifest")
-    if (bundle / "investigation-harness.sqlite3").is_file():
+    if "investigation-harness.sqlite3" in payloads:
         if int(report["investigation_harness"]["run_rows"]) != int(manifest.get("harness_runs", -1)):
             raise RuntimeError("restored harness SQLite run count does not match bundle manifest")
         report["investigation_harness"]["present"] = True
 
 
 def __restore_postgres_backups(
-    args: argparse.Namespace, bundle: Path, report: dict[str, object],
+    args: argparse.Namespace,
+    payloads: dict[str, Path],
+    report: dict[str, object],
 ) -> None:
-    report["postgres"] = restore_postgres(args.docker, bundle / "n8n-postgres.dump")
-    shadow_dump = bundle / "alert-store-postgres.dump"
+    report["postgres"] = restore_postgres(
+        args.docker,
+        payloads["n8n-postgres.dump"],
+    )
+    shadow_dump = payloads.get("alert-store-postgres.dump")
     report["alert_store_postgres_shadow"] = (
         restore_postgres(
             args.docker, shadow_dump,
             source_container="onion-sentinel-alert-store-postgres",
             schema_kind="alert-store-shadow",
         )
-        if shadow_dump.is_file()
+        if shadow_dump is not None
         else {"present": False}
     )
-    if shadow_dump.is_file():
+    if shadow_dump is not None:
         report["alert_store_postgres_shadow"]["present"] = True
 
 
@@ -430,10 +334,33 @@ def __execute_restore_drill(
     args: argparse.Namespace, bundle: Path, report: dict[str, object],
 ) -> None:
     manifest = verify_bundle(bundle)
-    __validate_sqlite_backups(bundle, manifest, report)
-    report["runtime_archive"] = validate_runtime_archive(bundle / "runtime-secrets.tar.gz")
-    __restore_postgres_backups(args, bundle, report)
+    encryption = RecoveryEncryption.from_keychain(
+        service=getattr(
+            args,
+            "keychain_service",
+            "com.arron.onion-sentinel.runtime-backup",
+        ),
+        account=getattr(args, "keychain_account", getpass.getuser()),
+        security=getattr(args, "security", "/usr/bin/security"),
+        openssl=getattr(args, "openssl", "/usr/bin/openssl"),
+    )
+    with tempfile.TemporaryDirectory(
+        prefix="onion-sentinel-recovery-plaintext-"
+    ) as plaintext_temp:
+        plaintext_root = Path(plaintext_temp)
+        payloads = decrypt_bundle_files(
+            bundle,
+            manifest,
+            plaintext_root,
+            encryption,
+        )
+        __validate_sqlite_backups(payloads, manifest, report)
+        report["runtime_archive"] = validate_runtime_archive(
+            payloads["runtime-secrets.tar.gz"]
+        )
+        __restore_postgres_backups(args, payloads, report)
     report["manifest_alert_rows"] = int(manifest.get("alert_rows") or 0)
+    report["encryption"] = dict(manifest["encryption"])
     report["status"] = "passed"
 
 

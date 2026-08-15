@@ -1,5 +1,6 @@
 import datetime as dt
 from contextlib import closing
+import hashlib
 import importlib.util
 import json
 import os
@@ -12,6 +13,7 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RECOVERY_SECRET = b"fixture-recovery-secret-with-at-least-32-bytes"
 
 
 def load_module(name: str, path: Path):
@@ -38,6 +40,37 @@ class RecoveryOperationTests(unittest.TestCase):
             "failures": [] if ok else ["test failure"],
             "signals": {"heartbeat_age_seconds": 60, "disk_used_percent": 50},
             "soak": {"healthy_since": "2026-07-14  00:00:00+00:00"},
+        }
+
+    def encrypted_bundle_manifest(
+        self,
+        bundle: Path,
+        plaintext_names: tuple[str, ...],
+    ) -> dict[str, object]:
+        files: dict[str, dict[str, object]] = {}
+        for plaintext_name in plaintext_names:
+            encrypted_name = f"{plaintext_name}.enc"
+            plaintext = f"fixture:{plaintext_name}".encode()
+            payload = b"encrypted-fixture:" + plaintext
+            path = bundle / encrypted_name
+            path.write_bytes(payload)
+            os.chmod(path, 0o600)
+            files[encrypted_name] = {
+                "scheme": self.restore.ENCRYPTION_SCHEME,
+                "bytes": len(payload),
+                "sha256": self.restore.sha256_file(path),
+                "plaintext_name": plaintext_name,
+                "plaintext_bytes": len(plaintext),
+                "plaintext_sha256": hashlib.sha256(plaintext).hexdigest(),
+            }
+        return {
+            "encryption": {
+                "scheme": self.restore.ENCRYPTION_SCHEME,
+                "pbkdf2_iterations": self.restore.PBKDF2_ITERATIONS,
+                "authenticated": True,
+                "key_source": "injected",
+            },
+            "files": files,
         }
 
     def test_complete_dense_soak_passes(self):
@@ -160,26 +193,17 @@ class RecoveryOperationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bundle = Path(tmp)
             os.chmod(bundle, 0o700)
-            for name in (
+            names = (
                 "alerts.sqlite3",
                 "n8n-postgres.dump",
                 "runtime-secrets.tar.gz",
-            ):
-                (bundle / name).write_bytes(b"fixture")
-                os.chmod(bundle / name, 0o600)
-            files = {
-                name: {"sha256": self.restore.sha256_file(bundle / name)}
-                for name in (
-                    "alerts.sqlite3",
-                    "n8n-postgres.dump",
-                    "runtime-secrets.tar.gz",
-                )
-            }
+            )
+            manifest = self.encrypted_bundle_manifest(bundle, names)
             manifest_path = bundle / "manifest.json"
             manifest_path.write_text(
                 json.dumps(
                     {
-                        "files": files,
+                        **manifest,
                         "sqlite": {
                             "investigation_harness": {"present": True}
                         },
@@ -202,16 +226,10 @@ class RecoveryOperationTests(unittest.TestCase):
                 "n8n-postgres.dump",
                 "runtime-secrets.tar.gz",
             )
-            for name in names:
-                (bundle / name).write_bytes(b"fixture")
-                os.chmod(bundle / name, 0o600)
-            files = {
-                name: {"sha256": self.restore.sha256_file(bundle / name)}
-                for name in names
-            }
+            manifest = self.encrypted_bundle_manifest(bundle, names)
             manifest_path = bundle / "manifest.json"
             manifest_path.write_text(json.dumps({
-                "files": files,
+                **manifest,
                 "sqlite": {
                     "investigation_harness": {"present": False},
                 },
@@ -327,6 +345,10 @@ class RecoveryOperationTests(unittest.TestCase):
                         stack,
                         backup_root,
                         "/fake/docker",
+                        encryption=self.backup.RecoveryEncryption(
+                            RECOVERY_SECRET,
+                            openssl="/usr/bin/openssl",
+                        ),
                     )
 
             self.assertFalse(
@@ -342,17 +364,26 @@ class RecoveryOperationTests(unittest.TestCase):
             )
 
             restore_root = root / "restore"
-            restore_root.mkdir()
+            restore_root.mkdir(mode=0o700)
+            payloads = self.restore.decrypt_bundle_files(
+                bundle,
+                manifest,
+                restore_root,
+                self.restore.RecoveryEncryption(
+                    RECOVERY_SECRET,
+                    openssl="/usr/bin/openssl",
+                ),
+            )
             alert_result = self.restore.validate_sqlite(
-                bundle / "alerts.sqlite3",
+                payloads["alerts.sqlite3"],
                 restore_root,
             )
             harness_result = self.restore.validate_harness_sqlite(
-                bundle / "investigation-harness.sqlite3",
+                payloads["investigation-harness.sqlite3"],
                 restore_root,
             )
             archive_result = self.restore.validate_runtime_archive(
-                bundle / "runtime-secrets.tar.gz"
+                payloads["runtime-secrets.tar.gz"]
             )
             self.assertEqual(alert_result["quick_check"], "ok")
             self.assertEqual(alert_result["alert_rows"], 1)
