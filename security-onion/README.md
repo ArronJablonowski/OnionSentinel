@@ -11,6 +11,8 @@ This directory contains the Security Onion-side pieces for Onion Sentinel.
 | `bin/export-incident-evidence` | `/usr/local/sbin/export-incident-evidence` | Restricted baseline evidence and policy-brokered Elastic/OQL pivot wrapper. |
 | `bin/export-dhcp-observations` | `/usr/local/sbin/export-dhcp-observations` | Read-only, fixed-DSL Zeek DHCP helper routed by the incident-evidence wrapper. |
 | `bin/export-software-observations` | `/usr/local/sbin/export-software-observations` | Read-only, fixed-aggregation OSQuery Apps, Zeek Software, and LAN HTTP User-Agent helper. |
+| `../n8n/bin/investigation_query_schema.py` | `/usr/local/lib/onion-sentinel/investigation_query_schema.py` | Shared v2 query and bounded historical-OSQuery projection policy. |
+| `../n8n/bin/historical_osquery_schema.py` | `/usr/local/lib/onion-sentinel/historical_osquery_schema.py` | Historical-OSQuery mapping discovery, profile matching, and digest validation. |
 | `bin/run-live-osquery` | `/usr/local/sbin/run-live-osquery` | Disabled-by-default live endpoint OSQuery wrapper with exact alias mapping and bounded Osquery Manager calls. |
 | `bin/run-live-osquery-forced` | `/usr/local/sbin/run-live-osquery-forced` | Pre-sudo forced-command guard that rejects caller-supplied SSH commands and arguments. |
 | `sudoers/90-so-ai-relay-export` | `/etc/sudoers.d/90-so-ai-relay-export` | Allows only the wrapper to run passwordless for `so-ai-relay`. |
@@ -183,6 +185,17 @@ negative controls run for every batch; a failed control, shard, timeout,
 projection check, or out-of-scope hit makes the batch partial and creates an
 explicit evidence gap.
 
+The `osquery_history` pack has an additional fail-closed mapping gate. Before
+its fixed `_search`, the wrapper submits the exact reviewed projection to the
+same scoped data streams through `_field_caps`. Only ECS endpoint mappings,
+flat Elastic Osquery Manager result mappings, and Elastic action-response
+mappings with searchable identity/observable fields are admitted. The compact
+verdict and its digests travel with the result. A discovery timeout, malformed
+response, mapping drift, or missing host binding prevents the search and can
+never be interpreted as an exact zero. Raw stored query text is not projected.
+This remains indexed historical evidence for SOC Analyst and Incident
+Responder roles; it does not invoke or authorize live endpoint OSQuery.
+
 The wrapper generates all three audit forms locally:
 
 - the exact Query DSL executed by `so-elasticsearch-query`;
@@ -211,7 +224,10 @@ deployments and adds it only when an existing JSON configuration has no
 
 On the Mac Studio, `n8n/bin/investigation_query_contract.py` independently
 rebuilds the expected DSL, OQL, KQL, endpoint, index scope, projections, and
-digests before evidence can return to a model.
+digests before evidence can return to a model. For `osquery_history`, it also
+rebuilds and authenticates the schema-discovery verdict and requires a
+compatible reviewed profile before a successful result or exact zero can be
+trusted.
 `n8n/bin/collect-investigation-pivots.py` exposes the shared SOC Analyst and
 Incident Responder API:
 

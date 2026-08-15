@@ -2725,6 +2725,11 @@ then normalizes those results at the composition boundary.
 the v2 investigation-query wire contract. The governed implementation is split
 into `investigation_query_schema.py`, `investigation_query_normalization.py`,
 `investigation_query_authorization.py`, and `investigation_query_rendering.py`.
+`historical_osquery_schema.py` is the inward mapping-discovery owner. It
+constructs only the fixed `_field_caps` endpoint/body, matches reviewed ECS and
+Elastic Osquery Manager mapping profiles, and authenticates digest-bound
+success/failure verdicts. It imports the schema owner but no facade, transport,
+credential, planner, or response module.
 The normalization module is itself a stable facade:
 `investigation_query_normalization_primitives.py` owns exact object/key/ID and
 UTC-window primitives, `investigation_query_observable_normalization.py` owns
@@ -2744,14 +2749,15 @@ reauthentication and batch accounting, and
 `investigation_query_response.py` is the stable response-validation facade;
 `investigation_query_response_source.py` owns ECS projection, time-window,
 dataset, observable, and event-tuple binding;
-`investigation_query_response_result.py` owns coverage and per-query execution
-validation; and
+`investigation_query_response_result.py` owns coverage, per-query execution,
+and historical schema-verdict admission; and
 `investigation_query_response_control.py` owns positive/negative control
 authentication. Response owners depend only on the earlier contract layers and
 the source owner, while the facade composes them, so the graph remains acyclic
 and authorization and response validation continue to fail closed.
 
-The versioned runtime installer atomically installs the complete v2 module tree
+The versioned Mac runtime installer and Security Onion wrapper installer
+atomically install the schema-discovery owner with the complete v2 module tree
 only after the exact v2 contract is selected. The bundled v1 facade, collector,
 and manifest remain frozen and byte-stable. No module receives credentials or
 transport authority, and Security Onion and Relay access remain read-only.

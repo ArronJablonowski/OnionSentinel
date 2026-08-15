@@ -54,6 +54,33 @@ category, and 200 hits. Reports retain an analyst-readable KQL equivalent and
 the exact executed Query DSL. Query DSL is the execution record; KQL is an
 explanation of intent.
 
+Before any `osquery_history` search, the Security Onion wrapper performs one
+bounded read-only `_field_caps` request against the pack's exact reviewed index
+scope. The body contains only the fixed projection-field list; it cannot carry
+Query DSL, SQL, scripts, or caller-selected fields. The returned capabilities
+must match at least one reviewed profile:
+
+- ECS endpoint process, file, or network events;
+- the Elastic Osquery Manager result stream with flat `osquery.<column>`
+  fields; or
+- the Elastic Osquery Manager action-response stream.
+
+The mapping verdict records mapped, searchable, identity, and observable
+fields; compatible profiles; the exact field-capabilities endpoint; and
+digests of the request body, projection, and verdict. A mapping timeout,
+output limit, root error, malformed response, unreviewed field, missing
+identity/observable binding, or incompatible mapping stops the historical
+search and remains a distinct failure. Only a compatible discovery followed
+by an exact successful search may support `exact_zero`; mapping drift is never
+reported as absence. Raw Osquery Manager request text such as
+`action_data.query` is outside the projection.
+
+Both the SOC Analyst and Incident Responder may receive the same deterministic
+historical attribution pivot after a trusted network finding establishes an
+exact host and bounded window. This grants only indexed-history access. It does
+not authorize a current endpoint query, select a Fleet target, or weaken the
+separate Incident Responder-only live OSQuery gate.
+
 The caller also supplies the representative alert's Elasticsearch backing
 index and document ID as an anchor. Both values originate in the restricted
 alert-export wrapper, outside the event `_source`. Before evidence can be
