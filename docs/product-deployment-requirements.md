@@ -201,6 +201,16 @@ for file in $(find n8n/alert_store -name '*.js' -type f); do node --check "$file
 
 Run `pytest` when available. If it is unavailable, state that explicitly.
 
+For any managed Mac Studio, Relay, or Security Onion change, also run the
+secret-free handoff gate with the reviewed change document before invoking the
+target installer:
+
+```bash
+python3 operations/validate-cross-host-handoff.py \
+  --repo-root "$(pwd)" \
+  --handoff /path/to/change-handoff.json
+```
+
 Live Mac Studio validation examples:
 
 ```bash

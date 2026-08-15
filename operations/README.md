@@ -76,6 +76,27 @@ readiness and this byte-exact reconciliation. For rollback, install the recorded
 commit through `install-macstudio-stack.zsh`, then rerun reconciliation with that
 commit as both `--source-revision` and `--expected-release-id`.
 
+## Cross-Host Change Handoff
+
+`validate-cross-host-handoff.py` is the read-only pre-deployment and
+post-acknowledgement gate for managed changes spanning the Mac Studio, Relay,
+or Security Onion. It binds the request to an exact Git revision and desired
+artifact hashes, compares reviewed expected-current hashes with independently
+observed-current hashes, refuses protected runtime configuration/state paths,
+and emits only a sanitized decision summary.
+
+```bash
+python3 operations/validate-cross-host-handoff.py \
+  --repo-root "$(pwd)" \
+  --handoff /path/to/change-handoff.json
+```
+
+Use `operations/security/cross-host-change.example.json` as a secret-free
+read-only example. The full request, acknowledgement, idempotent replay, drift
+reconciliation, Security Onion authorization, and rollback process is in
+`../docs/cross-host-change-handoff.md`. Run this gate before any cross-host
+installer; the gate itself never writes or connects to another system.
+
 ## Verify Stack
 
 ```bash

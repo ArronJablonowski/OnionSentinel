@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "change_id": "ARR-35-relay-example-001",
+  "request": {
+    "target_system": "relay",
+    "owner": "relay-operator",
+    "purpose": "Review one managed Relay artifact without authorizing a write.",
+    "prerequisites": [
+      "The source revision and rollback revision have passed review."
+    ],
+    "risk": "low",
+    "validation": [
+      "Run the bounded local Relay readiness check after any separately authorized apply."
+    ],
+    "rollback": [
+      "Reinstall the recorded rollback revision through the governed Relay installer."
+    ],
+    "write_authorized": false,
+    "authorized_operations": [],
+    "source_revision": "529f31c4c38a693fb8e84ab16f8f3268d7785110",
+    "rollback_revision": "529f31c4c38a693fb8e84ab16f8f3268d7785110",
+    "requested_at": "2026-08-15T04:00:00Z",
+    "artifacts": [
+      {
+        "source": "relay/app/relay.py",
+        "destination": "/opt/so-alert-relay/app/relay.py",
+        "sha256": "38109711fc8b29d47aee7d951fa66ae7f71c4f55ec0cc16baaf2b788074f1528",
+        "expected_current_sha256": null,
+        "observed_current_sha256": null
+      }
+    ]
+  },
+  "acknowledgement": null
+}

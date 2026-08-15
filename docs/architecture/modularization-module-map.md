@@ -3819,6 +3819,29 @@ readiness uses it to remove inherited webhook and notification credentials from
 all local probe children while preserving the helper's existing default
 inheritance contract for alert, PCAP, and incident-evidence transports.
 
+## Cross-Host Change Coordination
+
+`operations/cross_host_handoff_contract.py` owns the side-effect-free,
+secret-free Studio/Relay/Security Onion request and acknowledgement contract.
+It validates exact identities, write authorization, bounded idempotent
+operations, protected path boundaries, Git source hashes, expected-versus-
+observed current hashes, applied receipts, verification digests, rollback
+binding, and replay identity. It never opens remote connections or runtime
+configuration and returns only a metadata projection.
+
+`operations/validate-cross-host-handoff.py` is the bounded file-admission and
+CLI composition root. It rejects symlinks, oversized or duplicate-key JSON,
+emits no request text or paths, and maps actionable/no-op decisions to exit 0,
+review-required decisions to exit 1, and contract failures to exit 2. The CLI
+depends inward on the contract module; the contract never imports the CLI or a
+deployment installer.
+
+The handoff gate is deliberately separate from the Mac byte-exact runtime
+reconciler: the handoff proves authorization and pre-deployment drift state for
+all three systems, while the Mac reconciler proves the running application
+payload after deployment. Neither may read or replace operator-owned secrets,
+configuration, databases, logs, evidence, caches, or agent memory.
+
 ## Local Ollama Benchmark
 
 `benchmark-ollama-cybersecurity.py` is the repository-only executable and
