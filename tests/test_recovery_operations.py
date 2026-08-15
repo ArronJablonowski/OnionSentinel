@@ -69,6 +69,7 @@ class RecoveryOperationTests(unittest.TestCase):
                 "pbkdf2_iterations": self.restore.PBKDF2_ITERATIONS,
                 "authenticated": True,
                 "key_source": "injected",
+                "key_id": "injected",
             },
             "files": files,
         }

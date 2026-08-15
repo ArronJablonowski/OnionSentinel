@@ -20,10 +20,10 @@
       "backup_schedule": "Verified online SQLite backup every hour plus one complete runtime recovery bundle daily at 02:30 local time.",
       "backup_artifacts": [
         "alert_store_backups/alerts.sqlite3.<timestamp>.backup",
-        "recovery_backups/<timestamp>/alerts.sqlite3"
+        "recovery_backups/<timestamp>/alerts.sqlite3.enc"
       ],
-      "backup_encryption_state": "owner-only-unencrypted",
-      "backup_secret_policy": "Database backups contain evidence and analyst state but no service credentials; artifacts and directories are owner-only and excluded from source control.",
+      "backup_encryption_state": "encrypted",
+      "backup_secret_policy": "The daily database artifact is authenticated and encrypted before atomic bundle publication; its versioned key remains in macOS Keychain and operator escrow, never in the bundle, process arguments, environment, logs, or source control. Hourly local repair snapshots remain owner-only and are not approved for off-host replication.",
       "retention": "Ten hourly SQLite backups and seven daily recovery bundles by default; failed recovery candidates are retained for operator disposition.",
       "rpo_minutes": 60,
       "rto_minutes": 120,
@@ -74,6 +74,8 @@
         "n8n/alert_store/services/alert_store_schema_foundation.js",
         "n8n/bin/maintain-alert-store-sqlite.zsh",
         "n8n/bin/backup-onion-sentinel-runtime.py",
+        "n8n/bin/recovery_encryption.py",
+        "n8n/bin/recovery_bundle.py",
         "n8n/bin/run-recovery-restore-drill.py"
       ]
     },
@@ -95,11 +97,11 @@
       "rollback_strategy": "Restore a verified owner-only snapshot only while the harness is stopped; never restore active browser sessions or mix database and ledger generations.",
       "backup_schedule": "Included in the daily 02:30 runtime recovery bundle when present; maintenance requires a fresh verified backup before retention deletes terminal runs.",
       "backup_artifacts": [
-        "recovery_backups/<timestamp>/investigation-harness.sqlite3",
+        "recovery_backups/<timestamp>/investigation-harness.sqlite3.enc",
         "harness-maintenance backup referenced by the maintenance receipt"
       ],
-      "backup_encryption_state": "owner-only-unencrypted",
-      "backup_secret_policy": "The database stores bounded sanitized trace metadata and evidence references, not provider credentials or raw secret material.",
+      "backup_encryption_state": "encrypted",
+      "backup_secret_policy": "The database stores bounded sanitized trace metadata and evidence references; its daily artifact is authenticated and encrypted with the versioned macOS Keychain recovery key before publication.",
       "retention": "Daily bundles retain seven generations by default; hourly harness retention removes only bounded terminal runs after a verified backup.",
       "rpo_minutes": 1440,
       "rto_minutes": 240,
@@ -150,6 +152,8 @@
         "n8n/bin/harness_store_foundation.py",
         "n8n/bin/harness_maintenance_integrity.py",
         "n8n/bin/harness_maintenance_retention.py",
+        "n8n/bin/recovery_encryption.py",
+        "n8n/bin/recovery_bundle.py",
         "n8n/bin/run-recovery-restore-drill.py"
       ]
     },
@@ -171,11 +175,11 @@
       "rollback_strategy": "Restore the pre-upgrade custom-format dump and matching n8n encryption/configuration state, then run the exact prior pinned image.",
       "backup_schedule": "Custom-format PostgreSQL dump in the daily 02:30 runtime recovery bundle and before every n8n version migration.",
       "backup_artifacts": [
-        "recovery_backups/<timestamp>/n8n-postgres.dump",
-        "recovery_backups/<timestamp>/runtime-secrets.tar.gz"
+        "recovery_backups/<timestamp>/n8n-postgres.dump.enc",
+        "recovery_backups/<timestamp>/runtime-secrets.tar.gz.enc"
       ],
-      "backup_encryption_state": "owner-only-unencrypted",
-      "backup_secret_policy": "Database and encryption configuration are separated into manifest-bound owner-only artifacts; neither artifact is admitted to source control.",
+      "backup_encryption_state": "encrypted",
+      "backup_secret_policy": "The database dump and matching n8n encryption configuration are separate authenticated ciphertexts bound by one content-free manifest. The versioned recovery key remains in macOS Keychain and operator escrow; neither plaintext nor key is admitted to source control.",
       "retention": "Seven complete daily recovery bundles by default, with a separate pre-migration rollback generation retained through acceptance.",
       "rpo_minutes": 1440,
       "rto_minutes": 240,
@@ -223,6 +227,8 @@
       "source_anchors": [
         "n8n/docker-compose.yml",
         "n8n/bin/backup-onion-sentinel-runtime.py",
+        "n8n/bin/recovery_encryption.py",
+        "n8n/bin/recovery_bundle.py",
         "n8n/bin/run-recovery-restore-drill.py",
         "docs/disaster-recovery-runbook.md"
       ]
@@ -245,10 +251,10 @@
       "rollback_strategy": "Disable PostgreSQL-backed features, restore the verified prior custom-format dump into an isolated container, reconcile against SQLite authority where applicable, then re-enable.",
       "backup_schedule": "Optional custom-format PostgreSQL dump in the daily 02:30 recovery bundle whenever any alert-store PostgreSQL feature is enabled.",
       "backup_artifacts": [
-        "recovery_backups/<timestamp>/alert-store-postgres.dump"
+        "recovery_backups/<timestamp>/alert-store-postgres.dump.enc"
       ],
-      "backup_encryption_state": "owner-only-unencrypted",
-      "backup_secret_policy": "The dump contains normalized application state but no database password; the credential remains only in the separately governed runtime environment.",
+      "backup_encryption_state": "encrypted",
+      "backup_secret_policy": "The normalized application-state dump is authenticated and encrypted before publication. Database credentials remain in the separately governed runtime environment and the versioned recovery key remains in macOS Keychain and operator escrow.",
       "retention": "Seven daily recovery bundles by default; software and AC Hunter schemas additionally retain bounded active/history snapshots.",
       "rpo_minutes": 1440,
       "rto_minutes": 240,
@@ -300,6 +306,8 @@
         "n8n/postgres/asset-inventory-schema.sql",
         "n8n/postgres/software-inventory-schema.sql",
         "n8n/postgres/ac-hunter-schema.sql",
+        "n8n/bin/recovery_encryption.py",
+        "n8n/bin/recovery_bundle.py",
         "n8n/bin/run-recovery-restore-drill.py"
       ]
     },

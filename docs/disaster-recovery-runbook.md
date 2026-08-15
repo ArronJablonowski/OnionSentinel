@@ -699,6 +699,35 @@ tracebacks.
 The daily runtime recovery bundle complements the hourly SQLite backups with
 n8n PostgreSQL and encryption/configuration state:
 
+Before enabling the daily LaunchAgent, provision its recovery key as the
+interactive Mac Studio operator. Generate at least 32 random bytes in the
+approved password manager, escrow the same value in the separate offline
+recovery vault, and add it to the login Keychain without placing it in shell
+history or a process argument. The `security` command prompts because `-w` is
+the final option with no value:
+
+```bash
+/usr/bin/security add-generic-password -U \
+  -a "$(id -un)" \
+  -s com.arron.onion-sentinel.runtime-backup.v1 \
+  -T /usr/bin/security \
+  -w
+
+# Validate availability while discarding the secret value.
+/usr/bin/security find-generic-password -w \
+  -a "$(id -un)" \
+  -s com.arron.onion-sentinel.runtime-backup.v1 >/dev/null
+```
+
+Do not use `-A`, export the recovery value, paste it into `.env`, commit it, or
+record it in Linear. Key loss makes the associated generations unrecoverable.
+The manifest records only the versioned service identifier. For rotation,
+create a new service generation (for example `.v2`), deploy matching backup
+and restore arguments through a reviewed release, and retain the old Keychain
+and escrow value until every bundle bearing the old `key_id` has expired and a
+restore drill for the new generation has passed. Never overwrite an in-use key
+generation.
+
 ```bash
 ssh <mac_user>@<mac_studio_ip> 'python3 "$HOME/n8n-local/bin/backup-onion-sentinel-runtime.py"'
 ssh <mac_user>@<mac_studio_ip> 'latest=$(find "$HOME/n8n-local/recovery_backups" -mindepth 1 -maxdepth 1 -type d ! -name ".*" | sort | tail -1); python3 -m json.tool "$latest/manifest.json"'
@@ -710,13 +739,15 @@ snapshots are restored through SQLite's backup API, rechecked, and compared to
 their manifest row counts before the bundle is published. The bundle also
 contains the n8n PostgreSQL custom-format dump and, when the alert-store shadow
 is enabled, a distinct alert-store PostgreSQL dump. Both are validated by
-`pg_restore --list`. The bundle also contains a SHA-256 manifest and the
-runtime `.env`, n8n encryption config,
-prompts/settings, and agent memories needed for recovery. A missing harness
-database remains a valid pre-harness recovery state. The bundle is mode `0700`
-with files mode `0600`, retained for seven days, and must never enter Git.
-Because it contains secrets and live operator state, any off-host copy must
-use an operator-controlled encrypted backup target.
+`pg_restore --list`. Every database, dump, and runtime configuration archive is
+then authenticated and encrypted before the atomic rename; published payloads
+end in `.enc`, and plaintext exists only inside the unpublished owner-only
+staging directory. The content-free manifest binds ciphertext and plaintext
+digests, byte counts, reviewed plaintext names, the algorithm, and versioned
+`key_id`, but never contains the key. A missing harness database remains a
+valid pre-harness recovery state. The bundle is mode `0700` with files mode
+`0600`, retained for seven days, and must never enter Git. Off-host copies must
+still use an operator-controlled target and trusted transport.
 
 When present, the same archive includes the owner-only
 `logs/onion-sentinel-admin-audit.jsonl` chain and refuses a symlink, non-regular
@@ -761,14 +792,17 @@ creation checks:
 ssh <mac_user>@<mac_studio_ip> 'python3 "$HOME/n8n-local/bin/run-recovery-restore-drill.py"'
 ```
 
-This uses a disposable PostgreSQL container with networking disabled and a
-temporary data filesystem. It validates the restored n8n schema and workflow
-records; restores and validates the optional alert-store PostgreSQL shadow
-schema and durable-job rows; verifies the alert-store and optional investigation-harness SQLite
-copies, foreign keys, schema version, and manifest row counts; checks all
-bundle hashes; and confirms the archive contains the n8n encryption
-configuration. The production containers, databases, keys, and workflows are
-not modified.
+This verifies the exact encrypted inventory and ciphertext hashes before
+requesting the matching Keychain generation. Authentication succeeds before
+plaintext publication, and each payload is decrypted under one owner-only
+temporary directory that is removed when the drill exits. The drill then uses
+a disposable PostgreSQL container with networking disabled and a temporary
+data filesystem. It validates the restored n8n schema and workflow records;
+restores and validates the optional alert-store PostgreSQL shadow schema and
+durable-job rows; verifies the alert-store and optional investigation-harness
+SQLite copies, foreign keys, schema version, and manifest row counts; and
+confirms the archive contains the n8n encryption configuration. The production
+containers, databases, keys, and workflows are not modified.
 
 ### Mac Studio supervision readiness and restart quarantine
 

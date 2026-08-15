@@ -52,6 +52,7 @@ class FakeEncryption:
     descriptor = {
         "scheme": "fixture-authenticated-encryption-v1",
         "key_source": "test-only",
+        "key_id": "test-only",
         "authenticated": True,
     }
 

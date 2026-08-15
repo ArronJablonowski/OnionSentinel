@@ -47,6 +47,7 @@ class RecoveryEncryptionTests(unittest.TestCase):
             self.assertEqual(result["plaintext_bytes"], len(payload))
             self.assertEqual(metadata["scheme"], module.ENCRYPTION_SCHEME)
             self.assertEqual(metadata["key_source"], "injected")
+            self.assertEqual(metadata["key_id"], "injected")
             self.assertNotIn(SECRET.decode(), repr(metadata))
 
     def test_wrong_key_and_tampering_fail_before_plaintext_publication(self) -> None:

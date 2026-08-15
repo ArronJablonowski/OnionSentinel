@@ -120,6 +120,7 @@ class RecoveryEncryption:
         *,
         openssl: str = "/usr/bin/openssl",
         key_source: str = "injected",
+        key_id: str = "injected",
     ):
         if (
             not isinstance(secret, bytes)
@@ -129,10 +130,13 @@ class RecoveryEncryption:
             raise ValueError("recovery encryption secret must be at least 32 bytes")
         if key_source not in {"injected", "macos-keychain"}:
             raise ValueError("recovery encryption key source is invalid")
+        if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", key_id) is None:
+            raise ValueError("recovery encryption key identifier is invalid")
         executable = _trusted_executable(openssl)
         self.__secret = bytes(secret)
         self.__openssl = str(executable)
         self.__key_source = key_source
+        self.__key_id = key_id
 
     @classmethod
     def from_keychain(
@@ -168,6 +172,7 @@ class RecoveryEncryption:
             secret,
             openssl=openssl,
             key_source="macos-keychain",
+            key_id=service,
         )
 
     @property
@@ -177,6 +182,7 @@ class RecoveryEncryption:
             "pbkdf2_iterations": PBKDF2_ITERATIONS,
             "authenticated": True,
             "key_source": self.__key_source,
+            "key_id": self.__key_id,
         }
 
     def __run_openssl(self, arguments: list[str]) -> None:
