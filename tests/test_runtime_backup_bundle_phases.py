@@ -48,6 +48,31 @@ class FixedDatetime:
         )
 
 
+class FakeEncryption:
+    descriptor = {
+        "scheme": "fixture-authenticated-encryption-v1",
+        "key_source": "test-only",
+        "authenticated": True,
+    }
+
+    def __init__(self, events: list[tuple[object, ...]]):
+        self.events = events
+
+    def encrypt_file(self, source: Path, destination: Path) -> dict[str, object]:
+        self.events.append(("encrypt", source.name, destination.name))
+        plaintext = source.read_bytes()
+        ciphertext = b"encrypted:" + plaintext
+        destination.write_bytes(ciphertext)
+        destination.chmod(0o600)
+        return {
+            "scheme": self.descriptor["scheme"],
+            "bytes": len(ciphertext),
+            "sha256": hashlib.sha256(ciphertext).hexdigest(),
+            "plaintext_bytes": len(plaintext),
+            "plaintext_sha256": hashlib.sha256(plaintext).hexdigest(),
+        }
+
+
 def sqlite_result(rows: int) -> dict[str, object]:
     return {
         "rows": rows,
@@ -72,7 +97,7 @@ class RuntimeBackupBundlePhaseTests(unittest.TestCase):
         )
         self.assertEqual(
             str(inspect.signature(backup.create_bundle)),
-            "(stack_dir: 'Path', backup_root: 'Path', docker: 'str') -> 'Path'",
+            "(stack_dir: 'Path', backup_root: 'Path', docker: 'str', *, encryption: 'RecoveryEncryption') -> 'Path'",
         )
 
     def test_complete_bundle_order_manifest_hashes_and_modes_are_exact(
@@ -168,7 +193,12 @@ class RuntimeBackupBundlePhaseTests(unittest.TestCase):
                 "archive_runtime_secrets",
                 side_effect=archive_runtime_secrets,
             ):
-                bundle = backup.create_bundle(stack, backup_root, "/fake/docker")
+                bundle = backup.create_bundle(
+                    stack,
+                    backup_root,
+                    "/fake/docker",
+                    encryption=FakeEncryption(events),
+                )
 
             self.assertEqual(bundle, backup_root / STAMP)
             self.assertTrue(bundle.is_dir())
@@ -179,6 +209,7 @@ class RuntimeBackupBundlePhaseTests(unittest.TestCase):
             self.assertEqual(manifest["alert_rows"], 3)
             self.assertEqual(manifest["harness_runs"], 2)
             self.assertEqual(manifest["runtime_paths"], [".env", "config"])
+            self.assertEqual(manifest["encryption"], FakeEncryption.descriptor)
             self.assertEqual(
                 manifest["postgres"],
                 {
@@ -189,25 +220,33 @@ class RuntimeBackupBundlePhaseTests(unittest.TestCase):
                     },
                 },
             )
-            expected_files = {
+            plaintext_files = {
                 "alerts.sqlite3": b"alert-snapshot",
                 "investigation-harness.sqlite3": b"harness-snapshot",
                 "n8n-postgres.dump": b"n8n-dump",
                 "alert-store-postgres.dump": b"shadow-dump",
                 "runtime-secrets.tar.gz": b"runtime-archive",
             }
-            self.assertEqual(set(manifest["files"]), set(expected_files))
-            for name, payload in expected_files.items():
-                path = bundle / name
+            expected_files = {f"{name}.enc" for name in plaintext_files}
+            self.assertEqual(set(manifest["files"]), expected_files)
+            for name, plaintext in plaintext_files.items():
+                encrypted_name = f"{name}.enc"
+                payload = b"encrypted:" + plaintext
+                path = bundle / encrypted_name
                 self.assertEqual(path.read_bytes(), payload)
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
                 self.assertEqual(
-                    manifest["files"][name],
+                    manifest["files"][encrypted_name],
                     {
+                        "scheme": "fixture-authenticated-encryption-v1",
                         "bytes": len(payload),
                         "sha256": hashlib.sha256(payload).hexdigest(),
+                        "plaintext_name": name,
+                        "plaintext_bytes": len(plaintext),
+                        "plaintext_sha256": hashlib.sha256(plaintext).hexdigest(),
                     },
                 )
+                self.assertFalse((bundle / name).exists())
             self.assertEqual(stat.S_IMODE((bundle / "manifest.json").stat().st_mode), 0o600)
             self.assertEqual(
                 events,
@@ -253,6 +292,11 @@ class RuntimeBackupBundlePhaseTests(unittest.TestCase):
                         stack,
                         backup_root / f".staging-{STAMP}/runtime-secrets.tar.gz",
                     ),
+                    ("encrypt", "alert-store-postgres.dump", "alert-store-postgres.dump.enc"),
+                    ("encrypt", "alerts.sqlite3", "alerts.sqlite3.enc"),
+                    ("encrypt", "investigation-harness.sqlite3", "investigation-harness.sqlite3.enc"),
+                    ("encrypt", "n8n-postgres.dump", "n8n-postgres.dump.enc"),
+                    ("encrypt", "runtime-secrets.tar.gz", "runtime-secrets.tar.gz.enc"),
                 ],
             )
 
@@ -274,7 +318,12 @@ class RuntimeBackupBundlePhaseTests(unittest.TestCase):
                 "backup_sqlite_database",
             ) as sqlite_backup:
                 with self.assertRaisesRegex(RuntimeError, "capacity denied"):
-                    backup.create_bundle(stack, backup_root, "/fake/docker")
+                    backup.create_bundle(
+                        stack,
+                        backup_root,
+                        "/fake/docker",
+                        encryption=FakeEncryption([]),
+                    )
 
             self.assertEqual(list(backup_root.iterdir()), [])
             sqlite_backup.assert_not_called()
@@ -318,7 +367,12 @@ class RuntimeBackupBundlePhaseTests(unittest.TestCase):
                 "archive_runtime_secrets",
             ) as archive:
                 with self.assertRaisesRegex(RuntimeError, "dump failed"):
-                    backup.create_bundle(stack, backup_root, "/fake/docker")
+                    backup.create_bundle(
+                        stack,
+                        backup_root,
+                        "/fake/docker",
+                        encryption=FakeEncryption([]),
+                    )
 
             self.assertFalse((backup_root / f".staging-{STAMP}").exists())
             self.assertFalse((backup_root / STAMP).exists())
