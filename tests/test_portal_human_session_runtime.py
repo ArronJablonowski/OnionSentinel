@@ -12,6 +12,7 @@ DASHBOARD = ROOT / "onion-sentinel-dashboard"
 sys.path.insert(0, str(DASHBOARD))
 
 import portal_human_session_runtime as runtime  # noqa: E402
+from portal_session_principal import HumanPrincipal  # noqa: E402
 
 
 class PortalHumanSessionRuntimeTests(unittest.TestCase):
@@ -95,6 +96,25 @@ class PortalHumanSessionRuntimeTests(unittest.TestCase):
                     new_token=lambda: "csrf-" + "c" * 38,
                 )
                 self.assertEqual(token, "csrf-" + "c" * 38)
+
+    def test_session_creation_uses_only_the_explicit_authenticated_principal(self):
+        records = []
+        service = runtime.HumanSessionRuntime(
+            mode="rbac-enforce",
+            store_path=Path("/not-used"),
+            put_record=lambda _path, _session_id, record: records.append(record),
+        )
+        principal = HumanPrincipal("human_session", "viewer-1", "viewer")
+        token = service.create_session(
+            "session-" + "s" * 36,
+            principal=principal,
+            client_identity="192.0.2.4",
+            now_timestamp=1_000,
+            new_token=lambda: "csrf-" + "c" * 38,
+        )
+        self.assertEqual(token, "csrf-" + "c" * 38)
+        self.assertEqual(records[0]["principal_id"], "viewer-1")
+        self.assertEqual(records[0]["role"], "viewer")
 
     def test_rbac_runtime_resolves_a_retained_analyst_principal(self):
         record = runtime.create_session_bundle(
