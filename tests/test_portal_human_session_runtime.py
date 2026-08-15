@@ -76,7 +76,7 @@ class PortalHumanSessionRuntimeTests(unittest.TestCase):
             self.assertEqual(missing.reason, "session_missing")
 
     def test_enforcement_modes_use_the_versioned_store(self):
-        for mode in ("admin-enforce", "rbac-enforce"):
+        for mode, generation in (("admin-enforce", 2), ("rbac-enforce", 3)):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
                 service = runtime.load_human_session_runtime(
                     mode=mode,
@@ -84,6 +84,10 @@ class PortalHumanSessionRuntimeTests(unittest.TestCase):
                 )
                 self.assertTrue(service.enabled)
                 self.assertTrue(service.enforcing)
+                self.assertEqual(service.policy_generation, generation)
+                self.assertEqual(
+                    service.snapshot()["policy_generation"], generation
+                )
                 token = service.create_session(
                     "session-" + "s" * 36,
                     client_identity="192.0.2.4",
@@ -99,7 +103,7 @@ class PortalHumanSessionRuntimeTests(unittest.TestCase):
             now_timestamp=1_000,
             absolute_ttl_seconds=1_000,
             idle_ttl_seconds=500,
-            policy_generation=1,
+            policy_generation=3,
             client_fingerprint="1" * 64,
             new_token=iter(
                 ("session-" + "s" * 36, "csrf-" + "c" * 38)
@@ -119,6 +123,35 @@ class PortalHumanSessionRuntimeTests(unittest.TestCase):
         self.assertTrue(result.csrf_authorized)
         self.assertEqual(result.principal.role, "analyst")
 
+    def test_forward_mode_promotion_invalidates_the_prior_session_generation(self):
+        record = runtime.create_session_bundle(
+            principal_id="local-administrator",
+            role="administrator",
+            now_timestamp=1_000,
+            absolute_ttl_seconds=1_000,
+            idle_ttl_seconds=500,
+            policy_generation=2,
+            client_fingerprint="1" * 64,
+            new_token=iter(
+                ("session-" + "s" * 36, "csrf-" + "c" * 38)
+            ).__next__,
+        ).record
+        removed = []
+        service = runtime.HumanSessionRuntime(
+            mode="rbac-enforce",
+            store_path=Path("/not-used"),
+            load_record=lambda *_args, **_kwargs: record,
+            delete_record=lambda *_args, **_kwargs: removed.append(True) or True,
+        )
+        result = service.resolve_session(
+            "session-" + "s" * 36,
+            csrf_value="csrf-" + "c" * 38,
+            now_timestamp=1_100,
+        )
+        self.assertIsNone(result.principal)
+        self.assertEqual(result.reason, "policy_generation_mismatch")
+        self.assertEqual(removed, [True])
+
     def test_enforcement_fails_closed_when_idle_touch_loses_ownership(self):
         record = runtime.create_session_bundle(
             principal_id="local-administrator",
@@ -126,7 +159,7 @@ class PortalHumanSessionRuntimeTests(unittest.TestCase):
             now_timestamp=1_000,
             absolute_ttl_seconds=1_000,
             idle_ttl_seconds=500,
-            policy_generation=1,
+            policy_generation=2,
             client_fingerprint="1" * 64,
             new_token=iter(("session-" + "s" * 36, "csrf-" + "c" * 38)).__next__,
         ).record
@@ -152,7 +185,7 @@ class PortalHumanSessionRuntimeTests(unittest.TestCase):
             now_timestamp=1_000,
             absolute_ttl_seconds=1_000,
             idle_ttl_seconds=500,
-            policy_generation=1,
+            policy_generation=2,
             client_fingerprint="1" * 64,
             new_token=iter(("session-" + "s" * 36, "csrf-" + "c" * 38)).__next__,
         ).record

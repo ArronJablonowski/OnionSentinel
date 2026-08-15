@@ -41,6 +41,7 @@ class PortalAccessPolicyTests(unittest.TestCase):
             "portal_access_observer.py",
             "portal_access_observer_runtime.py",
             "onion_sentinel_access_adapter.py",
+            "onion_sentinel_auth_pages.py",
             "portal_human_session_store.py",
             "portal_human_session_runtime.py",
             "portal_admin_recovery.py",
@@ -67,6 +68,7 @@ class PortalAccessPolicyTests(unittest.TestCase):
         }
         expected = {
             "onion-sentinel-dashboard/onion_sentinel_access_adapter.py",
+            "onion-sentinel-dashboard/onion_sentinel_auth_pages.py",
             "onion-sentinel-dashboard/onion_sentinel_request_routes.py",
             "onion-sentinel-dashboard/onion_sentinel_server.py",
             "onion-sentinel-dashboard/portal_access_enforcement.py",

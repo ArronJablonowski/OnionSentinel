@@ -96,8 +96,11 @@ silently transform, partially apply, or discard a valid settings request.
 
 ## Administrative audit contract
 
-Every allowed or denied unsafe request produces one bounded metadata-only audit
-event. Events contain schema version, sequence, UTC time, request ID, a
+Every denied or compatibility-observed unsafe request produces one bounded
+metadata-only final audit event. An allowed enforced request first produces a
+durable admission-precommit event and then one final event containing its
+actual response status. Events contain schema version, sequence, UTC time,
+request ID, a
 pseudonymous principal/session fingerprint, role, permission, action, bounded
 target type and identifier digest, outcome, HTTP status, reason code, previous
 event digest, and event digest. They never contain credentials, cookies, CSRF
@@ -128,10 +131,9 @@ role, permission, CSRF decision, or audit outcome.
 
 Deployment uses explicit, validated modes; an unknown value is a startup error.
 The source runtime reads `ONION_SENTINEL_ACCESS_MODE`; an absent value is
-`legacy`. The source implementation admits `legacy`, `observe`, and
-`admin-enforce`; `rbac-enforce` remains startup-blocked. Production promotion
-of `admin-enforce` remains a separate guarded deployment gate even after its
-source qualification.
+`legacy`. The source implementation admits all four defined modes. Production
+promotion of either enforcement mode remains a separate guarded deployment
+gate even after source qualification.
 
 1. `legacy`: current behavior only, used solely as the pre-migration rollback
    point. Policy coverage and audit code may run offline, but no claim of access
@@ -151,7 +153,11 @@ source qualification.
    and the dashboard redirects authentication failures or displays a no-change
    banner.
 4. `rbac-enforce`: enforce the canonical role mapping for every unsafe browser
-   route. No legacy unauthenticated mutation remains.
+   route. No legacy unauthenticated mutation remains. The initial local PBKDF2
+   credential issues only the fixed `local-administrator` principal; it cannot
+   accept a browser-supplied role. Viewer or Analyst issuance requires a
+   separately qualified trusted identity owner, while retained records for
+   those roles are already validated and enforced by the session boundary.
 
 Observe mode requires the operator-created file
 `$HOME/n8n-local/config/onion-sentinel-admin-audit-signing.key` to be a regular,
@@ -175,7 +181,11 @@ Administrator session smoke test, negative cross-origin/CSRF/role tests,
 settings-save parity, audit-chain verification, logout/absolute/idle expiry,
 service-identity separation, rollback rehearsal, readiness, and a new healthy
 production soak. Each mode change revokes sessions to prevent authority from
-crossing policy generations.
+crossing policy generations. Forward promotion uses distinct observe,
+Administrator-enforcement, and RBAC session generations, so an older record is
+rejected and removed. A rollback must stop the service and run the recovery
+command with `--revoke-sessions` before changing the configured mode; this
+prevents an older generation from becoming valid again.
 
 Recovery is local and operator-controlled: stop the dashboard write listener,
 then run the deployed owner-only command with explicit offline confirmation:

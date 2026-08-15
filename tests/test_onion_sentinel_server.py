@@ -431,6 +431,37 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertTrue(access.verify_password(password))
         self.assertFalse(access.verify_password("wrong"))
 
+    def test_enforcement_get_auth_never_trusts_only_the_legacy_cookie(self):
+        handler = SimpleNamespace(
+            headers=Message(),
+            client_address=("127.0.0.1", 41414),
+            _admin_authenticated=mock.Mock(return_value=True),
+            _admin_session_id=lambda: "session-" + "s" * 36,
+        )
+        sessions = SimpleNamespace(
+            enforcing=True,
+            resolve_session=mock.Mock(return_value=SimpleNamespace(
+                principal=None,
+                csrf_authorized=False,
+                reason="policy_generation_mismatch",
+            )),
+        )
+        access = server._access_adapter.DedicatedAccessRuntime(
+            runtime=server.runtime,
+            observer=SimpleNamespace(),
+            sessions=sessions,
+            password_record={},
+        )
+        self.assertFalse(access.admin_authenticated(handler))
+        handler._admin_authenticated.assert_not_called()
+
+    def test_admin_logout_bootstrap_sends_the_session_csrf_header(self):
+        rendered = server.render_admin_status().decode("utf-8")
+        self.assertIn("onion_sentinel_csrf=", rendered)
+        self.assertIn("X-Onion-Sentinel-CSRF", rendered)
+        self.assertIn("credentials:'same-origin'", rendered)
+        self.assertIn("event.preventDefault()", rendered)
+
     def test_enforcement_modes_have_an_isolated_clean_startup_boundary(self):
         for mode in ("admin-enforce", "rbac-enforce"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:

@@ -12,6 +12,7 @@ from portal_access_enforcement import (
     MODE_ADMIN_ENFORCE,
     MODE_LEGACY,
     MODE_OBSERVE,
+    MODE_RBAC_ENFORCE,
     parse_mode,
 )
 from portal_access_observer import (
@@ -107,7 +108,12 @@ class AccessObserverRuntime:
         initial_event_count: int = 0,
     ) -> None:
         self.mode = parse_mode(mode)
-        if self.mode not in {MODE_LEGACY, MODE_OBSERVE, MODE_ADMIN_ENFORCE}:
+        if self.mode not in {
+            MODE_LEGACY,
+            MODE_OBSERVE,
+            MODE_ADMIN_ENFORCE,
+            MODE_RBAC_ENFORCE,
+        }:
             raise AccessObserverConfigurationError(
                 "configured access enforcement mode is not qualified"
             )
@@ -115,7 +121,7 @@ class AccessObserverRuntime:
             not isinstance(signing_key, bytes) or len(signing_key) < 32
         ):
             raise AccessObserverConfigurationError(
-                "observe mode requires an access audit signing key"
+                "enabled access mode requires an access audit signing key"
             )
         self._signing_key = signing_key
         self._ledger_path = Path(ledger_path)
@@ -132,7 +138,7 @@ class AccessObserverRuntime:
 
     @property
     def enforcing(self) -> bool:
-        return self.mode == MODE_ADMIN_ENFORCE
+        return self.mode in {MODE_ADMIN_ENFORCE, MODE_RBAC_ENFORCE}
 
     def begin(
         self,
@@ -248,7 +254,11 @@ def load_access_observer_runtime(
             ledger_path=ledger_path,
             failure_sink=failure_sink,
         )
-    if mode not in {MODE_OBSERVE, MODE_ADMIN_ENFORCE}:
+    if mode not in {
+        MODE_OBSERVE,
+        MODE_ADMIN_ENFORCE,
+        MODE_RBAC_ENFORCE,
+    }:
         raise AccessObserverConfigurationError(
             "configured access enforcement mode is not qualified"
         )

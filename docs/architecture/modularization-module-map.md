@@ -3565,7 +3565,9 @@ existing login succeeds, resolves and touches that record for write
 observation, compares the per-session CSRF value, revokes the target record on
 logout, and emits only type-level failure telemetry. Enforcement does not
 extend idle expiry on an origin or CSRF denial and fails closed on a lost touch
-compare-and-swap. Legacy mode never reads or creates the target store. Unsafe
+compare-and-swap. Distinct observe, Administrator-enforcement, and RBAC policy
+generations invalidate sessions on forward promotion. Legacy mode never reads
+or creates the target store. Unsafe
 retained custody fails enabled-mode startup; request-level observation failure
 cannot change the legacy or observe HTTP result.
 
@@ -3608,10 +3610,11 @@ cookies, CSRF values, credentials other than opaque signing bytes, or raw audit
 destinations.
 
 `portal_access_observer_runtime.py` owns explicit
-`legacy`/`observe`/`admin-enforce` startup admission, owner/0600 lowercase-hex
+`legacy`/`observe`/`admin-enforce`/`rbac-enforce` startup admission,
+owner/0600 lowercase-hex
 signing-key loading, retained-ledger verification, append orchestration,
-counters, and type-only failure telemetry. It rejects full RBAC. The dedicated
-server starts observation before body parsing, skips controlled-evaluation
+counters, and type-only failure telemetry. The dedicated server starts
+observation before body parsing, skips controlled-evaluation
 service identity requests, and finalizes exactly once from the first response
 status. Observe audit failure remains telemetry-only; an enforced allowed write
 requires a durable metadata-only precommit receipt before body parsing.
@@ -3624,6 +3627,11 @@ projection, audit precommit, and first-response finalize hooks.
 Keeping these ports outside
 `onion_sentinel_server.py` leaves the stable executable and HTTP compatibility
 surface below the module-size warning threshold.
+
+`onion_sentinel_auth_pages.py` owns pure dedicated-server sign-in and
+Administration-status rendering, including the same-origin session-CSRF logout
+bootstrap. It receives only the transitional form token and escaped public
+message text; it never reads credentials, cookies, session state, or files.
 
 ### Portal catalog runtime
 

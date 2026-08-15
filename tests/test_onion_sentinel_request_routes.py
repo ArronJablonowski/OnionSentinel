@@ -127,6 +127,23 @@ class DashboardGetDispatchTests(unittest.TestCase):
                 self.assertEqual(routes.do_get(handler, context), expected)
                 self.assertEqual(events, expected_events)
 
+    def test_enforcement_admin_get_uses_the_versioned_session_boundary(self):
+        handler, events = self.handler("/admin/login", authenticated=True)
+        context = self.context(events)
+        context.ACCESS_RUNTIME = SimpleNamespace(
+            admin_authenticated=lambda _handler: False
+        )
+        self.assertEqual(routes.do_get(handler, context), "send")
+        self.assertEqual(events, [("send", 200, b"login")])
+
+        handler, events = self.handler("/admin", authenticated=True)
+        context = self.context(events)
+        context.ACCESS_RUNTIME = SimpleNamespace(
+            admin_authenticated=lambda _handler: False
+        )
+        self.assertEqual(routes.do_get(handler, context), "redirect")
+        self.assertEqual(events, [("redirect", "/admin/login")])
+
 
 class DedicatedAdminSessionBridgeTests(unittest.TestCase):
     @staticmethod

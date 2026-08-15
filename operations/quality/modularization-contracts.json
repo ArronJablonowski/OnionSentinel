@@ -3035,6 +3035,15 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/onion_sentinel_auth_pages.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/onion_sentinel_auth_pages.py",
+      "required_symbols": [
+        "render_admin_status",
+        "render_login"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/onion_sentinel_request_routes.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/onion_sentinel_request_routes.py",

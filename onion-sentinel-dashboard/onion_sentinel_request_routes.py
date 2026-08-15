@@ -12,6 +12,14 @@ JSON_TYPE = "application/json; charset=utf-8"
 _UNHANDLED = object()
 
 
+def _admin_authenticated(handler: object, c: ModuleType) -> bool:
+    access_runtime = getattr(c, "ACCESS_RUNTIME", None)
+    authenticate = getattr(access_runtime, "admin_authenticated", None)
+    if callable(authenticate):
+        return bool(authenticate(handler))
+    return bool(handler._admin_authenticated())
+
+
 def do_head(handler: object, c: ModuleType) -> None:
     path = urlparse(handler.path).path
     if c.CONTROLLED_EVALUATION_MODE and handler.path != "/healthz":
@@ -21,7 +29,7 @@ def do_head(handler: object, c: ModuleType) -> None:
     if c.is_application_log_get_api(path):
         status = (
             HTTPStatus.OK
-            if handler._admin_authenticated()
+            if _admin_authenticated(handler, c)
             else HTTPStatus.FORBIDDEN
         )
         return _send_head(handler, status)
@@ -81,11 +89,11 @@ def _dedicated_get(handler: object, c: ModuleType, path: str) -> object:
         )
         return _json_response(handler, status, data, indent=2)
     if path == "/admin/login":
-        if handler._admin_authenticated():
+        if _admin_authenticated(handler, c):
             return handler._redirect("/admin")
         return handler._send(HTTPStatus.OK, c.render_login())
     if path == "/admin":
-        if not handler._admin_authenticated():
+        if not _admin_authenticated(handler, c):
             return handler._redirect("/admin/login")
         return handler._send(HTTPStatus.OK, c.render_admin_status())
     return _UNHANDLED
@@ -133,7 +141,7 @@ def _application_logs(
     parsed: object,
     log_id: str | None,
 ) -> None:
-    if not handler._admin_authenticated():
+    if not _admin_authenticated(handler, c):
         return handler._send(
             HTTPStatus.FORBIDDEN,
             json.dumps(

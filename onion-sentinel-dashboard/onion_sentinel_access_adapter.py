@@ -12,6 +12,7 @@ from portal_human_session_runtime import (
     load_human_session_runtime,
 )
 from portal_access_observer_runtime import load_access_observer_runtime
+from portal_access_policy import ROLE_ADMINISTRATOR
 from portal_admin_session_store import (
     load_enforcement_admin_password_record,
     validate_admin_session_store,
@@ -403,6 +404,25 @@ class DedicatedAccessRuntime:
         if self.session_required:
             return verify_admin_password(password, self._password_record)
         return bool(self.runtime.verify_admin_password(password))
+
+    def admin_authenticated(self, handler: Any) -> bool:
+        if not self.session_required:
+            return bool(handler._admin_authenticated())
+        try:
+            observation = _resolve_human_session(
+                handler,
+                runtime=self.runtime,
+                session_runtime=self.sessions,
+                activity_authorized=False,
+            )
+        except Exception as exc:
+            _record_session_failure(self.sessions, exc)
+            return False
+        principal = getattr(observation, "principal", None)
+        return bool(
+            principal is not None
+            and getattr(principal, "role", "") == ROLE_ADMINISTRATOR
+        )
 
     @property
     def session_required(self) -> bool:

@@ -12,6 +12,7 @@ from portal_access_enforcement import (
     MODE_ADMIN_ENFORCE,
     MODE_LEGACY,
     MODE_OBSERVE,
+    MODE_RBAC_ENFORCE,
     parse_mode,
 )
 from portal_human_session_store import (
@@ -36,6 +37,12 @@ CSRF_HEADER_NAME = "X-Onion-Sentinel-CSRF"
 DEFAULT_ABSOLUTE_TTL_SECONDS = 8 * 60 * 60
 DEFAULT_IDLE_TTL_SECONDS = 30 * 60
 DEFAULT_POLICY_GENERATION = 1
+MODE_POLICY_GENERATIONS = {
+    MODE_LEGACY: 0,
+    MODE_OBSERVE: DEFAULT_POLICY_GENERATION,
+    MODE_ADMIN_ENFORCE: 2,
+    MODE_RBAC_ENFORCE: 3,
+}
 SAFE_COOKIE_VALUE_RE = re.compile(r"^[A-Za-z0-9_-]{32,512}$")
 
 
@@ -123,7 +130,7 @@ class HumanSessionRuntime:
         store_path: Path,
         absolute_ttl_seconds: int = DEFAULT_ABSOLUTE_TTL_SECONDS,
         idle_ttl_seconds: int = DEFAULT_IDLE_TTL_SECONDS,
-        policy_generation: int = DEFAULT_POLICY_GENERATION,
+        policy_generation: int | None = None,
         load_record: Callable[..., object] = load_session_record,
         put_record: Callable[..., object] = put_session_record,
         replace_record: Callable[..., object] = replace_session_record,
@@ -135,6 +142,7 @@ class HumanSessionRuntime:
             MODE_LEGACY,
             MODE_OBSERVE,
             MODE_ADMIN_ENFORCE,
+            MODE_RBAC_ENFORCE,
         }:
             raise HumanSessionConfigurationError(
                 "configured human-session mode is not qualified"
@@ -142,7 +150,9 @@ class HumanSessionRuntime:
         absolute_ttl, idle_ttl, generation = _validate_lifetime_policy(
             absolute_ttl_seconds,
             idle_ttl_seconds,
-            policy_generation,
+            MODE_POLICY_GENERATIONS[selected_mode]
+            if policy_generation is None
+            else policy_generation,
         )
         self.mode = selected_mode
         self.store_path = Path(store_path)
@@ -166,7 +176,7 @@ class HumanSessionRuntime:
 
     @property
     def enforcing(self) -> bool:
-        return self.mode == MODE_ADMIN_ENFORCE
+        return self.mode in {MODE_ADMIN_ENFORCE, MODE_RBAC_ENFORCE}
 
     def _record_failure(self, error_type: str) -> None:
         with self._lock:
@@ -301,6 +311,7 @@ class HumanSessionRuntime:
             return {
                 "mode": self.mode,
                 "enabled": self.enabled,
+                "policy_generation": self.policy_generation,
                 "created_count": self._created_count,
                 "resolved_count": self._resolved_count,
                 "failure_count": self._failure_count,
@@ -321,7 +332,11 @@ def load_human_session_runtime(
             "configured human-session mode is invalid"
         ) from exc
     path = human_session_store_path(home)
-    if selected_mode in {MODE_OBSERVE, MODE_ADMIN_ENFORCE}:
+    if selected_mode in {
+        MODE_OBSERVE,
+        MODE_ADMIN_ENFORCE,
+        MODE_RBAC_ENFORCE,
+    }:
         try:
             validate_session_store(path)
         except Exception as exc:

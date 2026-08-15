@@ -8,7 +8,6 @@ not a runtime dependency and cannot publish or mutate Onion Sentinel content.
 from __future__ import annotations
 
 import hmac
-import html
 import importlib.util
 import mimetypes
 import os
@@ -32,6 +31,7 @@ from cti_program_audit import program_audit_metrics
 from http_runtime import BoundedThreadingHTTPServer
 import onion_sentinel_application as _application
 import onion_sentinel_access_adapter as _access_adapter
+import onion_sentinel_auth_pages as _auth_pages
 import onion_sentinel_release as _release
 import onion_sentinel_request_routes as _request_routes
 
@@ -373,33 +373,13 @@ def resolve_dashboard_target(root: Path, request_path: str) -> Path | None:
 
 
 def render_login(message: str = "", error: bool = False) -> bytes:
-    token = runtime.ensure_admin_token()
-    note = ""
-    if message:
-        cls = "error" if error else "note"
-        note = f'<p class="{cls}">{html.escape(message)}</p>'
-    body = f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Onion Sentinel Administration</title><style>
-body{{margin:0;background:#07131d;color:#edf7ff;font:16px system-ui;display:grid;place-items:center;min-height:100vh}}
-main{{width:min(420px,calc(100% - 32px));border:1px solid #16485a;padding:24px;background:#0b1823}}
-label{{display:block;color:#a9bbcf;margin:16px 0 8px}}input,button{{box-sizing:border-box;width:100%;min-height:44px;font:inherit}}
-input{{background:#07131d;color:#edf7ff;border:1px solid #315064;padding:10px}}button{{margin-top:16px;background:#16bfd5;color:#041016;border:0;font-weight:700}}
-.error{{color:#ff7188}}.note{{color:#71e6f4}}a{{color:#71e6f4}}</style></head>
-<body><main><h1>Onion Sentinel</h1><p>Administration sign in</p>{note}
-<form method="post" action="/admin/login"><input type="hidden" name="token" value="{html.escape(token)}">
-<label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required>
-<button type="submit">Sign in</button></form><p><a href="/settings.html">Return to Settings</a></p></main></body></html>"""
-    return body.encode("utf-8")
+    return _auth_pages.render_login(
+        runtime.ensure_admin_token(), message, error
+    )
 
 
 def render_admin_status() -> bytes:
-    body = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Onion Sentinel Administration</title></head><body><h1>Onion Sentinel Administration</h1>
-<p>Authenticated. Administration access is enabled for this browser session.</p>
-<p><a href="/settings.html">Open Settings</a></p><form method="post" action="/admin/logout">
-<input type="hidden" name="token" value="TOKEN"><button type="submit">Sign out</button></form></body></html>"""
-    return body.replace("TOKEN", html.escape(runtime.ensure_admin_token())).encode("utf-8")
+    return _auth_pages.render_admin_status(runtime.ensure_admin_token())
 
 
 class OnionSentinelHandler(runtime.PortalHandler):
