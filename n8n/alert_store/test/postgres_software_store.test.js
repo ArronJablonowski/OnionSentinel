@@ -3,9 +3,11 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const {
+  conflictSql,
   createPostgresSoftwareStore,
   normalizeRecord,
   parseQuery,
+  publicRow,
 } = require('../lib/postgres_software_store');
 
 function record(overrides = {}) {
@@ -77,6 +79,25 @@ test('bounds database query pagination and filters', () => {
   });
   assert.throws(() => parseQuery({limit: '251'}), /limit/);
   assert.throws(() => parseQuery({window: '365d'}), /window/);
+});
+
+test('projects database-wide simultaneous version conflicts explicitly', () => {
+  const sql = conflictSql();
+  assert.match(sql, /peer\.snapshot_id = record\.snapshot_id/);
+  assert.match(sql, /peer\.last_seen = record\.last_seen/);
+  assert.match(sql, /lower\(peer\.version\) <> lower\(record\.version\)/);
+
+  const projected = publicRow({
+    ...record(),
+    first_seen: new Date('2026-07-30T10:00:00Z'),
+    last_seen: new Date('2026-07-30T11:00:00Z'),
+    freshness: 'current',
+    evidence_conflict: true,
+  });
+  assert.equal(
+    projected.evidence_conflict,
+    'simultaneous-version-disagreement',
+  );
 });
 
 test('alert-store route serializes the default observation time', () => {
