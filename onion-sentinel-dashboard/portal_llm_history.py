@@ -225,7 +225,7 @@ def _project_second_opinion_row(row: dict, parent: dict) -> dict:
         "trigger": row.get("trigger"),
         "model": row.get("reviewer_model"),
         "model_path": row.get("reviewer_model_path"),
-        "model_route": "",
+        "model_route": row.get("reviewer_model_route") or "",
         "mode": "codex-cli" if row.get("reviewer_model_path") == "frontier-codex-cli" else row.get("reviewer_model_path"),
         "runtime_seconds": row.get("reviewer_runtime_seconds"),
         "started_at": llm_reviewer_started_at(row.get("generated_at"), row.get("reviewer_runtime_seconds")),

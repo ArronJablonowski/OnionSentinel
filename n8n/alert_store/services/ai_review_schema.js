@@ -11,7 +11,8 @@ function createAiReviewSchema({run, ensureColumn}) {
         agent_role TEXT NOT NULL, trigger TEXT, status TEXT NOT NULL,
         reviewer_error TEXT, primary_model TEXT, primary_model_path TEXT,
         primary_outcome TEXT, primary_confidence TEXT, reviewer_model TEXT,
-        reviewer_model_path TEXT, reviewer_outcome TEXT, reviewer_confidence TEXT,
+        reviewer_model_path TEXT, reviewer_model_route TEXT,
+        reviewer_outcome TEXT, reviewer_confidence TEXT,
         agreement TEXT, material_disagreement INTEGER NOT NULL DEFAULT 0,
         disputed_fields_json TEXT NOT NULL DEFAULT '[]',
         comparison_json TEXT NOT NULL DEFAULT '{}', reviewer_runtime_seconds REAL,
@@ -20,6 +21,7 @@ function createAiReviewSchema({run, ensureColumn}) {
       )
     `);
     await ensureColumn('ai_second_opinion_runs', 'reviewer_error', 'TEXT');
+    await ensureColumn('ai_second_opinion_runs', 'reviewer_model_route', 'TEXT');
     await run('CREATE INDEX IF NOT EXISTS idx_ai_second_opinion_generated ON ai_second_opinion_runs(generated_at DESC)');
     await run('CREATE INDEX IF NOT EXISTS idx_ai_second_opinion_agreement ON ai_second_opinion_runs(agreement, generated_at DESC)');
     await run('CREATE INDEX IF NOT EXISTS idx_ai_second_opinion_group ON ai_second_opinion_runs(group_id, generated_at DESC)');

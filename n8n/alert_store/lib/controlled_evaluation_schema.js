@@ -27,6 +27,7 @@ const REQUIRED_COLUMNS = Object.freeze({
     'analysis_id', 'group_id', 'alert_id', 'agent_role', 'trigger', 'status',
     'reviewer_error', 'primary_model', 'primary_model_path', 'primary_outcome',
     'primary_confidence', 'reviewer_model', 'reviewer_model_path', 'reviewer_outcome',
+    'reviewer_model_route',
     'reviewer_confidence', 'agreement', 'material_disagreement', 'disputed_fields_json',
     'comparison_json', 'reviewer_runtime_seconds', 'memory_candidates_promoted',
     'generated_at', 'created_at', 'updated_at',

@@ -34,18 +34,21 @@ function createAiReviewRepository({run, safeString, jsonText, nowUtc}) {
       `INSERT INTO ai_second_opinion_runs (
          analysis_id, group_id, alert_id, agent_role, trigger, status, reviewer_error,
          primary_model, primary_model_path, primary_outcome, primary_confidence,
-         reviewer_model, reviewer_model_path, reviewer_outcome, reviewer_confidence,
+         reviewer_model, reviewer_model_path, reviewer_model_route,
+         reviewer_outcome, reviewer_confidence,
          agreement, material_disagreement, disputed_fields_json, comparison_json,
          reviewer_runtime_seconds, memory_candidates_promoted, generated_at,
          created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(analysis_id) DO UPDATE SET
          group_id = excluded.group_id, alert_id = excluded.alert_id,
          agent_role = excluded.agent_role, trigger = excluded.trigger,
          status = excluded.status, reviewer_error = excluded.reviewer_error,
          primary_model = excluded.primary_model, primary_model_path = excluded.primary_model_path,
          primary_outcome = excluded.primary_outcome, primary_confidence = excluded.primary_confidence,
-         reviewer_model = excluded.reviewer_model, reviewer_model_path = excluded.reviewer_model_path,
+         reviewer_model = excluded.reviewer_model,
+         reviewer_model_path = excluded.reviewer_model_path,
+         reviewer_model_route = excluded.reviewer_model_route,
          reviewer_outcome = excluded.reviewer_outcome, reviewer_confidence = excluded.reviewer_confidence,
          agreement = excluded.agreement, material_disagreement = excluded.material_disagreement,
          disputed_fields_json = excluded.disputed_fields_json, comparison_json = excluded.comparison_json,
@@ -63,6 +66,7 @@ function createAiReviewRepository({run, safeString, jsonText, nowUtc}) {
         safeString(response.confidence, 16).toLowerCase(),
         safeString(reviewer._analysis_model || secondOpinion.model_route, 200),
         safeString(reviewer._analysis_model_path, 100),
+        safeString(secondOpinion.model_route, 200),
         safeString(reviewer.detection_outcome, 100),
         safeString(reviewer.confidence, 16).toLowerCase(),
         safeString(comparison.agreement, 64),

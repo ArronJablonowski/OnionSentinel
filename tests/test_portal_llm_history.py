@@ -18,6 +18,7 @@ from portal_llm_history import (  # noqa: E402
     project_second_opinion_rows,
     reconcile_llm_primary_logs,
 )
+from portal_llm_activity import decorate_llm_analysis_record  # noqa: E402
 
 
 class LlmHistoryTests(unittest.TestCase):
@@ -107,6 +108,12 @@ class LlmHistoryTests(unittest.TestCase):
         self.assertEqual(reviewer["mode"], "codex-cli")
         self.assertEqual(
             reviewer["model_route"], "codex-cli:reviewer-model:xhigh"
+        )
+        self.assertEqual(
+            decorate_llm_analysis_record(reviewer, live=False)[
+                "runtime_model_label"
+            ],
+            "Codex CLI · reviewer-model (xhigh)",
         )
         self.assertEqual(reviewer["started_at"], "2026-08-07  01:01:00+00:00")
         self.assertEqual(reviewer["alert"]["rule_name"], "Detection")

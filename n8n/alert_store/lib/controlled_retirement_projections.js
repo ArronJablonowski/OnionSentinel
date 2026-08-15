@@ -56,7 +56,9 @@ function createControlledRetirementProjections({rawSha256, sha256, safeString, p
     status: String(row?.status || ''), reviewer_error: error(row?.reviewer_error), primary_model: row?.primary_model ?? null,
     primary_model_path: row?.primary_model_path ?? null, primary_outcome: row?.primary_outcome ?? null,
     primary_confidence: row?.primary_confidence ?? null, reviewer_model: row?.reviewer_model ?? null,
-    reviewer_model_path: row?.reviewer_model_path ?? null, reviewer_outcome: row?.reviewer_outcome ?? null,
+    reviewer_model_path: row?.reviewer_model_path ?? null,
+    reviewer_model_route: row?.reviewer_model_route ?? null,
+    reviewer_outcome: row?.reviewer_outcome ?? null,
     reviewer_confidence: row?.reviewer_confidence ?? null, agreement: row?.agreement ?? null,
     material_disagreement: Number(row?.material_disagreement || 0), disputed_fields_sha256: rawSha256(row?.disputed_fields_json || ''),
     comparison_sha256: rawSha256(row?.comparison_json || ''), reviewer_runtime_seconds: row?.reviewer_runtime_seconds == null

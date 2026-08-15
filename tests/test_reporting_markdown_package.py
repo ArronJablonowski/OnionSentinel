@@ -97,6 +97,7 @@ class ReportingMarkdownPackageTests(unittest.TestCase):
         ]}
         authorization = {"authorized": False}
         second = {
+            "model_route": "codex-cli:gpt-5.6-sol:xhigh",
             "response": secondary, "comparison": comparison,
             "automation_authorization": authorization,
         }
@@ -146,6 +147,10 @@ class ReportingMarkdownPackageTests(unittest.TestCase):
         self.assertEqual(context["first_seen"], "old")
         self.assertEqual(context["analysis_tag"], "tag")
         self.assertEqual(context["json_name"], "result.json")
+        self.assertIn(
+            "- **Model route:** codex-cli:gpt-5.6-sol:xhigh",
+            markdown._review_lines(context),
+        )
         self.assertEqual(prompt, before_prompt)
         self.assertEqual(response, before_response)
 

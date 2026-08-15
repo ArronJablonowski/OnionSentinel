@@ -115,10 +115,16 @@ def _read_second_opinion_rows(connection: object, limit: int) -> list[dict]:
     reviewer_error = (
         "reviewer_error" if "reviewer_error" in columns else "NULL AS reviewer_error"
     )
+    reviewer_model_route = (
+        "reviewer_model_route"
+        if "reviewer_model_route" in columns
+        else "NULL AS reviewer_model_route"
+    )
     rows = connection.execute(
         f"""
         SELECT analysis_id, alert_id, agent_role, trigger, status,
                {reviewer_error}, reviewer_model, reviewer_model_path,
+               {reviewer_model_route},
                reviewer_outcome, reviewer_confidence, agreement,
                material_disagreement, reviewer_runtime_seconds, generated_at
         FROM ai_second_opinion_runs
