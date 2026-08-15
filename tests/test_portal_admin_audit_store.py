@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import sys
 import tempfile
@@ -101,11 +102,28 @@ class PortalAdminAuditStoreTests(unittest.TestCase):
                     with self.assertRaises(store.AuditStoreError):
                         store.load_verified_events(path, signing_key=KEY)
 
+    def test_existing_ledger_and_parent_must_remain_owner_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "private"
+            parent.mkdir()
+            path = parent / "admin-audit.jsonl"
+            path.write_text("", encoding="utf-8")
+            os.chmod(path, 0o600)
+            os.chmod(parent, 0o755)
+            with self.assertRaisesRegex(store.AuditStoreError, "parent"):
+                store.load_verified_events(path, signing_key=KEY)
+
+            os.chmod(parent, 0o700)
+            os.chmod(path, 0o640)
+            with self.assertRaisesRegex(store.AuditStoreError, "owner-only"):
+                store.load_verified_events(path, signing_key=KEY)
+
     def test_size_event_and_line_bounds_fail_without_partial_append(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             oversized = root / "oversized.jsonl"
             oversized.write_bytes(b"x" * 65)
+            os.chmod(oversized, 0o600)
             with self.assertRaisesRegex(store.AuditStoreError, "size limit"):
                 store.load_verified_events(
                     oversized,
