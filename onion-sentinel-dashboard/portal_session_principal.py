@@ -14,6 +14,19 @@ SESSION_SCHEMA = "onion-sentinel-human-session-v1"
 TOKEN_MINIMUM_LENGTH = 32
 PRINCIPAL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+SESSION_RECORD_FIELDS = frozenset({
+    "schema",
+    "principal_kind",
+    "principal_id",
+    "role",
+    "issued_at",
+    "last_activity_at",
+    "absolute_expires_at",
+    "idle_expires_at",
+    "policy_generation",
+    "client_fingerprint",
+    "csrf_digest",
+})
 
 
 class SessionPolicyError(ValueError):
@@ -106,6 +119,13 @@ def _invalid(reason: str) -> SessionDecision:
     return SessionDecision(False, reason)
 
 
+def _record_integer(record: dict[object, object], field: str) -> int | None:
+    value = record.get(field)
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return value
+
+
 def _session_identity(
     record: dict[object, object],
 ) -> tuple[str, str] | SessionDecision:
@@ -123,16 +143,68 @@ def _session_identity(
     return principal_id, str(role)
 
 
+def _record_timing(
+    record: dict[object, object],
+) -> tuple[int, int, int, int, int] | None:
+    values = tuple(
+        _record_integer(record, field)
+        for field in (
+            "issued_at",
+            "last_activity_at",
+            "absolute_expires_at",
+            "idle_expires_at",
+            "policy_generation",
+        )
+    )
+    if any(value is None for value in values):
+        return None
+    issued_at, last_activity, absolute_expiry, idle_expiry, generation = values
+    assert all(value is not None for value in values)
+    if (
+        issued_at <= 0
+        or generation < 0
+        or not issued_at <= last_activity < idle_expiry <= absolute_expiry
+    ):
+        return None
+    return issued_at, last_activity, absolute_expiry, idle_expiry, generation
+
+
+def _record_client_fingerprint_valid(record: dict[object, object]) -> bool:
+    value = record.get("client_fingerprint")
+    return isinstance(value, str) and 1 <= len(value) <= 128
+
+
+def _record_validation_failure(record: object) -> SessionDecision | None:
+    if (
+        not isinstance(record, dict)
+        or record.get("schema") != SESSION_SCHEMA
+        or set(record) != SESSION_RECORD_FIELDS
+    ):
+        return _invalid("malformed_record")
+    identity = _session_identity(record)
+    if isinstance(identity, SessionDecision):
+        return identity
+    if _record_timing(record) is None:
+        return _invalid("malformed_record")
+    if not _record_client_fingerprint_valid(record):
+        return _invalid("malformed_record")
+    return None
+
+
+def is_valid_session_record(record: object) -> bool:
+    """Admit only the exact secret-free persisted session shape."""
+    return _record_validation_failure(record) is None
+
+
 def _session_timing_failure(
     record: dict[object, object],
     now_timestamp: int,
     expected_policy_generation: int,
 ) -> SessionDecision | None:
-    try:
-        generation = int(record["policy_generation"])
-        absolute_expiry = int(record["absolute_expires_at"])
-        idle_expiry = int(record["idle_expires_at"])
-    except (KeyError, TypeError, ValueError):
+    generation = _record_integer(record, "policy_generation")
+    absolute_expiry = _record_integer(record, "absolute_expires_at")
+    idle_expiry = _record_integer(record, "idle_expires_at")
+    if generation is None or absolute_expiry is None or idle_expiry is None:
         return _invalid("malformed_record")
     if generation != expected_policy_generation:
         return _invalid("policy_generation_mismatch")
@@ -150,8 +222,10 @@ def session_decision(
     expected_policy_generation: int,
 ) -> SessionDecision:
     """Admit one current versioned human-session record, or fail closed."""
-    if not isinstance(record, dict) or record.get("schema") != SESSION_SCHEMA:
-        return _invalid("malformed_record")
+    validation_failure = _record_validation_failure(record)
+    if validation_failure is not None:
+        return validation_failure
+    assert isinstance(record, dict)
     identity = _session_identity(record)
     if isinstance(identity, SessionDecision):
         return identity
@@ -181,12 +255,17 @@ def touch_session_record(
     now_timestamp: int,
     idle_ttl_seconds: int,
 ) -> dict[str, object]:
+    if not is_valid_session_record(record):
+        raise SessionPolicyError("session record has an invalid shape")
     now = _positive_integer(now_timestamp, "now_timestamp")
     idle_ttl = _positive_integer(idle_ttl_seconds, "idle_ttl_seconds")
     try:
         absolute_expiry = int(record["absolute_expires_at"])
     except (KeyError, TypeError, ValueError) as exc:
         raise SessionPolicyError("session record has invalid absolute expiry") from exc
+    issued_at = int(record["issued_at"])
+    if now < issued_at:
+        raise SessionPolicyError("session cannot be touched before issuance")
     if now >= absolute_expiry:
         raise SessionPolicyError("expired session cannot be touched")
     return {
@@ -198,12 +277,14 @@ def touch_session_record(
 
 __all__ = (
     "HumanPrincipal",
+    "SESSION_RECORD_FIELDS",
     "SESSION_SCHEMA",
     "SessionBundle",
     "SessionDecision",
     "SessionPolicyError",
     "create_session_bundle",
     "csrf_authorized",
+    "is_valid_session_record",
     "session_decision",
     "touch_session_record",
 )
