@@ -2,6 +2,21 @@
 
 Cross-node checks and operator workflows live here.
 
+## Database Governance Gate
+
+```bash
+python3 operations/validate-database-governance.py
+```
+
+The gate validates the complete secret-free database inventory in
+`quality/database-governance.json`. Each entry must name its owner, engine,
+schema-version and migration contract, backup/retention and recovery objectives,
+integrity and consistency checks, growth/maintenance controls, restore proof,
+provenance protections, and existing source anchors. The output separately
+counts declared implementation gaps; a valid catalog proves coverage and honest
+gap accounting, not that ARR-39 acceptance is complete. See
+`../docs/database-governance.md` for sequencing and operator boundaries.
+
 ## Credential Governance Gate
 
 ```bash

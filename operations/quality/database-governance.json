@@ -1,0 +1,381 @@
+{
+  "schema": "onion-sentinel-database-governance-catalog-v1",
+  "entries": [
+    {
+      "id": "mac.alert-store-sqlite",
+      "engine": "sqlite",
+      "owner": "Mac Studio alert-store runtime owner",
+      "purpose": "Authoritative operational alert, grouping, analyst-state, job, notification, enrichment, incident, PCAP, and analysis state.",
+      "data_classes": [
+        "normalized-alert-evidence",
+        "analyst-decisions",
+        "durable-job-state",
+        "derived-investigation-artifacts"
+      ],
+      "schema_version_contract": "The startup schema module set is source-versioned, but the aggregate database does not yet persist one exact schema version.",
+      "schema_version_state": "legacy-unversioned",
+      "migration_strategy": "Additive startup migrations execute before HTTP admission; destructive changes require a separately reviewed export, rollback, and recovery plan.",
+      "migration_atomicity_state": "not-transactional",
+      "rollback_strategy": "Stop all writers, preserve the current database and sidecars, restore a verified prior snapshot, then rebuild derived group summaries before admission.",
+      "backup_schedule": "Verified online SQLite backup every hour plus one complete runtime recovery bundle daily at 02:30 local time.",
+      "backup_artifacts": [
+        "alert_store_backups/alerts.sqlite3.<timestamp>.backup",
+        "recovery_backups/<timestamp>/alerts.sqlite3"
+      ],
+      "backup_encryption_state": "owner-only-unencrypted",
+      "backup_secret_policy": "Database backups contain evidence and analyst state but no service credentials; artifacts and directories are owner-only and excluded from source control.",
+      "retention": "Ten hourly SQLite backups and seven daily recovery bundles by default; failed recovery candidates are retained for operator disposition.",
+      "rpo_minutes": 60,
+      "rto_minutes": 120,
+      "integrity_checks": [
+        "PRAGMA quick_check on live and backup copies",
+        "PRAGMA foreign_key_check on daily snapshots and logical restores",
+        "required-table and manifest row-count validation"
+      ],
+      "partial_write_controls": [
+        "serialized write gate",
+        "BEGIN IMMEDIATE multi-statement transactions",
+        "atomic durable-job and alert commit workflows"
+      ],
+      "duplicate_controls": [
+        "unique job type and dedupe key",
+        "alert and group idempotency constraints",
+        "queue consistency and shadow reconciliation checks"
+      ],
+      "orphan_controls": [
+        "foreign-key checks",
+        "alert-group summary orphan and missing-summary checks",
+        "incident reanalysis relationship constraints"
+      ],
+      "growth_monitoring": [
+        "readiness database byte measurement",
+        "pipeline disk-growth projection",
+        "backup-age and filesystem-capacity SLOs"
+      ],
+      "maintenance": [
+        "hourly verified backup and summary consistency pass",
+        "bounded cache and pipeline retention",
+        "operator-controlled recovery candidate promotion"
+      ],
+      "restore_validation": [
+        "manifest SHA-256 verification",
+        "isolated copy quick and foreign-key checks",
+        "logical in-memory restore and row-count comparison",
+        "transient WAL and SHM sidecar refusal"
+      ],
+      "provenance_controls": [
+        "raw normalized alert payloads remain bound to stable alert and group identifiers",
+        "analysis and incident records retain source identifiers and generated timestamps",
+        "restore manifests bind snapshot hashes and authoritative row counts"
+      ],
+      "source_anchors": [
+        "n8n/alert_store/services/sqlite_runtime.js",
+        "n8n/alert_store/services/alert_store_schema_foundation.js",
+        "n8n/bin/maintain-alert-store-sqlite.zsh",
+        "n8n/bin/backup-onion-sentinel-runtime.py",
+        "n8n/bin/run-recovery-restore-drill.py"
+      ]
+    },
+    {
+      "id": "mac.investigation-harness-sqlite",
+      "engine": "sqlite",
+      "owner": "Mac Studio investigation-harness runtime owner",
+      "purpose": "Authoritative bounded investigation runs, event hash chains, evidence references, hypotheses, decisions, model/tool calls, and reservations.",
+      "data_classes": [
+        "investigation-run-state",
+        "evidence-provenance-references",
+        "model-and-tool-ledger",
+        "budget-reservations"
+      ],
+      "schema_version_contract": "harness_metadata persists schema_version 5 and startup rejects databases created by a newer runtime.",
+      "schema_version_state": "persisted",
+      "migration_strategy": "Additive schema settlement runs inside one SQLite connection transaction after probing the existing version; newer schemas fail closed.",
+      "migration_atomicity_state": "transactional",
+      "rollback_strategy": "Restore a verified owner-only snapshot only while the harness is stopped; never restore active browser sessions or mix database and ledger generations.",
+      "backup_schedule": "Included in the daily 02:30 runtime recovery bundle when present; maintenance requires a fresh verified backup before retention deletes terminal runs.",
+      "backup_artifacts": [
+        "recovery_backups/<timestamp>/investigation-harness.sqlite3",
+        "harness-maintenance backup referenced by the maintenance receipt"
+      ],
+      "backup_encryption_state": "owner-only-unencrypted",
+      "backup_secret_policy": "The database stores bounded sanitized trace metadata and evidence references, not provider credentials or raw secret material.",
+      "retention": "Daily bundles retain seven generations by default; hourly harness retention removes only bounded terminal runs after a verified backup.",
+      "rpo_minutes": 1440,
+      "rto_minutes": 240,
+      "integrity_checks": [
+        "PRAGMA quick_check",
+        "PRAGMA foreign_key_check",
+        "schema-version range validation",
+        "terminal event and ledger hash-chain verification"
+      ],
+      "partial_write_controls": [
+        "FULL synchronous WAL writes",
+        "transactional event and related-record commits",
+        "idempotency keys and fenced run reservations"
+      ],
+      "duplicate_controls": [
+        "event idempotency constraints",
+        "unique reservation identity",
+        "terminal-run reconciliation"
+      ],
+      "orphan_controls": [
+        "foreign-key checks",
+        "terminal ledger manifest verification",
+        "run-scoped trace integrity verification"
+      ],
+      "growth_monitoring": [
+        "allocated and live page bytes in operational SLOs",
+        "active and terminal run counts",
+        "bounded two-GiB live-page policy"
+      ],
+      "maintenance": [
+        "hourly terminal-run retention",
+        "incremental vacuum and optimize",
+        "safe WAL truncate only after complete checkpoint"
+      ],
+      "restore_validation": [
+        "manifest hash and run-count comparison",
+        "isolated quick and foreign-key checks",
+        "required-table and schema-version admission",
+        "ledger integrity validation"
+      ],
+      "provenance_controls": [
+        "hash-chained events retain stable evidence references",
+        "terminal manifests bind model, tool, hypothesis, decision, and event ledgers",
+        "restore validates run counts and schema before use"
+      ],
+      "source_anchors": [
+        "n8n/bin/harness_store_schema.py",
+        "n8n/bin/harness_store_foundation.py",
+        "n8n/bin/harness_maintenance_integrity.py",
+        "n8n/bin/harness_maintenance_retention.py",
+        "n8n/bin/run-recovery-restore-drill.py"
+      ]
+    },
+    {
+      "id": "mac.n8n-postgresql",
+      "engine": "postgresql",
+      "owner": "Mac Studio n8n workflow database owner",
+      "purpose": "Authoritative n8n workflow definitions, credentials encrypted by n8n, execution metadata, projects, and runtime configuration state.",
+      "data_classes": [
+        "workflow-definitions",
+        "encrypted-n8n-credentials",
+        "execution-metadata",
+        "n8n-project-state"
+      ],
+      "schema_version_contract": "Schema versions and migrations are owned by the pinned n8n release and recorded in n8n migration tables.",
+      "schema_version_state": "upstream-managed",
+      "migration_strategy": "Run only the pinned n8n image's supported forward migrations after a verified export and database dump; application code does not issue ad hoc n8n DDL.",
+      "migration_atomicity_state": "upstream-managed",
+      "rollback_strategy": "Restore the pre-upgrade custom-format dump and matching n8n encryption/configuration state, then run the exact prior pinned image.",
+      "backup_schedule": "Custom-format PostgreSQL dump in the daily 02:30 runtime recovery bundle and before every n8n version migration.",
+      "backup_artifacts": [
+        "recovery_backups/<timestamp>/n8n-postgres.dump",
+        "recovery_backups/<timestamp>/runtime-secrets.tar.gz"
+      ],
+      "backup_encryption_state": "owner-only-unencrypted",
+      "backup_secret_policy": "Database and encryption configuration are separated into manifest-bound owner-only artifacts; neither artifact is admitted to source control.",
+      "retention": "Seven complete daily recovery bundles by default, with a separate pre-migration rollback generation retained through acceptance.",
+      "rpo_minutes": 1440,
+      "rto_minutes": 240,
+      "integrity_checks": [
+        "pg_dump completion",
+        "pg_restore list validation",
+        "isolated restore with public-table and workflow row checks"
+      ],
+      "partial_write_controls": [
+        "PostgreSQL transaction semantics managed by n8n",
+        "graceful worker drain before upgrade or restore",
+        "matching encryption configuration required for recovery"
+      ],
+      "duplicate_controls": [
+        "n8n upstream uniqueness constraints",
+        "post-restore workflow count validation",
+        "exact pinned-image migration ownership"
+      ],
+      "orphan_controls": [
+        "n8n upstream relational constraints",
+        "isolated schema admission",
+        "workflow table presence validation"
+      ],
+      "growth_monitoring": [
+        "PostgreSQL volume disk-capacity SLO",
+        "execution retention policy",
+        "daily backup age"
+      ],
+      "maintenance": [
+        "n8n execution-history retention",
+        "PostgreSQL container health",
+        "operator-reviewed pinned-image upgrades"
+      ],
+      "restore_validation": [
+        "manifest SHA-256 verification",
+        "network-disabled disposable PostgreSQL restore",
+        "public schema table and workflow row checks",
+        "matching runtime configuration archive validation"
+      ],
+      "provenance_controls": [
+        "workflow and execution identifiers remain inside the restored relational schema",
+        "bundle manifest binds dump and configuration generations",
+        "restores require the matching pinned n8n image"
+      ],
+      "source_anchors": [
+        "n8n/docker-compose.yml",
+        "n8n/bin/backup-onion-sentinel-runtime.py",
+        "n8n/bin/run-recovery-restore-drill.py",
+        "docs/disaster-recovery-runbook.md"
+      ]
+    },
+    {
+      "id": "mac.alert-store-postgresql",
+      "engine": "postgresql",
+      "owner": "Mac Studio alert-store PostgreSQL owner",
+      "purpose": "Optional durable-job shadow plus authoritative asset, DHCP, Software Inventory, and AC Hunter normalized stores.",
+      "data_classes": [
+        "durable-job-shadow",
+        "asset-and-dhcp-inventory",
+        "software-evidence-inventory",
+        "ac-hunter-normalized-cache"
+      ],
+      "schema_version_contract": "Each onion_sentinel_queue, onion_sentinel_assets, onion_sentinel_software, and onion_sentinel_ac_hunter component persists and validates schema version 1.",
+      "schema_version_state": "persisted",
+      "migration_strategy": "Versioned SQL schemas use transactional BEGIN and COMMIT blocks; runtime stores reject unsupported versions and production cutovers require reconciliation.",
+      "migration_atomicity_state": "transactional",
+      "rollback_strategy": "Disable PostgreSQL-backed features, restore the verified prior custom-format dump into an isolated container, reconcile against SQLite authority where applicable, then re-enable.",
+      "backup_schedule": "Optional custom-format PostgreSQL dump in the daily 02:30 recovery bundle whenever any alert-store PostgreSQL feature is enabled.",
+      "backup_artifacts": [
+        "recovery_backups/<timestamp>/alert-store-postgres.dump"
+      ],
+      "backup_encryption_state": "owner-only-unencrypted",
+      "backup_secret_policy": "The dump contains normalized application state but no database password; the credential remains only in the separately governed runtime environment.",
+      "retention": "Seven daily recovery bundles by default; software and AC Hunter schemas additionally retain bounded active/history snapshots.",
+      "rpo_minutes": 1440,
+      "rto_minutes": 240,
+      "integrity_checks": [
+        "pg_restore list validation",
+        "persisted component schema-version checks",
+        "SQLite shadow count and digest reconciliation",
+        "isolated durable-job schema and row admission"
+      ],
+      "partial_write_controls": [
+        "transactional schema files",
+        "transactional snapshot promotion",
+        "source-revision fencing for durable-job shadow projection"
+      ],
+      "duplicate_controls": [
+        "unique durable job type and dedupe key",
+        "stable asset identifier constraints",
+        "snapshot and evidence digest uniqueness"
+      ],
+      "orphan_controls": [
+        "relational constraints and schema checks",
+        "snapshot promotion row-count validation",
+        "SQLite to PostgreSQL reconciliation"
+      ],
+      "growth_monitoring": [
+        "PostgreSQL backup age and disk-capacity SLO",
+        "bounded snapshot retention",
+        "shadow backlog and reconciliation metrics"
+      ],
+      "maintenance": [
+        "bounded retired-snapshot deletion",
+        "AC Hunter time retention",
+        "PostgreSQL health and reconciliation monitoring"
+      ],
+      "restore_validation": [
+        "manifest SHA-256 verification",
+        "network-disabled disposable PostgreSQL restore",
+        "component schema-version presence",
+        "durable-job table and row-count validation"
+      ],
+      "provenance_controls": [
+        "software records retain evidence, source, asset, and observation identifiers",
+        "asset changes retain audit events",
+        "shadow jobs retain SQLite identity and source revision",
+        "AC Hunter snapshots retain authoritative dataset digests"
+      ],
+      "source_anchors": [
+        "n8n/postgres/alert-store-queue-schema.sql",
+        "n8n/postgres/asset-inventory-schema.sql",
+        "n8n/postgres/software-inventory-schema.sql",
+        "n8n/postgres/ac-hunter-schema.sql",
+        "n8n/bin/run-recovery-restore-drill.py"
+      ]
+    },
+    {
+      "id": "relay.alert-delivery-sqlite",
+      "engine": "sqlite",
+      "owner": "Raspberry Pi Relay runtime owner",
+      "purpose": "Relay-side Security Onion alert deduplication and durable delivery outbox, including retry and dead-letter state.",
+      "data_classes": [
+        "security-onion-alert-identifiers",
+        "pending-delivery-payloads",
+        "delivery-attempt-metadata",
+        "dead-letter-state"
+      ],
+      "schema_version_contract": "The installed Relay source defines the seen-alert and delivery-outbox schema, but the database does not yet persist one schema version.",
+      "schema_version_state": "legacy-unversioned",
+      "migration_strategy": "Additive CREATE TABLE and CREATE INDEX startup statements preserve existing rows; incompatible changes require a stopped-Relay copy migration and verified rollback archive.",
+      "migration_atomicity_state": "not-transactional",
+      "rollback_strategy": "Stop Relay timers, restore the encrypted runtime archive into an isolated root, verify manifest and SQLite integrity, then restore the prior source and state together.",
+      "backup_schedule": "Encrypted operator-controlled backup before repair, OS upgrade, storage replacement, or application update, with an isolated restore drill after material changes and at least quarterly.",
+      "backup_artifacts": [
+        "encrypted Relay runtime archive containing opt/so-alert-relay/state/seen.sqlite3",
+        "content-free archive manifest with SHA-256 digests"
+      ],
+      "backup_encryption_state": "encrypted",
+      "backup_secret_policy": "The encrypted runtime archive contains state and separately protected keys; its content-free manifest never records database rows or credential material.",
+      "retention": "Delivered outbox rows retain 30 days by default; backup generations follow the operator-controlled encrypted-backup retention policy.",
+      "rpo_minutes": 1440,
+      "rto_minutes": 240,
+      "integrity_checks": [
+        "PRAGMA quick_check on every isolated restored state database",
+        "content-free manifest hash verification",
+        "local-only Relay readiness after restore"
+      ],
+      "partial_write_controls": [
+        "SQLite commits before delivery attempts",
+        "delivery claim state",
+        "processing rows requeued after crashes"
+      ],
+      "duplicate_controls": [
+        "seen_alerts primary key",
+        "alert delivery outbox primary key",
+        "insert-or-ignore enqueue idempotency"
+      ],
+      "orphan_controls": [
+        "invalid stored payloads move to dead letter",
+        "outbox status counts in Relay health",
+        "isolated restored-database quick check"
+      ],
+      "growth_monitoring": [
+        "Relay root and spool capacity thresholds",
+        "outbox pending and dead-letter health counts",
+        "delivered-row retention"
+      ],
+      "maintenance": [
+        "delivered outbox pruning",
+        "crash requeue",
+        "operator restore drill after material change and quarterly"
+      ],
+      "restore_validation": [
+        "encrypted archive extraction into an isolated root",
+        "regular-file and no-symlink admission",
+        "manifest SHA-256 verification",
+        "SQLite quick check before Relay timers are enabled"
+      ],
+      "provenance_controls": [
+        "Security Onion alert identifiers remain outbox idempotency keys",
+        "delivery payloads stay bound to their alert identifiers",
+        "manifest hashes bind restored state without exposing its rows"
+      ],
+      "source_anchors": [
+        "relay/app/relay_core.py",
+        "relay/app/alert_outbox.py",
+        "relay/config/config.example.json",
+        "relay/README.md",
+        "docs/disaster-recovery-runbook.md"
+      ]
+    }
+  ]
+}

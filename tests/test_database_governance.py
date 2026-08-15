@@ -85,6 +85,24 @@ class DatabaseGovernanceTests(unittest.TestCase):
         )
         self.assertIn("source_anchors are invalid", " ".join(result["errors"]))
 
+    def test_catalog_rejects_source_anchors_through_symlinks(self) -> None:
+        module = load_validator()
+        catalog = module.load_catalog(CATALOG)
+        entry = json.loads(json.dumps(catalog["entries"][0]))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real = root / "real"
+            real.mkdir()
+            (real / "owner.py").write_text("# owner\n", encoding="utf-8")
+            (root / "linked").symlink_to(real, target_is_directory=True)
+            entry["source_anchors"] = ["linked/owner.py"]
+            result = module.validate_catalog(
+                {"schema": catalog["schema"], "entries": [entry]},
+                root,
+                required_ids={entry["id"]},
+            )
+        self.assertIn("source_anchors are invalid", " ".join(result["errors"]))
+
     def test_validator_cli_is_a_documented_release_gate(self) -> None:
         operations = (ROOT / "operations" / "README.md").read_text(encoding="utf-8")
         deployment = (ROOT / "docs" / "product-deployment-requirements.md").read_text(

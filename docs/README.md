@@ -11,6 +11,8 @@ Important documents:
 - `disaster-recovery-runbook.md`: end-to-end restore.
 - `security-onion-relay-architecture.md`: full system architecture.
 - `soc-alert-storage-ui-scaling-architecture.md`: SQLite-backed dashboard/API design.
+- `database-governance.md`: complete database ownership, recovery objectives,
+  machine-validated controls, and declared ARR-39 gaps.
 - `security-onion-alert-filtering-guide.md`: tuning, scoring, filtering, and suppression.
 - `ai-analysis-policy.md`: AI analysis policy and model-routing behavior.
 - `llm-harness-and-investigation-runtime-roadmap.md`: security-gated roadmap
