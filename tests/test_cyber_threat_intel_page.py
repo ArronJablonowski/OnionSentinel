@@ -51,6 +51,22 @@ class CyberThreatIntelPageTests(unittest.TestCase):
         self.assertIn("Templates · not active PIRs", page)
         self.assertIn("Drafting and summarization only", page)
 
+    def test_cti_page_exposes_durable_requirements_intelligence_and_evaluation(self):
+        page = self.builder.cyber_threat_intel_page_section([])
+        for marker in (
+            "Evaluation",
+            'id="cti-requirement-rows"',
+            'id="cti-intelligence-rows"',
+            'data-cti-add="requirement"',
+            'data-cti-add="intelligence"',
+            "Information credibility",
+            "Context only · never fact or detection outcome",
+            "Indicators, actors, campaigns, vulnerabilities, and defensive actions",
+        ):
+            self.assertIn(marker, page)
+        self.assertNotIn("Templates · not active PIRs", page)
+        self.assertNotIn("A production PIR register should add", page)
+
     def test_source_and_technology_lists_have_accessible_crud_controls(self):
         page = self.builder.cyber_threat_intel_page_section([])
         self.assertGreaterEqual(page.count('data-cti-add="source"'), 2)
@@ -73,6 +89,8 @@ class CyberThreatIntelPageTests(unittest.TestCase):
         self.assertIn("response.status === 409", script)
         self.assertIn("response.status === 403", script)
         self.assertIn("/api/admin/session-status", script)
+        self.assertIn("requirements: nextProgram.requirements", script)
+        self.assertIn("intelligence: nextProgram.intelligence", script)
 
     def test_page_styles_preserve_professional_tables_and_mobile_layout(self):
         styles = self.builder.CYBER_THREAT_INTEL_CSS
