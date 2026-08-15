@@ -127,6 +127,25 @@ class PortalHumanSessionStoreTests(unittest.TestCase):
             with self.assertRaises(store.HumanSessionStoreError):
                 store.load_session_record(path, "session-" + "s" * 36)
 
+    def test_validation_rejects_broken_store_and_parent_symlinks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "admin-state"
+            parent.mkdir(mode=0o700)
+            path = parent / ".human_sessions.json"
+            path.symlink_to(parent / "missing-store")
+            with self.assertRaises(store.HumanSessionStoreError):
+                store.validate_session_store(path)
+            with self.assertRaises(store.HumanSessionStoreError):
+                store.load_session_record(path, "session-" + "s" * 36)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "admin-state"
+            parent.symlink_to(Path(tmp) / "missing-parent")
+            with self.assertRaises(store.HumanSessionStoreError):
+                store.validate_session_store(
+                    parent / ".human_sessions.json"
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
