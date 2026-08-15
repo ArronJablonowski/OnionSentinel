@@ -2,6 +2,19 @@
 
 Cross-node checks and operator workflows live here.
 
+## Credential Governance Gate
+
+```bash
+python3 operations/validate-credential-governance.py
+```
+
+The gate verifies the complete secret-free service-identity catalog, unique
+logical bindings, lifecycle policy fields, and repository credential-source
+coverage. An optional owner-only runtime inventory adds missing, duplicate,
+expired, overdue, mismatched, and rotation/rollback-lineage checks without
+reading or emitting credential material. The operating contract is documented
+in `../docs/security/service-identity-lifecycle.md`.
+
 ## Module Quality Gate
 
 ```bash

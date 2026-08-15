@@ -280,6 +280,9 @@ PY
 trap cleanup_alert_store_stage EXIT
 prepare_alert_store_stage
 validate_production_python_sources
+PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 \
+  "$REPO_DIR/operations/validate-credential-governance.py" \
+  --catalog "$REPO_DIR/operations/security/credential-governance.json" >/dev/null
 if [[ "${ONION_SENTINEL_VALIDATE_ONLY:-0}" == "1" ]]; then
   echo "Mac Studio installer preflight validation passed."
   exit 0

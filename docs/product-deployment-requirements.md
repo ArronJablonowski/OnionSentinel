@@ -188,6 +188,7 @@ n8n webhook path, alert-store logs, and the SQLite `notification_log` table.
 Before commit and push, run:
 
 ```bash
+python3 operations/validate-credential-governance.py
 python3 operations/check-module-quality.py
 python3 operations/run-untrusted-telemetry-gate.py
 ./operations/secret-scan.zsh
