@@ -17,6 +17,13 @@ dependency.
 | `portal_runtime_config.py` | Exact thin compatibility facade for the report portal's historical runtime namespace. |
 | `portal_runtime_*_dependencies.py` | Ordered standard, settings, admin/operational, and SOC/incident dependency manifests and legacy aliases. |
 | `portal_runtime_constants.py` | Host paths, credential locations, bounded caches/locks, limits, and service/action policy constants. |
+| `portal_access_policy.py` | Pure Viewer/Analyst/Administrator permission hierarchy and exhaustive classified-write mapping. |
+| `portal_access_enforcement.py` | Pure legacy/observe/admin-enforce/RBAC decision projection. |
+| `portal_access_observer.py` | Metadata-only target-policy observation and actual-response audit projection. |
+| `portal_access_observer_runtime.py` | Owner-only audit-key admission, ledger verification/append, and type-only failure telemetry. |
+| `portal_admin_audit_chain.py` | Canonical keyed administrative event chain and retained-chain verification. |
+| `portal_admin_audit_store.py` | Owner-only bounded, serialized, crash-safe audit-ledger persistence. |
+| `portal_session_principal.py` | Versioned human principal, expiry, policy-generation, and per-session CSRF contract. |
 | `cti_program.py` | Exact compatibility facade for the owner-managed CTI workspace namespace. |
 | `cti_program_contract.py` | CTI schema, limits, defaults, lock, and typed validation/conflict errors. |
 | `cti_program_lifecycle.py` | Durable requirements, intelligence, evidence/entity link, timestamp, expiration, and context-only validation. |

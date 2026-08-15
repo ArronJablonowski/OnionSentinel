@@ -3566,11 +3566,26 @@ projects that key; ledger locking, atomic append, retention, and startup policy
 belong to the later audit-store adapter.
 
 `portal_admin_audit_store.py` owns bounded JSONL admission, regular-file and
-symlink policy, process/thread serialization, pre-append full-chain
-verification, owner-only crash-safe replacement, and directory durability for
-the Administration audit ledger. Signing-key loading, event projection from an
-HTTP decision, retention export, and startup enforcement remain outside this
-storage layer.
+symlink policy, exact owner/0600 file and owner/0700 directory custody,
+process/thread serialization, pre-append full-chain verification, owner-only
+crash-safe replacement, and directory durability for the Administration audit
+ledger. Signing-key loading, event projection from an HTTP decision, retention
+export, and startup enforcement remain outside this storage layer.
+
+`portal_access_observer.py` owns the pure compatibility observation projection:
+it combines one classified route with the target access decision, HMAC-derived
+pseudonymous principal fingerprint, SHA-256 target digest, actual HTTP status,
+and bounded would-allow/would-deny reason. It never receives request bodies,
+cookies, CSRF values, credentials other than opaque signing bytes, or raw audit
+destinations.
+
+`portal_access_observer_runtime.py` owns explicit `legacy`/`observe` startup
+admission, owner/0600 lowercase-hex signing-key loading, retained-ledger
+verification, append orchestration, counters, and type-only failure telemetry.
+It rejects the not-yet-qualified enforcement modes. The dedicated server starts
+observation before body parsing, skips controlled-evaluation service identity
+requests, and finalizes exactly once from the first response status. Audit
+failure is observable but cannot change a legacy-compatible response.
 
 ### Portal catalog runtime
 

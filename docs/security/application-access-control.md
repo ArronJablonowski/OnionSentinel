@@ -105,6 +105,11 @@ role, permission, CSRF decision, or audit outcome.
 ## Phased deployment and recovery
 
 Deployment uses explicit, validated modes; an unknown value is a startup error.
+The source runtime reads `ONION_SENTINEL_ACCESS_MODE`; an absent value is
+`legacy`. The current qualified implementation admits only `legacy` and
+`observe`. Configuring `admin-enforce` or `rbac-enforce` fails startup until the
+corresponding session, UI, denial-response, and recovery gates are implemented
+and separately accepted.
 
 1. `legacy`: current behavior only, used solely as the pre-migration rollback
    point. Policy coverage and audit code may run offline, but no claim of access
@@ -118,6 +123,16 @@ Deployment uses explicit, validated modes; an unknown value is a startup error.
    handling qualify.
 4. `rbac-enforce`: enforce the canonical role mapping for every unsafe browser
    route. No legacy unauthenticated mutation remains.
+
+Observe mode requires the operator-created file
+`$HOME/n8n-local/config/onion-sentinel-admin-audit-signing.key` to be a regular,
+owner-owned `0600` file containing exactly 64 lowercase hexadecimal characters
+and one optional final newline. The decoded 32-byte key is never printed or
+copied by the installer. The verified ledger is
+`$HOME/n8n-local/logs/onion-sentinel-admin-audit.jsonl`; an existing ledger must
+be owner-owned `0600` beneath an owner-owned `0700` directory. The installer
+deploys code only and never creates, replaces, parses, or removes either
+operator-owned object.
 
 Promotion requires owner-only configuration validation, an active
 Administrator session smoke test, negative cross-origin/CSRF/role tests,
