@@ -28,6 +28,7 @@ if str(DASHBOARD_DIR) not in sys.path:
 import report_portal as runtime
 import ac_hunter_review
 import application_logs
+from cti_program_audit import program_audit_metrics
 from http_runtime import BoundedThreadingHTTPServer
 import onion_sentinel_application as _application
 import onion_sentinel_release as _release
@@ -474,28 +475,14 @@ class OnionSentinelHandler(runtime.PortalHandler):
 
     def _cti_program_mutation_audit(self, program: dict[str, object]) -> None:
         """Record CTI governance changes without logging source content."""
-        sources = program.get("sources") if isinstance(program.get("sources"), list) else []
-        technologies = (
-            program.get("technologies")
-            if isinstance(program.get("technologies"), list)
-            else []
-        )
+        freshness = runtime.cti_program.public_response(program).get("freshness", {})
         APPLICATION_LOGGER.log(
             "info",
             "cti.program.updated",
             request_id=getattr(self, "application_request_id", ""),
             remote_address=self.client_address[0],
             revision=int(program.get("revision") or 0),
-            source_count=len(sources),
-            enabled_source_count=sum(
-                1 for source in sources
-                if isinstance(source, dict) and source.get("enabled") is True
-            ),
-            technology_count=len(technologies),
-            enabled_technology_count=sum(
-                1 for technology in technologies
-                if isinstance(technology, dict) and technology.get("enabled") is True
-            ),
+            **program_audit_metrics(program, freshness),
             digest=runtime.cti_program.program_digest(program),
         )
 

@@ -6,6 +6,7 @@ import uuid
 from urllib.parse import urlsplit
 
 from cti_program_contract import *  # noqa: F403
+from cti_program_lifecycle import *  # noqa: F403
 
 
 def _text(value: object, field: str, limit: int, *, required: bool = False) -> str:
@@ -98,6 +99,50 @@ def _secret_reference(value: object, field: str) -> str:
     return normalized
 
 
+def _failure_code(value: object, field: str) -> str:
+    normalized = _text(value, field, 120)
+    if normalized and not IDENTIFIER_RE.fullmatch(normalized):  # noqa: F405
+        raise CTIProgramError(  # noqa: F405
+            f"{field} must be a redacted lowercase identifier."
+        )
+    return normalized
+
+
+def _source_collection_state(
+    value: dict[object, object], prefix: str
+) -> dict[str, str]:
+    status = _enum(
+        value.get("collection_status", "unknown"),
+        f"{prefix}.collection_status",
+        SOURCE_COLLECTION_STATUSES,  # noqa: F405
+    )
+    attempt = _timestamp(value.get("last_attempt_at", ""), f"{prefix}.last_attempt_at")
+    success = _timestamp(value.get("last_success_at", ""), f"{prefix}.last_success_at")
+    failure = _failure_code(value.get("failure_code", ""), f"{prefix}.failure_code")
+    if status in {"degraded", "failed"} and (not attempt or not failure):
+        raise CTIProgramError(  # noqa: F405
+            f"{prefix} {status} collection state requires last_attempt_at and failure_code."
+        )
+    if status == "healthy" and not success:
+        raise CTIProgramError(  # noqa: F405
+            f"{prefix} healthy collection state requires last_success_at."
+        )
+    if status in {"unknown", "healthy"} and failure:
+        raise CTIProgramError(  # noqa: F405
+            f"{prefix}.failure_code requires degraded or failed collection status."
+        )
+    if attempt and success and _parsed_timestamp(success) > _parsed_timestamp(attempt):
+        raise CTIProgramError(  # noqa: F405
+            f"{prefix}.last_success_at cannot follow last_attempt_at."
+        )
+    return {
+        "collection_status": status,
+        "last_attempt_at": attempt,
+        "last_success_at": success,
+        "failure_code": failure,
+    }
+
+
 def _source_values(value: dict[object, object], index: int) -> dict[str, object]:
     prefix = f"sources[{index}]"
     return {
@@ -115,6 +160,7 @@ def _source_values(value: dict[object, object], index: int) -> dict[str, object]
         "requirements": _string_list(value.get("requirements", []), f"{prefix}.requirements"),  # noqa: E501
         "review_date": _date(value.get("review_date", ""), f"{prefix}.review_date"),
         "disposition": _enum(value.get("disposition", ""), f"{prefix}.disposition", SOURCE_DISPOSITIONS),  # noqa: F405,E501
+        **_source_collection_state(value, prefix),
         "notes": _text(value.get("notes", ""), f"{prefix}.notes", 1200),
     }
 
@@ -177,7 +223,16 @@ def _normalize_technology(value: object, index: int) -> dict[str, object]:
 def _program_header(value: object) -> tuple[dict[object, object], int, str]:
     if not isinstance(value, dict):
         raise CTIProgramError("CTI workspace must be a JSON object.")  # noqa: F405
-    allowed = {"schema_version", "revision", "updated_at", "sources", "technologies"}
+    allowed = {
+        "schema_version",
+        "revision",
+        "updated_at",
+        "sources",
+        "technologies",
+        "requirements",
+        "intelligence",
+        "audit_history",
+    }
     unknown = set(value) - allowed
     if unknown:
         raise CTIProgramError(  # noqa: F405
@@ -239,12 +294,24 @@ def normalize_program(value: object, *, stored: bool = False) -> dict[str, objec
     sources, technologies = _program_collections(value)
     _require_unique_sources(sources)
     _require_unique_technologies(technologies)
+    requirements = normalize_requirements(value.get("requirements", []))
+    intelligence = normalize_intelligence(value.get("intelligence", []))
+    validate_intelligence_links(
+        intelligence,
+        source_ids={str(source["id"]) for source in sources},
+        requirement_ids={str(requirement["id"]) for requirement in requirements},
+        technology_ids={str(technology["id"]) for technology in technologies},
+    )
+    audit_history = normalize_audit_history(value.get("audit_history", []))
     return {
         "schema_version": SCHEMA_VERSION,  # noqa: F405
         "revision": revision,
         "updated_at": updated_at if stored else "",
         "sources": sources,
         "technologies": technologies,
+        "requirements": requirements,
+        "intelligence": intelligence,
+        "audit_history": audit_history,
     }
 
 
@@ -256,6 +323,7 @@ for __compat_function__ in (
     _string_list,
     _endpoint,
     _secret_reference,
+    _failure_code,
     _normalize_source,
     _normalize_technology,
     normalize_program,
@@ -273,5 +341,6 @@ __all__ = tuple(
         "_program_collections",
         "_require_unique_sources",
         "_require_unique_technologies",
+        "_source_collection_state",
     }
 )

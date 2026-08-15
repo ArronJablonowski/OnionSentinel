@@ -13,6 +13,7 @@ DASHBOARD_DIR = ROOT / "onion-sentinel-dashboard"
 sys.path.insert(0, str(DASHBOARD_DIR))
 
 import cti_program  # noqa: E402
+import cti_program_lifecycle  # noqa: E402
 
 
 def lifecycle_payload() -> dict[str, object]:
@@ -139,14 +140,43 @@ class CTILifecycleContractTests(unittest.TestCase):
         )
         self.assertEqual(item["entities"][0]["evidence_ids"], ["evidence-kev-entry"])
 
+    def test_new_requirement_and_intelligence_ids_are_generated_once_on_admission(self):
+        payload = lifecycle_payload()
+        payload["requirements"][0]["id"] = ""
+        payload["intelligence"][0]["id"] = ""
+        payload["intelligence"][0]["requirement_ids"] = []
+        normalized = cti_program.normalize_program(payload)
+        self.assertRegex(normalized["requirements"][0]["id"], r"^[a-f0-9]{32}$")
+        self.assertRegex(normalized["intelligence"][0]["id"], r"^[a-f0-9]{32}$")
+
     def test_expired_intelligence_is_projected_as_stale_without_rewriting_evidence(self):
         item = cti_program.normalize_program(lifecycle_payload())["intelligence"][0]
-        status = cti_program.intelligence_freshness(
+        status = cti_program_lifecycle.intelligence_freshness(
             item,
             now=dt.datetime(2026, 8, 14, 12, 0, 1, tzinfo=dt.timezone.utc),
         )
         self.assertEqual(status, "stale")
         self.assertEqual(item["expires_at"], "2026-08-14T12:00:00Z")
+
+    def test_investigation_projection_is_context_only_and_evidence_linked(self):
+        program = cti_program.normalize_program(lifecycle_payload())
+        context = cti_program_lifecycle.project_investigation_context(
+            program,
+            ["intel-kev-2026-001"],
+            now=dt.datetime(2026, 8, 14, 12, 0, 1, tzinfo=dt.timezone.utc),
+        )
+        self.assertEqual(context["authority"], "context-only")
+        self.assertFalse(context["may_assert_fact"])
+        self.assertFalse(context["may_set_detection_outcome"])
+        self.assertTrue(context["requires_independent_evidence"])
+        self.assertEqual(context["items"][0]["freshness"], "stale")
+        self.assertEqual(
+            context["items"][0]["evidence"][0]["id"], "evidence-kev-entry"
+        )
+        with self.assertRaisesRegex(cti_program.CTIProgramError, "Unknown intelligence"):
+            cti_program_lifecycle.project_investigation_context(
+                program, ["missing-intelligence"]
+            )
 
     def test_duplicates_are_rejected_across_requirements_intelligence_and_evidence(self):
         payload = lifecycle_payload()
@@ -195,6 +225,57 @@ class CTILifecycleContractTests(unittest.TestCase):
                 with self.assertRaises(cti_program.CTIProgramError):
                     cti_program.normalize_program(payload)
 
+    def test_temporal_handling_and_evidence_relationships_fail_closed(self):
+        payload = lifecycle_payload()
+        payload["intelligence"][0]["analyzed_at"] = "2026-08-13T09:00:00Z"
+        with self.assertRaisesRegex(cti_program.CTIProgramError, "cannot precede"):
+            cti_program.normalize_program(payload)
+
+        payload = lifecycle_payload()
+        payload["intelligence"][0]["handling"] = "TLP:CLEAR"
+        payload["intelligence"][0]["evidence"][0]["handling"] = "TLP:RED"
+        with self.assertRaisesRegex(cti_program.CTIProgramError, "less restrictive"):
+            cti_program.normalize_program(payload)
+
+        payload = lifecycle_payload()
+        payload["intelligence"][0]["source_ids"] = []
+        with self.assertRaisesRegex(cti_program.CTIProgramError, "not linked by source_ids"):
+            cti_program.normalize_program(payload)
+
+        payload = lifecycle_payload()
+        payload["intelligence"][0]["entities"][0]["evidence_ids"] = []
+        with self.assertRaisesRegex(cti_program.CTIProgramError, "must link admitted evidence"):
+            cti_program.normalize_program(payload)
+
+    def test_source_failure_code_cannot_store_secret_bearing_diagnostics(self):
+        payload = lifecycle_payload()
+        payload["sources"][0]["failure_code"] = "Bearer super-secret-token"
+        with self.assertRaisesRegex(cti_program.CTIProgramError, "redacted lowercase"):
+            cti_program.normalize_program(payload)
+
+    def test_source_collection_failure_and_success_states_are_coherent(self):
+        payload = lifecycle_payload()
+        payload["sources"][0]["failure_code"] = ""
+        with self.assertRaisesRegex(cti_program.CTIProgramError, "requires last_attempt"):
+            cti_program.normalize_program(payload)
+
+        payload = lifecycle_payload()
+        payload["sources"][0]["last_success_at"] = "2026-08-15T12:00:00Z"
+        with self.assertRaisesRegex(cti_program.CTIProgramError, "cannot follow"):
+            cti_program.normalize_program(payload)
+
+        payload = lifecycle_payload()
+        payload["sources"][0].update(
+            {
+                "collection_status": "healthy",
+                "last_attempt_at": "2026-08-14T12:00:00Z",
+                "last_success_at": "",
+                "failure_code": "",
+            }
+        )
+        with self.assertRaisesRegex(cti_program.CTIProgramError, "requires last_success"):
+            cti_program.normalize_program(payload)
+
     def test_revisioned_save_preserves_lifecycle_and_records_metadata_only_edit_audit(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "cti.json"
@@ -215,6 +296,67 @@ class CTILifecycleContractTests(unittest.TestCase):
             serialized = json.dumps(event)
             self.assertNotIn("CVE-2026-0001 added to KEV", serialized)
             self.assertEqual(cti_program.load_program(path), saved)
+
+    def test_legacy_source_only_save_preserves_existing_lifecycle_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cti.json"
+            initial = cti_program.save_program(
+                {"expected_revision": 0, **lifecycle_payload()}, path
+            )
+            saved = cti_program.save_program(
+                {
+                    "expected_revision": 1,
+                    "sources": initial["sources"],
+                    "technologies": initial["technologies"],
+                },
+                path,
+            )
+            self.assertEqual(saved["requirements"], initial["requirements"])
+            self.assertEqual(saved["intelligence"], initial["intelligence"])
+
+    def test_legacy_stored_workspace_is_migrated_in_memory_without_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cti.json"
+            legacy = cti_program.load_program(Path("/path/that/does/not/exist"))
+            for field in ("requirements", "intelligence", "audit_history"):
+                legacy.pop(field)
+            for source in legacy["sources"]:
+                for field in (
+                    "collection_status",
+                    "last_attempt_at",
+                    "last_success_at",
+                    "failure_code",
+                ):
+                    source.pop(field)
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            original = path.read_bytes()
+            loaded = cti_program.load_program(path)
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(loaded["requirements"], [])
+            self.assertEqual(loaded["intelligence"], [])
+            self.assertEqual(loaded["audit_history"], [])
+            self.assertEqual(loaded["sources"][0]["collection_status"], "unknown")
+
+    def test_audit_history_is_bounded_to_latest_one_hundred_revisions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cti.json"
+            payload = lifecycle_payload()
+            saved = cti_program.save_program(
+                {"expected_revision": 0, **payload}, path
+            )
+            for revision in range(1, 105):
+                saved = cti_program.save_program(
+                    {
+                        "expected_revision": revision,
+                        "sources": saved["sources"],
+                        "technologies": saved["technologies"],
+                    },
+                    path,
+                )
+            self.assertEqual(saved["revision"], 105)
+            self.assertEqual(len(saved["audit_history"]), 100)
+            self.assertEqual(saved["audit_history"][0]["revision"], 6)
+            self.assertEqual(saved["audit_history"][-1]["revision"], 105)
 
 
 if __name__ == "__main__":

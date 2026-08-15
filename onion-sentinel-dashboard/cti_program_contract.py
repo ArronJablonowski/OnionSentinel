@@ -11,6 +11,9 @@ SCHEMA_VERSION = 1
 MAX_FILE_BYTES = 256 * 1024
 MAX_SOURCES = 100
 MAX_TECHNOLOGIES = 250
+MAX_REQUIREMENTS = 100
+MAX_INTELLIGENCE = 500
+MAX_AUDIT_HISTORY = 100
 PROGRAM_LOCK = threading.RLock()
 DEFAULT_PROGRAM_FILE = (
     Path.home() / "n8n-local" / "config" / "cyber-threat-intel-workspace.json"
@@ -39,6 +42,7 @@ HANDLING_LEVELS = frozenset(
     {"TLP:CLEAR", "TLP:GREEN", "TLP:AMBER", "TLP:AMBER+STRICT", "TLP:RED"}
 )
 SOURCE_DISPOSITIONS = frozenset({"retain", "reduce", "replace", "remove"})
+SOURCE_COLLECTION_STATUSES = frozenset({"unknown", "healthy", "degraded", "failed"})
 TECHNOLOGY_CATEGORIES = frozenset(
     {
         "security-platform",
@@ -55,9 +59,40 @@ PRIORITIES = frozenset({"critical", "high", "medium", "low"})
 EXPOSURES = frozenset(
     {"internet-facing", "internal", "endpoint", "server", "cloud", "mixed", "unknown"}
 )
+REQUIREMENT_STATUSES = frozenset({"draft", "active", "answered", "paused", "retired"})
+LIFECYCLE_STATES = (
+    "requirements",
+    "collection",
+    "processing",
+    "analysis",
+    "dissemination",
+    "feedback",
+    "evaluation",
+)
+LIFECYCLE_STATE_SET = frozenset(LIFECYCLE_STATES)
+INFORMATION_CREDIBILITY_LEVELS = frozenset({"1", "2", "3", "4", "5", "6"})
+CONFIDENCE_LEVELS = frozenset({"high", "moderate", "low", "unknown"})
+EVIDENCE_KINDS = frozenset(
+    {
+        "source-record",
+        "advisory",
+        "report",
+        "telemetry",
+        "pcap",
+        "analyst-note",
+        "case-artifact",
+        "other",
+    }
+)
+ENTITY_TYPES = frozenset(
+    {"indicator", "actor", "campaign", "vulnerability", "defensive-action"}
+)
+INVESTIGATION_USE = "context-only"
 IDENTIFIER_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
 SECRET_REFERENCE_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,79}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+DIGEST_RE = re.compile(r"^[a-f0-9]{64}$")
+REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{2,499}$")
 
 SOURCE_FIELDS = frozenset(
     {
@@ -75,8 +110,65 @@ SOURCE_FIELDS = frozenset(
         "requirements",
         "review_date",
         "disposition",
+        "collection_status",
+        "last_attempt_at",
+        "last_success_at",
+        "failure_code",
         "notes",
     }
+)
+REQUIREMENT_FIELDS = frozenset(
+    {
+        "id",
+        "active",
+        "title",
+        "decision",
+        "sponsor",
+        "consumers",
+        "priority",
+        "horizon",
+        "cadence",
+        "collection_gaps",
+        "deliverable",
+        "success_criteria",
+        "review_date",
+        "status",
+    }
+)
+INTELLIGENCE_FIELDS = frozenset(
+    {
+        "id",
+        "deduplication_key",
+        "title",
+        "lifecycle_state",
+        "requirement_ids",
+        "source_ids",
+        "affected_technology_ids",
+        "source_reliability",
+        "information_credibility",
+        "confidence",
+        "handling",
+        "collected_at",
+        "analyzed_at",
+        "published_at",
+        "expires_at",
+        "summary",
+        "analytic_judgment",
+        "assumptions",
+        "alternatives",
+        "evidence",
+        "entities",
+        "investigation_use",
+    }
+)
+EVIDENCE_FIELDS = frozenset(
+    {"id", "kind", "reference", "description", "observed_at", "source_id", "handling"}
+)
+ENTITY_FIELDS = frozenset(
+    {"id", "entity_type", "value", "evidence_ids", "affected_technology_ids"}
+)
+AUDIT_FIELDS = frozenset(
+    {"revision", "event", "changed_at", "changes", "before_digest", "after_digest"}
 )
 TECHNOLOGY_FIELDS = frozenset(
     {
@@ -306,12 +398,21 @@ DEFAULT_TECHNOLOGIES = (
 
 
 def _default_program() -> dict[str, object]:
+    sources = copy.deepcopy(list(DEFAULT_SOURCES))
+    for source in sources:
+        source.setdefault("collection_status", "unknown")
+        source.setdefault("last_attempt_at", "")
+        source.setdefault("last_success_at", "")
+        source.setdefault("failure_code", "")
     return {
         "schema_version": SCHEMA_VERSION,
         "revision": 0,
         "updated_at": "",
-        "sources": copy.deepcopy(list(DEFAULT_SOURCES)),
+        "sources": sources,
         "technologies": copy.deepcopy(list(DEFAULT_TECHNOLOGIES)),
+        "requirements": [],
+        "intelligence": [],
+        "audit_history": [],
     }
 
 
