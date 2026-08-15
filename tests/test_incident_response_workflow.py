@@ -261,6 +261,7 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
             page,
         )
         self.assertIn("@keyframes ai-status-analyzing-pulse", page)
+        self.assertIn("@media(prefers-reduced-motion:reduce)", page)
         self.assertGreaterEqual(page.count("ir-agent-${esc(agentState)}"), 2)
         self.assertIn("item.agent_display_label||label(item.agent_status)", page)
         self.assertIn('colspan="9"', page)

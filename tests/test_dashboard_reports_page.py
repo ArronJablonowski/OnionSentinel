@@ -89,6 +89,7 @@ class DashboardReportsPageTests(unittest.TestCase):
         self.assertIn("No active job", rendered)
         self.assertIn("No model running", rendered)
         self.assertIn('class="llm-status-badge unknown"', rendered)
+        self.assertIn('role="status" aria-live="polite" aria-atomic="true"', rendered)
 
     def test_module_is_bounded_and_has_no_runtime_io_imports(self) -> None:
         source = MODULE_PATH.read_text(encoding="utf-8")

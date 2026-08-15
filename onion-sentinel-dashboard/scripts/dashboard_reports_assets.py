@@ -18,6 +18,8 @@ REPORTS_PAGE_ASSETS = '''
 .llm-status-badge.success{border-color:rgba(34,197,94,.34);color:#37e071;background:rgba(34,197,94,.08)}
 .llm-status-badge.failed{border-color:rgba(251,113,133,.38);color:#fb7185;background:rgba(251,113,133,.08)}
 .llm-status-badge.running{border-color:rgba(34,211,238,.42);color:#8ff4ff;background:rgba(34,211,238,.09);animation:analysisPulse 1.3s ease-in-out infinite}
+@keyframes analysisPulse{0%,100%{filter:brightness(.78);box-shadow:0 0 4px rgba(34,211,238,.10)}50%{filter:brightness(1.18);box-shadow:0 0 14px rgba(143,244,255,.42),0 0 28px rgba(34,211,238,.20)}}
+@media(prefers-reduced-motion:reduce){.llm-status-badge.running{animation:none}}
 .llm-log-toolbar{display:flex;justify-content:space-between;gap:16px;align-items:end;margin-bottom:14px}
 .llm-log-total-runs{display:inline-flex;align-items:baseline;gap:6px;width:max-content;margin-top:8px;border:1px solid rgba(34,211,238,.22);border-radius:999px;padding:5px 10px;color:#9fb0c4;background:rgba(34,211,238,.055);font-size:12px;font-weight:850}
 .llm-log-total-runs b{color:#8ff4ff;font-size:16px;line-height:1}

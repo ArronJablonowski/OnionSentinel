@@ -94,7 +94,7 @@ def render_reports_current_panel(current: ReportsCurrentRunViewModel) -> str:
           <p id="llm-current-route">{html.escape(current.route)}</p>
         </div>
         <div class="llm-current-meta">
-          <span id="llm-current-status" class="llm-status-badge {status_key}">{html.escape(current.status_label)}</span>
+          <span id="llm-current-status" class="llm-status-badge {status_key}" role="status" aria-live="polite" aria-atomic="true">{html.escape(current.status_label)}</span>
           <span><b>Agent</b><em id="llm-current-agent">{html.escape(current.agent)}</em></span>
           <span><b>Job</b><em id="llm-current-job">{html.escape(current.job)}</em></span>
           <span><b>Model</b><em id="llm-current-model">{html.escape(current.model)}</em></span>

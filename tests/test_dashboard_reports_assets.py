@@ -42,6 +42,7 @@ class DashboardReportsAssetsTests(unittest.TestCase):
             "executedModel(current, true)", "agentLabel(log)", "jobLabel(log)",
             "const rows = [...activeRuns, ...historical]",
             "register('llm-analysis-tables'", "intervalMs: 4000",
+            "@keyframes analysisPulse", "@media(prefers-reduced-motion:reduce)",
         ):
             self.assertIn(token, script)
 
