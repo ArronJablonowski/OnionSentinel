@@ -511,6 +511,53 @@ async function toggleFilter(page, inputId, checked) {
   await expect(input).toBeChecked({ checked });
 }
 
+test('session CSRF bootstrap scopes credentials to same-origin unsafe fetches', async ({ page }) => {
+  const token = 'csrf-browser-contract-token_1234567890';
+  await page.context().addCookies([{
+    name: 'onion_sentinel_csrf', value: token, url: fixtureBaseUrl, sameSite: 'Strict',
+  }]);
+  const requests = [];
+  page.on('request', request => {
+    const url = new URL(request.url());
+    if (url.pathname.startsWith('/api/csrf-contract/')) {
+      requests.push({
+        path: url.pathname,
+        method: request.method(),
+        token: request.headers()['x-onion-sentinel-csrf'] || '',
+      });
+    }
+  });
+  await page.route('https://csrf-cross-origin.invalid/**', async route => {
+    await route.fulfill({
+      status: 200,
+      headers: { 'Access-Control-Allow-Origin': fixtureBaseUrl },
+      contentType: 'application/json',
+      body: '{"ok":true}',
+    });
+  });
+  await installSyntheticApi(page);
+  await openSyntheticAlert(page);
+
+  await page.evaluate(async () => {
+    await fetch('/api/csrf-contract/same-origin-post', { method: 'POST' });
+    await fetch('/api/csrf-contract/same-origin-get');
+    await fetch(new Request('/api/csrf-contract/request-object', {
+      method: 'DELETE',
+      headers: { 'X-Onion-Sentinel-CSRF': 'caller-value-must-not-win' },
+    }));
+    await fetch('https://csrf-cross-origin.invalid/api/csrf-contract/cross-origin-post', {
+      method: 'POST',
+    });
+  });
+
+  expect(requests).toEqual([
+    { path: '/api/csrf-contract/same-origin-post', method: 'POST', token },
+    { path: '/api/csrf-contract/same-origin-get', method: 'GET', token: '' },
+    { path: '/api/csrf-contract/request-object', method: 'DELETE', token },
+    { path: '/api/csrf-contract/cross-origin-post', method: 'POST', token: '' },
+  ]);
+});
+
 test('synthetic fixture safely validates every destructive alert action', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const state = await installSyntheticApi(page);
