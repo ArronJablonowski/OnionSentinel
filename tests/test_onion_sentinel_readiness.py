@@ -46,7 +46,7 @@ class ReadinessTests(unittest.TestCase):
         (stack / "bin" / "validate-credential-governance.py").write_bytes(
             VALIDATOR.read_bytes()
         )
-        (stack / "config" / "credential-governance.json").write_bytes(
+        (stack / "bin" / "credential-governance.json").write_bytes(
             CREDENTIAL_CATALOG.read_bytes()
         )
         catalog = json.loads(CREDENTIAL_CATALOG.read_text(encoding="utf-8"))

@@ -159,7 +159,7 @@ class CredentialStartupGovernanceTests(unittest.TestCase):
             (stack / "bin" / "validate-credential-governance.py").write_bytes(
                 VALIDATOR.read_bytes()
             )
-            (stack / "config" / "credential-governance.json").write_bytes(
+            (stack / "bin" / "credential-governance.json").write_bytes(
                 CATALOG.read_bytes()
             )
             private = stack / "config" / "service-identity-inventory.json"
@@ -191,7 +191,7 @@ class CredentialStartupGovernanceTests(unittest.TestCase):
         )
         self.assertIn(
             'cp "$REPO_DIR/operations/security/credential-governance.json" '
-            '"$STACK_DIR/config/credential-governance.json"',
+            '"$STACK_DIR/bin/credential-governance.json"',
             installer,
         )
         gate = '"$STACK_DIR/bin/validate-credential-governance.py"'
@@ -214,7 +214,7 @@ class CredentialStartupGovernanceTests(unittest.TestCase):
             (stack / "bin" / "validate-credential-governance.py").write_bytes(
                 VALIDATOR.read_bytes()
             )
-            (stack / "config" / "credential-governance.json").write_bytes(
+            (stack / "bin" / "credential-governance.json").write_bytes(
                 CATALOG.read_bytes()
             )
             environment = {**os.environ, "STACK_DIR": str(stack)}

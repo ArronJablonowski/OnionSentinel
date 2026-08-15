@@ -235,7 +235,7 @@ def check_credentials(stack: Path) -> dict[str, Any]:
         str(stack / "bin" / "validate-credential-governance.py"),
         "--deployed-runtime",
         "--catalog",
-        str(stack / "config" / "credential-governance.json"),
+        str(stack / "bin" / "credential-governance.json"),
         "--inventory",
         str(stack / "config" / "service-identity-inventory.json"),
     ]

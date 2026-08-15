@@ -56,7 +56,7 @@ if ! /usr/bin/env -i \
   /usr/bin/python3 \
   "$STACK_DIR/bin/validate-credential-governance.py" \
   --deployed-runtime \
-  --catalog "$STACK_DIR/config/credential-governance.json" \
+  --catalog "$STACK_DIR/bin/credential-governance.json" \
   --inventory "$STACK_DIR/config/service-identity-inventory.json" >/dev/null
 then
   echo "Credential lifecycle startup validation failed." >&2
