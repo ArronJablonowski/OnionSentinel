@@ -191,3 +191,35 @@ test('immediate transaction rolls back and preserves original error even if roll
     ]);
   }
 });
+
+test('nested transaction owners use rollback-safe savepoints in the outer context', async () => {
+  const {database, runtime} = owner();
+  const nestedFailure = new Error('nested migration failed');
+  await runtime.withImmediateTransaction(async () => {
+    database.calls.push({name: 'outer:before'});
+    await runtime.withImmediateTransaction(async () => {
+      database.calls.push({name: 'nested:success'});
+    });
+    await assert.rejects(
+      runtime.withImmediateTransaction(async () => {
+        database.calls.push({name: 'nested:failure'});
+        throw nestedFailure;
+      }),
+      (error) => error === nestedFailure,
+    );
+    database.calls.push({name: 'outer:after'});
+  });
+  assert.deepEqual(database.calls.slice(1).map((call) => call.sql || call.name), [
+    'BEGIN IMMEDIATE',
+    'outer:before',
+    'SAVEPOINT onion_sentinel_nested_1',
+    'nested:success',
+    'RELEASE SAVEPOINT onion_sentinel_nested_1',
+    'SAVEPOINT onion_sentinel_nested_2',
+    'nested:failure',
+    'ROLLBACK TO SAVEPOINT onion_sentinel_nested_2',
+    'RELEASE SAVEPOINT onion_sentinel_nested_2',
+    'outer:after',
+    'COMMIT',
+  ]);
+});
