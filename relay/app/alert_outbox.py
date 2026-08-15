@@ -16,7 +16,8 @@ def now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def initialize(conn: sqlite3.Connection) -> None:
+def install_schema(conn: sqlite3.Connection) -> None:
+    """Install outbox objects without claiming transaction ownership."""
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS alert_delivery_outbox (
@@ -48,11 +49,21 @@ def initialize(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def recover_interrupted_claims(conn: sqlite3.Connection) -> None:
+    """Make interrupted idempotent deliveries eligible for replay."""
     # A process killed between claim and delivery is safe to replay because
     # alert-store treats alert_id as an idempotency key.
     conn.execute(
         "UPDATE alert_delivery_outbox SET status = 'pending' WHERE status = 'delivering'"
     )
+
+
+def initialize(conn: sqlite3.Connection) -> None:
+    """Compatibility initializer that retains its historical commit boundary."""
+    install_schema(conn)
+    recover_interrupted_claims(conn)
     conn.commit()
 
 

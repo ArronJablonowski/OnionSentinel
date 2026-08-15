@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 
@@ -49,7 +50,7 @@ class RelayDatabaseSchemaTest(unittest.TestCase):
         return {"relay": {"db_path": str(self.db_path)}}
 
     def test_legacy_database_is_admitted_without_data_loss(self) -> None:
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(
                 """
                 CREATE TABLE seen_alerts (
@@ -97,7 +98,7 @@ class RelayDatabaseSchemaTest(unittest.TestCase):
             connection.close()
 
     def test_future_version_is_rejected_before_any_mutation(self) -> None:
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(
                 "CREATE TABLE relay_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
@@ -120,7 +121,7 @@ class RelayDatabaseSchemaTest(unittest.TestCase):
             unexpected_connection.close()
             self.fail("future Relay schema version was admitted")
 
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             self.assertEqual(schema_objects(connection), before)
             self.assertEqual(
                 connection.execute("SELECT value FROM sentinel").fetchone(),
@@ -153,7 +154,8 @@ class RelayDatabaseSchemaTest(unittest.TestCase):
             connection.set_authorizer(deny_version_write)
             with self.assertRaises(sqlite3.DatabaseError):
                 schema.initialize(connection)
-            connection.set_authorizer(None)
+            # Python 3.9 does not reliably clear an authorizer with None.
+            connection.set_authorizer(lambda *_args: sqlite3.SQLITE_OK)
 
             self.assertEqual(schema_objects(connection), before)
             self.assertEqual(
@@ -171,6 +173,19 @@ class RelayDatabaseSchemaTest(unittest.TestCase):
             )
         finally:
             connection.close()
+
+    def test_schema_owner_is_registered_for_relay_deployment(self) -> None:
+        source = "relay/app/relay_database_schema.py"
+        runtime = "/opt/so-alert-relay/app/relay_database_schema.py"
+        installer = (ROOT / "relay/bin/install-pi-relay.sh").read_text(
+            encoding="utf-8"
+        )
+        contracts = (ROOT / "operations/quality/modularization-contracts.json").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(f'"$REPO_DIR/{source}" {runtime}', installer)
+        self.assertIn(f'"path": "{source}"', contracts)
+        self.assertIn(f'"runtime_path": "{runtime}"', contracts)
 
 
 if __name__ == "__main__":
