@@ -108,9 +108,9 @@ def _failure_code(value: object, field: str) -> str:
     return normalized
 
 
-def _source_collection_state(
+def _source_collection_fields(
     value: dict[object, object], prefix: str
-) -> dict[str, str]:
+) -> tuple[str, str, str, str]:
     status = _enum(
         value.get("collection_status", "unknown"),
         f"{prefix}.collection_status",
@@ -119,6 +119,12 @@ def _source_collection_state(
     attempt = _timestamp(value.get("last_attempt_at", ""), f"{prefix}.last_attempt_at")
     success = _timestamp(value.get("last_success_at", ""), f"{prefix}.last_success_at")
     failure = _failure_code(value.get("failure_code", ""), f"{prefix}.failure_code")
+    return status, attempt, success, failure
+
+
+def _validate_source_collection_status(
+    status: str, attempt: str, success: str, failure: str, prefix: str
+) -> None:
     if status in {"degraded", "failed"} and (not attempt or not failure):
         raise CTIProgramError(  # noqa: F405
             f"{prefix} {status} collection state requires last_attempt_at and failure_code."
@@ -131,10 +137,23 @@ def _source_collection_state(
         raise CTIProgramError(  # noqa: F405
             f"{prefix}.failure_code requires degraded or failed collection status."
         )
+
+
+def _validate_source_collection_timestamps(
+    attempt: str, success: str, prefix: str
+) -> None:
     if attempt and success and _parsed_timestamp(success) > _parsed_timestamp(attempt):
         raise CTIProgramError(  # noqa: F405
             f"{prefix}.last_success_at cannot follow last_attempt_at."
         )
+
+
+def _source_collection_state(
+    value: dict[object, object], prefix: str
+) -> dict[str, str]:
+    status, attempt, success, failure = _source_collection_fields(value, prefix)
+    _validate_source_collection_status(status, attempt, success, failure, prefix)
+    _validate_source_collection_timestamps(attempt, success, prefix)
     return {
         "collection_status": status,
         "last_attempt_at": attempt,
@@ -341,6 +360,9 @@ __all__ = tuple(
         "_program_collections",
         "_require_unique_sources",
         "_require_unique_technologies",
+        "_source_collection_fields",
         "_source_collection_state",
+        "_validate_source_collection_status",
+        "_validate_source_collection_timestamps",
     }
 )
