@@ -205,6 +205,11 @@ def __result_context(result: dict[str, Any]) -> dict[str, Any]:
             if result.get("event_tuple")
             else {}
         ),
+        **(
+            {"schema_discovery": result["schema_discovery"]}
+            if result.get("schema_discovery")
+            else {}
+        ),
     }
 
 

@@ -1,4 +1,4 @@
-"""Deterministic, protocol-first Incident Responder query planning."""
+"""Deterministic protocol and historical-evidence query planning."""
 
 from __future__ import annotations
 
@@ -29,6 +29,9 @@ class Dependencies:
     utc_text: Callable[[dt.datetime], str]
     pack_event_tuple_fields: Callable[[str], Any]
     query_error: type[Exception]
+    is_historical_reader: Callable[[dict[str, Any]], bool] = (
+        lambda _package: False
+    )
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,7 @@ class PlanningContext:
     local: dict[str, Any]
     alert: dict[str, Any]
     trusted_entries: list[dict[str, Any]]
+    incident_responder: bool
 
 
 @dataclass(frozen=True)
@@ -63,7 +67,11 @@ def plan(
     selected = _selected_event(context, policy, dependencies)
     if selected is None:
         return []
-    output = _protocol_requests(selected, policy, dependencies)
+    output = (
+        _protocol_requests(selected, policy, dependencies)
+        if context.incident_responder
+        else []
+    )
     attribution = _attribution_request(context, selected, policy, dependencies)
     if attribution is not None:
         output.append(attribution)
@@ -73,7 +81,8 @@ def plan(
 def _planning_context(
     package: dict[str, Any], dependencies: Dependencies
 ) -> PlanningContext | None:
-    if not dependencies.is_incident_responder(package):
+    incident_responder = dependencies.is_incident_responder(package)
+    if not incident_responder and not dependencies.is_historical_reader(package):
         return None
     capability = package.get("investigation_query_capability")
     local = package.get("_local_investigation_query_context")
@@ -90,6 +99,7 @@ def _planning_context(
         local=local,
         alert=alert if isinstance(alert, dict) else {},
         trusted_entries=entries,
+        incident_responder=incident_responder,
     )
 
 

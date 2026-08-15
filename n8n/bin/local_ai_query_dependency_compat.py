@@ -86,6 +86,9 @@ def _query_deterministic_planning_dependencies():
         utc_text=_query_utc_text,
         pack_event_tuple_fields=pack_event_tuple_fields,
         query_error=InvestigationQueryError,
+        is_historical_reader=lambda package: str(
+            package.get("agent_role") or ""
+        ).strip().lower() in {"soc-analyst", "incident-responder"},
     )
 
 

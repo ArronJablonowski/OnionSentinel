@@ -71,7 +71,7 @@ OBSERVABLE_FIELDS = {
     ],
     "hosts": [
         "host.id", "host.name", "host.hostname", "agent.id", "agent.name",
-        "related.hosts",
+        "related.hosts", "osquery.hostname", "osquery.uuid",
     ],
     "users": [
         "user.id", "user.name", "source.user.name", "destination.user.name",
@@ -114,6 +114,105 @@ ZEEK_PROTOCOL_BASE_FIELDS = [
     "network.community_id", "network.bytes", "network.packets",
     "log.id.uid", "observer.name",
 ]
+
+_HISTORICAL_OSQUERY_SCHEMA_CONTRACT = (
+    "onion-sentinel-historical-osquery-schema-v1"
+)
+_HISTORICAL_OSQUERY_BASE_FIELDS = [
+    "@timestamp", "event.dataset", "event.kind", "event.category",
+    "event.type", "event.action", "event.outcome", "event.id",
+    "host.id", "host.name", "host.hostname", "host.ip",
+    "agent.id", "agent.name", "user.id", "user.name",
+    "process.entity_id", "process.pid", "process.parent.pid",
+    "process.name", "process.executable", "file.name", "file.path",
+    "file.extension", "file.hash.sha256", "source.ip", "source.port",
+    "source.domain", "destination.ip", "destination.port",
+    "destination.domain", "client.ip", "client.domain", "server.ip",
+    "server.domain", "url.domain", "dns.question.name",
+    "dns.resolved_ip", "network.transport", "network.protocol",
+]
+_HISTORICAL_OSQUERY_SCHEMA_PROFILES = {
+    "ecs-endpoint-events-v1": {
+        "datasets": [
+            "endpoint.events.process", "endpoint.events.file",
+            "endpoint.events.network",
+        ],
+        "identity_fields": [
+            "host.id", "host.name", "host.hostname", "agent.id",
+        ],
+        "marker_fields": [
+            "process.entity_id", "process.pid", "file.path",
+            "network.transport",
+        ],
+        "fields": [],
+    },
+    "elastic-osquery-manager-flat-v1": {
+        "datasets": ["osquery_manager.result"],
+        "identity_fields": [
+            "host.id", "host.name", "host.hostname", "agent.id",
+            "agent.name", "osquery.hostname", "osquery.uuid",
+        ],
+        "marker_fields": [
+            "osquery.name", "osquery.path", "osquery.pid",
+            "osquery.bundle_identifier",
+        ],
+        "fields": [
+            "action_id", "schedule_id", "pack_id", "pack_name",
+            "query_name", "response_id", "schedule_execution_count",
+            "planned_schedule_time", "osquery.hostname", "osquery.uuid",
+            "osquery.name", "osquery.path", "osquery.pid", "osquery.parent",
+            "osquery.uid", "osquery.gid", "osquery.username",
+            "osquery.groupname", "osquery.start_time", "osquery.address",
+            "osquery.port", "osquery.protocol", "osquery.filename",
+            "osquery.directory", "osquery.mtime", "osquery.ctime",
+            "osquery.atime", "osquery.sha256", "osquery.bundle_identifier",
+            "osquery.bundle_name", "osquery.bundle_short_version",
+            "osquery.bundle_version", "osquery.category", "osquery.version",
+            "osquery.source", "osquery.arch", "osquery.release",
+        ],
+    },
+    "elastic-osquery-manager-action-responses-v1": {
+        "datasets": ["osquery_manager.action.responses"],
+        "identity_fields": [
+            "host.id", "host.name", "host.hostname", "agent.id",
+            "agent.name",
+        ],
+        "marker_fields": [
+            "action_id", "schedule_id", "response_id",
+            "action_response.osquery.count",
+        ],
+        "fields": [
+            "action_id", "schedule_id", "pack_id", "pack_name",
+            "query_name", "response_id", "schedule_execution_count",
+            "planned_schedule_time", "action_input_type", "agent_id",
+            "started_at", "completed_at", "count",
+            "action_response.osquery.count",
+        ],
+    },
+}
+
+
+def _ordered_unique(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(values))
+
+
+_HISTORICAL_OSQUERY_PROJECTION_FIELDS = _ordered_unique([
+    *_HISTORICAL_OSQUERY_BASE_FIELDS,
+    *(
+        field
+        for profile in _HISTORICAL_OSQUERY_SCHEMA_PROFILES.values()
+        for field in profile["fields"]
+    ),
+])
+_HISTORICAL_OSQUERY_IDENTITY_FIELDS = frozenset(
+    field
+    for profile in _HISTORICAL_OSQUERY_SCHEMA_PROFILES.values()
+    for field in profile["identity_fields"]
+)
+_HISTORICAL_OSQUERY_SCHEMA_STATUSES = frozenset({
+    "ok", "timeout", "output_limit", "error", "invalid_response",
+})
+
 PACKS = {
     "alert_context": {
         "indices": ALERT_INDEX_SCOPE,
@@ -285,18 +384,7 @@ PACKS = {
             "endpoint.events.network", "osquery_manager.result",
             "osquery_manager.action.responses",
         ],
-        "fields": [
-            "@timestamp", "event.dataset", "event.kind", "event.category",
-            "event.type", "event.action", "event.outcome", "event.id",
-            "host.id", "host.name", "host.ip", "user.id", "user.name",
-            "process.entity_id", "process.pid", "process.parent.pid",
-            "process.name", "process.executable", "file.name", "file.path",
-            "file.extension", "file.hash.sha256", "source.ip", "source.port",
-            "source.domain", "destination.ip", "destination.port",
-            "destination.domain", "client.ip", "client.domain", "server.ip",
-            "server.domain", "url.domain", "dns.question.name",
-            "dns.resolved_ip", "network.transport", "network.protocol",
-        ],
+        "fields": _HISTORICAL_OSQUERY_PROJECTION_FIELDS,
     },
     "cross_sensor_timeline": {
         "indices": [

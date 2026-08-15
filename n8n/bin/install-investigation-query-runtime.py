@@ -28,6 +28,7 @@ VERSIONED_QUERY_FILES = (
 )
 V2_QUERY_DEPENDENCIES = (
     "investigation_query_schema.py",
+    "historical_osquery_schema.py",
     "investigation_query_normalization_primitives.py",
     "investigation_query_observable_normalization.py",
     "investigation_query_event_tuple_normalization.py",

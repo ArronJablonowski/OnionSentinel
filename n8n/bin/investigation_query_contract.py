@@ -13,6 +13,16 @@ if str(BIN_DIR) not in sys.path:
 # compatibility bundle remains frozen and does not import these v2 modules.
 INVESTIGATION_QUERY_CONTRACT = "onion-sentinel-investigation-pivots-v2"
 
+from investigation_query_schema import (  # noqa: E402
+    _HISTORICAL_OSQUERY_SCHEMA_CONTRACT as HISTORICAL_OSQUERY_SCHEMA_CONTRACT,
+    _HISTORICAL_OSQUERY_SCHEMA_PROFILES as HISTORICAL_OSQUERY_SCHEMA_PROFILES,
+)
+from historical_osquery_schema import (  # noqa: E402
+    compile_historical_osquery_schema_discovery,
+    historical_osquery_field_caps_body,
+    historical_osquery_field_caps_endpoint,
+    validate_historical_osquery_schema_discovery,
+)
 from investigation_query_schema import *  # noqa: E402,F401,F403
 from investigation_query_normalization import *  # noqa: E402,F401,F403
 from investigation_query_authorization import *  # noqa: E402,F401,F403
@@ -25,12 +35,17 @@ __all__ = [
     "ALLOWED_PURPOSES",
     "EVENT_TUPLE_FIELDS",
     "EVENT_TUPLE_PATHS",
+    "HISTORICAL_OSQUERY_SCHEMA_CONTRACT",
+    "HISTORICAL_OSQUERY_SCHEMA_PROFILES",
     "INVESTIGATION_QUERY_CONTRACT",
     "InvestigationQueryContractError",
     "SAFE_ATOM_RE",
     "authorize_investigation_query_request",
     "build_query_dsl",
     "canonical_digest",
+    "compile_historical_osquery_schema_discovery",
+    "historical_osquery_field_caps_body",
+    "historical_osquery_field_caps_endpoint",
     "kql_equivalent",
     "oql_equivalent",
     "pack_event_tuple_fields",
@@ -40,4 +55,5 @@ __all__ = [
     "validate_authorized_investigation_query_request",
     "validate_investigation_query_request",
     "validate_investigation_query_response",
+    "validate_historical_osquery_schema_discovery",
 ]

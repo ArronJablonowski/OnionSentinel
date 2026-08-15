@@ -30,6 +30,24 @@ import uuid
 from pathlib import Path
 
 
+for _shared_contract_dir in (
+    Path("/usr/local/lib/onion-sentinel"),
+    Path(__file__).resolve().parents[2] / "n8n" / "bin",
+):
+    if _shared_contract_dir.is_dir() and str(_shared_contract_dir) not in sys.path:
+        sys.path.insert(0, str(_shared_contract_dir))
+
+from investigation_query_schema import (  # noqa: E402
+    InvestigationQueryContractError as SharedQueryContractError,
+)
+from historical_osquery_schema import (  # noqa: E402
+    compile_historical_osquery_schema_discovery,
+    historical_osquery_field_caps_body,
+    historical_osquery_field_caps_endpoint,
+    historical_osquery_schema_failure,
+)
+
+
 MAX_REQUEST_BYTES = 16 * 1024
 MAX_TRANSPORT_REQUEST_BYTES = 20 * 1024
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
@@ -281,7 +299,8 @@ PACKS = {
         "fields": [
             "@timestamp", "event.dataset", "event.kind", "event.category",
             "event.type", "event.action", "event.outcome", "event.id",
-            "host.id", "host.name", "host.ip", "user.id", "user.name",
+            "host.id", "host.name", "host.hostname", "host.ip",
+            "agent.id", "agent.name", "user.id", "user.name",
             "process.entity_id", "process.pid", "process.parent.pid",
             "process.name", "process.executable", "file.name", "file.path",
             "file.extension", "file.hash.sha256", "source.ip", "source.port",
@@ -289,6 +308,20 @@ PACKS = {
             "destination.domain", "client.ip", "client.domain", "server.ip",
             "server.domain", "url.domain", "dns.question.name",
             "dns.resolved_ip", "network.transport", "network.protocol",
+            "action_id", "schedule_id", "pack_id", "pack_name",
+            "query_name", "response_id", "schedule_execution_count",
+            "planned_schedule_time", "osquery.hostname", "osquery.uuid",
+            "osquery.name", "osquery.path", "osquery.pid", "osquery.parent",
+            "osquery.uid", "osquery.gid", "osquery.username",
+            "osquery.groupname", "osquery.start_time", "osquery.address",
+            "osquery.port", "osquery.protocol", "osquery.filename",
+            "osquery.directory", "osquery.mtime", "osquery.ctime",
+            "osquery.atime", "osquery.sha256", "osquery.bundle_identifier",
+            "osquery.bundle_name", "osquery.bundle_short_version",
+            "osquery.bundle_version", "osquery.category", "osquery.version",
+            "osquery.source", "osquery.arch", "osquery.release",
+            "action_input_type", "agent_id", "started_at", "completed_at",
+            "count", "action_response.osquery.count",
         ],
     },
     "cross_sensor_timeline": {
@@ -485,7 +518,7 @@ OBSERVABLE_FIELDS = {
     ],
     "hosts": [
         "host.id", "host.name", "host.hostname", "agent.id", "agent.name",
-        "related.hosts",
+        "related.hosts", "osquery.hostname", "osquery.uuid",
     ],
     "users": [
         "user.id", "user.name", "source.user.name", "destination.user.name",
@@ -1719,6 +1752,107 @@ def execute_search(body: dict, index_scope: list[str]) -> dict:
     }
 
 
+def historical_osquery_observable_fields(
+    observables: dict[str, list[str]],
+) -> list[str]:
+    """Return only fixed fields relevant to the authorized observable kinds."""
+    return [
+        field
+        for kind, fields in pack_observable_fields("osquery_history").items()
+        if observables.get(kind)
+        for field in fields
+    ]
+
+
+def discover_historical_osquery_schema(
+    observables: dict[str, list[str]],
+) -> dict:
+    """Run one bounded read-only field-capabilities preflight."""
+    pack = PACKS["osquery_history"]
+    endpoint = historical_osquery_field_caps_endpoint(pack["indices"])
+    body = historical_osquery_field_caps_body(pack["fields"])
+    AUDIT_CONTEXT["elastic_search_count"] = int(
+        AUDIT_CONTEXT.get("elastic_search_count", 0)
+    ) + 1
+    try:
+        completed = run_bounded_command(
+            [str(SO_QUERY), endpoint, "-d", json.dumps(
+                body, separators=(",", ":"), sort_keys=True
+            )],
+            timeout_seconds=QUERY_TIMEOUT_SECONDS,
+            max_stdout_bytes=MAX_OUTPUT_BYTES,
+            max_stderr_bytes=MAX_STDERR_BYTES,
+        )
+    except BoundedCommandError as exc:
+        status = "timeout" if exc.reason == "timeout" else "output_limit"
+        return historical_osquery_schema_failure(
+            status,
+            index_scope=pack["indices"],
+            projection_fields=pack["fields"],
+            error=(
+                "Elasticsearch field-capabilities request exceeded its timeout"
+                if status == "timeout"
+                else "Elasticsearch field-capabilities response exceeded its output limit"
+            ),
+        )
+    if completed.returncode != 0:
+        return historical_osquery_schema_failure(
+            "error",
+            index_scope=pack["indices"],
+            projection_fields=pack["fields"],
+            error="Elasticsearch field-capabilities request failed",
+        )
+    try:
+        raw = json.loads(completed.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return historical_osquery_schema_failure(
+            "invalid_response",
+            index_scope=pack["indices"],
+            projection_fields=pack["fields"],
+            error="Elasticsearch field-capabilities response was not valid JSON",
+        )
+    if isinstance(raw, dict) and raw.get("error") is not None:
+        return historical_osquery_schema_failure(
+            "error",
+            index_scope=pack["indices"],
+            projection_fields=pack["fields"],
+            error="Elasticsearch field-capabilities response reported an error",
+        )
+    try:
+        return compile_historical_osquery_schema_discovery(
+            raw,
+            index_scope=pack["indices"],
+            projection_fields=pack["fields"],
+            observable_fields=historical_osquery_observable_fields(observables),
+        )
+    except SharedQueryContractError:
+        return historical_osquery_schema_failure(
+            "invalid_response",
+            index_scope=pack["indices"],
+            projection_fields=pack["fields"],
+            error="Elasticsearch field-capabilities response failed validation",
+        )
+
+
+def historical_schema_failure_result(
+    body: dict,
+    schema_discovery: dict,
+) -> dict:
+    status = str(schema_discovery.get("status") or "invalid_response")
+    if status == "ok":
+        status = "invalid_response"
+        error = "Historical OSQuery field mapping is incompatible"
+    else:
+        error = str(schema_discovery.get("error") or "")
+    return empty_search_result(
+        body,
+        PACKS["osquery_history"]["indices"],
+        status,
+        0,
+        error=error,
+    )
+
+
 def execute_pack(pack_name: str, window: dict, observables: dict[str, list[str]], size: int) -> dict:
     pack = PACKS[pack_name]
     body = {
@@ -1733,7 +1867,23 @@ def execute_pack(pack_name: str, window: dict, observables: dict[str, list[str]]
             observable_clause(observables, pack_name),
         ]}},
     }
-    return {"pack": pack_name, **execute_search(body, pack["indices"])}
+    schema_discovery = (
+        discover_historical_osquery_schema(observables)
+        if pack_name == "osquery_history"
+        else None
+    )
+    result = (
+        historical_schema_failure_result(body, schema_discovery)
+        if schema_discovery is not None
+        and (
+            schema_discovery.get("status") != "ok"
+            or schema_discovery.get("mapping_compatible") is not True
+        )
+        else execute_search(body, pack["indices"])
+    )
+    if schema_discovery is not None:
+        result["schema_discovery"] = schema_discovery
+    return {"pack": pack_name, **result}
 
 
 def pivot_query_dsl(query: dict) -> dict:
@@ -2059,7 +2209,20 @@ def execute_pivot_query(query: dict) -> dict:
     body = pivot_query_dsl(query)
     kql = pivot_kql_equivalent(query)
     oql = pivot_oql_equivalent(query)
-    result = execute_search(body, pack["indices"])
+    schema_discovery = (
+        discover_historical_osquery_schema(query["observables"])
+        if query["pack"] == "osquery_history"
+        else None
+    )
+    result = (
+        historical_schema_failure_result(body, schema_discovery)
+        if schema_discovery is not None
+        and (
+            schema_discovery.get("status") != "ok"
+            or schema_discovery.get("mapping_compatible") is not True
+        )
+        else execute_search(body, pack["indices"])
+    )
     if result.get("status") == "ok":
         invalid_projection = any(
             not isinstance(hit, dict)
@@ -2076,6 +2239,8 @@ def execute_pivot_query(query: dict) -> dict:
                 int(result.get("duration_ms") or 0),
                 error="Elasticsearch returned data outside the reviewed pivot projection",
             )
+    if schema_discovery is not None:
+        result["schema_discovery"] = schema_discovery
     if query["aggregation"] == "count":
         # A size-zero exact count is an aggregate, not a truncated event list.
         result["truncated"] = result.get("total_hits_relation") != "eq"
