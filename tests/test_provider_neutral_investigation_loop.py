@@ -610,6 +610,69 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             attribution["parameters"]["event_tuple"],
         )
 
+    def test_soc_analyst_gets_only_justified_historical_endpoint_pivot(
+        self,
+    ) -> None:
+        package = {
+            "agent_role": "soc-analyst",
+            "alert": {
+                "timestamp": "2026-07-24T18:30:00Z",
+                "rule_name": "Synthetic TLS SNI detection",
+                "source_ip": "192.0.2.10",
+                "destination_ip": "198.51.100.20",
+                "rule_context": {
+                    "deployed_rule": {"protocol": "tls"},
+                },
+            },
+            "investigation_query_capability": {
+                "enabled": True,
+                "anchor_time": "2026-07-24T18:30:00Z",
+                "backends": {
+                    "elastic": {
+                        "enabled": True,
+                        "packs": [
+                            "zeek_tls",
+                            "zeek_anomalies",
+                            "osquery_history",
+                        ],
+                    },
+                    "osquery": {"enabled": False},
+                },
+            },
+            "_local_investigation_query_context": {
+                "anchor_time": "2026-07-24T18:30:00Z",
+                "time_envelope": {
+                    "start": "2026-07-24T12:00:00Z",
+                    "end": "2026-07-25T00:00:00Z",
+                },
+                "permitted_event_tuples": [{
+                    "event_tuple": {
+                        "source_ip": "192.0.2.10",
+                        "destination_ip": "198.51.100.20",
+                        "destination_port": 443,
+                        "transport": "tcp",
+                        "protocol": "tls",
+                        "community_id": "1:exact-soc-flow=",
+                    },
+                    "role_semantics": "packet_direction",
+                }],
+            },
+        }
+
+        plan = self.runner.deterministic_incident_pivot_requests(package)
+
+        self.assertEqual(
+            [item["query_id"] for item in plan],
+            ["deterministic-osquery-history-attribution"],
+        )
+        self.assertEqual(plan[0]["backend"], "elastic")
+        self.assertEqual(plan[0]["parameters"]["pack"], "osquery_history")
+        self.assertFalse(
+            package["investigation_query_capability"]["backends"]["osquery"][
+                "enabled"
+            ]
+        )
+
 
     @staticmethod
     def elastic_request(query_id: str = "pivot-1") -> dict:
