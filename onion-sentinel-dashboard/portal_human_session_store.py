@@ -261,6 +261,23 @@ def load_session_record(
             return dict(record) if record is not None else None
 
 
+def validate_session_store(
+    path: Path,
+    *,
+    maximum_bytes: int = DEFAULT_MAXIMUM_BYTES,
+    maximum_sessions: int = DEFAULT_MAXIMUM_SESSIONS,
+) -> int:
+    """Validate retained custody/content without creating absent state."""
+    _bounds(maximum_bytes, maximum_sessions)
+    with _STORE_LOCK:
+        if not _private_parent(path.parent, create=False):
+            return 0
+        if not path.exists():
+            return 0
+        with _locked(path):
+            return len(_decode_store(path, maximum_bytes, maximum_sessions))
+
+
 def put_session_record(
     path: Path,
     session_id: object,
@@ -348,4 +365,5 @@ __all__ = (
     "load_session_record",
     "put_session_record",
     "replace_session_record",
+    "validate_session_store",
 )
