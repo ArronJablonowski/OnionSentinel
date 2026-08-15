@@ -19,6 +19,7 @@ class DetectionContextRequest:
     detection_playbooks_path: Path
     asset_inventory_path: Path
     maximum_group_rows: int
+    available_evidence_sources: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -155,13 +156,18 @@ def select_exact_detection_group_rows(
     }
 
 
-def _skill_match_context(sources: DetectionContextSources, selected: Any) -> dict:
+def _skill_match_context(
+    sources: DetectionContextSources,
+    selected: Any,
+    available_evidence_sources: tuple[str, ...] = (),
+) -> dict:
     return {
         "event_dataset": sources.row_value(selected, "event_dataset"),
         "transport_protocol": sources.row_value(selected, "transport_protocol"),
         "network_protocol": sources.row_value(selected, "network_protocol"),
         "destination_port": sources.row_value(selected, "destination_port"),
         "rule_name": sources.row_value(selected, "rule_name"),
+        "evidence_sources": list(available_evidence_sources),
     }
 
 
@@ -251,7 +257,11 @@ def _load_rule_and_skills(
     )
     skill_selection = sources.resolve_investigation_skills(
         skill_registry,
-        _skill_match_context(sources, request.selected),
+        _skill_match_context(
+            sources,
+            request.selected,
+            request.available_evidence_sources,
+        ),
         request.agent_role,
     )
     return validation_rows, rule_context, skill_selection

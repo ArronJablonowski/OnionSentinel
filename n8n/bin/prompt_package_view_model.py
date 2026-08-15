@@ -92,6 +92,7 @@ def _prepared_evidence_sections(prepared: PreparedPromptPackageView) -> dict:
         "grouped_alert_context": snapshot.grouped_alert_context,
         "public_enrichment": snapshot.public_enrichment,
         "pcap_evidence": snapshot.pcap_evidence,
+        "ac_hunter_evidence": snapshot.ac_hunter_evidence,
         "investigation_query_capability": admitted.investigation_capability,
         "_local_investigation_query_context": (
             admitted.local_investigation_query_context

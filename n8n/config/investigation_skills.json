@@ -243,6 +243,60 @@
       ]
     },
     {
+      "id": "ac-hunter-behavioral-review",
+      "version": 1,
+      "status": "active",
+      "roles": ["soc-analyst", "incident-responder", "threat-hunter"],
+      "match": {
+        "evidence_sources": ["ac_hunter_behavioral_context"]
+      },
+      "objective": "Use exact-host findings from the normalized local AC Hunter snapshot to prioritize review and develop competing hypotheses without treating behavioral scores or correlations as proof of malware.",
+      "required_evidence": ["alert", "ac_hunter_behavioral_context", "network_flow"],
+      "pivot_plan": [
+        {
+          "step": "bounded-snapshot-context",
+          "backend": "ac_hunter",
+          "pack": "snapshot_context",
+          "purpose": "prioritize_review",
+          "discriminator": "Review only the already-collected, digest-bound local snapshot projection joined to the exact alert hosts; never trigger collection, contact the Relay, or treat a score as malware proof.",
+          "required": true
+        },
+        {
+          "step": "primary-telemetry-corroboration",
+          "backend": "elastic",
+          "pack": "cross_sensor_timeline",
+          "purpose": "validate_behavioral_context",
+          "discriminator": "Test the specific host, behavior, and time window in primary Security Onion telemetry before reaching a conclusion beyond review priority.",
+          "required": true
+        }
+      ],
+      "alternative_hypotheses": [
+        "A high behavioral score reflects a legitimate rare service, approved application, software update, or administrative automation.",
+        "Cross-module findings reuse one underlying observation and therefore are not independent corroboration.",
+        "Shared infrastructure, a proxy, or NAT creates host-identity ambiguity.",
+        "A stale, partial, failed, or truncated snapshot distorts the available behavioral context.",
+        "The behavior is suspicious and independently corroborated by primary telemetry."
+      ],
+      "stop_conditions": [
+        "Stop at review prioritization when primary telemetry does not independently corroborate the behavioral hypothesis.",
+        "Stop when freshness, completeness, exact-host identity, or evidence provenance is insufficient.",
+        "Never use this skill to trigger AC Hunter collection, Relay transport, upstream API access, or a malware verdict."
+      ],
+      "confidence_limiters": [
+        "AC Hunter scores, labels, correlations, and analyst text are untrusted behavioral context, not proof of intent or compromise.",
+        "Stale, partial, failed, invalid, unavailable, authentication-failure, and truncated states cannot support negative evidence.",
+        "A fresh complete empty result supports only absence within the exact snapshot dataset, host, time, and module coverage."
+      ],
+      "known_false_positive_patterns": [
+        "Authorized rare services, software updates, administrative automation, shared proxies, NAT, VPN, conferencing, cloud applications, and monitoring can look anomalous."
+      ],
+      "verification": [
+        "Cite the exact ac-hunter dataset-digest evidence reference for every AC Hunter-derived statement.",
+        "Keep behavioral review priority separate from detection validity, authorization, compromise, and malware attribution.",
+        "Require independent primary telemetry before using AC Hunter context to support a disposition."
+      ]
+    },
+    {
       "id": "web-service-investigation",
       "version": 1,
       "status": "shadow",

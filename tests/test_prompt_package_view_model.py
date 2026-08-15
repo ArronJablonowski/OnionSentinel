@@ -45,6 +45,7 @@ class PromptPackageViewModelTests(unittest.TestCase):
             grouped_alert_context={"group": 1},
             public_enrichment={"intel": 1},
             pcap_evidence={"pcap": 1},
+            ac_hunter_evidence={"ac_hunter": 1},
             authorization_evidence={"authorization": 1},
             analyst_state={"state": 1},
             latest_daily_rollup={"rollup": 1},
@@ -85,6 +86,7 @@ class PromptPackageViewModelTests(unittest.TestCase):
 
         self.assertIs(package["alert"], snapshot.alert)
         self.assertIs(package["detection_validation"], detection.detection_validation)
+        self.assertIs(package["ac_hunter_evidence"], snapshot.ac_hunter_evidence)
         self.assertIs(package["investigation_query_capability"], admitted.investigation_capability)
         self.assertIs(package["prior_analyses"], history.prior_analyses)
         self.assertIs(package["recent_notifications"], history.recent_notifications)

@@ -338,6 +338,7 @@ class InvestigationSkillsProjectionTests(unittest.TestCase):
                 ("get", "transport_protocol"),
                 ("get", "rule_name"),
                 ("get", "destination_port"),
+                ("get", "evidence_sources"),
             ],
         )
 

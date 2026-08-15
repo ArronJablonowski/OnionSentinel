@@ -141,6 +141,17 @@ class AcHunterHarnessEvidenceTests(unittest.TestCase):
         self.assertEqual(reference["source_class"], "behavioral_context")
         self.assertEqual(reference["evidence_digest"], DIGEST)
         self.assertTrue(reference["corroborating"])
+        package["evidence_reference_contract"] = contract
+        validated = self.runner.validate_evidence_references(
+            {"evidence_used": [f"ac-hunter:{DIGEST}"]}, package
+        )
+        self.assertEqual(validated["evidence_used"], [f"ac-hunter:{DIGEST}"])
+        self.assertEqual(
+            validated["_evidence_reference_validation"][
+                "corroborating_source_classes"
+            ],
+            ["behavioral_context"],
+        )
 
     def test_prompt_contract_keeps_behavioral_context_non_authoritative(self):
         instructions = "\n".join(GROUNDING_BEFORE_CONTEXT)

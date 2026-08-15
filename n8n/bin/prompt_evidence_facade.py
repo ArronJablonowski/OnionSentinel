@@ -79,6 +79,7 @@ from prompt_public_enrichment import (
     build_public_enrichment_context,
     compact_public_enrichment_record as project_public_enrichment_record,
 )
+from prompt_ac_hunter_context import build_ac_hunter_context
 
 
 def rows(connection, sql, params: Iterable[object] = ()):
@@ -231,6 +232,11 @@ def public_enrichment_context(
             include_tests=include_tests,
         ),
     )
+
+
+def ac_hunter_context(selected: Any) -> dict[str, Any]:
+    """Read only the fixed loopback PostgreSQL snapshot projection."""
+    return build_ac_hunter_context(selected)
 
 
 def _pcap_evidence_sources() -> PcapEvidenceSources:

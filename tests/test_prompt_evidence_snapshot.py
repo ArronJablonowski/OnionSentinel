@@ -70,6 +70,9 @@ class PromptEvidenceSnapshotTests(unittest.TestCase):
             public_enrichment_context=ordered_result(
                 events, "enrichment", {"enrichment": 1}
             ),
+            ac_hunter_context=ordered_result(
+                events, "ac-hunter", {"status": "fresh"}
+            ),
             authorized_activity_context=ordered_result(
                 events, "authorization", {"authorization": 1}
             ),
@@ -93,6 +96,7 @@ class PromptEvidenceSnapshotTests(unittest.TestCase):
                 "group",
                 "pcap",
                 "enrichment",
+                "ac-hunter",
                 "authorization",
                 "analyst",
                 "correlation",
@@ -122,6 +126,7 @@ class PromptEvidenceSnapshotTests(unittest.TestCase):
             grouped_alert_context=ordered_result(events, "group", {}),
             pcap_evidence_context=failing_pcap,
             public_enrichment_context=later,
+            ac_hunter_context=later,
             authorized_activity_context=later,
             analyst_state_context=later,
             correlated_alert_context=later,
@@ -144,6 +149,7 @@ class PromptEvidenceSnapshotTests(unittest.TestCase):
             grouped_alert_context=mock.Mock(return_value={}),
             pcap_evidence_context=mock.Mock(return_value={}),
             public_enrichment_context=mock.Mock(return_value={}),
+            ac_hunter_context=mock.Mock(return_value={}),
             authorized_activity_context=mock.Mock(return_value={}),
             analyst_state_context=mock.Mock(return_value={}),
             correlated_alert_context=mock.Mock(return_value={}),

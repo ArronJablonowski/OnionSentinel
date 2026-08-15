@@ -86,6 +86,7 @@ class PromptPackageOrchestratorTests(unittest.TestCase):
             analyst_state={"group_id": "group-1"},
             pcap_evidence={"pcap": 1},
             public_enrichment={"enrichment": 1},
+            ac_hunter_evidence={"available": True, "evidence_ref": "ac-hunter:" + "a" * 64},
             alert={"alert_id": "alert-1"},
             grouped_alert_context={"count": 2},
             authorization_evidence={"authorized": False},
@@ -152,8 +153,16 @@ class PromptPackageOrchestratorTests(unittest.TestCase):
             Path("/defaults/skills.json"),
         )
         self.assertEqual(detection_request.maximum_group_rows, 5000)
+        self.assertEqual(
+            detection_request.available_evidence_sources,
+            ("ac_hunter_behavioral_context",),
+        )
         admission_request = admit.call_args.args[1]
         self.assertEqual(admission_request.group_id, "group-1")
+        self.assertIs(
+            admission_request.ac_hunter_context,
+            snapshot.ac_hunter_evidence,
+        )
         self.assertEqual(admission_request.maximum_incident_evidence_bytes, 8192)
         contract_request = contract.call_args.args[0]
         self.assertEqual(contract_request.query_packs, ("alert_context", "network_flow"))

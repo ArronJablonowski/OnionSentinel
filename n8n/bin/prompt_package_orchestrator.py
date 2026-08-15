@@ -47,6 +47,7 @@ class PromptPackageWorkflowSources:
     grouped_alert_context: Callable[..., Any]
     pcap_evidence_context: Callable[..., Any]
     public_enrichment_context: Callable[..., Any]
+    ac_hunter_context: Callable[..., Any]
     authorized_activity_context: Callable[..., Any]
     analyst_state_context: Callable[..., Any]
     correlated_alert_context: Callable[..., Any]
@@ -75,6 +76,7 @@ def _collect_core_snapshot(sources, connection, selected, args):
             grouped_alert_context=sources.grouped_alert_context,
             pcap_evidence_context=sources.pcap_evidence_context,
             public_enrichment_context=sources.public_enrichment_context,
+            ac_hunter_context=sources.ac_hunter_context,
             authorized_activity_context=sources.authorized_activity_context,
             analyst_state_context=sources.analyst_state_context,
             correlated_alert_context=sources.correlated_alert_context,
@@ -95,7 +97,19 @@ def _collect_core_snapshot(sources, connection, selected, args):
     )
 
 
-def _collect_detection_context(sources, policy, connection, selected, args):
+def _collect_detection_context(
+    sources, policy, connection, selected, args, snapshot,
+):
+    ac_hunter = snapshot.ac_hunter_evidence
+    evidence_sources = (
+        ("ac_hunter_behavioral_context",)
+        if (
+            isinstance(ac_hunter, dict)
+            and ac_hunter.get("available") is True
+            and bool(ac_hunter.get("evidence_ref"))
+        )
+        else ()
+    )
     return prepare_detection_context(
         sources.detection_context_sources(),
         DetectionContextRequest(
@@ -125,6 +139,7 @@ def _collect_detection_context(sources, policy, connection, selected, args):
                 )
             ),
             maximum_group_rows=policy.maximum_detection_group_rows,
+            available_evidence_sources=evidence_sources,
         ),
     )
 
@@ -149,6 +164,7 @@ def _admit_evidence(sources, policy, selected, args, snapshot, detection_context
             exact_validation_rows=detection_context.exact_validation_rows,
             pcap_context=snapshot.pcap_evidence,
             enrichment_context=snapshot.public_enrichment,
+            ac_hunter_context=snapshot.ac_hunter_evidence,
             compact_alert=snapshot.alert,
             grouped_alert_context=snapshot.grouped_alert_context,
             detection_validation=detection_context.detection_validation,
@@ -254,6 +270,7 @@ def build_prepared_prompt_package(
         connection,
         selected,
         args,
+        snapshot,
     )
     admitted_evidence = _admit_evidence(
         sources,

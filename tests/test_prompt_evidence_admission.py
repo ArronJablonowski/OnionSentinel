@@ -38,6 +38,7 @@ def request(**changes) -> PromptEvidenceAdmissionRequest:
                 "cves": ["CVE-2026-1000"],
             }
         },
+        "ac_hunter_context": {"status": "fresh"},
         "compact_alert": {"compact": 1},
         "grouped_alert_context": {"group": 1},
         "detection_validation": {"intent": "match"},

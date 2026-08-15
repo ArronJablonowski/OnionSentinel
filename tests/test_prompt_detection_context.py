@@ -100,6 +100,7 @@ class PromptDetectionContextTests(unittest.TestCase):
                 "network_protocol": "tls",
                 "destination_port": 443,
                 "rule_name": "Fixture rule",
+                "evidence_sources": [],
             },
             "incident-responder",
         )

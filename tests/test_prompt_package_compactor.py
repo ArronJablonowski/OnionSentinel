@@ -86,6 +86,43 @@ class PromptPackageCompactorTests(unittest.TestCase):
             8,
         )
 
+    def test_ac_hunter_compaction_preserves_provenance_and_blocks_negative_use(self):
+        reference = "ac-hunter:" + "b" * 64
+        package = {
+            "related_alerts": [
+                {"id": index, "detail": "x" * 200}
+                for index in range(200)
+            ],
+            "ac_hunter_evidence": {
+                "evidence_ref": reference,
+                "evidence_digest": "b" * 64,
+                "findings": [
+                    {"id": index, "reason": "y" * 150}
+                    for index in range(32)
+                ],
+                "correlated_hosts": [{"host": index} for index in range(16)],
+                "analyst_notes": ["z" * 100 for _ in range(16)],
+                "negative_evidence_allowed": True,
+                "truncated": False,
+            },
+        }
+
+        compacted, _output = compact_package_to_budget(
+            self.sources, package, 8_000
+        )
+
+        context = compacted["ac_hunter_evidence"]
+        self.assertEqual(context["evidence_ref"], reference)
+        self.assertEqual(len(context["findings"]), 12)
+        self.assertEqual(len(context["correlated_hosts"]), 8)
+        self.assertEqual(len(context["analyst_notes"]), 6)
+        self.assertTrue(context["truncated"])
+        self.assertFalse(context["negative_evidence_allowed"])
+        self.assertIn(
+            "ac_hunter_evidence",
+            compacted["package_budget"]["compaction_steps"],
+        )
+
     def test_unshrinkable_package_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "remains above"):
             compact_package_to_budget(

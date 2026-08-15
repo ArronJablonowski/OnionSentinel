@@ -123,6 +123,23 @@ def _compact_enrichment(package: dict, steps: list[str]) -> None:
     steps.append("public_enrichment")
 
 
+def _compact_ac_hunter(package: dict, steps: list[str]) -> None:
+    context = package.get("ac_hunter_evidence")
+    if not isinstance(context, dict):
+        return
+    changed = False
+    for key, retain in (
+        ("findings", 12),
+        ("correlated_hosts", 8),
+        ("analyst_notes", 6),
+    ):
+        changed = _truncate_list(context, key, retain) or changed
+    if changed:
+        context["truncated"] = True
+        context["negative_evidence_allowed"] = False
+        steps.append("ac_hunter_evidence")
+
+
 def _pcap_relationship_counts(pcap: dict) -> None:
     evidence_rows = pcap["parsed_evidence"]
     pcap["exact_alert_evidence_count"] = sum(
@@ -204,6 +221,7 @@ def _initial_lossy_compaction(package, incident, steps, sources) -> None:
     _compact_supporting_context(package, steps)
     _compact_asset_context(package, steps)
     _compact_enrichment(package, steps)
+    _compact_ac_hunter(package, steps)
     _compact_pcap(package, steps)
     if isinstance(incident, dict) and sources.project_hits(
         incident,

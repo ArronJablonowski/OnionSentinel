@@ -168,6 +168,32 @@ Enable `/etc/so-alert-relay/ac-hunter.json` first and then
 `$HOME/n8n-local/config/ac-hunter.json`. That order ensures the scheduled
 collector continues to fail closed until the Relay trust boundary is ready.
 
+## Agent and harness evidence
+
+Prompt construction reads the normalized snapshot only from the alert store's
+fixed loopback `GET /ac-hunter/snapshot` route. It does not use the public
+dashboard route, invoke the collector, contact the Relay, or read the AC Hunter
+configuration and credential files. The projection is joined to the selected
+alert's exact source and destination addresses and caps findings, correlated
+hosts, lists, nesting, text, and total response bytes.
+
+The model-facing `ac_hunter_evidence` section preserves `fresh`, `empty`,
+`stale`, `partial`, `not_collected`, `auth_failure`, `unavailable`, and
+`invalid` states. Only a fresh, complete, non-truncated empty projection can
+support absence within its exact dataset, host, time, and module scope. Other
+failures remain evidence gaps. AC Hunter text is untrusted behavioral context;
+scores and correlations prioritize review and never establish malware,
+compromise, authorization, or malicious intent without independent primary
+telemetry.
+
+When a valid local snapshot exists, the active v1
+`ac-hunter-behavioral-review` guidance can be selected in the otherwise-shadow
+registry. Every AC Hunter-derived report statement must cite the exact
+`ac-hunter:<dataset_digest>` reference exposed by the evidence-reference
+contract. The stricter v2 manifest remains a candidate until its separately
+signed registry, independent review, replay, adversarial, and human-approval
+gates are satisfied; the v1 evidence path does not promote or activate it.
+
 ## Validation and rollback
 
 Run the collector once for cutover validation, then read the local database API:

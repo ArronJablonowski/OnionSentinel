@@ -23,6 +23,7 @@ SOURCE_CLASSES = {
     "incident_response_evidence": "security_onion_incident_export",
     "investigation_query_results": "security_onion_investigation_query",
     "live_osquery_evidence": "live_endpoint_osquery",
+    "ac_hunter_evidence": "behavioral_context",
 }
 
 

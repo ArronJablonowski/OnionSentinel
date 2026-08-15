@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 import sys
 import unittest
@@ -59,6 +60,15 @@ def snapshot(*, stale: bool = False, complete: bool = True) -> dict:
             "score": 99,
             "verdict": "high_concern",
             "reason": "must not enter this alert package",
+        },
+        {
+            "id": "finding-shared-destination-only",
+            "module": "beacons",
+            "source_ip": "203.0.113.57",
+            "destination_ip": "198.51.100.20",
+            "score": 92,
+            "verdict": "high_concern",
+            "reason": "a shared destination is not an exact-host join",
         },
     ]
     return {
@@ -129,6 +139,7 @@ def snapshot(*, stale: bool = False, complete: bool = True) -> dict:
             "Consider authorized software updates and shared infrastructure.",
         ],
         "disclaimer": "Behavioral context is not proof of malicious intent.",
+        "counts": {"beacons": len(findings)},
     }
 
 
@@ -171,10 +182,12 @@ class PromptAcHunterContextTests(unittest.TestCase):
         self.assertFalse(context["malware_verdict_authority"])
         self.assertFalse(context["collection_triggered"])
         self.assertNotIn("203.0.113.55", json.dumps(context))
+        self.assertNotIn("203.0.113.57", json.dumps(context))
 
     def test_fresh_complete_empty_scope_is_explicit_negative_context(self):
         value = snapshot()
         value["modules"]["beacons"]["findings"] = []
+        value["counts"]["beacons"] = 0
         value["correlated_hosts"] = []
 
         context = build_ac_hunter_context(
@@ -200,6 +213,33 @@ class PromptAcHunterContextTests(unittest.TestCase):
                 self.assertFalse(context["negative_evidence_allowed"])
                 self.assertEqual(context["evidence_ref"], f"ac-hunter:{DIGEST}")
 
+    def test_bounded_upstream_page_is_partial_even_when_requests_succeeded(self):
+        value = snapshot()
+        base = value["modules"]["beacons"]["findings"][0]
+        value["modules"]["beacons"]["findings"] = [
+            {
+                **base,
+                "id": f"unrelated-{index}",
+                "source_ip": "203.0.113.99",
+                "destination_ip": "203.0.113.100",
+            }
+            for index in range(100)
+        ]
+        value["counts"]["beacons"] = 342
+
+        context = build_ac_hunter_context(
+            self.selected(), fetch_snapshot=response(value)
+        )
+
+        self.assertEqual(context["status"], "partial")
+        self.assertTrue(context["truncated"])
+        self.assertFalse(context["negative_evidence_allowed"])
+        beacons = next(
+            item for item in context["module_statuses"]
+            if item["module"] == "beacons"
+        )
+        self.assertTrue(beacons["source_truncated"])
+
     def test_not_collected_and_auth_failures_are_explicit_and_unciteable(self):
         for code, expected in ((404, "not_collected"), (401, "auth_failure"), (403, "auth_failure")):
             with self.subTest(code=code):
@@ -210,6 +250,16 @@ class PromptAcHunterContextTests(unittest.TestCase):
                 self.assertFalse(context["available"])
                 self.assertEqual(context["evidence_ref"], "")
                 self.assertEqual(context["findings"], [])
+
+    def test_missing_alert_host_identity_is_unciteable(self):
+        context = build_ac_hunter_context(
+            {"source_ip": "", "destination_ip": ""},
+            fetch_snapshot=response(snapshot()),
+        )
+
+        self.assertEqual(context["status"], "unavailable")
+        self.assertFalse(context["available"])
+        self.assertEqual(context["evidence_ref"], "")
 
     def test_malformed_or_oversized_snapshots_fail_closed_without_secret_echo(self):
         malformed = snapshot()
@@ -246,6 +296,22 @@ class PromptAcHunterContextTests(unittest.TestCase):
         self.assertEqual(len(context["findings"]), MAX_FINDINGS)
         self.assertTrue(context["truncated"])
         self.assertLessEqual(len(context["findings"][0]["reason"]), 500)
+
+    def test_sqlite_alert_rows_are_supported_without_mapping_get(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT '192.0.2.10' AS source_ip, "
+            "'198.51.100.20' AS destination_ip"
+        ).fetchone()
+        self.addCleanup(connection.close)
+
+        context = build_ac_hunter_context(
+            row, fetch_snapshot=response(snapshot())
+        )
+
+        self.assertEqual(context["status"], "fresh")
+        self.assertEqual(context["returned"], 2)
 
 
 if __name__ == "__main__":

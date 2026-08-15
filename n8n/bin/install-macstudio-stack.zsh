@@ -921,6 +921,7 @@ cp "$REPO_DIR/n8n/bin/prompt_detection_context.py" "$STACK_DIR/bin/prompt_detect
 cp "$REPO_DIR/n8n/bin/prompt_detection_facade.py" "$STACK_DIR/bin/prompt_detection_facade.py"
 cp "$REPO_DIR/n8n/bin/prompt_evidence_admission.py" "$STACK_DIR/bin/prompt_evidence_admission.py"
 cp "$REPO_DIR/n8n/bin/prompt_evidence_facade.py" "$STACK_DIR/bin/prompt_evidence_facade.py"
+cp "$REPO_DIR/n8n/bin/prompt_ac_hunter_context.py" "$STACK_DIR/bin/prompt_ac_hunter_context.py"
 cp "$REPO_DIR/n8n/bin/prompt_evidence_snapshot.py" "$STACK_DIR/bin/prompt_evidence_snapshot.py"
 cp "$REPO_DIR/n8n/bin/prompt_investigation_query_context.py" "$STACK_DIR/bin/prompt_investigation_query_context.py"
 cp "$REPO_DIR/n8n/bin/prompt_package_compactor.py" "$STACK_DIR/bin/prompt_package_compactor.py"

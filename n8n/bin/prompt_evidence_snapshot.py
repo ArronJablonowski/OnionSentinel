@@ -30,6 +30,7 @@ class CoreEvidenceSnapshotSources:
     grouped_alert_context: Callable[[Any, Any, int, bool], dict]
     pcap_evidence_context: Callable[[Any, Any, Path, int], dict]
     public_enrichment_context: Callable[[Any, Any, int, bool], dict]
+    ac_hunter_context: Callable[[Any], dict]
     authorized_activity_context: Callable[[Any, Any], dict]
     analyst_state_context: Callable[[Any, Any], dict]
     correlated_alert_context: Callable[[Any, Any, int, int], dict]
@@ -44,6 +45,7 @@ class CoreEvidenceSnapshot:
     grouped_alert_context: dict
     pcap_evidence: dict
     public_enrichment: dict
+    ac_hunter_evidence: dict
     authorization_evidence: dict
     analyst_state: dict
     correlated_alert_context: dict
@@ -143,6 +145,7 @@ def collect_core_evidence_snapshot(
             request.related_limit,
             request.include_tests,
         ),
+        ac_hunter_evidence=sources.ac_hunter_context(request.selected),
         authorization_evidence=sources.authorized_activity_context(
             request.connection,
             request.selected,

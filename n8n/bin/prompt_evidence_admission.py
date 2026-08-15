@@ -20,6 +20,7 @@ class PromptEvidenceAdmissionRequest:
     exact_validation_rows: list[Any]
     pcap_context: dict
     enrichment_context: dict
+    ac_hunter_context: dict
     compact_alert: dict
     grouped_alert_context: dict
     detection_validation: dict
@@ -157,6 +158,7 @@ def _memory_context(
             "alert": request.compact_alert,
             "grouped_alert_context": request.grouped_alert_context,
             "public_enrichment": request.enrichment_context,
+            "ac_hunter_evidence": request.ac_hunter_context,
             "pcap_evidence": request.pcap_context,
             "detection_validation": request.detection_validation,
             "asset_context": request.asset_context,

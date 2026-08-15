@@ -84,6 +84,7 @@ from prompt_evidence_admission import (
 )
 from prompt_evidence_facade import (
     alert_group_rows,
+    ac_hunter_context,
     analyst_state_context,
     authorized_activity_context,
     canonical_authorized_activity_entry,
@@ -169,6 +170,7 @@ def _package_workflow_sources() -> PromptPackageWorkflowSources:
         grouped_alert_context=grouped_alert_context,
         pcap_evidence_context=pcap_evidence_context,
         public_enrichment_context=public_enrichment_context,
+        ac_hunter_context=ac_hunter_context,
         authorized_activity_context=authorized_activity_context,
         analyst_state_context=analyst_state_context,
         correlated_alert_context=correlated_alert_context,

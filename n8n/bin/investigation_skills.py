@@ -30,7 +30,9 @@ SAFE_ROLES = {
     "threat-hunter",
 }
 SAFE_STATUSES = {"candidate", "shadow", "active", "deprecated"}
-SAFE_BACKENDS = {"elastic", "oql", "osquery", "pcap_zeek", "enrichment"}
+SAFE_BACKENDS = {
+    "elastic", "oql", "osquery", "pcap_zeek", "enrichment", "ac_hunter",
+}
 SAFE_EVIDENCE = {
     "alert",
     "asset_context",
@@ -46,6 +48,7 @@ SAFE_EVIDENCE = {
     "zeek_http",
     "zeek_ssh",
     "zeek_tls",
+    "ac_hunter_behavioral_context",
 }
 
 
@@ -105,6 +108,7 @@ def _match_mapping(value: Any, skill_id: str) -> dict[str, Any]:
         "protocols",
         "destination_ports",
         "rule_name_contains",
+        "evidence_sources",
     }
     unknown = set(value) - allowed_keys
     if unknown:
@@ -116,9 +120,16 @@ def _normalized_match_lists(
     value: dict[str, Any], skill_id: str,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {}
-    for key in ("event_datasets", "protocols", "rule_name_contains"):
+    for key in (
+        "event_datasets", "protocols", "rule_name_contains",
+        "evidence_sources",
+    ):
         if key in value:
-            result[key] = _string_list(value[key], f"{skill_id}.match.{key}")
+            result[key] = _string_list(
+                value[key],
+                f"{skill_id}.match.{key}",
+                allowed=SAFE_EVIDENCE if key == "evidence_sources" else None,
+            )
     return result
 
 
@@ -320,7 +331,7 @@ def load_investigation_skills(path: Path) -> dict[str, Any]:
 
 def _context_match_values(
     context: Mapping[str, Any],
-) -> tuple[str, str, str, int]:
+) -> tuple[str, str, str, int, set[str]]:
     dataset = str(context.get("event_dataset") or "").strip().lower()
     protocol = str(
         context.get("transport_protocol") or context.get("network_protocol") or ""
@@ -330,12 +341,17 @@ def _context_match_values(
         destination_port = int(context.get("destination_port"))
     except (TypeError, ValueError):
         destination_port = 0
-    return dataset, protocol, rule_name, destination_port
+    raw_sources = context.get("evidence_sources")
+    evidence_sources = {
+        str(item or "").strip().lower()
+        for item in raw_sources
+    } if isinstance(raw_sources, list) else set()
+    return dataset, protocol, rule_name, destination_port, evidence_sources
 
 
 def _trigger_checks(
     match: Mapping[str, Any], dataset: str, protocol: str,
-    rule_name: str, destination_port: int,
+    rule_name: str, destination_port: int, evidence_sources: set[str],
 ) -> list[bool]:
     checks: list[bool] = []
     if match.get("event_datasets"):
@@ -346,13 +362,19 @@ def _trigger_checks(
         checks.append(destination_port in set(match["destination_ports"]))
     if match.get("rule_name_contains"):
         checks.append(any(fragment in rule_name for fragment in match["rule_name_contains"]))
+    if match.get("evidence_sources"):
+        checks.append(set(match["evidence_sources"]).issubset(evidence_sources))
     return checks
 
 
 def _matches(skill: Mapping[str, Any], context: Mapping[str, Any]) -> bool:
     match = skill.get("match") if isinstance(skill.get("match"), dict) else {}
-    dataset, protocol, rule_name, destination_port = _context_match_values(context)
-    checks = _trigger_checks(match, dataset, protocol, rule_name, destination_port)
+    dataset, protocol, rule_name, destination_port, evidence_sources = (
+        _context_match_values(context)
+    )
+    checks = _trigger_checks(
+        match, dataset, protocol, rule_name, destination_port, evidence_sources,
+    )
     return bool(checks) and all(checks)
 
 

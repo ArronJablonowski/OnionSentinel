@@ -70,6 +70,35 @@ def _add_authorization_references(
         )
 
 
+def _add_ac_hunter_reference(
+    prompt_package: dict[str, Any], registry: ReferenceRegistry,
+) -> None:
+    context = prompt_package.get("ac_hunter_evidence")
+    if not isinstance(context, dict) or context.get("available") is not True:
+        return
+    reference = context.get("evidence_ref")
+    digest = context.get("evidence_digest")
+    if not reference or not digest:
+        return
+    status = str(context.get("status") or "")
+    returned = context.get("returned")
+    valid_returned = (
+        isinstance(returned, int)
+        and not isinstance(returned, bool)
+        and returned >= 0
+    )
+    registry.add(
+        reference,
+        source="ac_hunter_evidence",
+        source_class="behavioral_context",
+        corroborating=status == "fresh" and valid_returned and returned > 0,
+        status=status,
+        returned=returned,
+        evidence_digest=digest,
+        require_valid_count=True,
+    )
+
+
 def build(
     prompt_package: dict[str, Any], deps: Dependencies,
 ) -> dict[str, Any]:
@@ -77,6 +106,7 @@ def build(
     registry = deps.registry_factory()
     _add_section_references(prompt_package, registry)
     _add_authorization_references(prompt_package, registry, deps)
+    _add_ac_hunter_reference(prompt_package, registry)
     iterative = prompt_package.get("investigation_query_results")
     columnar_claimed = deps.process_columnar(iterative, registry)
     for section in TRAVERSED_SECTIONS:
