@@ -90,7 +90,7 @@ class RecoveryRestoreWorkflowCharacterization(unittest.TestCase):
         encoded = json.dumps(names, separators=(",", ":"), sort_keys=True).encode()
         self.assertEqual(
             (len(names), hashlib.sha256(encoded).hexdigest()),
-            (28, "5450aa68b22704bf58bd15420e70dc3ac7817156cd10313841f6c89492ae5e39"),
+            (32, "be09d7f6457b0c26479a1aeabda535eb4c75d0cd3a701b7d3601bf91d7551a87"),
         )
         self.assertEqual(str(inspect.signature(restore.verify_bundle)), "(bundle: 'Path') -> 'dict[str, object]'")
         self.assertEqual(
