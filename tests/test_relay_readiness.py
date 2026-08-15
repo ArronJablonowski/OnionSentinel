@@ -109,6 +109,26 @@ class RelayReadinessTests(unittest.TestCase):
         self.assertFalse(any(command[0].endswith("ping") for command in commands))
         self.assertTrue(all("--help" not in command for command in commands))
 
+    def test_readiness_does_not_latch_its_own_previous_failure(self) -> None:
+        module = self.require_module()
+
+        def run(command):
+            if "show" in command:
+                prior_result = (
+                    "exit-code"
+                    if command[-1] == "so-storage-health.service"
+                    else "success"
+                )
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    f"LoadState=loaded\nResult={prior_result}\n",
+                    "",
+                )
+            return subprocess.CompletedProcess(command, 0, "active\n", "")
+
+        self.assertEqual(module.evaluate_service_health(run)["status"], "pass")
+
     def test_ssh_readiness_checks_metadata_without_reading_private_key_content(self) -> None:
         module = self.require_module()
         with tempfile.TemporaryDirectory() as tmp:
