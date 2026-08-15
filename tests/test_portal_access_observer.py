@@ -122,6 +122,59 @@ class PortalAccessObserverTests(unittest.TestCase):
         self.assertEqual(fields["permission"], "authentication.login")
         self.assertEqual(fields["reason_code"], "observe_authentication_boundary")
 
+    def test_enforcement_projection_distinguishes_precommit_and_final_outcome(self):
+        principal = HumanPrincipal(
+            "human_session", "local-administrator", "administrator"
+        )
+        observation = observer.begin_observation(
+            route("/api/soc-settings/ai-model"),
+            mode="admin-enforce",
+            principal=principal,
+            same_origin_authorized=True,
+            csrf_authorized=True,
+            request_id="request-enforced-1",
+            signing_key=KEY,
+        )
+        precommit = observer.precommit_observation(
+            observation,
+            occurred_at="2026-08-15T06:50:00Z",
+        )
+        final = observer.finalize_observation(
+            observation,
+            http_status=204,
+            occurred_at="2026-08-15T06:50:01Z",
+        )
+        self.assertEqual(
+            (precommit["http_status"], precommit["reason_code"]),
+            (100, "enforce_authorized_precommit"),
+        )
+        self.assertEqual(
+            (final["outcome"], final["reason_code"]),
+            ("allowed", "enforce_authorized"),
+        )
+
+    def test_enforcement_denial_cannot_be_projected_as_a_precommit(self):
+        observation = observer.begin_observation(
+            route("/api/soc-settings/ai-model"),
+            mode="admin-enforce",
+            principal=None,
+            same_origin_authorized=False,
+            csrf_authorized=False,
+            request_id="request-enforced-2",
+            signing_key=KEY,
+        )
+        final = observer.finalize_observation(
+            observation,
+            http_status=401,
+            occurred_at="2026-08-15T06:51:00Z",
+        )
+        self.assertEqual(final["reason_code"], "enforce_denied_unauthenticated")
+        with self.assertRaises(observer.AccessObservationError):
+            observer.precommit_observation(
+                observation,
+                occurred_at="2026-08-15T06:51:00Z",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,9 +4,197 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
+import stat
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
+
+
+PASSWORD_RECORD_FIELDS = frozenset({
+    "algorithm", "iterations", "salt", "hash",
+})
+MAXIMUM_PASSWORD_RECORD_BYTES = 4096
+MAXIMUM_LEGACY_SESSION_BYTES = 1024 * 1024
+MAXIMUM_LEGACY_SESSIONS = 256
+
+
+class AdminPasswordConfigurationError(RuntimeError):
+    """Raised when enforcement cannot safely admit the password record."""
+
+
+class AdminSessionStoreError(RuntimeError):
+    """Raised when legacy session state cannot be safely committed."""
+
+
+def _password_hex(value: object, *, minimum: int, maximum: int) -> bytes:
+    if not isinstance(value, str):
+        raise AdminPasswordConfigurationError(
+            "administrator password record has an invalid format"
+        )
+    try:
+        decoded = bytes.fromhex(value)
+    except ValueError as exc:
+        raise AdminPasswordConfigurationError(
+            "administrator password record has an invalid format"
+        ) from exc
+    if not minimum <= len(decoded) <= maximum or decoded.hex() != value:
+        raise AdminPasswordConfigurationError(
+            "administrator password record has an invalid format"
+        )
+    return decoded
+
+
+def _validate_password_parent(path: Path) -> None:
+    try:
+        parent = path.parent.lstat()
+    except OSError as exc:
+        raise AdminPasswordConfigurationError(
+            "administrator password record is unavailable"
+        ) from exc
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != os.getuid()
+        or stat.S_IMODE(parent.st_mode) != 0o700
+    ):
+        raise AdminPasswordConfigurationError(
+            "administrator password directory must be owner-only"
+        )
+
+
+def _owner_private_password_payload(path: Path) -> bytes:
+    _validate_password_parent(path)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise AdminPasswordConfigurationError(
+            "administrator password record is unavailable"
+        ) from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or not 1 <= metadata.st_size <= MAXIMUM_PASSWORD_RECORD_BYTES
+        ):
+            raise AdminPasswordConfigurationError(
+                "administrator password record must be an owner-only regular file"
+            )
+        payload = os.read(descriptor, MAXIMUM_PASSWORD_RECORD_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    return payload
+
+
+def _validated_password_record(payload: bytes) -> dict[str, object]:
+    try:
+        record = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AdminPasswordConfigurationError(
+            "administrator password record has an invalid format"
+        ) from exc
+    if (
+        not isinstance(record, dict)
+        or set(record) != PASSWORD_RECORD_FIELDS
+        or record.get("algorithm") != "pbkdf2_sha256"
+    ):
+        raise AdminPasswordConfigurationError(
+            "administrator password record has an invalid format"
+        )
+    iterations = record.get("iterations")
+    if (
+        not isinstance(iterations, int)
+        or isinstance(iterations, bool)
+        or not 200_000 <= iterations <= 5_000_000
+    ):
+        raise AdminPasswordConfigurationError(
+            "administrator password record has an invalid format"
+        )
+    _password_hex(record.get("salt"), minimum=16, maximum=64)
+    _password_hex(record.get("hash"), minimum=32, maximum=32)
+    return dict(record)
+
+
+def load_enforcement_admin_password_record(path: Path) -> dict[str, object]:
+    """Load an exact owner-only record without following filesystem links."""
+    return _validated_password_record(_owner_private_password_payload(path))
+
+
+def _admin_session_parent_present(state_dir: Path) -> bool:
+    try:
+        parent = state_dir.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise AdminSessionStoreError(
+            "administrator session directory metadata is unavailable"
+        ) from exc
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != os.getuid()
+        or stat.S_IMODE(parent.st_mode) != 0o700
+    ):
+        raise AdminSessionStoreError(
+            "administrator session directory must be owner-only"
+        )
+    return True
+
+
+def _owner_private_legacy_session_payload(path: Path) -> bytes | None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise AdminSessionStoreError(
+            "administrator session file is unavailable"
+        ) from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size > MAXIMUM_LEGACY_SESSION_BYTES
+        ):
+            raise AdminSessionStoreError(
+                "administrator session file must be a bounded owner-only regular file"
+            )
+        return os.read(descriptor, MAXIMUM_LEGACY_SESSION_BYTES + 1)
+    finally:
+        os.close(descriptor)
+
+
+def validate_admin_session_store(state_dir: Path, path: Path) -> int:
+    """Validate retained legacy session custody without creating state."""
+    if Path(path).parent != Path(state_dir):
+        raise AdminSessionStoreError(
+            "administrator session file must remain inside its state directory"
+        )
+    if not _admin_session_parent_present(state_dir):
+        return 0
+    payload = _owner_private_legacy_session_payload(path)
+    if payload is None:
+        return 0
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AdminSessionStoreError(
+            "administrator session file is malformed"
+        ) from exc
+    if not isinstance(value, dict) or len(value) > MAXIMUM_LEGACY_SESSIONS:
+        raise AdminSessionStoreError(
+            "administrator session file has an invalid session map"
+        )
+    return len(value)
 
 
 def ensure_admin_token(
@@ -69,13 +257,113 @@ def load_admin_sessions(path: Path) -> dict:
         return {}
 
 
-def save_admin_sessions(state_dir: Path, path: Path, sessions: dict) -> None:
-    state_dir.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(sessions, indent=2, sort_keys=True), encoding="utf-8")
+def _prepare_private_session_directory(path: Path) -> None:
     try:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        metadata = path.lstat()
+        if (
+            stat.S_ISDIR(metadata.st_mode)
+            and metadata.st_uid == os.getuid()
+            and stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            path.chmod(0o700)
+            metadata = path.lstat()
+    except OSError as exc:
+        raise AdminSessionStoreError(
+            "administrator session directory could not be prepared"
+        ) from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise AdminSessionStoreError(
+            "administrator session directory must be owner-only"
+        )
+
+
+def _validate_session_file(path: Path) -> None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise AdminSessionStoreError(
+            "administrator session file metadata is unavailable"
+        ) from exc
+    if (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_uid == os.getuid()
+        and stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        try:
+            path.chmod(0o600)
+            metadata = path.lstat()
+        except OSError as exc:
+            raise AdminSessionStoreError(
+                "administrator session file permissions could not be tightened"
+            ) from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise AdminSessionStoreError(
+            "administrator session file must be an owner-only regular file"
+        )
+
+
+def _atomic_session_write(path: Path, payload: bytes) -> None:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
         path.chmod(0o600)
-    except Exception:
-        pass
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as exc:
+        raise AdminSessionStoreError(
+            "administrator session commit failed"
+        ) from exc
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+
+def save_admin_sessions(state_dir: Path, path: Path, sessions: dict) -> None:
+    if Path(path).parent != Path(state_dir):
+        raise AdminSessionStoreError(
+            "administrator session file must remain inside its state directory"
+        )
+    _prepare_private_session_directory(state_dir)
+    _validate_session_file(path)
+    try:
+        payload = json.dumps(
+            sessions, indent=2, sort_keys=True
+        ).encode("utf-8") + b"\n"
+    except (TypeError, ValueError) as exc:
+        raise AdminSessionStoreError(
+            "administrator session state is not serializable"
+        ) from exc
+    _atomic_session_write(path, payload)
 
 
 def prune_admin_sessions(

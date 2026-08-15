@@ -291,6 +291,15 @@ async function installSyntheticApi(page, { failEscalation = false } = {}) {
       body: JSON.stringify(body),
     });
 
+    if (method === 'POST' && path === '/api/csrf-contract/denied') {
+      await route.fulfill({
+        status: 403,
+        contentType: 'application/json',
+        body: '{"ok":false,"error":"denied"}',
+      });
+      return;
+    }
+
     if (method === 'GET' && path === '/api/soc-incidents') {
       await json({
         ok: true,
@@ -538,7 +547,11 @@ test('session CSRF bootstrap scopes credentials to same-origin unsafe fetches', 
   await installSyntheticApi(page);
   await openSyntheticAlert(page);
 
-  await page.evaluate(async () => {
+  const deniedEvents = await page.evaluate(async () => {
+    const denied = [];
+    window.addEventListener('onion-sentinel-access-denied', event => {
+      denied.push(event.detail.status);
+    });
     await fetch('/api/csrf-contract/same-origin-post', { method: 'POST' });
     await fetch('/api/csrf-contract/same-origin-get');
     await fetch(new Request('/api/csrf-contract/request-object', {
@@ -548,6 +561,8 @@ test('session CSRF bootstrap scopes credentials to same-origin unsafe fetches', 
     await fetch('https://csrf-cross-origin.invalid/api/csrf-contract/cross-origin-post', {
       method: 'POST',
     });
+    await fetch('/api/csrf-contract/denied', { method: 'POST' });
+    return denied;
   });
 
   expect(requests).toEqual([
@@ -555,7 +570,12 @@ test('session CSRF bootstrap scopes credentials to same-origin unsafe fetches', 
     { path: '/api/csrf-contract/same-origin-get', method: 'GET', token: '' },
     { path: '/api/csrf-contract/request-object', method: 'DELETE', token },
     { path: '/api/csrf-contract/cross-origin-post', method: 'POST', token: '' },
+    { path: '/api/csrf-contract/denied', method: 'POST', token },
   ]);
+  expect(deniedEvents).toEqual([403]);
+  await expect(page.locator('#onion-sentinel-access-status')).toContainText(
+    'Administrator authorization failed. No change was applied.',
+  );
 });
 
 test('synthetic fixture safely validates every destructive alert action', async ({ page }) => {

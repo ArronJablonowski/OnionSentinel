@@ -549,10 +549,14 @@ class OnionSentinelHandler(runtime.PortalHandler):
         return _request_routes.do_get(self, sys.modules[__name__])
 
     def do_POST(self) -> None:
-        ACCESS_RUNTIME.begin(
+        admission = ACCESS_RUNTIME.begin(
             self, urlparse(self.path).path,
             controlled_evaluation=CONTROLLED_EVALUATION_MODE,
         )
+        if not admission.allowed:
+            return _request_routes.send_access_denial(
+                self, sys.modules[__name__], admission
+            )
         return _request_routes.do_post(self, sys.modules[__name__])
 
 

@@ -9,6 +9,7 @@ import stat
 import threading
 
 from portal_access_enforcement import (
+    MODE_ADMIN_ENFORCE,
     MODE_LEGACY,
     MODE_OBSERVE,
     parse_mode,
@@ -17,6 +18,7 @@ from portal_access_observer import (
     AccessObservation,
     begin_observation,
     finalize_observation,
+    precommit_observation,
 )
 from portal_admin_audit_store import (
     append_verified_event,
@@ -92,7 +94,7 @@ def _load_signing_key(path: Path) -> bytes:
 
 
 class AccessObserverRuntime:
-    """Observe writes and append audits without changing response behavior."""
+    """Audit phased write decisions and precommit enforced mutations."""
 
     def __init__(
         self,
@@ -105,11 +107,11 @@ class AccessObserverRuntime:
         initial_event_count: int = 0,
     ) -> None:
         self.mode = parse_mode(mode)
-        if self.mode not in {MODE_LEGACY, MODE_OBSERVE}:
+        if self.mode not in {MODE_LEGACY, MODE_OBSERVE, MODE_ADMIN_ENFORCE}:
             raise AccessObserverConfigurationError(
                 "configured access enforcement mode is not qualified"
             )
-        if self.mode == MODE_OBSERVE and (
+        if self.mode != MODE_LEGACY and (
             not isinstance(signing_key, bytes) or len(signing_key) < 32
         ):
             raise AccessObserverConfigurationError(
@@ -126,7 +128,11 @@ class AccessObserverRuntime:
 
     @property
     def enabled(self) -> bool:
-        return self.mode == MODE_OBSERVE
+        return self.mode != MODE_LEGACY
+
+    @property
+    def enforcing(self) -> bool:
+        return self.mode == MODE_ADMIN_ENFORCE
 
     def begin(
         self,
@@ -190,11 +196,37 @@ class AccessObserverRuntime:
             self._event_count += 1
         return True
 
+    def precommit(
+        self,
+        observation: AccessObservation | None,
+        *,
+        occurred_at: str,
+    ) -> bool:
+        if observation is None or not self.enforcing:
+            return True
+        try:
+            fields = precommit_observation(
+                observation,
+                occurred_at=occurred_at,
+            )
+            self._append_event(
+                self._ledger_path,
+                fields=fields,
+                signing_key=self._signing_key,
+            )
+        except Exception as exc:
+            self._record_failure(type(exc).__name__)
+            return False
+        with self._lock:
+            self._event_count += 1
+        return True
+
     def snapshot(self) -> dict[str, object]:
         with self._lock:
             return {
                 "mode": self.mode,
                 "enabled": self.enabled,
+                "enforcing": self.enforcing,
                 "audit_event_count": self._event_count,
                 "audit_failure_count": self._failure_count,
                 "last_failure_type": self._last_failure_type,
@@ -216,7 +248,7 @@ def load_access_observer_runtime(
             ledger_path=ledger_path,
             failure_sink=failure_sink,
         )
-    if mode != MODE_OBSERVE:
+    if mode not in {MODE_OBSERVE, MODE_ADMIN_ENFORCE}:
         raise AccessObserverConfigurationError(
             "configured access enforcement mode is not qualified"
         )

@@ -1,6 +1,9 @@
 import importlib
+import hashlib
+import json
 from email.message import Message
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -168,6 +171,82 @@ class OnionSentinelServerTests(unittest.TestCase):
         session_runtime.resolve_session.assert_called_once()
         self.assertTrue(admission.allowed)
 
+    def test_admin_enforcement_denies_before_body_and_requires_audit_precommit(self):
+        headers = Message()
+        headers["Host"] = "10.77.7.225:8766"
+        headers["Origin"] = "http://10.77.7.225:8766"
+        headers["X-Onion-Sentinel-CSRF"] = "csrf-" + "c" * 38
+        handler = SimpleNamespace(
+            headers=headers,
+            application_request_id="request-enforce-1",
+            _soc_review_origin_authorized=lambda: True,
+            _admin_session_id=lambda: "session-" + "s" * 36,
+        )
+        session = SimpleNamespace(
+            principal=None,
+            csrf_authorized=False,
+            reason="session_missing",
+        )
+        denied_decision = SimpleNamespace(
+            mode="admin-enforce",
+            permission="settings.manage",
+            allowed=False,
+            enforced=True,
+            would_authorize=False,
+            reason="unauthenticated",
+        )
+        observer_runtime = SimpleNamespace(
+            enabled=True,
+            enforcing=True,
+            begin=mock.Mock(
+                return_value=SimpleNamespace(decision=denied_decision)
+            ),
+            precommit=mock.Mock(),
+            record_boundary_failure=mock.Mock(),
+        )
+        session_runtime = SimpleNamespace(
+            resolve_session=mock.Mock(return_value=session)
+        )
+        access_runtime = server._access_adapter.DedicatedAccessRuntime(
+            runtime=server.runtime,
+            observer=observer_runtime,
+            sessions=session_runtime,
+        )
+        denied = access_runtime.begin(
+            handler,
+            "/api/soc-settings/ai-model",
+            controlled_evaluation=False,
+        )
+        self.assertFalse(denied.allowed)
+        self.assertEqual((denied.status, denied.reason), (401, "unauthenticated"))
+        observer_runtime.precommit.assert_not_called()
+
+        allowed_decision = SimpleNamespace(
+            mode="admin-enforce",
+            permission="settings.manage",
+            allowed=True,
+            enforced=True,
+            would_authorize=True,
+            reason="authorized",
+        )
+        session.principal = object()
+        session.csrf_authorized = True
+        session.reason = "authorized"
+        observer_runtime.begin.return_value = SimpleNamespace(
+            decision=allowed_decision
+        )
+        observer_runtime.precommit.return_value = False
+        unavailable = access_runtime.begin(
+            handler,
+            "/api/soc-settings/ai-model",
+            controlled_evaluation=False,
+        )
+        self.assertFalse(unavailable.allowed)
+        self.assertEqual(
+            (unavailable.status, unavailable.reason),
+            (503, "audit_precommit_failed"),
+        )
+
     def test_observe_login_and_logout_cookie_headers_preserve_legacy_default(self):
         disabled_sessions = SimpleNamespace(
             enabled=False,
@@ -220,6 +299,127 @@ class OnionSentinelServerTests(unittest.TestCase):
                     "onion_sentinel_csrf=; Path=/; Max-Age=0; SameSite=Strict",
                 ],
             )
+
+    def test_admin_enforcement_build_requires_strict_password_record(self):
+        observer = SimpleNamespace(mode="admin-enforce", enforcing=True)
+        sessions = object()
+        with (
+            mock.patch.object(
+                server._access_adapter,
+                "build_access_observer",
+                return_value=observer,
+            ),
+            mock.patch.object(
+                server._access_adapter,
+                "build_human_session_runtime",
+                return_value=sessions,
+            ),
+            mock.patch.object(
+                server._access_adapter,
+                "load_enforcement_admin_password_record",
+                create=True,
+                return_value={
+                    "algorithm": "pbkdf2_sha256",
+                    "iterations": 200_000,
+                    "salt": "00" * 16,
+                    "hash": "00" * 32,
+                },
+            ) as validate,
+            mock.patch.object(
+                server._access_adapter,
+                "validate_admin_session_store",
+                create=True,
+            ) as validate_sessions,
+        ):
+            built = server._access_adapter.build_access_runtime(
+                environ={},
+                home=Path("/operator"),
+                application_logger=object(),
+                runtime=server.runtime,
+            )
+        self.assertIs(built.sessions, sessions)
+        validate.assert_called_once_with(
+            Path("/operator/n8n-local/config/onion-sentinel-admin-password.json")
+        )
+        validate_sessions.assert_called_once_with(
+            Path("/operator/n8n-local/admin-state"),
+            Path("/operator/n8n-local/admin-state/.admin_sessions.json"),
+        )
+        self.assertTrue(built.password_configured())
+
+    def test_admin_enforcement_verifies_against_pinned_strict_record(self):
+        salt = b"0123456789abcdef"
+        password = "correct horse battery staple"
+        record = {
+            "algorithm": "pbkdf2_sha256",
+            "iterations": 200_000,
+            "salt": salt.hex(),
+            "hash": hashlib.pbkdf2_hmac(
+                "sha256", password.encode(), salt, 200_000
+            ).hex(),
+        }
+        access = server._access_adapter.DedicatedAccessRuntime(
+            runtime=SimpleNamespace(
+                admin_password_configured=mock.Mock(side_effect=AssertionError),
+                verify_admin_password=mock.Mock(side_effect=AssertionError),
+            ),
+            observer=SimpleNamespace(),
+            sessions=SimpleNamespace(enforcing=True),
+            password_record=record,
+        )
+        self.assertTrue(access.password_configured())
+        self.assertTrue(access.verify_password(password))
+        self.assertFalse(access.verify_password("wrong"))
+
+    def test_admin_enforcement_has_an_isolated_clean_startup_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            stack = home / "n8n-local"
+            config = stack / "config"
+            state = stack / "admin-state"
+            config.mkdir(parents=True, mode=0o700)
+            state.mkdir(mode=0o700)
+            os.chmod(config, 0o700)
+            os.chmod(state, 0o700)
+            key = config / "onion-sentinel-admin-audit-signing.key"
+            key.write_text("ab" * 32 + "\n", encoding="ascii")
+            os.chmod(key, 0o600)
+            password = config / "onion-sentinel-admin-password.json"
+            password.write_text(
+                json.dumps({
+                    "algorithm": "pbkdf2_sha256",
+                    "iterations": 200_000,
+                    "salt": "00" * 16,
+                    "hash": "00" * 32,
+                }),
+                encoding="utf-8",
+            )
+            os.chmod(password, 0o600)
+            command = (
+                "import sys; "
+                f"sys.path.insert(0, {str(DASHBOARD_DIR)!r}); "
+                "import onion_sentinel_server as server; "
+                "assert server.ACCESS_RUNTIME.observer.enforcing; "
+                "assert server.ACCESS_RUNTIME.session_required; "
+                "assert server.ACCESS_RUNTIME.password_configured()"
+            )
+            result = subprocess.run(
+                [sys.executable, "-I", "-c", command],
+                env={
+                    "HOME": str(home),
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                    "ONION_SENTINEL_ACCESS_MODE": "admin-enforce",
+                    "ONION_SENTINEL_APPLICATION_LOG": str(
+                        stack / "logs/application.jsonl"
+                    ),
+                },
+                cwd=home,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_begin_observation_boundary_failure_never_escapes_dispatch(self):
         handler = SimpleNamespace(

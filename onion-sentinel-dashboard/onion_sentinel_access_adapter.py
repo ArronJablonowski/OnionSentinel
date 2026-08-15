@@ -1,6 +1,7 @@
-"""Dedicated-server composition for compatibility access observation."""
+"""Dedicated-server composition for phased human-access admission."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -11,6 +12,38 @@ from portal_human_session_runtime import (
     load_human_session_runtime,
 )
 from portal_access_observer_runtime import load_access_observer_runtime
+from portal_admin_session_store import (
+    load_enforcement_admin_password_record,
+    validate_admin_session_store,
+    verify_admin_password,
+)
+
+
+@dataclass(frozen=True)
+class AccessAdmission:
+    allowed: bool
+    status: int
+    reason: str
+    json_request: bool
+
+
+def _admission_allowed(*, json_request: bool = False) -> AccessAdmission:
+    return AccessAdmission(True, 0, "not_enforced", json_request)
+
+
+def _admission_denied(
+    reason: str,
+    *,
+    json_request: bool,
+    unavailable: bool = False,
+) -> AccessAdmission:
+    if unavailable:
+        status = 503
+    elif reason == "unauthenticated":
+        status = 401
+    else:
+        status = 403
+    return AccessAdmission(False, status, reason, json_request)
 
 
 def _record_boundary_failure(observer: Any, exc: Exception) -> None:
@@ -133,11 +166,92 @@ def _resolve_human_session(
     *,
     runtime: Any,
     session_runtime: Any,
+    activity_authorized: bool,
 ) -> Any:
     return session_runtime.resolve_session(
         handler._admin_session_id(),
         csrf_value=handler.headers.get(CSRF_HEADER_NAME),
         now_timestamp=int(runtime.time.time()),
+        activity_authorized=activity_authorized,
+    )
+
+
+def _same_origin_authorized(handler: Any) -> bool:
+    fetch_site = str(
+        handler.headers.get("Sec-Fetch-Site") or ""
+    ).strip().lower()
+    return bool(
+        fetch_site in {"", "same-origin"}
+        and handler._soc_review_origin_authorized()
+    )
+
+
+def _decision_admission(
+    observation: Any,
+    *,
+    observer: Any,
+    route: Any,
+    runtime: Any,
+) -> AccessAdmission:
+    decision = getattr(observation, "decision", None)
+    if decision is None or not decision.enforced:
+        return _admission_allowed(json_request=bool(route.json_request))
+    if not decision.allowed:
+        return _admission_denied(
+            decision.reason,
+            json_request=bool(route.json_request),
+        )
+    if observer.precommit(
+        observation,
+        occurred_at=runtime.now_iso_utc(),
+    ):
+        return _admission_allowed(json_request=bool(route.json_request))
+    return _admission_denied(
+        "audit_precommit_failed",
+        json_request=bool(route.json_request),
+        unavailable=True,
+    )
+
+
+def _session_failure_admission(session: Any, route: Any) -> AccessAdmission | None:
+    reason = getattr(session, "reason", "")
+    if reason not in {
+        "session_observation_failed",
+        "session_touch_conflict",
+    }:
+        return None
+    return _admission_denied(
+        str(reason),
+        json_request=bool(getattr(route, "json_request", False)),
+        unavailable=True,
+    )
+
+
+def _classified_route(runtime: Any, path: str) -> Any:
+    return runtime.classify_post_route(
+        path,
+        cti_program_path=runtime.CTI_PROGRAM_API_PATH,
+        prompt_paths=runtime.SOC_SETTINGS_PROMPT_API_PATHS,
+    )
+
+
+def _boundary_admission(
+    observer: Any,
+    enforcing: bool,
+    route: Any,
+    exc: Exception,
+) -> AccessAdmission:
+    _record_boundary_failure(observer, exc)
+    return (
+        _admission_denied(
+            "access_boundary_failed",
+            json_request=bool(getattr(route, "json_request", False)),
+            unavailable=True,
+        )
+        if enforcing
+        else _admission_allowed(
+            json_request=bool(getattr(route, "json_request", False))
+        )
     )
 
 
@@ -149,33 +263,29 @@ def begin_access_observation(
     controlled_evaluation: bool,
     observer: Any,
     session_runtime: Any,
-) -> None:
+) -> AccessAdmission:
     """Attach one pre-body observe decision to a classified human write."""
     handler._access_observation = None
     if controlled_evaluation:
-        return
+        return _admission_allowed()
+    enforcing = bool(getattr(observer, "enforcing", False))
+    route = None
     try:
         if not observer.enabled:
-            return
-        route = runtime.classify_post_route(
-            path,
-            cti_program_path=runtime.CTI_PROGRAM_API_PATH,
-            prompt_paths=runtime.SOC_SETTINGS_PROMPT_API_PATHS,
-        )
+            return _admission_allowed()
+        route = _classified_route(runtime, path)
         if not route.accepted:
-            return
-        fetch_site = str(
-            handler.headers.get("Sec-Fetch-Site") or ""
-        ).strip().lower()
-        same_origin = bool(
-            fetch_site in {"", "same-origin"}
-            and handler._soc_review_origin_authorized()
-        )
+            return _admission_allowed()
+        same_origin = _same_origin_authorized(handler)
         session = _resolve_human_session(
             handler,
             runtime=runtime,
             session_runtime=session_runtime,
+            activity_authorized=same_origin,
         )
+        failure = _session_failure_admission(session, route)
+        if enforcing and failure is not None:
+            return failure
         handler._access_observation = observer.begin(
             route,
             principal=session.principal,
@@ -185,8 +295,14 @@ def begin_access_observation(
                 getattr(handler, "application_request_id", "")
             ),
         )
+        return _decision_admission(
+            handler._access_observation,
+            observer=observer,
+            route=route,
+            runtime=runtime,
+        )
     except Exception as exc:
-        _record_boundary_failure(observer, exc)
+        return _boundary_admission(observer, enforcing, route, exc)
 
 
 def finalize_access_observation(
@@ -211,16 +327,26 @@ def finalize_access_observation(
 
 
 class DedicatedAccessRuntime:
-    """Own dedicated-server observe composition outside the HTTP entrypoint."""
+    """Own dedicated-server access composition outside the HTTP entrypoint."""
 
-    def __init__(self, *, runtime: Any, observer: Any, sessions: Any) -> None:
+    def __init__(
+        self,
+        *,
+        runtime: Any,
+        observer: Any,
+        sessions: Any,
+        password_record: Mapping[str, object] | None = None,
+    ) -> None:
         self.runtime = runtime
         self.observer = observer
         self.sessions = sessions
+        self._password_record = (
+            dict(password_record) if password_record is not None else None
+        )
 
     def begin(
         self, handler: Any, path: str, *, controlled_evaluation: bool
-    ) -> None:
+    ) -> AccessAdmission:
         return begin_access_observation(
             handler,
             path,
@@ -268,6 +394,20 @@ class DedicatedAccessRuntime:
             observe_enabled=self.sessions.enabled,
         )
 
+    def password_configured(self) -> bool:
+        if self.session_required:
+            return self._password_record is not None
+        return bool(self.runtime.admin_password_configured())
+
+    def verify_password(self, password: str) -> bool:
+        if self.session_required:
+            return verify_admin_password(password, self._password_record)
+        return bool(self.runtime.verify_admin_password(password))
+
+    @property
+    def session_required(self) -> bool:
+        return bool(getattr(self.sessions, "enforcing", False))
+
 
 def build_access_runtime(
     *,
@@ -281,6 +421,16 @@ def build_access_runtime(
         home=home,
         application_logger=application_logger,
     )
+    password_record = None
+    if bool(getattr(observer, "enforcing", False)):
+        stack_dir = Path(home) / "n8n-local"
+        password_record = load_enforcement_admin_password_record(
+            stack_dir / "config/onion-sentinel-admin-password.json"
+        )
+        validate_admin_session_store(
+            stack_dir / "admin-state",
+            stack_dir / "admin-state/.admin_sessions.json",
+        )
     sessions = build_human_session_runtime(
         mode=observer.mode,
         home=home,
@@ -290,11 +440,13 @@ def build_access_runtime(
         runtime=runtime,
         observer=observer,
         sessions=sessions,
+        password_record=password_record,
     )
 
 
 __all__ = (
     "DedicatedAccessRuntime",
+    "AccessAdmission",
     "begin_access_observation",
     "admin_login_cookie_headers",
     "admin_logout_cookie_headers",

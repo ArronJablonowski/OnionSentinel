@@ -244,6 +244,35 @@ def do_post(handler: object, c: ModuleType) -> None:
     )
 
 
+def send_access_denial(
+    handler: object,
+    c: ModuleType,
+    admission: object,
+) -> None:
+    status = int(getattr(admission, "status", HTTPStatus.FORBIDDEN))
+    reason = str(getattr(admission, "reason", "access_denied"))
+    if status == HTTPStatus.UNAUTHORIZED:
+        message = "Administrator sign-in is required."
+    elif status == HTTPStatus.SERVICE_UNAVAILABLE:
+        message = "Administrator authorization is unavailable."
+    else:
+        message = "Administrator authorization failed."
+    if bool(getattr(admission, "json_request", False)):
+        return _json_response(
+            handler,
+            status,
+            {
+                "ok": False,
+                "authentication_required": status == HTTPStatus.UNAUTHORIZED,
+                "error": message,
+                "reason": reason,
+            },
+        )
+    if status == HTTPStatus.UNAUTHORIZED:
+        return handler._redirect("/admin/login")
+    return handler._send(status, c.render_login(message, True))
+
+
 def _admin_post(handler: object, c: ModuleType, path: str) -> None:
     try:
         length = int(handler.headers.get("Content-Length", "0"))
@@ -271,7 +300,15 @@ def _admin_post(handler: object, c: ModuleType, path: str) -> None:
             "/admin/login",
             {"Set-Cookie": c.ACCESS_RUNTIME.logout_cookie_headers()},
         )
-    if not c.runtime.admin_password_configured():
+    return _admin_login_post(handler, c, form)
+
+
+def _admin_login_post(
+    handler: object,
+    c: ModuleType,
+    form: dict[str, list[str]],
+) -> None:
+    if not c.ACCESS_RUNTIME.password_configured():
         return handler._send(
             HTTPStatus.SERVICE_UNAVAILABLE,
             c.render_login(
@@ -279,13 +316,21 @@ def _admin_post(handler: object, c: ModuleType, path: str) -> None:
                 True,
             ),
         )
-    if not c.runtime.verify_admin_password(form.get("password", [""])[0]):
+    if not c.ACCESS_RUNTIME.verify_password(form.get("password", [""])[0]):
         return handler._send(
             HTTPStatus.UNAUTHORIZED,
             c.render_login("Invalid password.", True),
         )
     session_id = c.runtime.create_admin_session(handler.client_address[0])
     csrf_token = c.ACCESS_RUNTIME.create_session(handler, session_id)
+    if getattr(c.ACCESS_RUNTIME, "session_required", False) and csrf_token is None:
+        c.runtime.destroy_admin_session(session_id)
+        return handler._send(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            c.render_login(
+                "Administrator session creation is unavailable.", True
+            ),
+        )
     return handler._redirect(
         "/admin",
         {"Set-Cookie": c.ACCESS_RUNTIME.login_cookie_headers(

@@ -37,6 +37,7 @@ class PortalAccessPolicyTests(unittest.TestCase):
             "portal_session_principal.py",
             "portal_admin_audit_chain.py",
             "portal_admin_audit_store.py",
+            "portal_admin_session_store.py",
             "portal_access_observer.py",
             "portal_access_observer_runtime.py",
             "onion_sentinel_access_adapter.py",
@@ -52,6 +53,8 @@ class PortalAccessPolicyTests(unittest.TestCase):
                     f'"$DASHBOARD_RUNTIME_DIR/{name}"',
                     installer,
                 )
+        self.assertIn('chmod 0700 "$STACK_DIR/config"', installer)
+        self.assertIn('chmod 0700 "$STACK_DIR/admin-state"', installer)
 
     def test_modularization_contract_covers_the_access_runtime_tree(self) -> None:
         contract = json.loads(
@@ -72,6 +75,7 @@ class PortalAccessPolicyTests(unittest.TestCase):
             "onion-sentinel-dashboard/portal_access_policy.py",
             "onion-sentinel-dashboard/portal_admin_audit_chain.py",
             "onion-sentinel-dashboard/portal_admin_audit_store.py",
+            "onion-sentinel-dashboard/portal_admin_session_store.py",
             "onion-sentinel-dashboard/portal_human_session_runtime.py",
             "onion-sentinel-dashboard/portal_human_session_store.py",
             "onion-sentinel-dashboard/portal_session_principal.py",

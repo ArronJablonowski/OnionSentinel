@@ -3558,13 +3558,16 @@ serialization, compare-and-swap touches, crash-safe replacement, and directory
 durability. It never receives a raw CSRF value and persists neither a raw
 session ID nor a browser cookie.
 
-`portal_human_session_runtime.py` owns the exact legacy no-op and opt-in observe
-bridge. In observe mode it dual-writes a target Administrator session after the
+`portal_human_session_runtime.py` owns the exact legacy no-op plus opt-in
+observe and Administration-enforcement session bridge. In enabled modes it
+dual-writes a target Administrator session after the
 existing login succeeds, resolves and touches that record for write
 observation, compares the per-session CSRF value, revokes the target record on
-logout, and emits only type-level failure telemetry. Legacy mode never reads or
-creates the target store. Unsafe retained custody fails observe startup;
-request-level observation failure cannot change the legacy HTTP result.
+logout, and emits only type-level failure telemetry. Enforcement does not
+extend idle expiry on an origin or CSRF denial and fails closed on a lost touch
+compare-and-swap. Legacy mode never reads or creates the target store. Unsafe
+retained custody fails enabled-mode startup; request-level observation failure
+cannot change the legacy or observe HTTP result.
 
 `portal_admin_recovery.py` owns the service-offline administrator recovery
 transaction: it validates owner/0700 configuration and state directories plus
@@ -3604,17 +3607,21 @@ and bounded would-allow/would-deny reason. It never receives request bodies,
 cookies, CSRF values, credentials other than opaque signing bytes, or raw audit
 destinations.
 
-`portal_access_observer_runtime.py` owns explicit `legacy`/`observe` startup
-admission, owner/0600 lowercase-hex signing-key loading, retained-ledger
-verification, append orchestration, counters, and type-only failure telemetry.
-It rejects the not-yet-qualified enforcement modes. The dedicated server starts
-observation before body parsing, skips controlled-evaluation service identity
-requests, and finalizes exactly once from the first response status. Audit
-failure is observable but cannot change a legacy-compatible response.
+`portal_access_observer_runtime.py` owns explicit
+`legacy`/`observe`/`admin-enforce` startup admission, owner/0600 lowercase-hex
+signing-key loading, retained-ledger verification, append orchestration,
+counters, and type-only failure telemetry. It rejects full RBAC. The dedicated
+server starts observation before body parsing, skips controlled-evaluation
+service identity requests, and finalizes exactly once from the first response
+status. Observe audit failure remains telemetry-only; an enforced allowed write
+requires a durable metadata-only precommit receipt before body parsing.
 
 `onion_sentinel_access_adapter.py` owns the dedicated server's logger/runtime
-composition, target-session login/logout bridge, pre-body principal/CSRF
-resolution, and first-response finalize hooks. Keeping these ports outside
+composition, strict enforcement password-record startup admission,
+process-lifetime password-hash pinning, legacy/target-session custody and
+login/logout bridge, pre-body principal/origin/CSRF resolution, bounded denial
+projection, audit precommit, and first-response finalize hooks.
+Keeping these ports outside
 `onion_sentinel_server.py` leaves the stable executable and HTTP compatibility
 surface below the module-size warning threshold.
 

@@ -8,7 +8,12 @@ from pathlib import Path
 import re
 import threading
 
-from portal_access_enforcement import MODE_LEGACY, MODE_OBSERVE, parse_mode
+from portal_access_enforcement import (
+    MODE_ADMIN_ENFORCE,
+    MODE_LEGACY,
+    MODE_OBSERVE,
+    parse_mode,
+)
 from portal_human_session_store import (
     delete_session_record,
     load_session_record,
@@ -126,7 +131,11 @@ class HumanSessionRuntime:
         failure_sink: Callable[[str], object] | None = None,
     ) -> None:
         selected_mode = parse_mode(mode)
-        if selected_mode not in {MODE_LEGACY, MODE_OBSERVE}:
+        if selected_mode not in {
+            MODE_LEGACY,
+            MODE_OBSERVE,
+            MODE_ADMIN_ENFORCE,
+        }:
             raise HumanSessionConfigurationError(
                 "configured human-session mode is not qualified"
             )
@@ -153,7 +162,11 @@ class HumanSessionRuntime:
 
     @property
     def enabled(self) -> bool:
-        return self.mode == MODE_OBSERVE
+        return self.mode != MODE_LEGACY
+
+    @property
+    def enforcing(self) -> bool:
+        return self.mode == MODE_ADMIN_ENFORCE
 
     def _record_failure(self, error_type: str) -> None:
         with self._lock:
@@ -208,12 +221,35 @@ class HumanSessionRuntime:
         except Exception as exc:
             self._record_failure(type(exc).__name__)
 
+    def _touch_authorized_session(
+        self,
+        session_id: str,
+        record: dict[str, object],
+        now_timestamp: int,
+    ) -> bool:
+        touched = touch_session_record(
+            record,
+            now_timestamp=now_timestamp,
+            idle_ttl_seconds=self.idle_ttl_seconds,
+        )
+        replaced = self._replace_record(
+            self.store_path,
+            session_id,
+            expected_record=record,
+            replacement=touched,
+        )
+        if replaced:
+            return True
+        self._record_failure("SessionTouchConflict")
+        return not self.enforcing
+
     def resolve_session(
         self,
         session_id: str,
         *,
         csrf_value: object,
         now_timestamp: int,
+        activity_authorized: bool = True,
     ) -> SessionObservation:
         if not self.enabled:
             return SessionObservation(None, False, "observation_disabled")
@@ -232,18 +268,16 @@ class HumanSessionRuntime:
                 self._remove_invalid(session_id)
                 return SessionObservation(None, False, decision.reason)
             csrf_ok = csrf_authorized(csrf_value, record)
-            touched = touch_session_record(
-                record,
-                now_timestamp=now_timestamp,
-                idle_ttl_seconds=self.idle_ttl_seconds,
-            )
-            if not self._replace_record(
-                self.store_path,
-                session_id,
-                expected_record=record,
-                replacement=touched,
+            if self.enforcing and (not activity_authorized or not csrf_ok):
+                return SessionObservation(
+                    decision.principal, csrf_ok, decision.reason
+                )
+            if not self._touch_authorized_session(
+                session_id, record, now_timestamp
             ):
-                self._record_failure("SessionTouchConflict")
+                return SessionObservation(
+                    None, False, "session_touch_conflict"
+                )
         except Exception as exc:
             self._record_failure(type(exc).__name__)
             return SessionObservation(
@@ -287,7 +321,7 @@ def load_human_session_runtime(
             "configured human-session mode is invalid"
         ) from exc
     path = human_session_store_path(home)
-    if selected_mode == MODE_OBSERVE:
+    if selected_mode in {MODE_OBSERVE, MODE_ADMIN_ENFORCE}:
         try:
             validate_session_store(path)
         except Exception as exc:

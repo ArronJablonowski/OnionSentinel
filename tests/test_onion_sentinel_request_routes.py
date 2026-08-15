@@ -164,6 +164,12 @@ class DedicatedAdminSessionBridgeTests(unittest.TestCase):
             ),
         )
         access_runtime = SimpleNamespace(
+            password_configured=lambda: (
+                events.append(("password-configured",)) or True
+            ),
+            verify_password=lambda password: (
+                events.append(("verify-password", password)) or True
+            ),
             create_session=lambda handler, session_id: (
                 events.append(("create-target", session_id)) or "csrf-token"
             ),
@@ -238,6 +244,64 @@ class DedicatedAdminSessionBridgeTests(unittest.TestCase):
                 ),
             ],
         )
+
+    def test_enforcement_login_rolls_back_legacy_session_when_target_creation_fails(self):
+        handler, events = self.handler(b"token=form-token&password=secret")
+        context = self.context(events)
+        context.ACCESS_RUNTIME.session_required = True
+        context.ACCESS_RUNTIME.create_session = lambda _handler, session_id: (
+            events.append(("create-target-failed", session_id)) or None
+        )
+
+        self.assertEqual(
+            routes._admin_post(handler, context, "/admin/login"),
+            "send",
+        )
+        self.assertEqual(
+            events[-3:],
+            [
+                ("create-target-failed", "legacy-session"),
+                ("destroy-legacy", "legacy-session"),
+                ("send", 503, b"login"),
+            ],
+        )
+
+    def test_access_denial_has_stable_json_and_form_responses(self):
+        handler, events = self.handler(b"")
+        context = self.context(events)
+        admission = SimpleNamespace(
+            status=401,
+            reason="unauthenticated",
+            json_request=True,
+        )
+        with mock.patch.object(
+            routes, "_json_response", return_value="json"
+        ) as response:
+            self.assertEqual(
+                routes.send_access_denial(handler, context, admission),
+                "json",
+            )
+        response.assert_called_once_with(
+            handler,
+            401,
+            {
+                "ok": False,
+                "authentication_required": True,
+                "error": "Administrator sign-in is required.",
+                "reason": "unauthenticated",
+            },
+        )
+
+        admission = SimpleNamespace(
+            status=503,
+            reason="audit_precommit_failed",
+            json_request=False,
+        )
+        self.assertEqual(
+            routes.send_access_denial(handler, context, admission),
+            "send",
+        )
+        self.assertEqual(events[-1], ("send", 503, b"login"))
 
 
 if __name__ == "__main__":

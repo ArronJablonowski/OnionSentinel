@@ -123,6 +123,42 @@ class PortalHumanSessionRuntimeTests(unittest.TestCase):
         self.assertFalse(result.csrf_authorized)
         self.assertEqual(result.reason, "session_touch_conflict")
 
+    def test_enforcement_denials_do_not_extend_idle_expiry(self):
+        record = runtime.create_session_bundle(
+            principal_id="local-administrator",
+            role="administrator",
+            now_timestamp=1_000,
+            absolute_ttl_seconds=1_000,
+            idle_ttl_seconds=500,
+            policy_generation=1,
+            client_fingerprint="1" * 64,
+            new_token=iter(("session-" + "s" * 36, "csrf-" + "c" * 38)).__next__,
+        ).record
+        replacements = []
+        service = runtime.HumanSessionRuntime(
+            mode="admin-enforce",
+            store_path=Path("/not-used"),
+            load_record=lambda *_args, **_kwargs: record,
+            replace_record=lambda *_args, **kwargs: replacements.append(kwargs) or True,
+        )
+        csrf_denied = service.resolve_session(
+            "session-" + "s" * 36,
+            csrf_value="wrong",
+            now_timestamp=1_100,
+            activity_authorized=True,
+        )
+        origin_denied = service.resolve_session(
+            "session-" + "s" * 36,
+            csrf_value="csrf-" + "c" * 38,
+            now_timestamp=1_100,
+            activity_authorized=False,
+        )
+        self.assertIsNotNone(csrf_denied.principal)
+        self.assertFalse(csrf_denied.csrf_authorized)
+        self.assertIsNotNone(origin_denied.principal)
+        self.assertTrue(origin_denied.csrf_authorized)
+        self.assertEqual(replacements, [])
+
     def test_expired_session_is_removed_and_reported_without_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = runtime.HumanSessionRuntime(

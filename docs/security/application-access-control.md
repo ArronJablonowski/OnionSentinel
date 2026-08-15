@@ -128,10 +128,10 @@ role, permission, CSRF decision, or audit outcome.
 
 Deployment uses explicit, validated modes; an unknown value is a startup error.
 The source runtime reads `ONION_SENTINEL_ACCESS_MODE`; an absent value is
-`legacy`. The current qualified implementation admits only `legacy` and
-`observe`. Configuring `admin-enforce` or `rbac-enforce` fails startup until the
-corresponding session, UI, denial-response, and recovery gates are implemented
-and separately accepted.
+`legacy`. The source implementation admits `legacy`, `observe`, and
+`admin-enforce`; `rbac-enforce` remains startup-blocked. Production promotion
+of `admin-enforce` remains a separate guarded deployment gate even after its
+source qualification.
 
 1. `legacy`: current behavior only, used solely as the pre-migration rollback
    point. Policy coverage and audit code may run offline, but no claim of access
@@ -141,8 +141,15 @@ and separately accepted.
    without changing the existing response or mutation behavior.
 3. `admin-enforce`: require an Administrator session and session-bound CSRF for
    all settings, integration, asset, CTI, Resource Library, and privileged
-   writes. Analyst workflow writes remain observed until UI and API denial
-   handling qualify.
+   writes. Analyst workflow writes remain observed. An allowed enforced write
+   reaches body parsing only after an owner-only audit precommit receipt is
+   durably appended; a missing/expired session, origin/CSRF denial, session
+   touch conflict, unsafe password/session custody, or audit precommit failure
+   fails closed. The service pins the strictly admitted password hash record for
+   its process lifetime, so recovery or rotation requires the documented
+   service-offline restart. JSON clients receive bounded 401/403/503 responses,
+   and the dashboard redirects authentication failures or displays a no-change
+   banner.
 4. `rbac-enforce`: enforce the canonical role mapping for every unsafe browser
    route. No legacy unauthenticated mutation remains.
 

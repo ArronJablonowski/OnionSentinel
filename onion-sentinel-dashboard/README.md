@@ -11,7 +11,7 @@ dependency.
 | --- | --- |
 | `onion_sentinel_server.py` | Dedicated port `8766` compatibility surface and bounded HTTP server/handler. |
 | `onion_sentinel_application.py` | CLI validation, controlled-evaluation admission, and service lifecycle composition. |
-| `onion_sentinel_access_adapter.py` | Dedicated-server observe-mode request/response composition and safe failure logging. |
+| `onion_sentinel_access_adapter.py` | Dedicated-server observe/enforcement admission, pinned strict password record, audit precommit, denial, session, and safe-failure composition. |
 | `onion_sentinel_request_routes.py` | Exact HEAD/GET/POST dispatch, health, authentication, logs, static, and SOC adapters. |
 | `onion_sentinel_release.py` | Literal owner-only runtime release identity loading without evaluating secrets. |
 | `report_portal.py` | Transitional SOC API implementation imported from the dedicated server; non-SOC routes are not exposed by `onion_sentinel_server.py`. |
@@ -21,12 +21,12 @@ dependency.
 | `portal_access_policy.py` | Pure Viewer/Analyst/Administrator permission hierarchy and exhaustive classified-write mapping. |
 | `portal_access_enforcement.py` | Pure legacy/observe/admin-enforce/RBAC decision projection. |
 | `portal_access_observer.py` | Metadata-only target-policy observation and actual-response audit projection. |
-| `portal_access_observer_runtime.py` | Owner-only audit-key admission, ledger verification/append, and type-only failure telemetry. |
+| `portal_access_observer_runtime.py` | Owner-only audit-key admission, ledger verification/append/precommit, mode admission, and type-only failure telemetry. |
 | `portal_admin_audit_chain.py` | Canonical keyed administrative event chain and retained-chain verification. |
 | `portal_admin_audit_store.py` | Owner-only bounded, serialized, crash-safe audit-ledger persistence. |
 | `portal_session_principal.py` | Versioned human principal, expiry, policy-generation, and per-session CSRF contract. |
 | `portal_human_session_store.py` | Digest-keyed, owner-only, bounded, atomic target human-session persistence. |
-| `portal_human_session_runtime.py` | Legacy no-op/observe dual-write, session resolution/touch/revocation, and CSRF cookie policy. |
+| `portal_human_session_runtime.py` | Legacy no-op plus observe/enforcement session resolution, authorized touch, revocation, and CSRF cookie policy. |
 | `portal_admin_recovery.py` | Owner-only password-record replacement and complete legacy/versioned human-session revocation. |
 | `portal_admin_recovery_cli.py` | Service-offline confirmation, secret-safe password prompting, and bounded recovery result projection. |
 | `recover-admin-access.py` | Thin local operator entry point for administrator recovery. |

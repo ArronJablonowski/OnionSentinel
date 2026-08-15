@@ -3041,7 +3041,8 @@
       "required_symbols": [
         "do_get",
         "do_head",
-        "do_post"
+        "do_post",
+        "send_access_denial"
       ]
     },
     {
@@ -3049,6 +3050,7 @@
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/onion_sentinel_access_adapter.py",
       "required_symbols": [
+        "AccessAdmission",
         "DedicatedAccessRuntime",
         "begin_access_observation",
         "build_access_runtime",
@@ -3084,7 +3086,8 @@
       "required_symbols": [
         "AccessObservation",
         "begin_observation",
-        "finalize_observation"
+        "finalize_observation",
+        "precommit_observation"
       ]
     },
     {
@@ -3115,6 +3118,19 @@
         "AuditStoreError",
         "append_verified_event",
         "load_verified_events"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_admin_session_store.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_session_store.py",
+      "required_symbols": [
+        "AdminPasswordConfigurationError",
+        "AdminSessionStoreError",
+        "load_enforcement_admin_password_record",
+        "save_admin_sessions",
+        "validate_admin_session_store",
+        "verify_admin_password"
       ]
     },
     {

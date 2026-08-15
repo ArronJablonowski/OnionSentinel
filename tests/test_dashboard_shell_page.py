@@ -72,6 +72,9 @@ class DashboardShellPageTests(unittest.TestCase):
         self.assertIn("onion_sentinel_csrf", source)
         self.assertIn("url.origin!==window.location.origin", source)
         self.assertIn("new Headers", source)
+        self.assertIn("onion-sentinel-access-denied", source)
+        self.assertIn("No change was applied.", source)
+        self.assertIn("window.location.assign('/admin/login')", source)
         self.assertIn(
             "fetch('/api/soc-alerts/status',{method:'POST',headers:{'Content-Type':'application/json'}",
             source,

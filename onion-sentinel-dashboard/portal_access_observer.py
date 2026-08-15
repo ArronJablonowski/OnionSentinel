@@ -106,11 +106,38 @@ def _outcome(http_status: int) -> str:
 
 
 def _reason(decision: AccessDecision) -> str:
-    if decision.reason == "authentication_boundary":
+    if decision.mode in {"legacy", "observe"} and (
+        decision.reason == "authentication_boundary"
+    ):
         return "observe_authentication_boundary"
-    if decision.would_authorize:
+    if decision.mode in {"legacy", "observe"} and decision.would_authorize:
         return "observe_would_allow"
-    return "observe_would_deny_" + decision.reason
+    if decision.mode in {"legacy", "observe"}:
+        return "observe_would_deny_" + decision.reason
+    if decision.reason == "authentication_boundary":
+        return "authentication_boundary"
+    if decision.allowed:
+        return "enforce_authorized"
+    return "enforce_denied_" + decision.reason
+
+
+def precommit_observation(
+    observation: AccessObservation,
+    *,
+    occurred_at: str,
+) -> dict[str, object]:
+    """Project a durable admission receipt before an enforced mutation."""
+    if not observation.decision.enforced or not observation.decision.allowed:
+        raise AccessObservationError(
+            "only an allowed enforced decision can be precommitted"
+        )
+    fields = finalize_observation(
+        observation,
+        http_status=100,
+        occurred_at=occurred_at,
+    )
+    fields["reason_code"] = "enforce_authorized_precommit"
+    return fields
 
 
 def finalize_observation(
@@ -141,4 +168,5 @@ __all__ = (
     "AccessObservationError",
     "begin_observation",
     "finalize_observation",
+    "precommit_observation",
 )
