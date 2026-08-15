@@ -55,7 +55,8 @@ POST_FORM_PATHS = frozenset({
     '/admin/login', '/admin/logout', '/admin/action',
 })
 POST_JSON_EXACT_PATHS = frozenset({
-    '/api/admin/start-service', '/api/soc-alerts/status',
+    '/api/admin/start-service', '/api/ac-hunter/refresh',
+    '/api/soc-alerts/status',
     '/api/soc-settings/ai-model', '/api/soc-settings/agent-model',
 })
 RESOURCE_WRITE_PATHS = frozenset({

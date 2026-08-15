@@ -66,6 +66,7 @@ _PATH_PERMISSIONS = {
     "/admin/logout": "session.logout",
     "/admin/action": "privileged-action.execute",
     "/api/admin/start-service": "integration.manage",
+    "/api/ac-hunter/refresh": "integration.manage",
     "/api/soc-alerts/status": "incident.status",
 }
 

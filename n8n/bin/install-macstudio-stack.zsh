@@ -266,6 +266,8 @@ load_file(
 sys.path.insert(0, str(dashboard_dir))
 import portal_access_policy
 import portal_access_enforcement
+import portal_access_observer
+import portal_access_observer_runtime
 import portal_admin_audit_chain
 import portal_admin_audit_store
 import portal_session_principal
@@ -1259,6 +1261,8 @@ cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_action_state.py" "$DASHBOARD
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_session_store.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_session_store.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_access_policy.py" "$DASHBOARD_RUNTIME_DIR/portal_access_policy.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_access_enforcement.py" "$DASHBOARD_RUNTIME_DIR/portal_access_enforcement.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_access_observer.py" "$DASHBOARD_RUNTIME_DIR/portal_access_observer.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_access_observer_runtime.py" "$DASHBOARD_RUNTIME_DIR/portal_access_observer_runtime.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_session_principal.py" "$DASHBOARD_RUNTIME_DIR/portal_session_principal.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_audit_chain.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_audit_chain.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_audit_store.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_audit_store.py"
