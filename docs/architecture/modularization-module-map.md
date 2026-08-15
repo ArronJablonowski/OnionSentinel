@@ -3979,6 +3979,20 @@ inheritance contract for alert, PCAP, and incident-evidence transports.
 
 ## Cross-Host Change Coordination
 
+`operations/validate-endpoint-response-governance.py` is a repository-only,
+side-effect-free governance composition root. It admits one bounded JSON
+contract, validates exact fields and existing non-symlink source anchors, and
+emits a deterministic secret-free summary. It has no runtime, network,
+credential, endpoint, Security Onion, Relay, or action-execution authority.
+
+`operations/security/endpoint-response-governance.json` owns the inert policy
+data: separate read/mutation identities and routes, recommendation-only model
+authority, two-person digest-bound approval, exact target and action scope,
+bounded rollbackable execution requirements, evidence/audit rules, and the
+five required response threats. The validator depends on this data contract;
+no application module imports the validator or contract, and neither is an
+endpoint-response implementation.
+
 `operations/cross_host_handoff_contract.py` owns the side-effect-free,
 secret-free Studio/Relay/Security Onion request and acknowledgement contract.
 It validates exact identities, write authorization, bounded idempotent

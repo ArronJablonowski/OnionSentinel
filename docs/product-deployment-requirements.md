@@ -188,6 +188,7 @@ n8n webhook path, alert-store logs, and the SQLite `notification_log` table.
 Before commit and push, run:
 
 ```bash
+python3 operations/validate-endpoint-response-governance.py
 python3 operations/validate-credential-governance.py
 python3 operations/check-module-quality.py
 python3 operations/run-untrusted-telemetry-gate.py
@@ -200,6 +201,15 @@ for file in $(find n8n/alert_store -name '*.js' -type f); do node --check "$file
 ```
 
 Run `pytest` when available. If it is unavailable, state that explicitly.
+
+The endpoint-response governance gate must remain
+`disabled_contract_valid`. It is a source-only review boundary and must not be
+treated as proof that a response broker, provider, credential, endpoint agent,
+or guarded proof of concept has been approved. Any change to its disabled
+state, capability separation, two-human approval rule, exact target/action
+binding, rollback, verification, or audit requirements blocks release pending
+the separate security review in
+`security/endpoint-response-integration.md`.
 
 For any managed Mac Studio, Relay, or Security Onion change, also run the
 secret-free handoff gate with the reviewed change document before invoking the

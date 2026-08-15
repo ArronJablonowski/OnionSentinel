@@ -2,6 +2,22 @@
 
 Cross-node checks and operator workflows live here.
 
+## Endpoint-Response Governance Gate
+
+```bash
+python3 operations/validate-endpoint-response-governance.py
+```
+
+The source-only gate validates the disabled, secret-free response-integration
+contract in `security/endpoint-response-governance.json`. It requires separate
+read and mutation identities/routes, model recommendation-only authority, two
+distinct human approvals, exact target/action binding, bounded reversible
+execution, independent evidence/receipts, and the five required response threat
+classes. It rejects source-level enablement and any shell, unrestricted SSH,
+arbitrary-command, wildcard-target, or reusable-credential design. See
+`../docs/security/endpoint-response-integration.md`. A green result does not
+approve a proof of concept or deploy a response capability.
+
 ## Database Governance Gate
 
 ```bash

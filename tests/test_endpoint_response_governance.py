@@ -76,7 +76,7 @@ class EndpointResponseGovernanceTests(unittest.TestCase):
     def test_candidate_actions_are_typed_bounded_and_reversible(self) -> None:
         contract = cloned_contract()
         actions = contract["action_catalog"]
-        self.assertTrue(actions)
+        self.assertEqual([action["id"] for action in actions], ["endpoint_network_isolation"])
         for action in actions:
             self.assertEqual(action["capability_tier"], "response_mutation")
             self.assertTrue(action["reversible"])
@@ -127,6 +127,14 @@ class EndpointResponseGovernanceTests(unittest.TestCase):
         result = module.validate_contract(contract, ROOT)
         self.assertTrue(result["errors"], result)
 
+        contract = cloned_contract()
+        widened = json.loads(json.dumps(contract["action_catalog"][0]))
+        widened["id"] = "endpoint_reboot"
+        widened["rollback_action_id"] = "endpoint_reboot_rollback"
+        contract["action_catalog"].append(widened)
+        result = module.validate_contract(contract, ROOT)
+        self.assertTrue(result["errors"], result)
+
     def test_shared_broker_or_credential_scope_fails_closed(self) -> None:
         module = load_validator()
         for field in ("broker_identity", "credential_scope", "route_scope"):
@@ -156,6 +164,11 @@ class EndpointResponseGovernanceTests(unittest.TestCase):
             path.write_bytes(b" " * (module.MAX_FILE_BYTES + 1))
             with self.assertRaisesRegex(ValueError, "byte budget"):
                 module.load_contract(path)
+
+            duplicate = Path(temporary) / "duplicate.json"
+            duplicate.write_text('{"schema":"first","schema":"second"}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "duplicate JSON field"):
+                module.load_contract(duplicate)
 
         command = "python3 operations/validate-endpoint-response-governance.py"
         operations = (ROOT / "operations" / "README.md").read_text(encoding="utf-8")

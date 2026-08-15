@@ -1,0 +1,185 @@
+{
+  "schema": "onion-sentinel-endpoint-response-governance-v1",
+  "status": "disabled",
+  "purpose": "Evaluate a brokered endpoint-response boundary without granting models or investigation services privileged execution authority.",
+  "review_gates": {
+    "security_review_approved": false,
+    "guarded_poc_approved": false,
+    "security_review_issue": "ARR-38",
+    "guarded_poc_issue": "unassigned"
+  },
+  "capability_tiers": {
+    "investigation_read_only": {
+      "broker_identity": "investigation_query_broker",
+      "credential_scope": "read_only_collection",
+      "route_scope": "approved_investigation_queries",
+      "state_change_allowed": false,
+      "enabled": true
+    },
+    "response_mutation": {
+      "broker_identity": "endpoint_response_broker",
+      "credential_scope": "short_lived_target_bound_response",
+      "route_scope": "approved_response_actions",
+      "state_change_allowed": true,
+      "enabled": false
+    }
+  },
+  "principals": [
+    {
+      "id": "model_recommender",
+      "authority": "recommend_only",
+      "human": false,
+      "can_approve": false,
+      "can_execute": false
+    },
+    {
+      "id": "trusted_human_approver",
+      "authority": "approve_exact_request",
+      "human": true,
+      "can_approve": true,
+      "can_execute": false
+    },
+    {
+      "id": "response_broker",
+      "authority": "execute_approved_allowlisted_request",
+      "human": false,
+      "can_approve": false,
+      "can_execute": true
+    }
+  ],
+  "approval_policy": {
+    "minimum_distinct_human_approvers": 2,
+    "maximum_approval_age_seconds": 300,
+    "model_identity_may_approve": false,
+    "free_text_is_authorization": false,
+    "approvers_must_be_distinct_from_requester": true,
+    "operator_trust_store_required": true,
+    "one_time_nonce_required": true,
+    "digest_binding_fields": [
+      "request_id",
+      "action_id",
+      "target_asset_id",
+      "parameters_sha256",
+      "expires_at"
+    ]
+  },
+  "target_policy": {
+    "exact_asset_id_required": true,
+    "model_may_select_target": false,
+    "wildcard_targets_allowed": false,
+    "inventory_authority": "operator_managed_asset_inventory",
+    "target_binding_fields": [
+      "asset_id",
+      "hardware_identity_sha256",
+      "response_agent_identity"
+    ],
+    "network_scope": "broker_egress_allowlist_only"
+  },
+  "action_catalog": [
+    {
+      "id": "endpoint_network_isolation",
+      "capability_tier": "response_mutation",
+      "risk": "high",
+      "reversible": true,
+      "rollback_action_id": "endpoint_network_restore",
+      "maximum_timeout_seconds": 120,
+      "parameter_fields": [
+        "isolation_profile_id"
+      ],
+      "initial_poc_allowed": true,
+      "requires_pre_action_evidence": true,
+      "requires_postcondition_verification": true
+    }
+  ],
+  "execution_policy": {
+    "enabled": false,
+    "interactive_shell_allowed": false,
+    "unrestricted_ssh_allowed": false,
+    "arbitrary_command_allowed": false,
+    "model_direct_broker_access": false,
+    "credential_delivery": "broker_held_short_lived_target_bound",
+    "code_owned_adapter_required": true,
+    "idempotency_key_required": true,
+    "maximum_timeout_seconds": 120,
+    "refuse_non_reversible_actions": true,
+    "refuse_unknown_fields": true
+  },
+  "evidence_policy": {
+    "pre_action_evidence_seal_required": true,
+    "evidence_digest_binding_required": true,
+    "independent_postcondition_verification_required": true,
+    "endpoint_self_report_is_sufficient": false,
+    "rollback_verification_required": true,
+    "preserve_original_provenance": true
+  },
+  "audit_policy": {
+    "append_only_receipt_required": true,
+    "independent_receipt_store_required": true,
+    "receipt_fields": [
+      "request_digest",
+      "approval_digests",
+      "action_id",
+      "target_binding_digest",
+      "started_at",
+      "completed_at",
+      "result",
+      "postcondition_digest",
+      "rollback_receipt_digest"
+    ],
+    "secret_values_forbidden": true,
+    "raw_endpoint_output_forbidden": true
+  },
+  "threat_model": [
+    {
+      "id": "compromised_endpoint",
+      "controls": [
+        "operator-owned inventory binding",
+        "pre-action evidence seal",
+        "independent postcondition verification"
+      ],
+      "fail_closed_result": "Reject unverifiable target identity or state; never trust endpoint self-report alone."
+    },
+    {
+      "id": "command_injection",
+      "controls": [
+        "closed typed action catalog",
+        "code-owned parameter projection",
+        "no shell or arbitrary command surface"
+      ],
+      "fail_closed_result": "Reject unknown actions, fields, encodings, or parameters before adapter selection."
+    },
+    {
+      "id": "credential_theft",
+      "controls": [
+        "broker-held short-lived target-bound authority",
+        "no reusable credential in model context",
+        "no credential values in source, logs, evidence, or receipts"
+      ],
+      "fail_closed_result": "Reject execution when ephemeral authority cannot be minted and independently bound to one target and action."
+    },
+    {
+      "id": "lateral_movement",
+      "controls": [
+        "exact target binding",
+        "broker egress allowlist",
+        "separate response service identity"
+      ],
+      "fail_closed_result": "Reject wildcard, model-selected, inventory-mismatched, or non-allowlisted destinations."
+    },
+    {
+      "id": "evidence_tampering",
+      "controls": [
+        "pre-action provenance seal",
+        "append-only independent receipt",
+        "independent postcondition and rollback verification"
+      ],
+      "fail_closed_result": "Preserve the disputed evidence and refuse success when any digest or independent observation is missing."
+    }
+  ],
+  "source_anchors": [
+    "docs/onion-sentinel-investigation-harness.md",
+    "docs/security/endpoint-response-integration.md",
+    "n8n/onion_sentinel/analysis/review/authorization.py",
+    "tests/test_endpoint_response_governance.py"
+  ]
+}
