@@ -30,18 +30,27 @@ from pathlib import Path
 from re import sub
 from urllib import request
 from urllib.error import HTTPError, URLError
-
 try:
     import alert_outbox
 except ModuleNotFoundError:
-    # Unit tests and recovery tooling may load relay.py directly without adding
-    # its directory to sys.path. Resolve the sibling module explicitly.
+    # Isolated recovery tooling may not add this sibling directory to sys.path.
     _outbox_spec = importlib.util.spec_from_file_location("alert_outbox", Path(__file__).with_name("alert_outbox.py"))
     if _outbox_spec is None or _outbox_spec.loader is None:
         raise
     alert_outbox = importlib.util.module_from_spec(_outbox_spec)
+    sys.modules.setdefault("alert_outbox", alert_outbox)
     _outbox_spec.loader.exec_module(alert_outbox)
 
+try:
+    import relay_database_schema
+except ModuleNotFoundError:
+    _schema_spec = importlib.util.spec_from_file_location(
+        "relay_database_schema", Path(__file__).with_name("relay_database_schema.py")
+    )
+    if _schema_spec is None or _schema_spec.loader is None:
+        raise
+    relay_database_schema = importlib.util.module_from_spec(_schema_spec)
+    _schema_spec.loader.exec_module(relay_database_schema)
 try:
     import alert_delivery
 except ModuleNotFoundError:
@@ -302,23 +311,15 @@ def require_relay_root_capacity(config: dict) -> dict:
 
 
 def connect_db(config: dict) -> sqlite3.Connection:
-    # This database is relay-side dedupe only. The long-term alert store lives
-    # in the Mac Studio alert-store SQLite database.
+    # This database is Relay-side only; long-term alerts live on Mac Studio.
     db_path = resolve_path(config["relay"]["db_path"])
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS seen_alerts (
-            alert_id TEXT PRIMARY KEY,
-            first_seen TEXT NOT NULL,
-            last_seen TEXT NOT NULL,
-            seen_count INTEGER NOT NULL DEFAULT 1
-        )
-        """
-    )
-    alert_outbox.initialize(conn)
-    conn.commit()
+    try:
+        relay_database_schema.initialize(conn)
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 

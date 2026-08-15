@@ -17,6 +17,7 @@ replay a safely committed alert.
 | File | Destination | Purpose |
 | --- | --- | --- |
 | `app/relay.py` | `/opt/so-alert-relay/app/relay.py` | Pulls alert JSON and submits new alerts or quiet-cycle heartbeats. |
+| `app/relay_database_schema.py` | `/opt/so-alert-relay/app/relay_database_schema.py` | Admits, transactionally migrates, crash-recovers, and versions Relay SQLite state. |
 | `app/alert_outbox.py` | `/opt/so-alert-relay/app/alert_outbox.py` | Durable, idempotent SQLite delivery outbox and poison-message dead letter. |
 | `app/alert_delivery.py` | `/opt/so-alert-relay/app/alert_delivery.py` | Bounded SSH batch transport with strict host-key pinning and per-item acknowledgements. |
 | `app/relay_health_wrapper.py` | `/opt/so-alert-relay/app/relay_health_wrapper.py` | Adds failure/recovery notification thresholding. |

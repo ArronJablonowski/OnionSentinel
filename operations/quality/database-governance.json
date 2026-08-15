@@ -322,10 +322,10 @@
         "delivery-attempt-metadata",
         "dead-letter-state"
       ],
-      "schema_version_contract": "The installed Relay source defines the seen-alert and delivery-outbox schema, but the database does not yet persist one schema version.",
-      "schema_version_state": "legacy-unversioned",
-      "migration_strategy": "Additive CREATE TABLE and CREATE INDEX startup statements preserve existing rows; incompatible changes require a stopped-Relay copy migration and verified rollback archive.",
-      "migration_atomicity_state": "not-transactional",
+      "schema_version_contract": "relay_metadata persists exact aggregate schema version 1; legacy unversioned state is admitted as version 0 and unsupported future versions fail before schema or row mutation.",
+      "schema_version_state": "persisted",
+      "migration_strategy": "One BEGIN IMMEDIATE startup transaction admits the existing version, installs additive seen-alert and outbox objects, requeues interrupted claims, and persists the version only after every phase succeeds; incompatible changes require a stopped-Relay copy migration and verified rollback archive.",
+      "migration_atomicity_state": "transactional",
       "rollback_strategy": "Stop Relay timers, restore the encrypted runtime archive into an isolated root, verify manifest and SQLite integrity, then restore the prior source and state together.",
       "backup_schedule": "Encrypted operator-controlled backup before repair, OS upgrade, storage replacement, or application update, with an isolated restore drill after material changes and at least quarterly.",
       "backup_artifacts": [
@@ -343,6 +343,7 @@
         "local-only Relay readiness after restore"
       ],
       "partial_write_controls": [
+        "one aggregate startup transaction with rollback before version publication",
         "SQLite commits before delivery attempts",
         "delivery claim state",
         "processing rows requeued after crashes"
@@ -380,6 +381,7 @@
       ],
       "source_anchors": [
         "relay/app/relay_core.py",
+        "relay/app/relay_database_schema.py",
         "relay/app/alert_outbox.py",
         "relay/config/config.example.json",
         "relay/README.md",

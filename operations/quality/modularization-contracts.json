@@ -5034,6 +5034,15 @@
       ]
     },
     {
+      "path": "relay/app/relay_database_schema.py",
+      "deployment": "relay-direct-copy",
+      "runtime_path": "/opt/so-alert-relay/app/relay_database_schema.py",
+      "required_symbols": [
+        "CURRENT_SCHEMA_VERSION",
+        "initialize"
+      ]
+    },
+    {
       "path": "relay/app/relay_pcap_spool_policy.py",
       "deployment": "relay-direct-copy",
       "runtime_path": "/opt/so-alert-relay/app/relay_pcap_spool_policy.py",

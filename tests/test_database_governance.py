@@ -44,13 +44,7 @@ class DatabaseGovernanceTests(unittest.TestCase):
                 "relay.alert-delivery-sqlite",
             },
         )
-        self.assertEqual(
-            result["declared_gaps"],
-            sorted([
-                "relay.alert-delivery-sqlite: schema version is not persisted",
-                "relay.alert-delivery-sqlite: schema migration is not atomic",
-            ]),
-        )
+        self.assertEqual(result["declared_gaps"], [])
 
     def test_catalog_rejects_missing_recovery_and_provenance_contracts(self) -> None:
         module = load_validator()
@@ -117,8 +111,8 @@ class DatabaseGovernanceTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["schema"], "onion-sentinel-database-governance-result-v1")
         self.assertEqual(payload["catalog_entries"], 5)
-        self.assertEqual(payload["declared_gap_count"], 2)
-        self.assertEqual(payload["status"], "catalog_valid_with_declared_gaps")
+        self.assertEqual(payload["declared_gap_count"], 0)
+        self.assertEqual(payload["status"], "catalog_valid")
         self.assertTrue(payload["ok"])
 
     def test_loader_rejects_oversized_catalogs(self) -> None:

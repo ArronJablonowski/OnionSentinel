@@ -3810,6 +3810,15 @@ deduplication, filtering, and Relay-root capacity policy. Its bounded policy
 phases separately own JSON-evidence retention admission/removal, existing-root
 anchor and disk-threshold projection, and wrapped webhook rejection parsing.
 
+`relay_database_schema.py` is the inward SQLite schema owner. It admits the
+legacy unversioned database, refuses unsupported future versions before schema
+or row mutation, and installs `seen_alerts`, outbox/dead-letter objects, crash
+requeue, and the exact persisted version in one transaction. `alert_outbox.py`
+keeps its historical committing `initialize` facade while exposing non-owning
+schema and recovery phases to the aggregate transaction. Dependencies flow
+from `relay_core.py` to the schema owner and from the schema owner to the
+outbox leaf; no reverse edge exists.
+
 `incident_evidence_broker.py` remains the forced-command compatibility facade
 for bounded, read-only Security Onion incident evidence. Its phases separately
 own special-request classification and validation, configuration loading,
