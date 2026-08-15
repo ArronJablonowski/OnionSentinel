@@ -861,6 +861,7 @@ cp "$REPO_DIR/n8n/bin/operational_slo_state.py" "$STACK_DIR/bin/operational_slo_
 cp "$REPO_DIR/n8n/bin/evaluate-operational-slos.py" "$STACK_DIR/bin/evaluate-operational-slos.py"
 cp "$REPO_DIR/n8n/bin/disk_capacity.py" "$STACK_DIR/bin/disk_capacity.py"
 cp "$REPO_DIR/n8n/bin/recovery_encryption.py" "$STACK_DIR/bin/recovery_encryption.py"
+cp "$REPO_DIR/n8n/bin/recovery_snapshot.py" "$STACK_DIR/bin/recovery_snapshot.py"
 cp "$REPO_DIR/n8n/bin/recovery_bundle.py" "$STACK_DIR/bin/recovery_bundle.py"
 cp "$REPO_DIR/n8n/bin/backup-onion-sentinel-runtime.py" "$STACK_DIR/bin/backup-onion-sentinel-runtime.py"
 cp "$REPO_DIR/n8n/bin/harness_maintenance_contract.py" "$STACK_DIR/bin/harness_maintenance_contract.py"

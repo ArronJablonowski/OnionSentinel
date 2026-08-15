@@ -19,11 +19,12 @@
       "rollback_strategy": "Stop all writers, preserve the current database and sidecars, restore a verified prior snapshot, then rebuild derived group summaries before admission.",
       "backup_schedule": "Verified online SQLite backup every hour plus one complete runtime recovery bundle daily at 02:30 local time.",
       "backup_artifacts": [
-        "alert_store_backups/alerts.sqlite3.<timestamp>.backup",
+        "alert_store_backups/alerts.sqlite3.<timestamp>.backup.enc",
+        "alert_store_backups/alerts.sqlite3.<timestamp>.backup.json",
         "recovery_backups/<timestamp>/alerts.sqlite3.enc"
       ],
       "backup_encryption_state": "encrypted",
-      "backup_secret_policy": "The daily database artifact is authenticated and encrypted before atomic bundle publication; its versioned key remains in macOS Keychain and operator escrow, never in the bundle, process arguments, environment, logs, or source control. Hourly local repair snapshots remain owner-only and are not approved for off-host replication.",
+      "backup_secret_policy": "Hourly repair snapshots and the daily database artifact are authenticated and encrypted before commit metadata or bundle publication. They share a versioned key held in macOS Keychain and operator escrow, never in artifacts, process arguments, environment, logs, or source control. Hourly repair snapshots remain local-only and are not approved for off-host replication.",
       "retention": "Ten hourly SQLite backups and seven daily recovery bundles by default; failed recovery candidates are retained for operator disposition.",
       "rpo_minutes": 60,
       "rto_minutes": 120,
@@ -75,6 +76,7 @@
         "n8n/bin/maintain-alert-store-sqlite.zsh",
         "n8n/bin/backup-onion-sentinel-runtime.py",
         "n8n/bin/recovery_encryption.py",
+        "n8n/bin/recovery_snapshot.py",
         "n8n/bin/recovery_bundle.py",
         "n8n/bin/run-recovery-restore-drill.py"
       ]

@@ -43,7 +43,11 @@ class ProbeError(RuntimeError):
 
 
 def newest_file_age(directory: Path, pattern: str, now: dt.datetime) -> int | None:
-    matches = [path for path in directory.glob(pattern) if path.is_file()]
+    matches = [
+        path
+        for path in directory.glob(pattern)
+        if path.is_file() and not path.is_symlink()
+    ]
     if not matches:
         return None
     newest = max(path.stat().st_mtime for path in matches)
@@ -132,7 +136,7 @@ def _evaluation_inputs(
         "now": now,
         "disk_used_percent": runtime_context["disk_used_percent"],
         "sqlite_backup_age": newest_file_age(
-            args.stack_dir / "alert_store_backups", "*.backup", now
+            args.stack_dir / "alert_store_backups", "*.backup.json", now
         ),
         "postgres_backup_age": newest_file_age(
             args.stack_dir / "recovery_backups", "*/n8n-postgres.dump", now

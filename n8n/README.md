@@ -777,7 +777,8 @@ The maintenance job:
 - verifies `alert_group_summary` still matches the raw `alerts` table and calls
   the local alert-store `/refresh-groups` repair endpoint if grouped state is
   stale;
-- creates a verified SQLite `.backup` copy under
+- creates a verified SQLite temporary copy, authenticates and encrypts it, then
+  publishes a `.backup.enc` artifact and `.backup.json` commit record under
   `$HOME/n8n-local/alert_store_backups`;
 - keeps that directory owner-only (`0700`) and removes ACLs before normalizing
   every direct regular backup or recovery artifact to `0600`; a symlinked
@@ -785,9 +786,13 @@ The maintenance job:
 - waits through normal writer contention with a 60-second SQLite busy timeout
   and bounded backup retries instead of treating a transient lock as database
   corruption;
-- removes abandoned `.backup.tmp` files only after they are 30 minutes old and
-  atomically promotes a temporary backup only after its own `quick_check`;
-- keeps the newest 10 verified hourly backups by default, limiting the
+- removes abandoned plaintext and encryption temporary files only after they
+  are 30 minutes old; exit and signal traps remove the current plaintext copy;
+- migrates retained plaintext `.backup` files through the same encryption
+  owner and never marks maintenance healthy while a plaintext backup remains;
+- uses owner-only `.backup.json` metadata as the SLO commit marker, so an
+  interrupted or orphaned ciphertext cannot claim a fresh successful backup;
+- keeps the newest 10 verified encrypted hourly backup pairs by default, limiting the
   fast-growing SQLite snapshot tier while separate daily recovery bundles
   preserve longer disaster-recovery coverage;
 - if corruption is detected, preserves the malformed DB and writes a recovered

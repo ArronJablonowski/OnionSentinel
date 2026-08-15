@@ -21,6 +21,7 @@ SQLITE_BUSY_TIMEOUT_MS="${ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS:-60000}"
 BACKUP_ATTEMPTS="${ALERT_STORE_BACKUP_ATTEMPTS:-5}"
 ENV_FILE="${ALERT_STORE_ENV_FILE:-$STACK_DIR/.env}"
 TELEGRAM_SENDER="$STACK_DIR/bin/send-telegram-notification.py"
+SNAPSHOT_TOOL="$STACK_DIR/bin/recovery_snapshot.py"
 STATE_FILE="$LOG_DIR/alert-store-sqlite-maintenance-state.json"
 REFRESH_GROUPS_URL="${ALERT_STORE_REFRESH_GROUPS_URL:-http://127.0.0.1:8787/refresh-groups}"
 REFRESH_GROUPS_TIMEOUT="${ALERT_STORE_REFRESH_GROUPS_TIMEOUT:-60}"
@@ -28,6 +29,7 @@ STAMP="$(date '+%Y%m%dT%H%M%S%z')"
 LOG_FILE="$LOG_DIR/alert-store-sqlite-maintenance.log"
 WEB_MAINTENANCE_HOLD="$LOG_DIR/onion-sentinel-web-maintenance.hold"
 RECOVERY_RUNTIME_STOPPED=0
+BACKUP_PLAINTEXT=""
 
 [[ "$SQLITE_BUSY_TIMEOUT_MS" == <-> ]] || SQLITE_BUSY_TIMEOUT_MS=60000
 [[ "$BACKUP_ATTEMPTS" == <-> ]] || BACKUP_ATTEMPTS=5
@@ -118,6 +120,19 @@ secure_regular_file() {
   chmod 0600 "$candidate" || fail "could not secure backup artifact: $candidate"
 }
 
+cleanup_backup_plaintext() {
+  local original_status=$?
+  if [[ -n "$BACKUP_PLAINTEXT" ]]; then
+    rm -f "$BACKUP_PLAINTEXT"
+    BACKUP_PLAINTEXT=""
+  fi
+  return "$original_status"
+}
+
+trap 'cleanup_backup_plaintext' EXIT
+trap 'cleanup_backup_plaintext; exit 130' INT
+trap 'cleanup_backup_plaintext; exit 143' TERM
+
 prepare_backup_directory() {
   if [[ -L "$BACKUP_DIR" ]]; then
     fail "alert-store backup directory must not be a symbolic link: $BACKUP_DIR"
@@ -136,11 +151,33 @@ prepare_backup_directory() {
   # Interrupted or lock-failed runs can leave an empty temporary target. Never
   # touch a current run, but remove stale partials before evaluating retention.
   find -P "$BACKUP_DIR" -maxdepth 1 -type f -name '*.backup.tmp' -mmin +30 -delete 2>/dev/null || true
+  find -P "$BACKUP_DIR" -maxdepth 1 -type f -name '.alerts.sqlite3.*.backup.*.tmp' -mmin +30 -delete 2>/dev/null || true
+  find -P "$BACKUP_DIR" -maxdepth 1 -type f -name 'alerts.sqlite3.*.backup.enc' -mmin +30 -print0 \
+    | while IFS= read -r -d '' encrypted; do
+        [[ -f "${encrypted%.enc}.json" && ! -L "${encrypted%.enc}.json" ]] \
+          || rm -f "$encrypted"
+      done
+  find -P "$BACKUP_DIR" -maxdepth 1 -type f -name 'alerts.sqlite3.*.backup.json' -mmin +30 -print0 \
+    | while IFS= read -r -d '' metadata; do
+        [[ -f "${metadata%.json}.enc" && ! -L "${metadata%.json}.enc" ]] \
+          || rm -f "$metadata"
+      done
 }
 
 require_sqlite() {
   if ! command -v sqlite3 >/dev/null 2>&1; then
     fail "sqlite3 is not installed or not in PATH"
+  fi
+}
+
+require_snapshot_tool() {
+  if [[ -L "$SNAPSHOT_TOOL" || ! -f "$SNAPSHOT_TOOL" ]]; then
+    fail "authenticated recovery snapshot tool is unavailable"
+  fi
+  local admitted
+  admitted="$(find -P "$SNAPSHOT_TOOL" -prune -type f -user "$(id -un)" ! -perm -022 -print)"
+  if [[ "$admitted" != "$SNAPSHOT_TOOL" ]]; then
+    fail "authenticated recovery snapshot tool is not trusted"
   fi
 }
 
@@ -151,10 +188,12 @@ quick_check() {
 
 verified_backup() {
   local backup_tmp="$BACKUP_DIR/alerts.sqlite3.$STAMP.backup.tmp"
-  local backup="$BACKUP_DIR/alerts.sqlite3.$STAMP.backup"
+  local backup="$BACKUP_DIR/alerts.sqlite3.$STAMP.backup.enc"
+  local metadata="$BACKUP_DIR/alerts.sqlite3.$STAMP.backup.json"
   local attempt=1
   local backup_error=""
   rm -f "$backup_tmp"
+  BACKUP_PLAINTEXT="$backup_tmp"
   while (( attempt <= BACKUP_ATTEMPTS )); do
     if backup_error="$(sqlite3 -cmd ".timeout $SQLITE_BUSY_TIMEOUT_MS" "$DB_PATH" ".backup '$backup_tmp'" 2>&1)"; then
       secure_regular_file "$backup_tmp"
@@ -172,11 +211,44 @@ verified_backup() {
   backup_check="$(quick_check "$backup_tmp")"
   if [[ "$backup_check" != "ok" ]]; then
     rm -f "$backup_tmp"
+    BACKUP_PLAINTEXT=""
     fail "backup failed quick_check: $backup_check"
   fi
-  mv "$backup_tmp" "$backup"
+  local snapshot_error
+  if ! snapshot_error="$("$SNAPSHOT_TOOL" create \
+      --source "$backup_tmp" --artifact "$backup" --metadata "$metadata" 2>&1)"; then
+    fail "authenticated backup publication failed: $snapshot_error"
+  fi
+  rm -f "$backup_tmp"
+  BACKUP_PLAINTEXT=""
   secure_regular_file "$backup"
+  secure_regular_file "$metadata"
   log "backup_ok path=$backup"
+}
+
+encrypt_retained_plaintext_backups() {
+  find -P "$BACKUP_DIR" -maxdepth 1 -type f -name 'alerts.sqlite3.*.backup' -print0 \
+    | while IFS= read -r -d '' plaintext; do
+        local encrypted="${plaintext}.enc"
+        local metadata="${plaintext}.json"
+        local check
+        local check_failed=0
+        if ! check="$(quick_check "$plaintext")"; then
+          check_failed=1
+        elif [[ "$check" != "ok" ]]; then
+          check_failed=1
+        fi
+        local snapshot_error
+        if ! snapshot_error="$("$SNAPSHOT_TOOL" create \
+            --source "$plaintext" --artifact "$encrypted" --metadata "$metadata" 2>&1)"; then
+          fail "retained backup encryption failed: $snapshot_error"
+        fi
+        rm -f "$plaintext"
+        secure_regular_file "$encrypted"
+        secure_regular_file "$metadata"
+        log "retained_backup_encrypted path=$encrypted"
+        (( check_failed == 0 )) || fail "retained backup failed quick_check"
+      done
 }
 
 summary_consistency_check() {
@@ -336,18 +408,20 @@ prune_backups() {
   if ! [[ "$keep" =~ '^[0-9]+$' ]] || (( keep < 1 )); then
     keep="$DEFAULT_KEEP_BACKUPS"
   fi
-  find "$BACKUP_DIR" -maxdepth 1 -type f -name 'alerts.sqlite3.*.backup' -print0 \
+  find "$BACKUP_DIR" -maxdepth 1 -type f -name 'alerts.sqlite3.*.backup.json' -print0 \
     | xargs -0 ls -t 2>/dev/null \
     | tail -n "+$((keep + 1))" \
-    | while IFS= read -r old_backup; do
-        rm -f "$old_backup"
-        log "pruned_backup path=$old_backup"
+    | while IFS= read -r old_metadata; do
+        local encrypted="${old_metadata%.json}.enc"
+        rm -f "$old_metadata" "$encrypted"
+        log "pruned_backup path=$encrypted"
       done
 }
 
 main() {
   prepare_backup_directory
   require_sqlite
+  require_snapshot_tool
   if [[ ! -f "$DB_PATH" ]]; then
     fail "DB not found: $DB_PATH"
   fi
@@ -372,6 +446,7 @@ main() {
   fi
   log "summary_consistency_ok detail=$summary_check"
 
+  encrypt_retained_plaintext_backups
   verified_backup
   prune_backups
   mark_ok "quick_check=ok summary_consistency=ok"

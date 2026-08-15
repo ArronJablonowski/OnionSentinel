@@ -422,7 +422,8 @@ $HOME/n8n-local/bin/maintain-alert-store-sqlite.zsh
 ```
 
 It runs `PRAGMA quick_check`, verifies that `alert_group_summary` matches the
-raw `alerts` table, writes verified `.backup` copies under
+raw `alerts` table, writes authenticated `.backup.enc` snapshots plus
+content-free `.backup.json` commit records under
 `$HOME/n8n-local/alert_store_backups`, retains the newest 10 verified hourly
 backups, and creates `.recover` candidates when corruption is detected. The
 separate daily recovery bundles provide longer disaster-recovery coverage. If

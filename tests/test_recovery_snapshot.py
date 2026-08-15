@@ -91,7 +91,10 @@ class RecoverySnapshotTests(unittest.TestCase):
             encrypted.write_bytes(tampered)
             encrypted.chmod(0o600)
             output = root / "tampered.sqlite3"
-            with self.assertRaisesRegex(RuntimeError, "authentication failed"):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "ciphertext validation failed|authentication failed",
+            ):
                 module.restore_snapshot(
                     encrypted,
                     metadata,
@@ -139,6 +142,42 @@ class RecoverySnapshotTests(unittest.TestCase):
 
             self.assertFalse(encrypted.exists())
             self.assertEqual(metadata.read_text(encoding="utf-8"), "occupied")
+
+    def test_restore_rejects_a_different_key_generation_before_decryption(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "alerts.sqlite3.backup.tmp"
+            encrypted = root / "alerts.sqlite3.20260815.backup.enc"
+            metadata = root / "alerts.sqlite3.20260815.backup.json"
+            source.write_bytes(b"payload" * 1024)
+            source.chmod(0o600)
+            writer = module.RecoveryEncryption(
+                SECRET,
+                openssl="/usr/bin/openssl",
+                key_id="generation-v1",
+            )
+            reader = module.RecoveryEncryption(
+                SECRET,
+                openssl="/usr/bin/openssl",
+                key_id="generation-v2",
+            )
+            module.create_snapshot(
+                source,
+                encrypted,
+                metadata,
+                encryption=writer,
+            )
+
+            output = root / "restored.sqlite3"
+            with self.assertRaisesRegex(RuntimeError, "key generation"):
+                module.restore_snapshot(
+                    encrypted,
+                    metadata,
+                    output,
+                    encryption=reader,
+                )
+            self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":

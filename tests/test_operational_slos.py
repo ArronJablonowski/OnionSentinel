@@ -784,6 +784,19 @@ class OperationalSloTests(unittest.TestCase):
             source,
         )
 
+    def test_backup_age_ignores_symlinked_commit_metadata(self):
+        now = dt.datetime(2026, 8, 15, 10, tzinfo=dt.timezone.utc)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            external = root / "external.backup.json"
+            external.write_text("{}", encoding="utf-8")
+            directory = root / "backups"
+            directory.mkdir()
+            (directory / "linked.backup.json").symlink_to(external)
+            self.assertIsNone(
+                self.slo.newest_file_age(directory, "*.backup.json", now)
+            )
+
     def test_slo_history_is_bounded(self):
         with tempfile.TemporaryDirectory() as tmp:
             history = Path(tmp) / "history.jsonl"

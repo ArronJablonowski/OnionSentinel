@@ -5354,6 +5354,17 @@
         "evaluate_ssh_health",
         "main"
       ]
+    },
+    {
+      "path": "n8n/bin/recovery_snapshot.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/recovery_snapshot.py",
+      "required_symbols": [
+        "SNAPSHOT_FORMAT",
+        "create_snapshot",
+        "restore_snapshot",
+        "main"
+      ]
     }
   ],
   "python_package_trees": [
