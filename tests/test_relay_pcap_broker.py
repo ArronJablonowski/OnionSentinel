@@ -7,6 +7,7 @@ import contextlib
 import fcntl
 import hashlib
 import io
+import json
 import os
 import subprocess
 import sys
@@ -65,6 +66,39 @@ class RelayPcapBrokerTest(unittest.TestCase):
         )
         storage.start()
         self.addCleanup(storage.stop)
+
+    def test_mac_transfer_uses_only_a_preprovisioned_host_pin(self) -> None:
+        config = {
+            "pcap_broker": {
+                "mac_transfer": {
+                    "host": "192.0.2.20",
+                    "user": "relay-intake",
+                    "ssh_key": "/private/relay-key",
+                    "known_hosts": "/private/mac-known-hosts",
+                }
+            }
+        }
+
+        command = self.relay.mac_ssh_base(config)
+
+        self.assertIn("StrictHostKeyChecking=yes", command)
+        self.assertIn("UserKnownHostsFile=/private/mac-known-hosts", command)
+        self.assertNotIn("StrictHostKeyChecking=accept-new", command)
+
+    def test_mac_transfer_example_and_runbook_require_the_host_pin(self) -> None:
+        example = json.loads(
+            (REPO_ROOT / "relay/config/config.example.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        transfer = example["pcap_broker"]["mac_transfer"]
+        self.assertEqual(
+            transfer["known_hosts"],
+            "/opt/so-alert-relay/keys/macstudio_known_hosts",
+        )
+        readme = (REPO_ROOT / "relay/README.md").read_text(encoding="utf-8")
+        self.assertIn('"known_hosts": "/opt/so-alert-relay/keys/macstudio_known_hosts"', readme)
+        self.assertIn("StrictHostKeyChecking=yes", readme)
 
     def test_broker_request_preserves_http_lifecycle_and_request_shape(self) -> None:
         events = []

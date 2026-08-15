@@ -156,6 +156,36 @@ class RelayReadinessTests(unittest.TestCase):
         self.assertNotIn("PRIVATE-SENTINEL", rendered)
         self.assertNotIn(str(key), rendered)
 
+    def test_pcap_transfer_pin_metadata_is_required_when_enabled(self) -> None:
+        module = self.require_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            key = directory / "relay-key"
+            hosts = directory / "known-hosts"
+            key.write_text("PRIVATE-SENTINEL", encoding="utf-8")
+            key.chmod(0o600)
+            config = {
+                "security_onion": {
+                    "ssh_key": str(key),
+                    "pcap_ssh_key": str(key),
+                },
+                "pcap_broker": {
+                    "enabled": True,
+                    "mac_transfer": {
+                        "ssh_key": str(key),
+                        "known_hosts": str(hosts),
+                    },
+                },
+            }
+
+            self.assertEqual(
+                module.evaluate_ssh_health(config)["code"],
+                "ssh_metadata_invalid",
+            )
+            hosts.write_text("host ssh-ed25519 PUBLIC-SENTINEL\n", encoding="utf-8")
+            hosts.chmod(0o600)
+            self.assertEqual(module.evaluate_ssh_health(config)["code"], "ssh_ready")
+
     def test_report_is_bounded_schema_only_and_never_contacts_remote_systems(self) -> None:
         module = self.require_module()
         storage = {
