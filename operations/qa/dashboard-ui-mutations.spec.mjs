@@ -11,6 +11,7 @@ const FIXTURE_REASON = 'Synthetic QA suppression reason';
 const INCIDENT_CASE_ID = 'ir-synthetic-query-audit';
 const EXACT_ALERT_CONTEXT_KQL = 'event.dataset: "synthetic.alert" AND source.ip: "192.0.2.10"';
 const EXACT_NETWORK_FLOW_KQL = 'source.ip: "192.0.2.10" AND destination.ip: "198.51.100.20"';
+const EXACT_SOFTWARE_NAME = 'Synthetic Endpoint Security Sensor with a deliberately long readable product name';
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const SPEC_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SPEC_DIR, '../..');
@@ -263,6 +264,19 @@ async function installSyntheticApi(page, { failEscalation = false } = {}) {
     delayedListStarted: false,
     delayedListFinished: false,
     postEscalationListResponses: 0,
+    currentAnalysis: {
+      ok: true, status: 'running',
+      started_at: '2026-07-15  08:00:00-06:00',
+      active_phase: 'second_opinion', phase_label: 'Second-opinion review',
+      active_model_route: 'codex-cli:gpt-5.6-sol:xhigh',
+      active_model: 'gpt-5.6-sol', active_model_path: 'frontier-codex-cli',
+      agent_role: 'soc-analyst', agent_label: 'SOC Analyst',
+      job_label: 'SOC alert triage', queue_size: 2,
+      alert: {
+        alert_count: 3, rule_name: 'Synthetic active analysis',
+        source_ip: '192.0.2.10', destination_ip: '198.51.100.20', destination_port: 443,
+      },
+    },
     mutations: [],
   };
 
@@ -292,6 +306,10 @@ async function installSyntheticApi(page, { failEscalation = false } = {}) {
           destination_ip: '198.51.100.20',
           destination_port: 443,
           seen_count: 3,
+          final_review_status: 'model_consensus',
+          effective_confidence: 'high',
+          source_asset: { status: 'resolved', hostname: 'source.synthetic.test' },
+          destination_asset: { status: 'resolved', hostname: 'destination.synthetic.test' },
         }],
         total: 1,
         page: 1,
@@ -321,6 +339,66 @@ async function installSyntheticApi(page, { failEscalation = false } = {}) {
         state.postEscalationListResponses += 1;
       }
       await json(payload);
+      return;
+    }
+    if (method === 'GET' && path === '/api/llm-analysis/current') {
+      await json(state.currentAnalysis);
+      return;
+    }
+    if (method === 'GET' && path === '/api/llm-analysis/logs') {
+      await json({
+        ok: true, page: 1, total_pages: 1, total: 1,
+        primary_total: 1, second_opinion_total: 0, disagreement_adjudication_total: 0,
+        agent_totals: { 'soc-analyst': 1 },
+        active_runs: state.currentAnalysis.status === 'running' ? [state.currentAnalysis] : [],
+        logs: [{
+          status: 'success', started_at: '2026-07-15  08:00:00-06:00', runtime_seconds: 62,
+          agent_role: 'incident-responder', agent_label: 'Incident Responder',
+          job_label: 'Incident response investigation',
+          model_route: 'codex-cli:gpt-5.6-sol:xhigh',
+          model: 'gpt-5.6-sol',
+          alert: {
+            alert_count: 1, rule_name: 'Synthetic provenance report',
+            source_ip: '192.0.2.10', destination_ip: '198.51.100.20', destination_port: 443,
+          },
+        }],
+      });
+      return;
+    }
+    if (method === 'GET' && path === '/api/software-inventory') {
+      await json({
+        ok: true,
+        generated_at: '2026-07-15T14:10:00Z',
+        summary: {
+          products: 1, assets: 1, installed: 1, observed: 0, inferred: 0,
+          current: 1, recent: 0, historical: 0, expired: 0,
+        },
+        coverage: {
+          authoritative_denominator: 1,
+          denominator_status: 'known',
+          osquery_ready: 1,
+          fresh_endpoint_inventories: 1,
+          network_observed_assets: 0,
+          coverage_gaps: 0,
+        },
+        collection: {
+          status: 'ok', complete: true, last_success_at: '2026-07-15T14:10:00Z',
+          source_statuses: { osquery_apps: { status: 'ok', freshness: 'current' } },
+        },
+        page: { limit: 100, offset: 0, filtered_total: 1, has_more: false },
+        platforms: ['macOS'],
+        warnings: [],
+        items: [{
+          evidence_id: 'synthetic-software-1', asset_label: 'source.synthetic.test',
+          asset_ref_type: 'ip', asset_ref: '192.0.2.10', product: EXACT_SOFTWARE_NAME,
+          version: '2026.7.15-build-abcdef', category: 'Endpoint security', tier: 'installed',
+          source: 'OSQuery applications', source_dataset: 'osquery_apps',
+          confidence: 'high', freshness: 'current',
+          first_seen: '2026-07-15T14:00:00Z', last_seen: '2026-07-15T14:10:00Z',
+          observation_count: 1, collection_status: 'complete', operating_system_type: 'macOS',
+          operating_system_version: 'macOS 26.0',
+        }],
+      });
       return;
     }
     if (method === 'GET' && path === '/api/soc-alerts/events') {
@@ -603,6 +681,76 @@ test('incident query audits collapse by default and copy exact queries with acce
   expect(copied.some(value => value.includes('@timestamp:['))).toBeTruthy();
   expect(copied.some(value => value.includes('"operation": "dns"'))).toBeTruthy();
   await expect(detail.locator('.ir-query-copy')).toHaveCount(7);
+});
+
+test('analysis activity exposes truthful provenance and accessible motion states', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const state = await installSyntheticApi(page);
+  await page.goto(`${fixtureBaseUrl}/reports.html`, { waitUntil: 'domcontentloaded' });
+
+  const status = page.locator('#llm-current-status');
+  await expect(status).toHaveText('Second-opinion review');
+  await expect(status).toHaveAttribute('role', 'status'); await expect(status).toHaveAttribute('aria-live', 'polite');
+  await expect(page.locator('#llm-current-agent')).toHaveText('SOC Analyst');
+  await expect(page.locator('#llm-current-job')).toHaveText('SOC alert triage');
+  await expect(page.locator('#llm-current-model')).toHaveText('Codex CLI · gpt-5.6-sol (xhigh)');
+  await expect(status).toHaveCSS('animation-name', 'analysisPulse');
+
+  const historical = page.locator('#llm-log-table-body tr', { hasText: 'Synthetic provenance report' }).last();
+  await expect(historical).toContainText('Incident Responder');
+  await expect(historical).toContainText('Incident response investigation');
+  await expect(historical).toContainText('Codex CLI · gpt-5.6-sol (xhigh)');
+
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expect(status).toHaveCSS('animation-name', 'none');
+
+  state.currentAnalysis = { ok: true, status: 'idle', alert: {}, queue_size: 0 };
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await expect(status).toHaveText('Idle');
+  await expect(status).not.toHaveClass(/running/);
+  await expect(status).toHaveCSS('animation-name', 'none');
+  await expect(page.locator('#llm-current-agent')).toHaveText('No agent running');
+  await expect(page.locator('#llm-current-job')).toHaveText('No active job');
+  await expect(page.locator('#llm-current-model')).toHaveText('No model running');
+});
+
+test('responsive analyst tables preserve exact IP, verdict, and software text', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await installSyntheticApi(page);
+  await page.goto(`${fixtureBaseUrl}/investigations.html`, { waitUntil: 'domcontentloaded' });
+
+  const incident = page.locator(`[data-case-id="${INCIDENT_CASE_ID}"]`);
+  await expect(incident).toBeVisible();
+  await expect(incident.locator('.ir-network-value').nth(0)).toHaveText('192.0.2.10');
+  await expect(incident.locator('.ir-network-value').nth(1)).toHaveText('198.51.100.20:443');
+  await expect(incident.locator('.review-badge-consensus')).toHaveText('Models agree');
+  const networkGeometry = await incident.locator('.ir-network-cell').evaluate(cell => ({
+    clientWidth: cell.clientWidth,
+    scrollWidth: cell.scrollWidth,
+    values: [...cell.querySelectorAll('.ir-network-value')].map(value => ({
+      text: value.textContent,
+      clientWidth: value.clientWidth,
+      scrollWidth: value.scrollWidth,
+    })),
+  }));
+  expect(networkGeometry.scrollWidth, JSON.stringify(networkGeometry)).toBeLessThanOrEqual(networkGeometry.clientWidth + 1);
+  expect(networkGeometry.values.every(value => value.scrollWidth <= value.clientWidth + 1), JSON.stringify(networkGeometry)).toBe(true);
+
+  await page.goto(`${fixtureBaseUrl}/software-inventory.html`, { waitUntil: 'domcontentloaded' });
+  const desktopSoftware = page.locator('[data-software-row="synthetic-software-1"] .software-name', { hasText: EXACT_SOFTWARE_NAME });
+  await expect(desktopSoftware).toHaveText(EXACT_SOFTWARE_NAME);
+  await expect(desktopSoftware).toHaveCSS('white-space', 'normal');
+  await expect(desktopSoftware).toHaveCSS('word-break', 'normal');
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator('.software-table-wrap')).toBeHidden();
+  const mobileSoftware = page.locator('[data-software-card="synthetic-software-1"] .software-name', { hasText: EXACT_SOFTWARE_NAME });
+  await expect(mobileSoftware).toHaveText(EXACT_SOFTWARE_NAME);
+  const dimensions = await page.evaluate(() => ({
+    viewport: document.documentElement.clientWidth,
+    page: document.documentElement.scrollWidth,
+  }));
+  expect(dimensions.page).toBeLessThanOrEqual(dimensions.viewport + 1);
 });
 
 test('successful escalation confirms for five seconds and removes desktop and mobile rows despite a stale list response', async ({ page }) => {
