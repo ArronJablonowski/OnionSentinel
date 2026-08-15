@@ -264,10 +264,12 @@ def _admin_post(handler: object, c: ModuleType, path: str) -> None:
             c.render_login("Form token validation failed.", True),
         )
     if path == "/admin/logout":
-        c.runtime.destroy_admin_session(handler._admin_session_id())
+        session_id = handler._admin_session_id()
+        c.runtime.destroy_admin_session(session_id)
+        c.ACCESS_RUNTIME.destroy_session(session_id)
         return handler._redirect(
             "/admin/login",
-            {"Set-Cookie": c.runtime.expired_admin_session_cookie_header()},
+            {"Set-Cookie": c.ACCESS_RUNTIME.logout_cookie_headers()},
         )
     if not c.runtime.admin_password_configured():
         return handler._send(
@@ -283,9 +285,12 @@ def _admin_post(handler: object, c: ModuleType, path: str) -> None:
             c.render_login("Invalid password.", True),
         )
     session_id = c.runtime.create_admin_session(handler.client_address[0])
+    csrf_token = c.ACCESS_RUNTIME.create_session(handler, session_id)
     return handler._redirect(
         "/admin",
-        {"Set-Cookie": c.runtime.admin_session_cookie_header(session_id)},
+        {"Set-Cookie": c.ACCESS_RUNTIME.login_cookie_headers(
+            session_id, csrf_token
+        )},
     )
 
 

@@ -70,8 +70,9 @@ APPLICATION_LOGGER = SecurityJsonlLogger(
 )
 
 
-ACCESS_OBSERVER = _access_adapter.build_access_observer(
+ACCESS_RUNTIME = _access_adapter.build_access_runtime(
     environ=os.environ, home=HOME, application_logger=APPLICATION_LOGGER,
+    runtime=runtime,
 )
 
 
@@ -355,13 +356,6 @@ def is_same_origin_json_request(headers: object) -> tuple[bool, int, str]:
     return True, HTTPStatus.OK, ""
 
 
-def begin_access_observation(handler: object, path: str) -> None:
-    return _access_adapter.begin_access_observation(
-        handler, path, runtime=runtime, controlled_evaluation=CONTROLLED_EVALUATION_MODE,
-        observer=ACCESS_OBSERVER,
-    )
-
-
 def resolve_dashboard_target(root: Path, request_path: str) -> Path | None:
     """Resolve a static request without allowing traversal or dot-file reads."""
     decoded = unquote(urlparse(request_path).path)
@@ -451,10 +445,7 @@ class OnionSentinelHandler(runtime.PortalHandler):
         super().log_message(fmt, *args)
 
     def send_response(self, code: int, message: str | None = None) -> None:
-        _access_adapter.finalize_access_observation(
-            self, code, runtime=runtime,
-            observer=ACCESS_OBSERVER,
-        )
+        ACCESS_RUNTIME.finalize(self, code)
         return super().send_response(code, message)
 
     def parse_request(self) -> bool:
@@ -558,7 +549,10 @@ class OnionSentinelHandler(runtime.PortalHandler):
         return _request_routes.do_get(self, sys.modules[__name__])
 
     def do_POST(self) -> None:
-        begin_access_observation(self, urlparse(self.path).path)
+        ACCESS_RUNTIME.begin(
+            self, urlparse(self.path).path,
+            controlled_evaluation=CONTROLLED_EVALUATION_MODE,
+        )
         return _request_routes.do_post(self, sys.modules[__name__])
 
 

@@ -41,7 +41,7 @@ def _redirect(
     handler: Any,
     runtime: Any,
     location: str,
-    extra: dict[str, str] | None = None,
+    extra: dict[str, str | list[str]] | None = None,
     status: Any = None,
 ) -> None:
     status = runtime.HTTPStatus.FOUND if status is None else status
@@ -50,7 +50,9 @@ def _redirect(
     handler.send_header("Cache-Control", "no-store")
     if extra:
         for key, value in extra.items():
-            handler.send_header(key, value)
+            values = value if isinstance(value, list) else [value]
+            for item in values:
+                handler.send_header(key, item)
     handler.end_headers()
 
 

@@ -165,6 +165,10 @@ class HumanSessionRuntime:
             except Exception:
                 pass
 
+    def record_boundary_failure(self, error_type: str) -> None:
+        """Record a safe failure type without accepting exception detail."""
+        self._record_failure(error_type)
+
     def create_session(
         self,
         session_id: str,

@@ -20,14 +20,13 @@ class OnionSentinelServerTests(unittest.TestCase):
         handler = object.__new__(server.OnionSentinelHandler)
         handler.path = "/api/soc-settings/ai-model?source=settings"
         events = []
+        access_runtime = SimpleNamespace(
+            begin=lambda value, path, **kwargs: events.append(
+                ("begin", value is handler, path, kwargs)
+            )
+        )
         with (
-            mock.patch.object(
-                server,
-                "begin_access_observation",
-                side_effect=lambda value, path: events.append(
-                    ("begin", value is handler, path)
-                ),
-            ),
+            mock.patch.object(server, "ACCESS_RUNTIME", access_runtime),
             mock.patch.object(
                 server._request_routes,
                 "do_post",
@@ -41,7 +40,12 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertEqual(
             events,
             [
-                ("begin", True, "/api/soc-settings/ai-model"),
+                (
+                    "begin",
+                    True,
+                    "/api/soc-settings/ai-model",
+                    {"controlled_evaluation": False},
+                ),
                 ("dispatch", True, True),
             ],
         )
@@ -58,8 +62,13 @@ class OnionSentinelServerTests(unittest.TestCase):
                 ) or False
             )
         )
+        access_runtime = server._access_adapter.DedicatedAccessRuntime(
+            runtime=server.runtime,
+            observer=observer_runtime,
+            sessions=SimpleNamespace(),
+        )
         with (
-            mock.patch.object(server, "ACCESS_OBSERVER", observer_runtime),
+            mock.patch.object(server, "ACCESS_RUNTIME", access_runtime),
             mock.patch.object(
                 server.runtime,
                 "now_iso_utc",
@@ -107,15 +116,16 @@ class OnionSentinelServerTests(unittest.TestCase):
         )
         handler._admin_session_id = lambda: "session-" + "s" * 36
         headers["X-Onion-Sentinel-CSRF"] = "csrf-" + "c" * 38
-        with (
-            mock.patch.object(server, "CONTROLLED_EVALUATION_MODE", False),
-            mock.patch.object(server, "ACCESS_OBSERVER", observer_runtime),
-            mock.patch.object(server, "HUMAN_SESSION_RUNTIME", session_runtime),
-        ):
-            server.begin_access_observation(
-                handler,
-                "/api/ac-hunter/refresh",
-            )
+        access_runtime = server._access_adapter.DedicatedAccessRuntime(
+            runtime=server.runtime,
+            observer=observer_runtime,
+            sessions=session_runtime,
+        )
+        access_runtime.begin(
+            handler,
+            "/api/ac-hunter/refresh",
+            controlled_evaluation=False,
+        )
         self.assertIs(handler._access_observation, observation)
         called_route = observer_runtime.begin.call_args.args[0]
         self.assertTrue(called_route.accepted)
@@ -132,19 +142,35 @@ class OnionSentinelServerTests(unittest.TestCase):
         session_runtime.resolve_session.assert_called_once()
 
     def test_observe_login_and_logout_cookie_headers_preserve_legacy_default(self):
+        disabled_sessions = SimpleNamespace(
+            enabled=False,
+            absolute_ttl_seconds=28_800,
+        )
+        enabled_sessions = SimpleNamespace(
+            enabled=True,
+            absolute_ttl_seconds=28_800,
+        )
         with mock.patch.object(
             server.runtime,
             "admin_session_cookie_header",
             return_value="legacy-session-cookie",
         ):
+            disabled = server._access_adapter.DedicatedAccessRuntime(
+                runtime=server.runtime,
+                observer=SimpleNamespace(),
+                sessions=disabled_sessions,
+            )
+            enabled = server._access_adapter.DedicatedAccessRuntime(
+                runtime=server.runtime,
+                observer=SimpleNamespace(),
+                sessions=enabled_sessions,
+            )
             self.assertEqual(
-                server.admin_login_cookie_headers("legacy-id", None),
+                disabled.login_cookie_headers("legacy-id", None),
                 "legacy-session-cookie",
             )
             self.assertEqual(
-                server.admin_login_cookie_headers(
-                    "legacy-id", "csrf-" + "c" * 38
-                ),
+                enabled.login_cookie_headers("legacy-id", "csrf-" + "c" * 38),
                 [
                     "legacy-session-cookie",
                     "onion_sentinel_csrf=csrf-" + "c" * 38
@@ -157,11 +183,11 @@ class OnionSentinelServerTests(unittest.TestCase):
             return_value="expired-legacy-cookie",
         ):
             self.assertEqual(
-                server.admin_logout_cookie_headers(observe_enabled=False),
+                disabled.logout_cookie_headers(),
                 "expired-legacy-cookie",
             )
             self.assertEqual(
-                server.admin_logout_cookie_headers(observe_enabled=True),
+                enabled.logout_cookie_headers(),
                 [
                     "expired-legacy-cookie",
                     "onion_sentinel_csrf=; Path=/; Max-Age=0; SameSite=Strict",
@@ -182,18 +208,23 @@ class OnionSentinelServerTests(unittest.TestCase):
             record_boundary_failure=mock.Mock(),
         )
         accepted_route = SimpleNamespace(accepted=True)
+        session_runtime = SimpleNamespace(resolve_session=mock.Mock())
+        access_runtime = server._access_adapter.DedicatedAccessRuntime(
+            runtime=server.runtime,
+            observer=observer_runtime,
+            sessions=session_runtime,
+        )
         with (
-            mock.patch.object(server, "CONTROLLED_EVALUATION_MODE", False),
-            mock.patch.object(server, "ACCESS_OBSERVER", observer_runtime),
             mock.patch.object(
                 server.runtime,
                 "classify_post_route",
                 return_value=accepted_route,
             ),
         ):
-            server.begin_access_observation(
+            access_runtime.begin(
                 handler,
                 "/api/soc-settings/ai-model",
+                controlled_evaluation=False,
             )
         self.assertIsNone(handler._access_observation)
         observer_runtime.begin.assert_not_called()
