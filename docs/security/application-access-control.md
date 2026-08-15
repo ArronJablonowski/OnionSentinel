@@ -86,7 +86,9 @@ addresses.
 Events are appended atomically to an owner-only ledger. The event digest is a
 keyed chain over canonical event metadata and the previous digest. Its signing
 key is an operator-managed service credential distinct from the admin password,
-browser session, and application-log files. Startup verifies the complete
+browser session, and application-log files. The logical identity is
+`dashboard.admin-audit-signing`; its value remains only in the owner-managed
+runtime file represented by `file:mac-admin-audit-signing-key`. Startup verifies the complete
 retained chain and fails closed for enforcement if the ledger is malformed or
 the head cannot be verified. Rotation creates an explicit signed key-transition
 event. Retention exports preserve a verified head receipt before pruning.
