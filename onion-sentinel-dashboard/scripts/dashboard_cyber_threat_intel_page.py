@@ -2,7 +2,30 @@
 from __future__ import annotations
 
 import html
+import importlib.util
+import sys
 from dataclasses import dataclass
+from pathlib import Path
+
+try:
+    from dashboard_cti_lifecycle_workspace import (
+        CTI_LIFECYCLE_CSS,
+        CTI_LIFECYCLE_JS,
+        inject_cti_lifecycle_markup,
+    )
+except ModuleNotFoundError:
+    _lifecycle_path = Path(__file__).with_name("dashboard_cti_lifecycle_workspace.py")
+    _lifecycle_spec = importlib.util.spec_from_file_location(
+        "dashboard_cti_lifecycle_workspace", _lifecycle_path
+    )
+    if _lifecycle_spec is None or _lifecycle_spec.loader is None:
+        raise ImportError("CTI lifecycle workspace module could not be loaded")
+    _lifecycle_module = importlib.util.module_from_spec(_lifecycle_spec)
+    sys.modules[_lifecycle_spec.name] = _lifecycle_module
+    _lifecycle_spec.loader.exec_module(_lifecycle_module)
+    CTI_LIFECYCLE_CSS = _lifecycle_module.CTI_LIFECYCLE_CSS
+    CTI_LIFECYCLE_JS = _lifecycle_module.CTI_LIFECYCLE_JS
+    inject_cti_lifecycle_markup = _lifecycle_module.inject_cti_lifecycle_markup
 
 
 @dataclass(frozen=True)
@@ -63,21 +86,22 @@ CYBER_THREAT_INTEL_MARKUP = '''
           <article role="listitem"><b>04</b><span>Analysis</span><strong>Defensible judgment</strong><small>Alternatives, confidence, local relevance</small></article>
           <article role="listitem"><b>05</b><span>Dissemination</span><strong>Owned action</strong><small>Audience, TLP, deadline, validation</small></article>
           <article role="listitem"><b>06</b><span>Feedback</span><strong>Measure change</strong><small>Outcome, source value, refine PIR</small></article>
+          <article role="listitem"><b>07</b><span>Evaluation</span><strong>Prove value</strong><small>Decision impact, expiry, requirement refinement</small></article>
         </div>
       </section>
 
       <div class="cti-program-grid">
         <section class="cti-panel" aria-labelledby="cti-direction-title">
           <header class="cti-section-header compact">
-            <div><span class="cti-kicker">Direction</span><h3 id="cti-direction-title">Priority intelligence requirement templates</h3></div>
-            <span class="cti-neutral-pill">Templates · not active PIRs</span>
+            <div><span class="cti-kicker">Direction</span><h3 id="cti-direction-title">Priority intelligence requirement patterns</h3></div>
+            <span class="cti-neutral-pill">Use to seed the durable register</span>
           </header>
           <div class="cti-pir-list">
             <article><b>Vulnerability exposure</b><p>Which actively exploited vulnerabilities materially affect monitored technologies and require a patch, mitigation, detection, or accepted-risk decision?</p><span>Consumer: vulnerability + platform owners</span></article>
             <article><b>Adversary behavior</b><p>Which emerging behaviors are observable in Security Onion telemetry, and what detection or hunt should change as a result?</p><span>Consumer: SOC + detection engineering</span></article>
             <article><b>Campaign relevance</b><p>Which campaigns change defensive priorities in the next 30 days based on local assets, exposure, identity, and observed activity?</p><span>Consumer: security leadership + incident response</span></article>
           </div>
-          <p class="cti-panel-note">A production PIR register should add sponsor, decision, priority, horizon, cadence, collection gaps, product, success criteria, and review date before these templates become active requirements.</p>
+          <p class="cti-panel-note">Create an active requirement below to bind a pattern to its sponsor, decision, priority, horizon, collection gaps, deliverable, success criteria, and review date.</p>
         </section>
 
         <section class="cti-panel" aria-labelledby="cti-action-title">
@@ -192,18 +216,19 @@ CYBER_THREAT_INTEL_MARKUP = '''
 
 def render_cyber_threat_intel_page(view: CyberThreatIntelPageViewModel) -> str:
     """Render the decision-led CTI program workspace."""
-    return CYBER_THREAT_INTEL_MARKUP.format(
+    rendered = CYBER_THREAT_INTEL_MARKUP.format(
         urgent_local_signals=view.urgent_local_signals,
         repeated_local_signals=view.repeated_local_signals,
         model_label=html.escape(view.model_label),
     )
+    return inject_cti_lifecycle_markup(rendered)
 
 
 CYBER_THREAT_INTEL_CSS = '''
 <style>
 .cti-workspace{display:grid;gap:16px;padding-top:10px}.cti-workspace button,.cti-workspace input,.cti-workspace select,.cti-workspace textarea{font:inherit}.cti-hero{position:relative;display:grid;grid-template-columns:minmax(0,1.35fr) minmax(340px,.65fr);gap:18px;overflow:hidden;border:1px solid rgba(34,211,238,.2);border-radius:14px;padding:24px;background:radial-gradient(circle at 12% 0%,rgba(34,211,238,.12),transparent 38%),linear-gradient(135deg,#0d1a25,#09121b 72%);box-shadow:0 22px 54px rgba(0,0,0,.2),inset 0 1px 0 rgba(255,255,255,.035)}.cti-hero:after{content:'';position:absolute;right:-70px;bottom:-110px;width:280px;height:280px;border:1px solid rgba(34,211,238,.1);border-radius:50%;box-shadow:0 0 0 34px rgba(34,211,238,.025),0 0 0 68px rgba(34,211,238,.018);pointer-events:none}.cti-kicker{display:inline-block;color:#8ff4ff;font-size:10.5px;font-weight:950;text-transform:uppercase;letter-spacing:.14em}.cti-hero h2{margin:9px 0 8px;color:#f5f9ff;font-size:34px;line-height:1.02;letter-spacing:-.035em}.cti-hero-copy>p{max-width:78ch;margin:0;color:#a3b2c4;font-size:14px;line-height:1.62}.cti-hero-meta{display:flex;align-items:center;flex-wrap:wrap;gap:8px 15px;margin-top:17px;color:#8fa1b5;font-size:11.5px}.cti-maturity-pill,.cti-neutral-pill{display:inline-flex;align-items:center;border:1px solid rgba(34,211,238,.28);border-radius:999px;padding:5px 9px;color:#8ff4ff;background:rgba(34,211,238,.055);font-size:9.5px;font-weight:950;text-transform:uppercase;letter-spacing:.08em}.cti-doctrine-card{position:relative;z-index:1;align-self:stretch;border:1px solid rgba(148,163,184,.13);border-radius:11px;padding:16px;background:rgba(6,16,24,.74);box-shadow:inset 3px 0 0 rgba(34,211,238,.45)}.cti-doctrine-card>span{color:#8ff4ff;font-size:10px;font-weight:950;text-transform:uppercase;letter-spacing:.11em}.cti-doctrine-card>strong{display:block;margin-top:8px;color:#f1f7ff;font-size:15px;line-height:1.42}.cti-doctrine-card>p{margin:8px 0 0;color:#93a5b9;font-size:12px;line-height:1.5}.cti-hero-actions{display:flex;gap:8px;margin-top:16px}.cti-primary-button,.cti-secondary-button,.cti-danger-button,.cti-edit-button{min-height:38px;border-radius:8px;padding:8px 12px;font-size:11.5px;font-weight:900;cursor:pointer;transition:border-color .14s,color .14s,background .14s}.cti-primary-button{border:1px solid #67e8f9;color:#061018;background:#8ff4ff}.cti-primary-button:hover,.cti-primary-button:focus-visible{background:#c8fbff;outline:none}.cti-secondary-button,.cti-edit-button{border:1px solid rgba(34,211,238,.28);color:#aef7ff;background:rgba(34,211,238,.05)}.cti-secondary-button:hover,.cti-secondary-button:focus-visible,.cti-edit-button:hover,.cti-edit-button:focus-visible{border-color:#8ff4ff;color:#f4fdff;outline:none}.cti-danger-button{border:1px solid rgba(251,113,133,.46);color:#fb7185;background:rgba(251,113,133,.055)}.cti-danger-button:hover,.cti-danger-button:focus-visible{border-color:#fb7185;background:rgba(251,113,133,.12);outline:none}.cti-workspace button:disabled{cursor:wait;opacity:.58}.cti-page-status{display:flex;align-items:center;gap:9px;min-height:36px;border:1px solid rgba(148,163,184,.11);border-radius:9px;padding:8px 12px;color:#9eb0c3;background:#0b151f;font-size:11.5px}.cti-page-status.ok{border-color:rgba(74,222,128,.18)}.cti-page-status.error{border-color:rgba(251,113,133,.25);color:#ff8ca0}.cti-page-status.warning{border-color:rgba(246,199,109,.22);color:#f6c76d}.cti-status-dot{width:7px;height:7px;flex:0 0 7px;border-radius:50%;background:#22d3ee;box-shadow:0 0 11px rgba(34,211,238,.58)}.cti-page-status.ok .cti-status-dot{background:#4ade80}.cti-page-status.error .cti-status-dot{background:#fb7185}.cti-page-status.warning .cti-status-dot{background:#f6c76d}.cti-page-status a{margin-left:auto;color:#8ff4ff;font-weight:900;text-decoration:none}.cti-kpi-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px}.cti-kpi-grid article{min-width:0;border:1px solid rgba(148,163,184,.1);border-radius:9px;padding:12px;background:linear-gradient(180deg,#0d1721,#0a131c)}.cti-kpi-grid span{display:block;color:#93a5b9;font-size:9.5px;font-weight:950;text-transform:uppercase;letter-spacing:.08em}.cti-kpi-grid strong{display:block;margin-top:8px;color:#f7fbff;font-size:24px;line-height:1}.cti-kpi-grid em{display:block;margin-top:7px;color:#788b9f;font-size:10.5px;font-style:normal;line-height:1.3}.cti-panel{min-width:0;border:1px solid rgba(148,163,184,.11);border-radius:11px;padding:16px;background:linear-gradient(180deg,#0d1721,#0a131c);box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}.cti-section-header{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin-bottom:14px}.cti-section-header.compact{align-items:flex-start}.cti-section-header h3{margin:6px 0 0;color:#f3f8ff;font-size:18px;line-height:1.2;letter-spacing:-.015em}.cti-section-header p{max-width:66ch;margin:5px 0 0;color:#90a2b6;font-size:11.5px;line-height:1.45}.cti-section-header>p{margin:0;text-align:right}.cti-lifecycle{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:7px}.cti-lifecycle article{position:relative;min-width:0;border:1px solid rgba(34,211,238,.1);border-radius:8px;padding:12px 11px;background:#08121b}.cti-lifecycle article:not(:last-child):after{content:'›';position:absolute;right:-7px;top:50%;z-index:2;display:grid;place-items:center;width:14px;height:20px;color:#4ddbea;background:#0b151f;font-size:16px;transform:translateY(-50%)}.cti-lifecycle b{color:#4ddbea;font:900 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace}.cti-lifecycle span{display:block;margin-top:12px;color:#8ff4ff;font-size:9.5px;font-weight:950;text-transform:uppercase;letter-spacing:.08em}.cti-lifecycle strong{display:block;margin-top:5px;color:#edf5ff;font-size:12px;line-height:1.3}.cti-lifecycle small{display:block;margin-top:6px;color:#778b9f;font-size:10px;line-height:1.35}.cti-program-grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(320px,.8fr);gap:10px}.cti-pir-list{display:grid;gap:7px}.cti-pir-list article{display:grid;grid-template-columns:180px minmax(0,1fr) 180px;gap:13px;align-items:start;border-top:1px solid rgba(148,163,184,.09);padding:10px 0}.cti-pir-list b{color:#f0f6ff;font-size:12px}.cti-pir-list p{margin:0;color:#aab8c8;font-size:11.5px;line-height:1.48}.cti-pir-list span{color:#7f92a6;font-size:10.5px;line-height:1.4}.cti-panel-note{margin:12px 0 0;border-left:2px solid rgba(246,199,109,.55);padding-left:10px;color:#a6b4c4;font-size:11px;line-height:1.5}.cti-action-modes{display:flex;flex-wrap:wrap;gap:6px}.cti-action-modes span,.cti-metric-list span{border:1px solid rgba(34,211,238,.14);border-radius:999px;padding:5px 8px;color:#a8eaf1;background:rgba(34,211,238,.035);font-size:9.5px;font-weight:850}.cti-action-checklist{display:grid;gap:0;margin:12px 0 0;padding:0;list-style:none}.cti-action-checklist li{display:grid;grid-template-columns:82px minmax(0,1fr);gap:10px;border-top:1px solid rgba(148,163,184,.09);padding:8px 0}.cti-action-checklist b{color:#8ff4ff;font-size:10px;text-transform:uppercase;letter-spacing:.06em}.cti-action-checklist span{color:#99aabd;font-size:11px;line-height:1.35}.cti-agent-card{margin-top:10px;border:1px solid rgba(34,211,238,.14);border-radius:8px;padding:10px;background:#07111a}.cti-agent-card span{color:#7f92a6;font-size:9.5px;font-weight:900;text-transform:uppercase;letter-spacing:.08em}.cti-agent-card strong{display:block;margin-top:5px;color:#eaf6ff;font-size:12px}.cti-agent-card em{display:block;margin-top:5px;color:#8396aa;font-size:10.5px;font-style:normal;line-height:1.4}.cti-table-panel{padding:0;overflow:hidden}.cti-table-panel .cti-section-header{align-items:flex-end;margin:0;padding:16px}.cti-table-actions{display:flex;align-items:flex-end;gap:8px}.cti-search{display:grid;gap:5px;color:#8ea1b6;font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.08em}.cti-search input{width:250px;min-height:38px;border:1px solid rgba(34,211,238,.17);border-radius:8px;padding:8px 10px;color:#e7f3ff;background:#071018;outline:none;font-size:11.5px;text-transform:none;letter-spacing:0}.cti-search input:focus{border-color:#67e8f9;box-shadow:0 0 0 3px rgba(34,211,238,.08)}.cti-table-wrap{overflow:auto;border-top:1px solid rgba(148,163,184,.1);border-bottom:1px solid rgba(148,163,184,.09);box-shadow:inset -22px 0 20px -22px rgba(143,244,255,.32)}.cti-table{width:100%;min-width:1260px;border-collapse:collapse}.cti-table th{padding:9px 11px;color:#91a3b6;background:#101b26;font-size:9px;font-weight:950;text-align:left;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap}.cti-table td{padding:11px;border-top:1px solid rgba(148,163,184,.08);color:#cbd8e6;font-size:11px;line-height:1.4;vertical-align:top}.cti-table tbody tr:hover{background:rgba(34,211,238,.025)}.cti-table td:first-child{width:58px}.cti-table td:last-child{width:68px;text-align:right}.cti-table strong{display:block;color:#f2f7fd;font-size:11.5px;line-height:1.32}.cti-table small{display:block;margin-top:4px;color:#8295a9;font-size:10px;line-height:1.35}.cti-table a{display:block;margin-top:4px;color:#8ff4ff;text-decoration:none;font-size:10px}.cti-table a:hover{text-decoration:underline}.cti-source-table td:nth-child(2){width:220px}.cti-source-table td:nth-child(3){width:140px}.cti-source-table td:nth-child(4),.cti-source-table td:nth-child(5){width:90px}.cti-source-table td:nth-child(6){min-width:260px}.cti-source-table td:nth-child(7){width:180px}.cti-technology-table td:nth-child(2){width:225px}.cti-technology-table td:nth-child(3),.cti-technology-table td:nth-child(4){width:105px}.cti-technology-table td:nth-child(5),.cti-technology-table td:nth-child(6){min-width:230px}.cti-technology-table td:nth-child(7){width:180px}.cti-table-pill{display:inline-flex;align-items:center;border:1px solid rgba(34,211,238,.18);border-radius:999px;padding:3px 7px;color:#8ff4ff;background:rgba(34,211,238,.035);font-size:9px;font-weight:950;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}.cti-table-pill.priority-critical{border-color:rgba(251,113,133,.46);color:#ff7890;background:rgba(251,113,133,.06)}.cti-table-pill.priority-high{border-color:rgba(246,199,109,.44);color:#f6c76d;background:rgba(246,199,109,.055)}.cti-table-pill.priority-low{border-color:rgba(148,163,184,.22);color:#9eafc1}.cti-table-pill.overdue{margin-top:5px;border-color:rgba(251,113,133,.42);color:#fb7185}.cti-inline-tags{display:flex;flex-wrap:wrap;gap:4px}.cti-inline-tags span{border:1px solid rgba(148,163,184,.12);border-radius:5px;padding:2px 5px;color:#a8b8c9;background:#0a141d;font-size:9.5px}.cti-loading-cell{padding:22px!important;color:#8397ab!important;text-align:center!important}.cti-table-footnote{margin:0;padding:10px 16px;color:#7f92a6;font-size:10.5px;line-height:1.4}.cti-switch{position:relative;display:inline-flex;width:34px;height:19px}.cti-switch input{position:absolute;opacity:0;pointer-events:none}.cti-switch span{position:absolute;inset:0;border:1px solid rgba(148,163,184,.28);border-radius:999px;background:#111c27;cursor:pointer}.cti-switch span:after{content:'';position:absolute;left:2px;top:2px;width:13px;height:13px;border-radius:50%;background:#8293a6;transition:transform .16s,background .16s}.cti-switch input:checked+span{border-color:rgba(74,222,128,.48);background:rgba(74,222,128,.12)}.cti-switch input:checked+span:after{background:#4ade80;transform:translateX(15px)}.cti-switch input:focus-visible+span{outline:2px solid #8ff4ff;outline-offset:2px}.cti-quality-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.cti-quality-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}.cti-quality-list span{border:1px solid rgba(148,163,184,.1);border-radius:7px;padding:9px;color:#8497aa;background:#08121b;font-size:10px;line-height:1.35}.cti-quality-list b{display:block;margin-bottom:4px;color:#dce8f6;font-size:10.5px}.cti-metric-list{display:flex;flex-wrap:wrap;gap:6px}.cti-modal[hidden]{display:none}.cti-modal{position:fixed;inset:0;z-index:12000;display:grid;place-items:center;padding:18px}.cti-modal-backdrop{position:absolute;inset:0;width:100%;height:100%;border:0;background:rgba(1,7,12,.83);backdrop-filter:blur(5px);cursor:default}.cti-dialog{position:relative;display:grid;grid-template-rows:auto minmax(0,1fr);width:min(880px,100%);max-height:calc(100dvh - 36px);overflow:hidden;border:1px solid rgba(34,211,238,.34);border-radius:13px;background:#0a141e;box-shadow:0 30px 90px rgba(0,0,0,.62)}.cti-dialog>header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;border-bottom:1px solid rgba(148,163,184,.1);padding:18px 20px}.cti-dialog h2{margin:6px 0 0;color:#f3f8ff;font-size:23px}.cti-dialog header p{margin:6px 0 0;color:#8da0b4;font-size:11.5px}.cti-close-button{display:grid;place-items:center;width:38px;height:38px;flex:0 0 38px;border:1px solid rgba(148,163,184,.2);border-radius:8px;color:#cbd8e6;background:#0d1822;font-size:24px;cursor:pointer}.cti-close-button:hover,.cti-close-button:focus-visible{border-color:#8ff4ff;color:#8ff4ff;outline:none}.cti-dialog form{overflow:auto;padding:16px 20px 20px}.cti-form-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px;border:1px solid rgba(148,163,184,.1);border-radius:8px;padding:9px 11px;background:#07111a}.cti-enabled-control{display:flex;align-items:center;gap:8px;color:#dbe7f3;font-size:11.5px;font-weight:800}.cti-enabled-control input{accent-color:#22d3ee}.cti-form-banner>span{color:#f6c76d;font-size:10.5px;text-align:right}.cti-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px}.cti-form-grid label{display:grid;gap:6px;min-width:0;color:#91a4b8;font-size:9.5px;font-weight:900;text-transform:uppercase;letter-spacing:.075em}.cti-form-grid label.wide{grid-column:1/-1}.cti-form-grid input,.cti-form-grid select,.cti-form-grid textarea{box-sizing:border-box;width:100%;min-width:0;border:1px solid rgba(34,211,238,.18);border-radius:8px;padding:10px 11px;color:#e4f0fc;background:#071018;outline:none;font-size:11.5px;line-height:1.35;text-transform:none;letter-spacing:0}.cti-form-grid textarea{resize:vertical}.cti-form-grid input:focus,.cti-form-grid select:focus,.cti-form-grid textarea:focus{border-color:#67e8f9;box-shadow:0 0 0 3px rgba(34,211,238,.08)}.cti-dialog footer{display:grid;grid-template-columns:auto 1fr auto auto;gap:8px;align-items:center;margin-top:16px;border-top:1px solid rgba(148,163,184,.1);padding-top:14px}body.cti-modal-open{overflow:hidden}@media(max-width:1280px){.cti-kpi-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.cti-lifecycle{grid-template-columns:repeat(3,minmax(0,1fr))}.cti-lifecycle article:nth-child(3):after{display:none}}@media(max-width:980px){.cti-hero,.cti-program-grid,.cti-quality-grid{grid-template-columns:1fr}.cti-lifecycle{grid-template-columns:repeat(2,minmax(0,1fr))}.cti-lifecycle article:nth-child(3):after{display:grid}.cti-lifecycle article:nth-child(even):after{display:none}.cti-section-header{align-items:flex-start}.cti-table-panel .cti-section-header{align-items:flex-start}.cti-pir-list article{grid-template-columns:150px minmax(0,1fr)}.cti-pir-list article span{grid-column:2}}@media(max-width:720px){.cti-workspace{gap:11px}.cti-hero{padding:17px}.cti-hero h2{font-size:28px}.cti-hero-actions,.cti-table-actions,.cti-section-header,.cti-table-panel .cti-section-header{display:grid;width:100%}.cti-kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.cti-lifecycle{grid-template-columns:1fr}.cti-lifecycle article:after{display:none!important}.cti-pir-list article{grid-template-columns:1fr;gap:5px}.cti-pir-list article span{grid-column:auto}.cti-search input{width:100%}.cti-table-actions .cti-primary-button{width:100%}.cti-quality-list{grid-template-columns:repeat(2,minmax(0,1fr))}.cti-modal{padding:8px}.cti-dialog{max-height:calc(100dvh - 16px)}.cti-dialog>header,.cti-dialog form{padding:14px}.cti-form-grid{grid-template-columns:1fr}.cti-form-grid label.wide{grid-column:auto}.cti-dialog footer{grid-template-columns:1fr 1fr}.cti-dialog footer>span{display:none}.cti-dialog footer button{width:100%}}@media(max-width:460px){.cti-kpi-grid,.cti-quality-list{grid-template-columns:1fr}.cti-dialog footer{grid-template-columns:1fr}.cti-doctrine-card{padding:13px}}
 </style>
-'''
+''' + CTI_LIFECYCLE_CSS
 
 
 CYBER_THREAT_INTEL_JS = r'''
@@ -303,6 +328,9 @@ CYBER_THREAT_INTEL_JS = r'''
         sourceCell.append(link);
       }
       const collectionCell = addLine(node('td'), labelize(source.acquisition), labelize(source.cadence));
+      collectionCell.append(pill(labelize(source.collection_status || 'unknown'), source.collection_status === 'failed' ? 'cti-freshness-stale' : ''));
+      if (source.last_success_at) collectionCell.append(node('small', '', `Last success ${source.last_success_at}`));
+      if (source.failure_code) collectionCell.append(node('small', '', `Failure: ${source.failure_code}`));
       if (source.credential_reference) collectionCell.append(node('small', '', `Secret ref: ${source.credential_reference}`));
       const reliabilityCell = node('td'); reliabilityCell.append(pill(source.reliability));
       const handlingCell = node('td'); handlingCell.append(pill(source.handling));
@@ -399,7 +427,7 @@ CYBER_THREAT_INTEL_JS = r'''
       method: 'POST',
       credentials: 'same-origin',
       headers: {'Content-Type': 'application/json', 'X-Onion-Sentinel-Request': 'dashboard'},
-      body: JSON.stringify({expected_revision: state.program.revision, sources: nextProgram.sources, technologies: nextProgram.technologies}),
+      body: JSON.stringify({expected_revision: state.program.revision, sources: nextProgram.sources, technologies: nextProgram.technologies, requirements: nextProgram.requirements, intelligence: nextProgram.intelligence}),
     });
     let data = {};
     try { data = await response.json(); } catch (_) {}
@@ -413,6 +441,7 @@ CYBER_THREAT_INTEL_JS = r'''
     }
     state.program = data.program;
     renderWorkspace();
+    document.dispatchEvent(new CustomEvent('cti-program-updated', {detail: {program: data.program}}));
     setPageStatus(successMessage, 'ok');
   };
   const toggleEntry = (kind, id, enabled) => requireAdmin(async () => {
@@ -473,7 +502,7 @@ CYBER_THREAT_INTEL_JS = r'''
   const entryFromForm = () => {
     const id = value('cti-edit-id');
     const enabled = byId('cti-edit-enabled').checked;
-    if (state.editorKind === 'source') return {id, enabled, name: value('cti-source-name'), source_type: value('cti-source-type'), acquisition: value('cti-source-acquisition'), endpoint: value('cti-source-endpoint'), credential_reference: value('cti-source-secret'), owner: value('cti-source-owner'), cadence: value('cti-source-cadence'), reliability: value('cti-source-reliability'), handling: value('cti-source-handling'), requirements: splitList(value('cti-source-requirements')), review_date: value('cti-source-review'), disposition: value('cti-source-disposition'), notes: value('cti-source-notes')};
+    if (state.editorKind === 'source') { const current = state.program.sources.find(item => item.id === id) || {}; return {...current, id, enabled, name: value('cti-source-name'), source_type: value('cti-source-type'), acquisition: value('cti-source-acquisition'), endpoint: value('cti-source-endpoint'), credential_reference: value('cti-source-secret'), owner: value('cti-source-owner'), cadence: value('cti-source-cadence'), reliability: value('cti-source-reliability'), handling: value('cti-source-handling'), requirements: splitList(value('cti-source-requirements')), review_date: value('cti-source-review'), disposition: value('cti-source-disposition'), notes: value('cti-source-notes')}; }
     return {id, enabled, vendor: value('cti-tech-vendor'), product: value('cti-tech-product'), category: value('cti-tech-category'), versions: value('cti-tech-versions'), deployment_scope: value('cti-tech-scope'), criticality: value('cti-tech-criticality'), priority: value('cti-tech-priority'), exposure: value('cti-tech-exposure'), owner: value('cti-tech-owner'), monitor_for: splitList(value('cti-tech-monitor')), requirements: splitList(value('cti-tech-requirements')), review_date: value('cti-tech-review'), notes: value('cti-tech-notes')};
   };
 
@@ -510,11 +539,12 @@ CYBER_THREAT_INTEL_JS = r'''
   root.querySelectorAll('[data-cti-close]').forEach(button => button.addEventListener('click', closeEditor));
   byId('cti-source-search').addEventListener('input', () => filterRows('source'));
   byId('cti-technology-search').addEventListener('input', () => filterRows('technology'));
+  document.addEventListener('cti-program-updated', event => { if (event.detail?.program) { state.program = event.detail.program; renderWorkspace(); } });
   document.addEventListener('keydown', event => { if (event.key === 'Escape' && !modal.hidden) closeEditor(); });
   initialize();
 })();
 </script>
-'''
+''' + CTI_LIFECYCLE_JS
 
 
 def inject_cyber_threat_intel_assets(text: str) -> str:

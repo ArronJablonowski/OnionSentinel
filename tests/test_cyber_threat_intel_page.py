@@ -38,7 +38,7 @@ class CyberThreatIntelPageTests(unittest.TestCase):
             'id="cti-workspace"',
             "Intelligence that changes a decision",
             "Intelligence operating loop",
-            "Priority intelligence requirement templates",
+            "Priority intelligence requirement patterns",
             "Defensive action contract",
             "CTI source portfolio",
             "Technology intelligence watchlist",
@@ -48,7 +48,7 @@ class CyberThreatIntelPageTests(unittest.TestCase):
         for marker in required:
             self.assertIn(marker, page)
         self.assertNotIn("Data-backed widgets can be added here", page)
-        self.assertIn("Templates · not active PIRs", page)
+        self.assertIn("Use to seed the durable register", page)
         self.assertIn("Drafting and summarization only", page)
 
     def test_cti_page_exposes_durable_requirements_intelligence_and_evaluation(self):
@@ -163,6 +163,12 @@ class CyberThreatIntelPageTests(unittest.TestCase):
             '"$DASHBOARD_RUNTIME_DIR/scripts/dashboard_cyber_threat_intel_page.py"'
         )
         self.assertEqual(installer.count(command), 1)
+        for source in (
+            "onion-sentinel-dashboard/scripts/dashboard_cti_lifecycle_workspace.py",
+            "onion-sentinel-dashboard/cti_program_lifecycle.py",
+            "onion-sentinel-dashboard/cti_program_audit.py",
+        ):
+            self.assertEqual(installer.count(f'cp "$REPO_DIR/{source}"'), 1)
 
 
 if __name__ == "__main__":

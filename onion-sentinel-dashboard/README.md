@@ -19,6 +19,8 @@ dependency.
 | `portal_runtime_constants.py` | Host paths, credential locations, bounded caches/locks, limits, and service/action policy constants. |
 | `cti_program.py` | Exact compatibility facade for the owner-managed CTI workspace namespace. |
 | `cti_program_contract.py` | CTI schema, limits, defaults, lock, and typed validation/conflict errors. |
+| `cti_program_lifecycle.py` | Durable requirements, intelligence, evidence/entity link, timestamp, expiration, and context-only validation. |
+| `cti_program_audit.py` | Metadata-only revision change summaries and content digests for analyst edit auditability. |
 | `cti_program_validation.py` | Pure CTI normalization, URL restrictions, and credential-reference-only policy. |
 | `cti_program_store.py` | Guarded reads, optimistic revisions, owner-only atomic persistence, digesting, and public projection. |
 | `software_inventory.py` | Thin compatibility facade for the collector-produced Software Inventory snapshot. |
@@ -40,6 +42,7 @@ dependency.
 | `scripts/dashboard_metric_components.py` | Small tested render helpers for the SOC Alerts metric cards. |
 | `scripts/dashboard_timeline_components.py` | Pure grouped-event normalization, observation rows, marker/burst geometry, seen-window pagination, and escaped timeline HTML composition. |
 | `scripts/dashboard_system_health_components.py` | System Health page markup, PCAP workflow panel styles, and browser refresh logic. |
+| `scripts/dashboard_cti_lifecycle_workspace.py` | Requirement, intelligence-evidence, expiration, entity-link, and revision-history workspace assets. |
 | `assets/` | Onion Sentinel, metric, privacy, brand, and dashboard CSS assets used by the dashboard. |
 
 ## Runtime Locations

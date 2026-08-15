@@ -3887,6 +3887,30 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/cti_program_lifecycle.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/cti_program_lifecycle.py",
+      "required_symbols": [
+        "normalize_requirements",
+        "normalize_intelligence",
+        "validate_intelligence_links",
+        "intelligence_freshness",
+        "project_investigation_context",
+        "normalize_audit_history"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/cti_program_audit.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/cti_program_audit.py",
+      "required_symbols": [
+        "content_digest",
+        "change_summary",
+        "append_audit_event",
+        "program_audit_metrics"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/cti_program_store.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/cti_program_store.py",
@@ -4641,6 +4665,17 @@
         "CyberThreatIntelPageViewModel",
         "inject_cyber_threat_intel_assets",
         "render_cyber_threat_intel_page"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_cti_lifecycle_workspace.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_cti_lifecycle_workspace.py",
+      "required_symbols": [
+        "CTI_LIFECYCLE_CSS",
+        "CTI_LIFECYCLE_JS",
+        "CTI_LIFECYCLE_MARKUP",
+        "inject_cti_lifecycle_markup"
       ]
     },
     {
