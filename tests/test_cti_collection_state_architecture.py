@@ -17,6 +17,7 @@ import cti_program_validation  # noqa: E402
 
 def function_metrics(name: str) -> tuple[int, int]:
     tree = ast.parse(VALIDATION_PATH.read_text(encoding="utf-8"))
+    match_type = getattr(ast, "Match", ())
     target = next(
         node
         for node in ast.walk(tree)
@@ -31,7 +32,7 @@ def function_metrics(name: str) -> tuple[int, int]:
             complexity += len(node.handlers)
         elif isinstance(node, ast.BoolOp):
             complexity += max(0, len(node.values) - 1)
-        elif isinstance(node, ast.Match):
+        elif isinstance(node, match_type):
             complexity += 1 + len(node.cases)
         elif isinstance(node, ast.comprehension):
             complexity += 1 + len(node.ifs)
