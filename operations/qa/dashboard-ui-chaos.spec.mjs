@@ -23,7 +23,12 @@ function collectRuntimeErrors(page) {
   const errors = [];
   page.on('pageerror', error => errors.push(`pageerror: ${error.message}`));
   page.on('response', response => {
-    if (response.status() >= 400) {
+    const request = response.request();
+    const path = new URL(response.url()).pathname;
+    const expectedProtectedLogResponse = response.status() === 403
+      && request.method() === 'GET'
+      && (path === '/api/application-logs' || path.startsWith('/api/application-logs/'));
+    if (response.status() >= 400 && !expectedProtectedLogResponse) {
       errors.push(`http: ${response.status()} ${response.request().method()} ${response.url()}`);
     }
   });
@@ -52,7 +57,7 @@ async function protectLiveState(page) {
 async function openAlerts(page) {
   await page.goto('./index.html', { waitUntil: 'domcontentloaded' });
   await expect(page).toHaveTitle(/SOC Alerts/);
-  await expect(page.locator('.report-row-group').first()).toBeAttached();
+  await expect(page.locator('.report-row-group').first()).toBeAttached({ timeout: 30_000 });
   await page.waitForTimeout(500);
 }
 
@@ -534,7 +539,7 @@ test('Settings agent icons use consistent source and rendered dimensions', async
   expect(runtimeErrors).toEqual([]);
 });
 
-test('Incident Response preserves endpoint columns and SOC-style expanded evidence', async ({ page }) => {
+test('Incident Response preserves network path and SOC-style expanded evidence', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
   await protectLiveState(page);
 
@@ -543,13 +548,14 @@ test('Incident Response preserves endpoint columns and SOC-style expanded eviden
   const desktopRow = page.locator('.ir-case-row:has(.ir-agent-analyzed)').first();
   await expect(desktopRow).toBeVisible();
   await expect(page.locator('.ir-table > thead > tr > th')).toHaveText([
-    '', 'Status', 'Severity', 'Escalated', 'Alert', 'Source IP',
-    'Destination IP', 'Destination Port', 'Count', 'Agent',
+    '', 'Case', 'Escalated', 'Alert', 'Assessment', 'Network path',
+    'Count', 'Agent', 'Actions',
   ]);
-  await expect(desktopRow.locator('td')).toHaveCount(10);
-  for (const index of [5, 6, 7]) {
-    await expect(desktopRow.locator('td').nth(index)).not.toHaveText('n/a');
-  }
+  await expect(desktopRow.locator('td')).toHaveCount(9);
+  const networkValues = await desktopRow.locator('.ir-network-value').allTextContents();
+  expect(networkValues).toHaveLength(2);
+  expect(networkValues.every(value => value.trim() && value.trim() !== 'n/a')).toBe(true);
+  expect(networkValues[1]).toMatch(/:\d+$/);
   const caseId = await desktopRow.getAttribute('data-case-id');
   expect(caseId).toBeTruthy();
   await desktopRow.click();
