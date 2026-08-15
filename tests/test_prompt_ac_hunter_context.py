@@ -294,8 +294,25 @@ class PromptAcHunterContextTests(unittest.TestCase):
         )
 
         self.assertEqual(len(context["findings"]), MAX_FINDINGS)
+        self.assertEqual(context["status"], "partial")
+        self.assertFalse(context["complete"])
         self.assertTrue(context["truncated"])
+        self.assertFalse(context["negative_evidence_allowed"])
         self.assertLessEqual(len(context["findings"][0]["reason"]), 500)
+
+    def test_composite_credential_keys_fail_closed(self):
+        for key in ("api_token", "relay-password", "sessionCookie"):
+            with self.subTest(key=key):
+                value = snapshot()
+                value[key] = "must-not-enter-the-prompt"
+
+                context = build_ac_hunter_context(
+                    self.selected(), fetch_snapshot=response(value)
+                )
+
+                self.assertEqual(context["status"], "invalid")
+                self.assertFalse(context["available"])
+                self.assertNotIn("must-not-enter-the-prompt", json.dumps(context))
 
     def test_sqlite_alert_rows_are_supported_without_mapping_get(self):
         connection = sqlite3.connect(":memory:")

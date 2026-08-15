@@ -153,6 +153,15 @@ class AcHunterHarnessEvidenceTests(unittest.TestCase):
             ["behavioral_context"],
         )
 
+        mismatched = dict(ac_context)
+        mismatched["evidence_ref"] = "ac-hunter:" + "c" * 64
+        package["ac_hunter_evidence"] = mismatched
+        mismatched_contract = self.runner.evidence_reference_contract(package)
+        self.assertNotIn(
+            mismatched["evidence_ref"],
+            [item["ref"] for item in mismatched_contract["references"]],
+        )
+
     def test_prompt_contract_keeps_behavioral_context_non_authoritative(self):
         instructions = "\n".join(GROUNDING_BEFORE_CONTEXT)
         self.assertIn("AC Hunter", instructions)

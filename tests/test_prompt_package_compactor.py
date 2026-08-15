@@ -94,6 +94,8 @@ class PromptPackageCompactorTests(unittest.TestCase):
                 for index in range(200)
             ],
             "ac_hunter_evidence": {
+                "status": "fresh",
+                "complete": True,
                 "evidence_ref": reference,
                 "evidence_digest": "b" * 64,
                 "findings": [
@@ -116,6 +118,8 @@ class PromptPackageCompactorTests(unittest.TestCase):
         self.assertEqual(len(context["findings"]), 12)
         self.assertEqual(len(context["correlated_hosts"]), 8)
         self.assertEqual(len(context["analyst_notes"]), 6)
+        self.assertEqual(context["status"], "partial")
+        self.assertFalse(context["complete"])
         self.assertTrue(context["truncated"])
         self.assertFalse(context["negative_evidence_allowed"])
         self.assertIn(
