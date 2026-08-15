@@ -38,6 +38,23 @@ LIST_KEYS = ENTRY_KEYS - {
     "rollback_strategy", "backup_schedule", "backup_encryption_state",
     "backup_secret_policy", "retention", "rpo_minutes", "rto_minutes",
 }
+SCALAR_TEXT_KEYS = tuple(sorted(
+    ENTRY_KEYS - LIST_KEYS - {"id", "rpo_minutes", "rto_minutes"}
+))
+COLLECTION_KEYS = tuple(sorted(LIST_KEYS - {"source_anchors"}))
+DURATION_KEYS = ("rpo_minutes", "rto_minutes")
+ENUM_VALUES = {
+    "engine": frozenset({"sqlite", "postgresql"}),
+    "schema_version_state": frozenset({
+        "persisted", "upstream-managed", "legacy-unversioned",
+    }),
+    "migration_atomicity_state": frozenset({
+        "transactional", "upstream-managed", "not-transactional",
+    }),
+    "backup_encryption_state": frozenset({
+        "encrypted", "owner-only-unencrypted",
+    }),
+}
 ID_RE = re.compile(r"[a-z0-9]+(?:[.-][a-z0-9]+)*")
 FORBIDDEN_MATERIAL_RE = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
@@ -102,31 +119,44 @@ def _anchor_is_valid(root: Path, value: str) -> bool:
     return resolved.is_file()
 
 
+def _scalar_text_errors(
+    entry: dict[str, object], prefix: str
+) -> list[str]:
+    errors: list[str] = []
+    for name in SCALAR_TEXT_KEYS:
+        if not _text(entry[name]):
+            errors.append(f"{prefix}: {name} is invalid")
+    return errors
+
+
+def _duration_errors(entry: dict[str, object], prefix: str) -> list[str]:
+    errors: list[str] = []
+    for name in DURATION_KEYS:
+        value = entry[name]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 1 <= value <= 525600
+        ):
+            errors.append(f"{prefix}: {name} is invalid")
+    return errors
+
+
+def _enum_errors(entry: dict[str, object], prefix: str) -> list[str]:
+    return [
+        f"{prefix}: {name} is invalid"
+        for name, allowed in ENUM_VALUES.items()
+        if entry[name] not in allowed
+    ]
+
+
 def _entry_scalar_errors(entry: dict[str, object], prefix: str) -> list[str]:
     errors: list[str] = []
     if not _text(entry["id"]) or not ID_RE.fullmatch(str(entry["id"])):
         errors.append(f"{prefix}: id is invalid")
-    for name in ENTRY_KEYS - LIST_KEYS - {"id", "rpo_minutes", "rto_minutes"}:
-        if not _text(entry[name]):
-            errors.append(f"{prefix}: {name} is invalid")
-    for name in ("rpo_minutes", "rto_minutes"):
-        value = entry[name]
-        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 525600:
-            errors.append(f"{prefix}: {name} is invalid")
-    if entry["engine"] not in {"sqlite", "postgresql"}:
-        errors.append(f"{prefix}: engine is invalid")
-    if entry["schema_version_state"] not in {
-        "persisted", "upstream-managed", "legacy-unversioned"
-    }:
-        errors.append(f"{prefix}: schema_version_state is invalid")
-    if entry["migration_atomicity_state"] not in {
-        "transactional", "upstream-managed", "not-transactional"
-    }:
-        errors.append(f"{prefix}: migration_atomicity_state is invalid")
-    if entry["backup_encryption_state"] not in {
-        "encrypted", "owner-only-unencrypted"
-    }:
-        errors.append(f"{prefix}: backup_encryption_state is invalid")
+    errors.extend(_scalar_text_errors(entry, prefix))
+    errors.extend(_duration_errors(entry, prefix))
+    errors.extend(_enum_errors(entry, prefix))
     return errors
 
 
@@ -134,7 +164,7 @@ def _entry_collection_errors(
     entry: dict[str, object], prefix: str, root: Path
 ) -> list[str]:
     errors: list[str] = []
-    for name in LIST_KEYS - {"source_anchors"}:
+    for name in COLLECTION_KEYS:
         value = entry[name]
         if not _string_list(value):
             errors.append(f"{prefix}: {name} is invalid")
@@ -172,30 +202,51 @@ def _declared_gaps(entries: list[object]) -> list[str]:
     return sorted(gaps)
 
 
+def _catalog_entries(
+    catalog: object,
+) -> tuple[list[object] | None, list[str]]:
+    if not isinstance(catalog, dict) or set(catalog) != {"schema", "entries"}:
+        return None, ["catalog field set is invalid"]
+    if catalog.get("schema") != CATALOG_SCHEMA:
+        return None, ["catalog schema is invalid"]
+    entries = catalog.get("entries")
+    if not isinstance(entries, list) or not entries:
+        return None, ["catalog entries are invalid"]
+    return entries, []
+
+
+def _catalog_identity_errors(
+    entries: list[object],
+    required_ids: set[str] | frozenset[str],
+) -> list[str]:
+    identifiers = [
+        entry.get("id") for entry in entries if isinstance(entry, dict)
+    ]
+    errors: list[str] = []
+    if len(identifiers) != len(set(identifiers)):
+        errors.append("catalog contains duplicate database ids")
+    missing = sorted(set(required_ids) - set(identifiers))
+    if missing:
+        errors.append("catalog is missing database ids: " + ", ".join(missing))
+    return errors
+
+
 def validate_catalog(
     catalog: object,
     root: Path = ROOT,
     *,
     required_ids: set[str] | frozenset[str] = REQUIRED_IDS,
 ) -> dict[str, list[str]]:
-    if not isinstance(catalog, dict) or set(catalog) != {"schema", "entries"}:
-        return {"errors": ["catalog field set is invalid"], "declared_gaps": []}
-    if catalog.get("schema") != CATALOG_SCHEMA:
-        return {"errors": ["catalog schema is invalid"], "declared_gaps": []}
-    entries = catalog.get("entries")
-    if not isinstance(entries, list) or not entries:
-        return {"errors": ["catalog entries are invalid"], "declared_gaps": []}
+    entries, admission_errors = _catalog_entries(catalog)
+    if admission_errors:
+        return {"errors": admission_errors, "declared_gaps": []}
+    assert entries is not None
     errors = [
         error
         for index, entry in enumerate(entries)
         for error in _entry_errors(entry, index, Path(root))
     ]
-    identifiers = [entry.get("id") for entry in entries if isinstance(entry, dict)]
-    if len(identifiers) != len(set(identifiers)):
-        errors.append("catalog contains duplicate database ids")
-    missing = sorted(set(required_ids) - set(identifiers))
-    if missing:
-        errors.append("catalog is missing database ids: " + ", ".join(missing))
+    errors.extend(_catalog_identity_errors(entries, required_ids))
     return {"errors": errors, "declared_gaps": _declared_gaps(entries)}
 
 
