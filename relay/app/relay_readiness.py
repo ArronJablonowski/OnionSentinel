@@ -43,6 +43,12 @@ MAX_CONFIG_BYTES = 1024 * 1024
 MAX_KERNEL_BYTES = 64 * 1024
 DEFAULT_CONFIG = Path("/opt/so-alert-relay/app/config.json")
 DEFAULT_THERMAL_PATH = Path("/sys/class/thermal/thermal_zone0/temp")
+PROBE_ENVIRONMENT = {
+    "HOME": "/opt/so-alert-relay",
+    "LANG": "C",
+    "LC_ALL": "C",
+    "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+}
 
 
 def _env_int(name: str, default: int) -> int:
@@ -118,6 +124,7 @@ def _run_local(command: list[str] | tuple[str, ...]) -> subprocess.CompletedProc
         timeout_seconds=15,
         max_stdout_bytes=MAX_KERNEL_BYTES,
         max_stderr_bytes=16 * 1024,
+        env=PROBE_ENVIRONMENT,
     )
     return subprocess.CompletedProcess(
         list(command),

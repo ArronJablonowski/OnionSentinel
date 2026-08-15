@@ -14,7 +14,7 @@ import signal
 import subprocess
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 
 class BoundedProcessError(RuntimeError):
@@ -24,6 +24,7 @@ class BoundedProcessError(RuntimeError):
 def _start_bounded_process(
     command: Sequence[str],
     stdin_file: object,
+    env: Mapping[str, str] | None,
 ) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
         list(command),
@@ -31,6 +32,7 @@ def _start_bounded_process(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
+        env=None if env is None else dict(env),
     )
 
 
@@ -111,6 +113,7 @@ def run_bounded_command(
     timeout_seconds: float,
     max_stdout_bytes: int,
     max_stderr_bytes: int,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run one command while draining stdout and stderr under hard ceilings.
     Input is staged in an anonymous file instead of a pipe.  That detail avoids
@@ -122,11 +125,10 @@ def run_bounded_command(
         raise ValueError("timeout_seconds must be positive")
     if max_stdout_bytes <= 0 or max_stderr_bytes <= 0:
         raise ValueError("output limits must be positive")
-
     with tempfile.TemporaryFile() as stdin_file:
         stdin_file.write(input_bytes)
         stdin_file.seek(0)
-        process = _start_bounded_process(command, stdin_file)
+        process = _start_bounded_process(command, stdin_file, env)
         assert process.stdout is not None and process.stderr is not None
         selector, buffers = _register_process_control_channels(
             process,

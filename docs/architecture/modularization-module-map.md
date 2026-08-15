@@ -3810,6 +3810,10 @@ kernel routes, owner-only SSH credential metadata, and enabled broker config.
 It never opens SSH or application network connections, reads credential
 contents, or returns host/path/log values. The existing storage component and
 debounced health state remain its systemd and notification compatibility seam.
+The Relay `process_io.py` helper accepts an optional replacement environment;
+readiness uses it to remove inherited webhook and notification credentials from
+all local probe children while preserving the helper's existing default
+inheritance contract for alert, PCAP, and incident-evidence transports.
 
 ## Local Ollama Benchmark
 

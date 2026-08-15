@@ -277,6 +277,17 @@ class BoundedProcessTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, b"bounded relay control")
 
+    def test_relay_control_command_can_replace_inherited_environment(self) -> None:
+        result = run_relay_bounded_command(
+            ["/usr/bin/env"],
+            timeout_seconds=5,
+            max_stdout_bytes=128,
+            max_stderr_bytes=128,
+            env={"ARR33_SAFE": "yes"},
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"ARR33_SAFE=yes\n")
+
     def test_streams_large_stdout_to_file_without_buffering(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             destination = Path(tmp) / "capture.bin"
