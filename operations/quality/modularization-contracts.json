@@ -3155,6 +3155,32 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_admin_recovery.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_recovery.py",
+      "required_symbols": [
+        "AdminRecoveryError",
+        "AdminRecoveryResult",
+        "recover_admin_access"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_admin_recovery_cli.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_recovery_cli.py",
+      "required_symbols": [
+        "main"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/recover-admin-access.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/recover-admin-access.py",
+      "required_symbols": [
+        "main"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_runtime_config.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_runtime_config.py",

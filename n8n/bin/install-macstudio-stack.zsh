@@ -273,8 +273,14 @@ import portal_admin_audit_store
 import portal_session_principal
 import portal_human_session_store
 import portal_human_session_runtime
+import portal_admin_recovery
+import portal_admin_recovery_cli
 import onion_sentinel_access_adapter
 import onion_sentinel_server
+load_file(
+    "_onion_sentinel_admin_recovery",
+    dashboard_dir / "recover-admin-access.py",
+)
 
 result = bounded_process.run_bounded_command(
     ["/usr/bin/true"],
@@ -1270,6 +1276,9 @@ cp "$REPO_DIR/onion-sentinel-dashboard/portal_access_observer_runtime.py" "$DASH
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_session_principal.py" "$DASHBOARD_RUNTIME_DIR/portal_session_principal.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_human_session_store.py" "$DASHBOARD_RUNTIME_DIR/portal_human_session_store.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_human_session_runtime.py" "$DASHBOARD_RUNTIME_DIR/portal_human_session_runtime.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_recovery.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_recovery.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_recovery_cli.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_recovery_cli.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/recover-admin-access.py" "$DASHBOARD_RUNTIME_DIR/recover-admin-access.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_audit_chain.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_audit_chain.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_audit_store.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_audit_store.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_access_runtime.py" "$DASHBOARD_RUNTIME_DIR/portal_access_runtime.py"

@@ -171,10 +171,23 @@ production soak. Each mode change revokes sessions to prevent authority from
 crossing policy generations.
 
 Recovery is local and operator-controlled: stop the dashboard write listener,
-run the owner-only password/role recovery command, remove both
-`admin-state/.admin_sessions.json` and `admin-state/.human_sessions.json`,
-verify runtime file modes and the restored audit chain, and restart into the
-previously qualified mode. There is
+then run the deployed owner-only command with explicit offline confirmation:
+
+```sh
+/usr/bin/python3 "$HOME/n8n-local/onion-sentinel-dashboard/recover-admin-access.py" \
+  --stack-dir "$HOME/n8n-local" \
+  --confirm-service-stopped \
+  --reset-password \
+  --revoke-sessions
+```
+
+The command prompts twice without echoing the new password, replaces only the
+owner/0600 salted PBKDF2 record, and atomically replaces each session store
+(`admin-state/.admin_sessions.json` and
+`admin-state/.human_sessions.json`) after validating every existing target. It
+never reads or changes the audit signing
+key or ledger. Verify runtime file modes and the retained audit chain, then
+restart into the previously qualified mode. There is
 no network recovery token, query parameter bypass, universal service token, or
 fail-open environment value. Rollback restores the prior qualified source and
 mode through the guarded installer without replacing the password record,

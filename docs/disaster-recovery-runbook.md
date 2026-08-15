@@ -728,6 +728,23 @@ present. Restore the audit chain and its separately protected signing key,
 verify both before starting observe/enforcement mode, then create a new browser
 session through the normal local Administrator login.
 
+To recover dashboard administrator access, first stop the dashboard write
+listener through the normal service supervisor. Run the deployed local command
+with `--confirm-service-stopped` and the required action flags; never delete or
+replace the audit ledger as part of access recovery:
+
+```sh
+/usr/bin/python3 "$HOME/n8n-local/onion-sentinel-dashboard/recover-admin-access.py" \
+  --stack-dir "$HOME/n8n-local" \
+  --confirm-service-stopped \
+  --reset-password \
+  --revoke-sessions
+```
+
+Successful session revocation leaves both owner/0600 session files as valid
+empty stores. After verifying file custody and the retained audit chain,
+restart only into the last qualified access mode and require a fresh login.
+
 The SQLite backup path keeps online copy/canonicalization, persisted snapshot
 verification, logical in-memory restore, and transient-sidecar refusal as
 separate fail-closed phases. Every connection is explicitly closed; no bundle

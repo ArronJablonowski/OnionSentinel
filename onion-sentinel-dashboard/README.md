@@ -27,6 +27,9 @@ dependency.
 | `portal_session_principal.py` | Versioned human principal, expiry, policy-generation, and per-session CSRF contract. |
 | `portal_human_session_store.py` | Digest-keyed, owner-only, bounded, atomic target human-session persistence. |
 | `portal_human_session_runtime.py` | Legacy no-op/observe dual-write, session resolution/touch/revocation, and CSRF cookie policy. |
+| `portal_admin_recovery.py` | Owner-only password-record replacement and complete legacy/versioned human-session revocation. |
+| `portal_admin_recovery_cli.py` | Service-offline confirmation, secret-safe password prompting, and bounded recovery result projection. |
+| `recover-admin-access.py` | Thin local operator entry point for administrator recovery. |
 | `cti_program.py` | Exact compatibility facade for the owner-managed CTI workspace namespace. |
 | `cti_program_contract.py` | CTI schema, limits, defaults, lock, and typed validation/conflict errors. |
 | `cti_program_lifecycle.py` | Durable requirements, intelligence, evidence/entity link, timestamp, expiration, and context-only validation. |

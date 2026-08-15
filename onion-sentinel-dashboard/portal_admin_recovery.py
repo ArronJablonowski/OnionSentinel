@@ -163,6 +163,26 @@ def _password_record(
     ).encode("ascii") + b"\n"
 
 
+def _validated_targets(
+    root: Path,
+    *,
+    password_requested: bool,
+) -> tuple[Path, Path, Path]:
+    config_dir = root / "config"
+    state_dir = root / "admin-state"
+    _private_directory(config_dir)
+    _private_directory(state_dir)
+    password_path = config_dir / ADMIN_PASSWORD_FILENAME
+    legacy_path = state_dir / LEGACY_SESSION_FILENAME
+    human_path = state_dir / HUMAN_SESSION_FILENAME
+    targets = [legacy_path, human_path]
+    if password_requested:
+        targets.append(password_path)
+    for path in targets:
+        _private_file(path)
+    return password_path, legacy_path, human_path
+
+
 def recover_admin_access(
     stack_dir: Path,
     *,
@@ -178,20 +198,10 @@ def recover_admin_access(
     """
     if new_password is None and not revoke_sessions:
         raise AdminRecoveryError("administrator recovery requested no action")
-    root = Path(stack_dir).expanduser()
-    config_dir = root / "config"
-    state_dir = root / "admin-state"
-    _private_directory(config_dir)
-    _private_directory(state_dir)
-    password_path = config_dir / ADMIN_PASSWORD_FILENAME
-    legacy_path = state_dir / LEGACY_SESSION_FILENAME
-    human_path = state_dir / HUMAN_SESSION_FILENAME
-
-    targets = [legacy_path, human_path]
-    if new_password is not None:
-        targets.append(password_path)
-    for path in targets:
-        _private_file(path)
+    password_path, legacy_path, human_path = _validated_targets(
+        Path(stack_dir).expanduser(),
+        password_requested=new_password is not None,
+    )
 
     password_payload = (
         None

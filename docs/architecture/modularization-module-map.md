@@ -3566,6 +3566,17 @@ logout, and emits only type-level failure telemetry. Legacy mode never reads or
 creates the target store. Unsafe retained custody fails observe startup;
 request-level observation failure cannot change the legacy HTTP result.
 
+`portal_admin_recovery.py` owns the service-offline administrator recovery
+transaction: it validates owner/0700 configuration and state directories plus
+every existing owner/0600 target before replacing anything, creates a bounded
+PBKDF2-HMAC-SHA256 password record when requested, and atomically replaces each
+legacy and versioned human-session store with a valid empty envelope. It never
+reads, replaces, truncates, or restores the audit key or ledger.
+`portal_admin_recovery_cli.py` owns the
+explicit stopped-service confirmation, double secret input, bounded error
+projection, and metadata-only JSON result; `recover-admin-access.py` remains a
+seven-line executable facade.
+
 `portal_access_enforcement.py` owns validation of the explicit legacy, observe,
 Administration-enforcement, and full-RBAC modes; ordered principal, role,
 same-origin, and CSRF decisions; and compatibility-versus-enforcement
