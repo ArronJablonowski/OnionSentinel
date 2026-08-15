@@ -118,6 +118,39 @@ class OnionSentinelServerTests(unittest.TestCase):
             },
         )
 
+    def test_begin_observation_boundary_failure_never_escapes_dispatch(self):
+        handler = SimpleNamespace(
+            headers=Message(),
+            application_request_id="request-8",
+            _soc_review_origin_authorized=mock.Mock(
+                side_effect=RuntimeError("must not escape")
+            ),
+        )
+        observer_runtime = SimpleNamespace(
+            enabled=True,
+            begin=mock.Mock(),
+            record_boundary_failure=mock.Mock(),
+        )
+        accepted_route = SimpleNamespace(accepted=True)
+        with (
+            mock.patch.object(server, "CONTROLLED_EVALUATION_MODE", False),
+            mock.patch.object(server, "ACCESS_OBSERVER", observer_runtime),
+            mock.patch.object(
+                server.runtime,
+                "classify_post_route",
+                return_value=accepted_route,
+            ),
+        ):
+            server.begin_access_observation(
+                handler,
+                "/api/soc-settings/ai-model",
+            )
+        self.assertIsNone(handler._access_observation)
+        observer_runtime.begin.assert_not_called()
+        observer_runtime.record_boundary_failure.assert_called_once_with(
+            "RuntimeError"
+        )
+
     def test_server_release_reader_is_literal_private_and_duplicate_safe(self):
         with tempfile.TemporaryDirectory() as tmp:
             env_path = Path(tmp) / ".env"
