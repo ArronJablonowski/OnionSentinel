@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -122,6 +123,68 @@ class DatabaseGovernanceTests(unittest.TestCase):
             path.write_bytes(b" " * (module.MAX_FILE_BYTES + 1))
             with self.assertRaisesRegex(ValueError, "byte budget"):
                 module.load_catalog(path)
+
+    def test_invalid_diagnostics_are_stable_across_hash_seeds(self) -> None:
+        catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
+        entry = catalog["entries"][0]
+        entry["id"] = "INVALID ID"
+        text_fields = sorted(
+            set(entry)
+            - {
+                "id",
+                "rpo_minutes",
+                "rto_minutes",
+                "data_classes",
+                "backup_artifacts",
+                "integrity_checks",
+                "partial_write_controls",
+                "duplicate_controls",
+                "orphan_controls",
+                "growth_monitoring",
+                "maintenance",
+                "restore_validation",
+                "provenance_controls",
+                "source_anchors",
+            }
+        )
+        for name in text_fields:
+            entry[name] = ""
+        self.assertTrue(text_fields)
+        entry["rpo_minutes"] = True
+        entry["rto_minutes"] = 0
+        for name in (
+            "data_classes",
+            "backup_artifacts",
+            "integrity_checks",
+            "partial_write_controls",
+            "duplicate_controls",
+            "orphan_controls",
+            "growth_monitoring",
+            "maintenance",
+            "restore_validation",
+            "provenance_controls",
+            "source_anchors",
+        ):
+            entry[name] = []
+        catalog["entries"] = [entry]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "invalid-catalog.json"
+            path.write_text(json.dumps(catalog), encoding="utf-8")
+            diagnostics = []
+            for seed in ("1", "2", "8675309"):
+                result = subprocess.run(
+                    [sys.executable, str(VALIDATOR), "--catalog", str(path)],
+                    cwd=ROOT,
+                    env={**os.environ, "PYTHONHASHSEED": seed},
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 2, result.stderr)
+                diagnostics.append(json.loads(result.stdout)["errors"])
+        self.assertEqual(diagnostics[1:], diagnostics[:1] * 2)
+        self.assertEqual(diagnostics[0][0], "entry[0]: id is invalid")
 
 
 if __name__ == "__main__":
