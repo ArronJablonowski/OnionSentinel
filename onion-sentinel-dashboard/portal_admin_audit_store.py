@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 import threading
 
@@ -30,8 +31,37 @@ def _bounds(maximum_bytes: int, maximum_events: int) -> None:
 
 
 def _regular_file(path: Path) -> None:
-    if path.is_symlink() or (path.exists() and not path.is_file()):
-        raise AuditStoreError("audit ledger must be a regular file")
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise AuditStoreError("audit ledger metadata could not be read") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise AuditStoreError(
+            "audit ledger must be an owner-only regular file"
+        )
+
+
+def _private_parent(path: Path) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise AuditStoreError(
+            "audit ledger parent metadata could not be read"
+        ) from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise AuditStoreError(
+            "audit ledger parent must be an owner-only directory"
+        )
 
 
 def _ledger_payload(path: Path, maximum_bytes: int) -> bytes:
@@ -89,6 +119,8 @@ def load_verified_events(
 ) -> list[dict]:
     _bounds(maximum_bytes, maximum_events)
     with _STORE_LOCK:
+        if path.parent.exists():
+            _private_parent(path.parent)
         return _verified_events(
             path, signing_key, maximum_bytes, maximum_events
         )
@@ -103,8 +135,7 @@ def _prepare_parent(path: Path) -> None:
             parent.chmod(0o700)
     except OSError as exc:
         raise AuditStoreError("audit ledger directory could not be prepared") from exc
-    if parent.is_symlink() or not parent.is_dir():
-        raise AuditStoreError("audit ledger parent must be a regular directory")
+    _private_parent(parent)
 
 
 def _encoded_ledger(events: list[dict], maximum_bytes: int) -> bytes:
