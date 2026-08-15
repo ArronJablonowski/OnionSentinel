@@ -287,6 +287,8 @@ class CrossHostHandoffContractTests(unittest.TestCase):
         for field, value in (
             ("purpose", "Set TELEGRAM_BOT_" + "TOKEN=" + "secret-value"),
             ("purpose", "Paste the -----BEGIN OPENSSH PRIVATE" + " KEY----- block."),
+            ("purpose", "Opaque value: " + ("A" * 60)),
+            ("purpose", "Public credential: ssh-" + "ed25519 " + ("A" * 60)),
         ):
             document = copy.deepcopy(self.document)
             document["request"][field] = value

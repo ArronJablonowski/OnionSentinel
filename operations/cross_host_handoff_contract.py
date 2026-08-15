@@ -18,7 +18,11 @@ IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
 TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 SENSITIVE_RE = re.compile(
     r"-----BEGIN [^-]*PRIVATE KEY-----"
-    r"|(?:token|secret|password|passwd|api[_-]?key|cookie)\s*[:=]\s*\S+",
+    r"|(?:token|secret|password|passwd|api[_-]?key|cookie)\s*[:=]\s*\S+"
+    r"|(?:ssh-(?:rsa|ed25519)|ecdsa-sha2-nistp\d+)\s+\S+"
+    r"|(?:gh[pousr]_|xox[baprs]-|sk-)\S+"
+    r"|\b\d{6,12}:[A-Za-z0-9_-]{20,}\b"
+    r"|\b[A-Za-z0-9_+/=-]{48,}\b",
     re.IGNORECASE,
 )
 PRIVATE_KEY_PATH_RE = re.compile(
