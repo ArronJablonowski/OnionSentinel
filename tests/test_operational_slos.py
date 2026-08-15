@@ -771,6 +771,19 @@ class OperationalSloTests(unittest.TestCase):
         failed = self.slo.update_soak_state({"healthy_since": state["healthy_since"]}, ["stale"], now)
         self.assertIsNone(failed["healthy_since"])
 
+    def test_sqlite_backup_slo_uses_encrypted_snapshot_commit_metadata(self):
+        source = (ROOT / "n8n/bin/evaluate-operational-slos.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'args.stack_dir / "alert_store_backups", "*.backup.json", now',
+            source,
+        )
+        self.assertNotIn(
+            'args.stack_dir / "alert_store_backups", "*.backup", now',
+            source,
+        )
+
     def test_slo_history_is_bounded(self):
         with tempfile.TemporaryDirectory() as tmp:
             history = Path(tmp) / "history.jsonl"
