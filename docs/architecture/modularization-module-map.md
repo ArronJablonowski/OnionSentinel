@@ -3536,6 +3536,15 @@ the existing store; session IDs remain server-side; filenames and tags remain
 normalized; resource actions remain append-only Hermes work requests with the
 same admin authorization enforced by the HTTP write adapter.
 
+`portal_access_policy.py` owns the pure target human-role hierarchy, canonical
+permission names, fail-closed mapping from every classified portal write to one
+permission, and the rule that service identities can never satisfy human
+browser permissions. It depends only on the transport-neutral route contract;
+session persistence, request authentication, CSRF, enforcement mode, and audit
+I/O remain outside this pure policy layer. The complete phased access-control,
+session, audit-chain, service-identity, and recovery design is documented in
+`docs/security/application-access-control.md`.
+
 ### Portal catalog runtime
 
 `portal_catalog_runtime.py` owns local-address discovery, report title/category
