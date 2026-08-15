@@ -42,6 +42,9 @@ class PortalAccessPolicyTests(unittest.TestCase):
             "onion_sentinel_access_adapter.py",
             "portal_human_session_store.py",
             "portal_human_session_runtime.py",
+            "portal_admin_recovery.py",
+            "portal_admin_recovery_cli.py",
+            "recover-admin-access.py",
         ):
             with self.subTest(name=name):
                 self.assertIn(
@@ -72,6 +75,9 @@ class PortalAccessPolicyTests(unittest.TestCase):
             "onion-sentinel-dashboard/portal_human_session_runtime.py",
             "onion-sentinel-dashboard/portal_human_session_store.py",
             "onion-sentinel-dashboard/portal_session_principal.py",
+            "onion-sentinel-dashboard/portal_admin_recovery.py",
+            "onion-sentinel-dashboard/portal_admin_recovery_cli.py",
+            "onion-sentinel-dashboard/recover-admin-access.py",
         }
         self.assertEqual(expected - contracted, set())
 
