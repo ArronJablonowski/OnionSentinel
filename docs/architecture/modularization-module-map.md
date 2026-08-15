@@ -3552,6 +3552,12 @@ It is pure and does not read cookies, credentials, clocks, files, or sockets;
 the existing Administration session store remains the persistence owner until
 the separately gated enforcement adapter migrates it.
 
+`portal_access_enforcement.py` owns validation of the explicit legacy, observe,
+Administration-enforcement, and full-RBAC modes; ordered principal, role,
+same-origin, and CSRF decisions; and compatibility-versus-enforcement
+projection. It is a pure decision layer and neither reads HTTP state nor
+performs a write, audit append, or response.
+
 `portal_admin_audit_chain.py` owns the canonical metadata-only Administration
 event schema, strict field admission, keyed HMAC-SHA256 event chaining, sequence
 and previous-head binding, and full retained-chain verification. It receives

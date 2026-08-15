@@ -32,6 +32,7 @@ class PortalAccessPolicyTests(unittest.TestCase):
         )
         for name in (
             "portal_access_policy.py",
+            "portal_access_enforcement.py",
             "portal_session_principal.py",
             "portal_admin_audit_chain.py",
             "portal_admin_audit_store.py",
