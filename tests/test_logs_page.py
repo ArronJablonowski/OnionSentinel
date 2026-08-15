@@ -142,7 +142,11 @@ class LogsPageTests(unittest.TestCase):
         self.assertIn("def application_log_route_identifier(path: str)", self.server_source)
         self.assertIn("application_logs.is_application_log_id(identifier)", self.server_source)
         self.assertIn(
-            "if not handler._admin_authenticated():",
+            "if not _admin_authenticated(handler, c):",
+            self.server_route_source,
+        )
+        self.assertIn(
+            'access_runtime = getattr(c, "ACCESS_RUNTIME", None)',
             self.server_route_source,
         )
         self.assertIn(
