@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -15,6 +16,108 @@ server = importlib.import_module("onion_sentinel_server")
 
 
 class OnionSentinelServerTests(unittest.TestCase):
+    def test_post_starts_observation_before_preserving_existing_dispatch(self):
+        handler = object.__new__(server.OnionSentinelHandler)
+        handler.path = "/api/soc-settings/ai-model?source=settings"
+        events = []
+        with (
+            mock.patch.object(
+                server,
+                "begin_access_observation",
+                side_effect=lambda value, path: events.append(
+                    ("begin", value is handler, path)
+                ),
+            ),
+            mock.patch.object(
+                server._request_routes,
+                "do_post",
+                side_effect=lambda value, context: events.append(
+                    ("dispatch", value is handler, context is server)
+                ) or "dispatched",
+            ),
+        ):
+            result = server.OnionSentinelHandler.do_POST(handler)
+        self.assertEqual(result, "dispatched")
+        self.assertEqual(
+            events,
+            [
+                ("begin", True, "/api/soc-settings/ai-model"),
+                ("dispatch", True, True),
+            ],
+        )
+
+    def test_response_finalizes_observation_once_without_changing_response(self):
+        handler = object.__new__(server.OnionSentinelHandler)
+        observation = object()
+        handler._access_observation = observation
+        observed_before_append = []
+        observer_runtime = SimpleNamespace(
+            finalize=mock.Mock(
+                side_effect=lambda *_args, **_kwargs: observed_before_append.append(
+                    handler._access_observation
+                ) or False
+            )
+        )
+        with (
+            mock.patch.object(server, "ACCESS_OBSERVER", observer_runtime),
+            mock.patch.object(
+                server.runtime,
+                "now_iso_utc",
+                return_value="2026-08-15T05:00:04Z",
+            ),
+            mock.patch.object(
+                server.runtime.PortalHandler,
+                "send_response",
+                return_value="sent",
+            ) as send,
+        ):
+            result = server.OnionSentinelHandler.send_response(handler, 202)
+            server.OnionSentinelHandler.send_response(handler, 202)
+        self.assertEqual(result, "sent")
+        self.assertEqual(observed_before_append, [None])
+        observer_runtime.finalize.assert_called_once_with(
+            observation,
+            http_status=202,
+            occurred_at="2026-08-15T05:00:04Z",
+        )
+        self.assertEqual(send.call_count, 2)
+
+    def test_begin_observation_classifies_dedicated_write_without_body_access(self):
+        headers = Message()
+        headers["Host"] = "10.77.7.225:8766"
+        headers["Origin"] = "http://10.77.7.225:8766"
+        handler = SimpleNamespace(
+            headers=headers,
+            application_request_id="request-7",
+            _soc_review_origin_authorized=lambda: True,
+        )
+        observation = object()
+        observer_runtime = SimpleNamespace(
+            enabled=True,
+            begin=mock.Mock(return_value=observation),
+        )
+        with (
+            mock.patch.object(server, "CONTROLLED_EVALUATION_MODE", False),
+            mock.patch.object(server, "ACCESS_OBSERVER", observer_runtime),
+        ):
+            server.begin_access_observation(
+                handler,
+                "/api/ac-hunter/refresh",
+            )
+        self.assertIs(handler._access_observation, observation)
+        called_route = observer_runtime.begin.call_args.args[0]
+        self.assertTrue(called_route.accepted)
+        self.assertEqual(called_route.path, "/api/ac-hunter/refresh")
+        self.assertEqual(
+            observer_runtime.begin.call_args.kwargs,
+            {
+                "principal": None,
+                "same_origin_authorized": True,
+                "csrf_authorized": False,
+                "request_id": "request-7",
+            },
+        )
+
     def test_server_release_reader_is_literal_private_and_duplicate_safe(self):
         with tempfile.TemporaryDirectory() as tmp:
             env_path = Path(tmp) / ".env"
