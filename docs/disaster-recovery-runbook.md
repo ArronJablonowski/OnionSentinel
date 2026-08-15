@@ -700,8 +700,9 @@ The daily runtime recovery bundle complements the hourly SQLite backups with
 n8n PostgreSQL and encryption/configuration state:
 
 Before enabling the daily LaunchAgent, provision its recovery key as the
-interactive Mac Studio operator. Generate at least 32 random bytes in the
-approved password manager, escrow the same value in the separate offline
+interactive Mac Studio operator. Generate at least 32 random bytes and store
+their single-line base64url encoding (at least 43 characters) in the approved
+password manager. Escrow the same encoded value in the separate offline
 recovery vault, and add it to the login Keychain without placing it in shell
 history or a process argument. The `security` command prompts because `-w` is
 the final option with no value:

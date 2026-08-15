@@ -7,7 +7,11 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import sys
 
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
 from recovery_encryption import (
     ENCRYPTION_SCHEME,
     PBKDF2_ITERATIONS,
