@@ -116,6 +116,37 @@ class LlmHistoryStoreTests(unittest.TestCase):
         rows = read_second_opinion_history_rows(self.sources(), limit=5)
         self.assertEqual(rows[0]["analysis_id"], "run-1")
         self.assertIsNone(rows[0]["reviewer_error"])
+        self.assertIsNone(rows[0]["reviewer_model_route"])
+
+    def test_second_opinion_reads_exact_reviewer_route_when_available(self) -> None:
+        self.connection.execute(
+            """
+            CREATE TABLE ai_second_opinion_runs (
+              analysis_id TEXT, alert_id TEXT, agent_role TEXT, trigger TEXT,
+              status TEXT, reviewer_error TEXT, reviewer_model TEXT,
+              reviewer_model_path TEXT, reviewer_model_route TEXT,
+              reviewer_outcome TEXT, reviewer_confidence TEXT, agreement TEXT,
+              material_disagreement INTEGER, reviewer_runtime_seconds REAL,
+              generated_at TEXT
+            )
+            """
+        )
+        self.connection.execute(
+            "INSERT INTO ai_second_opinion_runs VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "run-2", "alert-2", "soc-analyst", "trigger", "completed",
+                None, "gpt-5.6-sol", "frontier-codex-cli",
+                "codex-cli:gpt-5.6-sol:xhigh", "suspicious", "high",
+                "agreement", 0, 5.0, "2026-08-07T01:00:00Z",
+            ),
+        )
+
+        rows = read_second_opinion_history_rows(self.sources(), limit=5)
+
+        self.assertEqual(
+            rows[0]["reviewer_model_route"], "codex-cli:gpt-5.6-sol:xhigh"
+        )
 
     def test_adjudication_query_returns_bounded_newest_rows(self) -> None:
         self.connection.execute(

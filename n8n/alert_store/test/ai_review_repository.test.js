@@ -45,8 +45,12 @@ test('second opinion preserves bounded reviewer, comparison, runtime, and memory
         trigger: 'material review',
         status: 'completed',
         runtime_seconds: 1.5,
-        model_route: 'review-route',
-        response: {_analysis_model: 'reviewer', confidence: 'MEDIUM'},
+        model_route: 'codex-cli:reviewer:xhigh',
+        response: {
+          _analysis_model: 'reviewer',
+          _analysis_model_path: 'frontier-codex-cli',
+          confidence: 'MEDIUM',
+        },
         comparison: {agreement: 'partial', material_disagreement: true, disputed_fields: ['outcome']},
         memory_writeback: {accepted: 2},
       },
@@ -56,10 +60,13 @@ test('second opinion preserves bounded reviewer, comparison, runtime, and memory
   const {sql, params} = env.calls[0];
   assert.match(sql, /ON CONFLICT\(analysis_id\) DO UPDATE SET/);
   assert.equal(params[7], 'primary-model');
-  assert.equal(params[14], 'medium');
-  assert.equal(params[16], 1);
-  assert.equal(params[19], 1.5);
-  assert.equal(params[20], 2);
+  assert.equal(params[11], 'reviewer');
+  assert.equal(params[12], 'frontier-codex-cli');
+  assert.equal(params[13], 'codex-cli:reviewer:xhigh');
+  assert.equal(params[15], 'medium');
+  assert.equal(params[17], 1);
+  assert.equal(params[20], 1.5);
+  assert.equal(params[21], 2);
 });
 
 test('invalid second-opinion runtime and arrays are normalized without widening schemas', async () => {
@@ -73,9 +80,9 @@ test('invalid second-opinion runtime and arrays are normalized without widening 
     }},
   });
   const params = env.calls[0].params;
-  assert.equal(params[17], '[]');
-  assert.equal(params[19], null);
-  assert.equal(params[20], 0);
+  assert.equal(params[18], '[]');
+  assert.equal(params[20], null);
+  assert.equal(params[21], 0);
 });
 
 test('adjudication remains human-required and never directly authorizes automation', async () => {

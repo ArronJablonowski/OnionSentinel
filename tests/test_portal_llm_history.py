@@ -94,6 +94,7 @@ class LlmHistoryTests(unittest.TestCase):
                 "reviewer_error": "",
                 "reviewer_model": "reviewer-model",
                 "reviewer_model_path": "frontier-codex-cli",
+                "reviewer_model_route": "codex-cli:reviewer-model:xhigh",
                 "reviewer_outcome": "true_positive_suspicious",
                 "agreement": "material_disagreement",
                 "material_disagreement": 1,
@@ -104,6 +105,9 @@ class LlmHistoryTests(unittest.TestCase):
         reviewer = project_second_opinion_rows(rows, parents)[0]
         self.assertEqual(reviewer["status"], "success")
         self.assertEqual(reviewer["mode"], "codex-cli")
+        self.assertEqual(
+            reviewer["model_route"], "codex-cli:reviewer-model:xhigh"
+        )
         self.assertEqual(reviewer["started_at"], "2026-08-07  01:01:00+00:00")
         self.assertEqual(reviewer["alert"]["rule_name"], "Detection")
         self.assertEqual(reviewer["gpu_temperature_celsius_max"], 48.5)

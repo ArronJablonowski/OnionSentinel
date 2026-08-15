@@ -33,6 +33,7 @@ test('retains additive reviewer and analyst compatibility columns', async () => 
     events.filter((event) => event.type === 'column').map(({table, name}) => [table, name]),
     [
       ['ai_second_opinion_runs', 'reviewer_error'],
+      ['ai_second_opinion_runs', 'reviewer_model_route'],
       ['analyst_adjudications', 'event_status'],
       ['analyst_adjudications', 'detection_validity'],
       ['analyst_adjudications', 'activity_disposition'],
