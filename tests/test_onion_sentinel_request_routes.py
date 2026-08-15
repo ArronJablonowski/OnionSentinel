@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import io
 import sys
 import unittest
 from pathlib import Path
@@ -125,6 +126,118 @@ class DashboardGetDispatchTests(unittest.TestCase):
                 context = self.context(events)
                 self.assertEqual(routes.do_get(handler, context), expected)
                 self.assertEqual(events, expected_events)
+
+
+class DedicatedAdminSessionBridgeTests(unittest.TestCase):
+    @staticmethod
+    def handler(form: bytes):
+        events: list[tuple[object, ...]] = []
+        handler = SimpleNamespace(
+            headers={"Content-Length": str(len(form))},
+            rfile=io.BytesIO(form),
+            client_address=("127.0.0.1", 41414),
+            _admin_session_id=lambda: (
+                events.append(("legacy-session-id",)) or "legacy-session"
+            ),
+            _redirect=lambda *args: events.append(("redirect", *args)) or "redirect",
+            _send=lambda *args: events.append(("send", *args)) or "send",
+        )
+        return handler, events
+
+    @staticmethod
+    def context(events: list[tuple[object, ...]]):
+        runtime = SimpleNamespace(
+            ensure_admin_token=lambda: (
+                events.append(("validate-form-token",)) or "form-token"
+            ),
+            admin_password_configured=lambda: (
+                events.append(("password-configured",)) or True
+            ),
+            verify_admin_password=lambda password: (
+                events.append(("verify-password", password)) or True
+            ),
+            create_admin_session=lambda client: (
+                events.append(("create-legacy", client)) or "legacy-session"
+            ),
+            destroy_admin_session=lambda session_id: events.append(
+                ("destroy-legacy", session_id)
+            ),
+        )
+        access_runtime = SimpleNamespace(
+            create_session=lambda handler, session_id: (
+                events.append(("create-target", session_id)) or "csrf-token"
+            ),
+            destroy_session=lambda session_id: events.append(
+                ("destroy-target", session_id)
+            ),
+            login_cookie_headers=lambda session_id, csrf_token: (
+                events.append(("login-cookies", session_id, csrf_token))
+                or ["legacy-cookie", "csrf-cookie"]
+            ),
+            logout_cookie_headers=lambda: (
+                events.append(("logout-cookies",))
+                or ["expired-legacy-cookie", "expired-csrf-cookie"]
+            ),
+        )
+        return SimpleNamespace(
+            runtime=runtime,
+            ACCESS_RUNTIME=access_runtime,
+            render_login=lambda *args: b"login",
+        )
+
+    def test_login_dual_writes_after_legacy_authentication(self) -> None:
+        handler, events = self.handler(b"token=form-token&password=secret")
+        context = self.context(events)
+
+        self.assertEqual(
+            routes._admin_post(handler, context, "/admin/login"),
+            "redirect",
+        )
+        self.assertEqual(
+            events,
+            [
+                ("validate-form-token",),
+                ("password-configured",),
+                ("verify-password", "secret"),
+                ("create-legacy", "127.0.0.1"),
+                ("create-target", "legacy-session"),
+                ("login-cookies", "legacy-session", "csrf-token"),
+                (
+                    "redirect",
+                    "/admin",
+                    {"Set-Cookie": ["legacy-cookie", "csrf-cookie"]},
+                ),
+            ],
+        )
+
+    def test_logout_revokes_legacy_and_target_before_expiring_cookies(self) -> None:
+        handler, events = self.handler(b"token=form-token")
+        context = self.context(events)
+
+        self.assertEqual(
+            routes._admin_post(handler, context, "/admin/logout"),
+            "redirect",
+        )
+        self.assertEqual(
+            events,
+            [
+                ("validate-form-token",),
+                ("legacy-session-id",),
+                ("destroy-legacy", "legacy-session"),
+                ("destroy-target", "legacy-session"),
+                ("logout-cookies",),
+                (
+                    "redirect",
+                    "/admin/login",
+                    {
+                        "Set-Cookie": [
+                            "expired-legacy-cookie",
+                            "expired-csrf-cookie",
+                        ]
+                    },
+                ),
+            ],
+        )
 
 
 if __name__ == "__main__":
