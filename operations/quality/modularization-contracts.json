@@ -2944,6 +2944,39 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/application_log_contract.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/application_log_contract.py",
+      "required_symbols": [
+        "ApplicationLogError",
+        "LogSpec",
+        "LOG_SPECS",
+        "LOG_SPECS_BY_ID",
+        "is_application_log_id"
+      ]
+    },
+    {
+      "path": "n8n/bin/application_log_maintenance.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/application_log_maintenance.py",
+      "required_symbols": [
+        "ApplicationLogMaintenanceError",
+        "cleanup_spec",
+        "maintain_logs",
+        "managed_specs",
+        "rotate_spec"
+      ]
+    },
+    {
+      "path": "n8n/bin/maintain-application-logs.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/maintain-application-logs.py",
+      "required_symbols": [
+        "main",
+        "parse_args"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/application_log_filesystem.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/application_log_filesystem.py",

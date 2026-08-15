@@ -87,6 +87,8 @@ class ApplicationLogTests(unittest.TestCase):
             "ApplicationLogError", "LogSpec", "DEFAULT_TAIL_LINES",
             "MAX_TAIL_LINES", "MAX_TAIL_BYTES", "MAX_ENV_BYTES",
             "DEFAULT_ROTATION_BYTES", "DEFAULT_ROTATION_BACKUPS",
+            "DEFAULT_RETENTION_DAYS", "ANALYSIS_ROTATION_BYTES",
+            "ANALYSIS_ROTATION_BACKUPS", "DISK_PRESSURE_PERCENT",
             "MAX_FAMILY_MEMBERS", "LOG_ID_RE", "ENSURE_STACK_RE",
             "SECRET_ASSIGNMENT_RE", "BEARER_RE", "COOKIE_RE",
             "AUTHORIZATION_RE", "PRIVATE_KEY_RE", "STRUCTURED_SPECS",
@@ -97,6 +99,7 @@ class ApplicationLogTests(unittest.TestCase):
             "_alert_store_policy", "_fixed_members", "_family_members",
             "_spec_catalog_item", "catalog_response", "_resolve_member",
             "_open_regular", "_redact", "_utf8_tail", "_bounded_tail",
+            "_page_content", "_bounded_regular_page", "_bounded_gzip_page",
             "content_response",
         }
         self.assertFalse(required_names.difference(vars(application_logs)))
@@ -113,13 +116,15 @@ class ApplicationLogTests(unittest.TestCase):
             (
                 "id", "label", "category", "root", "basename",
                 "description", "format", "rotation", "retention",
-                "backups", "bounded", "family",
+                "backups", "bounded", "family", "owner", "path_class",
+                "maximum_size_bytes", "compression", "disk_pressure",
+                "retention_days", "maintenance",
             ),
         )
         expected_signatures = {
             "is_application_log_id": "(value: 'str') -> 'bool'",
             "catalog_response": "(home: 'Path | None' = None) -> 'dict[str, object]'",
-            "content_response": "(log_id: 'str', member: 'str' = '', lines: 'int' = 200, home: 'Path | None' = None) -> 'dict[str, object]'",
+            "content_response": "(log_id: 'str', member: 'str' = '', lines: 'int' = 200, home: 'Path | None' = None, before: 'int | None' = None) -> 'dict[str, object]'",
             "_root_descriptor": "(root: 'Path') -> 'int'",
             "_member_metadata": "(root: 'Path', basename: 'str') -> 'dict[str, object] | None'",
             "_alert_store_policy": "(home: 'Path') -> 'tuple[int, int]'",
@@ -146,10 +151,10 @@ class ApplicationLogTests(unittest.TestCase):
                 projection, sort_keys=True, separators=(",", ":")
             ).encode("utf-8")
         ).hexdigest()
-        self.assertEqual(len(projection), 45)
+        self.assertEqual(len(projection), 50)
         self.assertEqual(
             digest,
-            "58b7ddb17e13de6def87e63d35eb33607ea439ecaa84e75fc280274627c8014c",
+            "0c8e7a7979b939e5376da07ba05bc0631b325375b9853badd41b49ca13e01c51",
         )
 
     def test_application_logs_starts_from_an_isolated_dashboard_directory(self) -> None:
@@ -199,6 +204,11 @@ class ApplicationLogTests(unittest.TestCase):
             )
             self.assertIn("rotation", item)
             self.assertIn("retention", item)
+            self.assertIn("owner", item)
+            self.assertIn("path_class", item)
+            self.assertGreater(item["maximum_size_bytes"], 0)
+            self.assertIn(item["compression"], {"none", "gzip"})
+            self.assertIn("disk_pressure", item)
             self.assertIsInstance(item["members"], list)
 
     def test_ids_and_content_lookup_reject_unknown_or_traversal_values(self) -> None:
@@ -346,6 +356,98 @@ class ApplicationLogTests(unittest.TestCase):
         )
         self.assertEqual(response["member"], "1")
         self.assertEqual(response["content"], "backup-one")
+
+    def test_regular_log_pages_walk_backward_without_path_or_size_authority(self) -> None:
+        self.write_runtime(
+            "onion-sentinel-application.jsonl",
+            "".join(f"line-{index:02d}\n" for index in range(20)),
+        )
+        newest = application_logs.content_response(
+            "onion-sentinel-application",
+            lines=5,
+            home=self.home,
+        )
+        older = application_logs.content_response(
+            "onion-sentinel-application",
+            lines=5,
+            before=newest["next_before"],
+            home=self.home,
+        )
+
+        self.assertIn("line-19", newest["content"])
+        self.assertNotIn("line-14", newest["content"])
+        self.assertIn("line-14", older["content"])
+        self.assertNotIn("line-19", older["content"])
+        self.assertTrue(newest["has_older"])
+        self.assertTrue(older["has_newer"])
+        self.assertLess(older["page_end"], newest["page_end"])
+
+    def test_gzip_backup_is_bounded_paginated_and_redacted(self) -> None:
+        import gzip
+
+        basename = "llm-analysis-log.jsonl.1.gz"
+        path = self.analysis_root / basename
+        with path.open("wb") as raw:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as archive:
+                archive.write(
+                    "".join(
+                        f"line-{index:02d} token=secret-{index}\n"
+                        for index in range(20)
+                    ).encode("utf-8")
+                )
+        os.chmod(path, 0o600)
+
+        response = application_logs.content_response(
+            "llm-analysis",
+            member="1",
+            lines=5,
+            home=self.home,
+        )
+
+        self.assertIn("line-19", response["content"])
+        self.assertNotIn("secret-19", response["content"])
+        self.assertIn("[REDACTED]", response["content"])
+        self.assertTrue(response["has_older"])
+        self.assertGreater(response["compressed_size_bytes"], 0)
+
+    def test_gzip_expansion_and_integrity_fail_closed(self) -> None:
+        import gzip
+
+        expanded = self.analysis_root / "expanded.gz"
+        expanded.write_bytes(gzip.compress(b"x" * 65, mtime=0))
+        os.chmod(expanded, 0o600)
+        with self.assertRaises(application_logs.ApplicationLogError) as raised:
+            application_logs._bounded_gzip_page(
+                self.analysis_root,
+                expanded.name,
+                10,
+                None,
+                64,
+            )
+        self.assertEqual(raised.exception.status, 413)
+
+        invalid = self.analysis_root / "invalid.gz"
+        invalid.write_bytes(b"not-gzip")
+        os.chmod(invalid, 0o600)
+        with self.assertRaises(application_logs.ApplicationLogError) as raised:
+            application_logs._bounded_gzip_page(
+                self.analysis_root,
+                invalid.name,
+                10,
+                None,
+                64,
+            )
+        self.assertEqual(raised.exception.status, 422)
+
+    def test_negative_page_offset_is_rejected(self) -> None:
+        self.write_runtime("onion-sentinel-application.jsonl", "safe\n")
+        with self.assertRaises(application_logs.ApplicationLogError) as raised:
+            application_logs.content_response(
+                "onion-sentinel-application",
+                before=-1,
+                home=self.home,
+            )
+        self.assertEqual(raised.exception.status, 400)
 
     def test_fixed_member_resolution_defaults_and_rejects_outside_backup_policy(self) -> None:
         spec = application_logs.LOG_SPECS_BY_ID["onion-sentinel-application"]
@@ -695,8 +797,37 @@ class ApplicationLogServerContractTests(unittest.TestCase):
             "onion-sentinel-application",
             member="1",
             lines=self.server.application_logs.MAX_TAIL_LINES,
+            before=None,
         )
         self.assertEqual(responses[0][0], 200)
+
+    def test_authenticated_handler_validates_and_forwards_page_offset(self) -> None:
+        handler, responses = self.handler_for(
+            "/api/application-logs/onion-sentinel-application?member=current&lines=100&before=1234",
+            authenticated=True,
+        )
+        with mock.patch.object(
+            self.server.application_logs,
+            "content_response",
+            return_value={"ok": True, "content": "older"},
+        ) as content:
+            self.server.OnionSentinelHandler.do_GET(handler)
+        content.assert_called_once_with(
+            "onion-sentinel-application",
+            member="current",
+            lines=100,
+            before=1234,
+        )
+        self.assertEqual(responses[0][0], 200)
+
+        for invalid in ("-1", "not-an-integer"):
+            handler, responses = self.handler_for(
+                "/api/application-logs/onion-sentinel-application?before=" + invalid,
+                authenticated=True,
+            )
+            self.server.OnionSentinelHandler.do_GET(handler)
+            self.assertEqual(responses[0][0], 400)
+            self.assertFalse(json.loads(responses[0][1])["ok"])
 
 
 class ApplicationLogPageContractTests(unittest.TestCase):

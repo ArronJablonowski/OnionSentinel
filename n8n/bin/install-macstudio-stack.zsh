@@ -414,7 +414,8 @@ critical_launch_agents_down() {
     com.arron.soc.dhcp-asset-discovery.plist \
     com.arron.soc.endpoint-software-inventory.plist \
     com.arron.soc.software-inventory.plist \
-    com.arron.soc.ac-hunter.plist
+    com.arron.soc.ac-hunter.plist \
+    com.arron.onion-sentinel.application-log-maintenance.plist
   do
     launchctl unload "$LAUNCHD_DIR/$plist" >/dev/null 2>&1 || true
   done
@@ -425,7 +426,8 @@ critical_launch_agents_down() {
     com.arron.soc.dhcp-asset-discovery \
     com.arron.soc.endpoint-software-inventory \
     com.arron.soc.software-inventory \
-    com.arron.soc.ac-hunter
+    com.arron.soc.ac-hunter \
+    com.arron.onion-sentinel.application-log-maintenance
   do
     launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
   done
@@ -989,6 +991,9 @@ cp "$REPO_DIR/n8n/bin/harness_store_run_repository.py" "$STACK_DIR/bin/harness_s
 cp "$REPO_DIR/n8n/bin/harness_store_trace_repository.py" "$STACK_DIR/bin/harness_store_trace_repository.py"
 cp "$REPO_DIR/n8n/bin/harness_store_trace_verification.py" "$STACK_DIR/bin/harness_store_trace_verification.py"
 cp "$REPO_DIR/n8n/bin/security_jsonl_log.py" "$STACK_DIR/bin/security_jsonl_log.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/application_log_contract.py" "$STACK_DIR/bin/application_log_contract.py"
+cp "$REPO_DIR/n8n/bin/application_log_maintenance.py" "$STACK_DIR/bin/application_log_maintenance.py"
+cp "$REPO_DIR/n8n/bin/maintain-application-logs.py" "$STACK_DIR/bin/maintain-application-logs.py"
 cp "$REPO_DIR/operations/evaluate-harness-traces.py" "$STACK_DIR/bin/evaluate-harness-traces.py"
 cp "$REPO_DIR/operations/trace_evaluation_skills.py" "$STACK_DIR/bin/trace_evaluation_skills.py"
 cp "$REPO_DIR/operations/trace_evaluation_storage.py" "$STACK_DIR/bin/trace_evaluation_storage.py"
@@ -1554,6 +1559,7 @@ for plist in \
   com.arron.onion-sentinel.web.plist \
   com.arron.onion-sentinel.web-guard.plist \
   com.arron.onion-sentinel.harness-maintenance.plist \
+  com.arron.onion-sentinel.application-log-maintenance.plist \
   com.arron.onion-sentinel.runtime-backup.plist
 do
   /usr/bin/python3 - "$HOME" "$REPO_DIR/n8n/launchd/$plist" "$LAUNCHD_DIR/$plist" <<'PY'
@@ -1602,6 +1608,7 @@ launchctl unload "$LAUNCHD_DIR/com.arron.soc.ac-hunter.plist" >/dev/null 2>&1 ||
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.web-guard.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.web.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.harness-maintenance.plist" >/dev/null 2>&1 || true
+launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.application-log-maintenance.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.runtime-backup.plist" >/dev/null 2>&1 || true
 launchctl load "$LAUNCHD_DIR/com.arron.n8n.ensure-stack.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.n8n.monitor-stack.plist"
@@ -1682,6 +1689,7 @@ launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.web.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.web-guard.plist"
 wait_for_harness_maintenance_readiness
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.harness-maintenance.plist"
+launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.application-log-maintenance.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.runtime-backup.plist"
 
 # Signal the dashboard only after the tested builder and refresh worker are in

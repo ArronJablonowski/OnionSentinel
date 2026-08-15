@@ -12,6 +12,10 @@ MAX_TAIL_BYTES: Final = 512 * 1024
 MAX_ENV_BYTES: Final = 1024 * 1024
 DEFAULT_ROTATION_BYTES: Final = 10 * 1024 * 1024
 DEFAULT_ROTATION_BACKUPS: Final = 5
+DEFAULT_RETENTION_DAYS: Final = 30
+ANALYSIS_ROTATION_BYTES: Final = 50 * 1024 * 1024
+ANALYSIS_ROTATION_BACKUPS: Final = 10
+DISK_PRESSURE_PERCENT: Final = 75
 MAX_FAMILY_MEMBERS: Final = 50
 
 LOG_ID_RE: Final = re.compile(r"[a-z0-9][a-z0-9-]{0,79}")
@@ -51,11 +55,18 @@ class LogSpec:
     basename: str
     description: str
     format: str = "text"
-    rotation: str = "Not automatically rotated"
-    retention: str = "Unbounded; review and archive manually"
+    rotation: str = "Producer-managed bounded rotation"
+    retention: str = "Maximum 30-day retention"
     backups: int = 0
     bounded: bool = False
     family: bool = False
+    owner: str = "Onion Sentinel operations"
+    path_class: str = "runtime"
+    maximum_size_bytes: int = DEFAULT_ROTATION_BYTES
+    compression: str = "none"
+    disk_pressure: str = "Preserve current file; prune oldest retained generation first"
+    retention_days: int = DEFAULT_RETENTION_DAYS
+    maintenance: bool = False
 
 
 STRUCTURED_SPECS: Final = (
@@ -71,6 +82,7 @@ STRUCTURED_SPECS: Final = (
         "Current file plus 5 backups (about 60 MiB maximum)",
         DEFAULT_ROTATION_BACKUPS,
         True,
+        owner="Onion Sentinel web service",
     ),
     LogSpec(
         "alert-store-application",
@@ -84,6 +96,7 @@ STRUCTURED_SPECS: Final = (
         "Controlled by ALERT_STORE_APPLICATION_LOG_* settings",
         DEFAULT_ROTATION_BACKUPS,
         True,
+        owner="Alert Store service",
     ),
     LogSpec(
         "investigation-harness",
@@ -97,6 +110,7 @@ STRUCTURED_SPECS: Final = (
         "Current file plus 5 backups (about 60 MiB maximum)",
         DEFAULT_ROTATION_BACKUPS,
         True,
+        owner="Investigation harness",
     ),
     LogSpec(
         "software-inventory",
@@ -110,6 +124,21 @@ STRUCTURED_SPECS: Final = (
         "Current file plus 5 backups (about 60 MiB maximum)",
         DEFAULT_ROTATION_BACKUPS,
         True,
+        owner="Software Inventory collector",
+    ),
+    LogSpec(
+        "endpoint-software-inventory",
+        "Endpoint Software Inventory collector",
+        "Inventory",
+        "runtime",
+        "endpoint-software-inventory.jsonl",
+        "Structured scheduled endpoint inventory, retry, and preflight events.",
+        "JSON Lines",
+        "At 10 MiB; 5 numbered backups",
+        "Current file plus 5 backups (about 60 MiB maximum)",
+        DEFAULT_ROTATION_BACKUPS,
+        True,
+        owner="Endpoint Software Inventory collector",
     ),
     LogSpec(
         "dhcp-asset-discovery",
@@ -123,6 +152,7 @@ STRUCTURED_SPECS: Final = (
         "Current file plus 5 backups (about 60 MiB maximum)",
         DEFAULT_ROTATION_BACKUPS,
         True,
+        owner="DHCP asset discovery collector",
     ),
     LogSpec(
         "dhcp-asset-review",
@@ -136,6 +166,7 @@ STRUCTURED_SPECS: Final = (
         "Current file plus 5 backups (about 60 MiB maximum)",
         DEFAULT_ROTATION_BACKUPS,
         True,
+        owner="DHCP asset review workflow",
     ),
     LogSpec(
         "security-onion-query",
@@ -149,6 +180,7 @@ STRUCTURED_SPECS: Final = (
         "Current file plus 5 backups (about 60 MiB maximum)",
         DEFAULT_ROTATION_BACKUPS,
         True,
+        owner="Security Onion query client",
     ),
     LogSpec(
         "operational-slo-history",
@@ -162,6 +194,9 @@ STRUCTURED_SPECS: Final = (
         "Latest 4,032 samples (about 14 days at five-minute intervals)",
         0,
         True,
+        owner="Operational SLO evaluator",
+        maximum_size_bytes=64 * 1024 * 1024,
+        retention_days=14,
     ),
     LogSpec(
         "llm-analysis",
@@ -171,8 +206,15 @@ STRUCTURED_SPECS: Final = (
         "llm-analysis-log.jsonl",
         "AI analysis execution records retained outside the general log directory.",
         "JSON Lines",
-        "Not automatically rotated",
-        "Unbounded; monitor disk use and archive according to policy",
+        "At 50 MiB by application-log maintenance",
+        "Current file plus 10 gzip backups; archives expire after 30 days",
+        ANALYSIS_ROTATION_BACKUPS,
+        True,
+        owner="AI analysis workers",
+        path_class="analysis-audit",
+        maximum_size_bytes=ANALYSIS_ROTATION_BYTES,
+        compression="gzip",
+        maintenance=True,
     ),
 )
 
@@ -191,9 +233,11 @@ LAUNCHD_STEMS: Final = (
     ("daily-rollup", "Daily rollup"),
     ("dashboard-refresh", "Dashboard refresh"),
     ("dhcp-asset-discovery", "DHCP asset discovery service"),
+    ("endpoint-software-inventory", "Endpoint Software Inventory service"),
     ("pcap-analysis", "PCAP analysis worker"),
     ("pcap-retention", "PCAP retention"),
     ("software-inventory", "Software Inventory service"),
+    ("application-log-maintenance", "Application log maintenance"),
 )
 
 
@@ -209,6 +253,19 @@ def _launchd_specs() -> tuple[LogSpec, ...]:
                     "runtime",
                     f"{stem}.{stream}.log",
                     f"Raw launchd {stream_label} for the {label} job.",
+                    "Text",
+                    "At 10 MiB by application-log maintenance",
+                    "Current file plus 5 gzip backups; archives expire after 30 days",
+                    DEFAULT_ROTATION_BACKUPS,
+                    True,
+                    False,
+                    label,
+                    "runtime",
+                    DEFAULT_ROTATION_BYTES,
+                    "gzip",
+                    "Preserve current file; prune oldest gzip generation first",
+                    DEFAULT_RETENTION_DAYS,
+                    True,
                 )
             )
     return tuple(specs)
@@ -222,6 +279,19 @@ OTHER_SPECS: Final = (
         "runtime",
         "alert-store-sqlite-maintenance.log",
         "SQLite integrity, optimization, and maintenance output.",
+        "Text",
+        "At 10 MiB by application-log maintenance",
+        "Current file plus 5 gzip backups; archives expire after 30 days",
+        DEFAULT_ROTATION_BACKUPS,
+        True,
+        False,
+        "Alert Store SQLite maintenance",
+        "runtime",
+        DEFAULT_ROTATION_BYTES,
+        "gzip",
+        "Preserve current file; prune oldest gzip generation first",
+        DEFAULT_RETENTION_DAYS,
+        True,
     ),
     LogSpec(
         "ensure-stack-runs",
@@ -236,6 +306,13 @@ OTHER_SPECS: Final = (
         0,
         True,
         True,
+        "Stack ensure scheduler",
+        "runtime",
+        DEFAULT_ROTATION_BYTES,
+        "none",
+        "Preserve newest runs; delete oldest runs first",
+        DEFAULT_RETENTION_DAYS,
+        False,
     ),
 )
 

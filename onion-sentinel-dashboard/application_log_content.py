@@ -1,6 +1,7 @@
 """Secure member resolution, bounded reads, and redaction for application logs."""
 from __future__ import annotations
 
+import gzip
 import os
 from pathlib import Path
 
@@ -52,7 +53,13 @@ def _resolve_fixed_member(
     if spec.id == "alert-store-application":
         _size, backups = _alert_store_policy(home)
     allowed = {"current": spec.basename}
-    allowed.update({str(index): f"{spec.basename}.{index}" for index in range(1, backups + 1)})
+    suffix = ".gz" if spec.compression == "gzip" else ""
+    allowed.update(
+        {
+            str(index): f"{spec.basename}.{index}{suffix}"
+            for index in range(1, backups + 1)
+        }
+    )
     member = requested or "current"
     basename = allowed.get(member)
     if basename is None:
@@ -86,31 +93,110 @@ def _utf8_tail(content: str, maximum_bytes: int) -> tuple[str, int, bool]:
 
 
 def _bounded_tail(root: Path, basename: str, line_limit: int) -> dict[str, object]:
-    descriptor, metadata = _open_regular(root, basename)
-    try:
-        size = int(metadata.st_size)
-        read_size = min(size, MAX_TAIL_BYTES)
-        start = max(0, size - read_size)
-        os.lseek(descriptor, start, os.SEEK_SET)
-        data = os.read(descriptor, read_size)
-    finally:
-        os.close(descriptor)
-    text = data.decode("utf-8", errors="replace")
-    lines = text.splitlines()
-    truncated = start > 0 or len(lines) > line_limit
-    selected = lines[-line_limit:]
-    content = _redact("\n".join(selected))
+    return _bounded_regular_page(root, basename, line_limit, before=None)
+
+
+def _page_content(
+    data: bytes,
+    *,
+    window_start: int,
+    page_end: int,
+    total_size: int,
+    line_limit: int,
+) -> dict[str, object]:
+    segments = data.splitlines(keepends=True)
+    selected = segments[-line_limit:]
+    omitted_bytes = sum(len(segment) for segment in segments[:-line_limit])
+    page_start = window_start + omitted_bytes
+    raw = b"".join(selected)
+    text = raw.decode("utf-8", errors="replace")
+    content = _redact("\n".join(text.splitlines()))
     content, returned_bytes, byte_truncated = _utf8_tail(content, MAX_TAIL_BYTES)
-    if byte_truncated:
-        truncated = True
     return {
         "content": content,
         "line_count": len(selected),
         "returned_bytes": returned_bytes,
-        "file_size_bytes": size,
-        "modified_at": _iso_timestamp(metadata.st_mtime),
-        "truncated": truncated,
+        "file_size_bytes": total_size,
+        "truncated": page_start > 0 or page_end < total_size or byte_truncated,
+        "has_older": page_start > 0,
+        "has_newer": page_end < total_size,
+        "next_before": page_start if page_start > 0 else None,
+        "page_start": page_start,
+        "page_end": page_end,
         "redacted": True,
+    }
+
+
+def _bounded_regular_page(
+    root: Path,
+    basename: str,
+    line_limit: int,
+    before: int | None,
+) -> dict[str, object]:
+    descriptor, metadata = _open_regular(root, basename)
+    try:
+        size = int(metadata.st_size)
+        end = size if before is None else min(size, before)
+        start = max(0, end - MAX_TAIL_BYTES)
+        os.lseek(descriptor, start, os.SEEK_SET)
+        data = os.read(descriptor, end - start)
+    finally:
+        os.close(descriptor)
+    return {
+        **_page_content(
+            data,
+            window_start=start,
+            page_end=end,
+            total_size=size,
+            line_limit=line_limit,
+        ),
+        "modified_at": _iso_timestamp(metadata.st_mtime),
+    }
+
+
+def _bounded_gzip_page(
+    root: Path,
+    basename: str,
+    line_limit: int,
+    before: int | None,
+    maximum_expanded_bytes: int,
+) -> dict[str, object]:
+    descriptor, metadata = _open_regular(root, basename)
+    try:
+        total = 0
+        window = bytearray()
+        with os.fdopen(descriptor, "rb", closefd=False) as raw:
+            with gzip.GzipFile(fileobj=raw, mode="rb") as archive:
+                while True:
+                    chunk = archive.read(min(1024 * 1024, maximum_expanded_bytes + 1 - total))
+                    if not chunk:
+                        break
+                    chunk_start = total
+                    total += len(chunk)
+                    if total > maximum_expanded_bytes:
+                        raise ApplicationLogError(413, "Compressed log member exceeds its expansion bound")
+                    target_end = total if before is None else min(total, before)
+                    admitted = max(0, target_end - chunk_start)
+                    if admitted:
+                        window.extend(chunk[:admitted])
+                        if len(window) > MAX_TAIL_BYTES:
+                            del window[:-MAX_TAIL_BYTES]
+    except (OSError, EOFError) as exc:
+        raise ApplicationLogError(422, "Compressed log member is invalid") from exc
+    finally:
+        os.close(descriptor)
+    end = total if before is None else min(total, before)
+    start = max(0, end - len(window))
+    return {
+        **_page_content(
+            bytes(window),
+            window_start=start,
+            page_end=end,
+            total_size=total,
+            line_limit=line_limit,
+        ),
+        "compressed_size_bytes": int(metadata.st_size),
+        "modified_at": _iso_timestamp(metadata.st_mtime),
     }
 
 
@@ -119,6 +205,7 @@ def content_response(
     member: str = "",
     lines: int = 200,
     home: Path | None = None,
+    before: int | None = None,
 ) -> dict[str, object]:
     if not is_application_log_id(log_id):
         raise ApplicationLogError(404, "Unknown application log")
@@ -127,7 +214,23 @@ def content_response(
     root = _roots(selected_home)[spec.root]
     selected_member, basename = _resolve_member(spec, root, member, selected_home)
     line_limit = max(1, min(MAX_TAIL_LINES, int(lines)))
-    tail = _bounded_tail(root, basename, line_limit)
+    if before is not None and int(before) < 0:
+        raise ApplicationLogError(400, "before must be a non-negative integer")
+    if basename.endswith(".gz"):
+        tail = _bounded_gzip_page(
+            root,
+            basename,
+            line_limit,
+            None if before is None else int(before),
+            max(spec.maximum_size_bytes, MAX_TAIL_BYTES),
+        )
+    else:
+        tail = _bounded_regular_page(
+            root,
+            basename,
+            line_limit,
+            None if before is None else int(before),
+        )
     return {
         "ok": True,
         "id": spec.id,

@@ -192,10 +192,24 @@ def _application_log_data(
         ) from exc
     lines = max(1, min(c.application_logs.MAX_TAIL_LINES, lines))
     member = str((query.get("member") or [""])[0])
+    raw_before = str((query.get("before") or [""])[0])
+    try:
+        before = None if raw_before == "" else int(raw_before)
+    except (TypeError, ValueError) as exc:
+        raise c.application_logs.ApplicationLogError(
+            HTTPStatus.BAD_REQUEST,
+            "before must be an integer",
+        ) from exc
+    if before is not None and before < 0:
+        raise c.application_logs.ApplicationLogError(
+            HTTPStatus.BAD_REQUEST,
+            "before must be a non-negative integer",
+        )
     return c.application_logs.content_response(
         str(log_id),
         member=member,
         lines=lines,
+        before=before,
     )
 
 

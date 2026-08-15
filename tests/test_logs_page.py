@@ -87,11 +87,11 @@ class LogsPageTests(unittest.TestCase):
             self.section,
         )
         self.assertIn(
-            "memberSelect.addEventListener('change',()=>{view.loaded=false;updateMemberPath(view);if(details.open)void loadLog(view)})",
+            "memberSelect.addEventListener('change',()=>{view.loaded=false;view.before=null;view.nextBefore=null;updateMemberPath(view);if(details.open)void loadLog(view)})",
             self.section,
         )
         self.assertIn(
-            "linesSelect.addEventListener('change',()=>{view.loaded=false;if(details.open)void loadLog(view)})",
+            "linesSelect.addEventListener('change',()=>{view.loaded=false;view.before=null;view.nextBefore=null;if(details.open)void loadLog(view)})",
             self.section,
         )
 
@@ -129,6 +129,11 @@ class LogsPageTests(unittest.TestCase):
             self.section,
         )
         self.assertIn("const query=new URLSearchParams({member,lines:String(selectedLines)})", self.section)
+        self.assertIn("query.set('before',String(view.before))", self.section)
+        self.assertIn("Older page", self.section)
+        self.assertIn("Newest page", self.section)
+        self.assertIn("item.maximum_size_bytes", self.section)
+        self.assertIn("item.disk_pressure", self.section)
         self.assertIn("[100,200,500].forEach", self.section)
         self.assertIn("response.status===403", self.section)
         self.assertIn("Administration sign-in is required", self.section)

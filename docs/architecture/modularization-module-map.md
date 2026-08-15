@@ -2449,15 +2449,22 @@ The first page-specific checkpoint is
 page markup, responsive styles, and bounded lazy-viewer client behavior. The
 builder re-exports `logs_page_section` for compatibility. The ARR-146 backend
 checkpoint retains `application_logs.py` as a 73-line stable facade.
-`application_log_contract.py` owns the immutable 45-entry catalog, limits,
+`application_log_contract.py` owns the immutable 50-entry catalog, ownership,
+path classes, size/compression/retention/disk-pressure policy, limits,
 allowlist regexes, error, and `LogSpec`; `application_log_filesystem.py` owns
 UID/mode validation, descriptor-relative no-follow opens, member metadata, and
 the allowlisted owner-only rotation-policy read; `application_log_catalog.py`
 owns bounded fixed/family enumeration and catalog projection; and
-`application_log_content.py` owns member resolution, credential/private-key
-redaction, valid-UTF-8 byte bounding, bounded reads, and content projection.
-The unit does not read arbitrary paths or gain write, network, credential, or
-external-system authority.
+`application_log_content.py` owns member resolution, bounded gzip expansion,
+credential/private-key redaction, valid-UTF-8 byte bounding, backward page
+offsets, bounded reads, and content projection. The unit does not read
+arbitrary paths or gain write, network, credential, or external-system
+authority. Separately, `n8n/bin/application_log_maintenance.py` owns fixed-ID
+copy-truncate rotation, gzip publication, retention cleanup, non-overlap, and
+oldest-first disk-pressure pruning; the 39-line
+`maintain-application-logs.py` entrypoint owns only CLI/report composition.
+The maintenance dependency points into the immutable contract and never into
+dashboard HTTP or rendering code.
 
 `onion-sentinel-dashboard/scripts/dashboard_software_inventory_page.py` owns
 the Software Inventory page markup, evidence-language guardrails, responsive

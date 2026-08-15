@@ -23,8 +23,9 @@ from application_log_filesystem import (
 
 def _fixed_members(spec: LogSpec, root: Path, backups: int) -> list[dict[str, object]]:
     candidates = [("current", "Current", spec.basename)]
+    suffix = ".gz" if spec.compression == "gzip" else ""
     candidates.extend(
-        (str(index), f"Backup {index}", f"{spec.basename}.{index}")
+        (str(index), f"Backup {index}", f"{spec.basename}.{index}{suffix}")
         for index in range(1, backups + 1)
     )
     members: list[dict[str, object]] = []
@@ -103,8 +104,10 @@ def _spec_catalog_item(spec: LogSpec, home: Path) -> dict[str, object]:
     backups = spec.backups
     rotation = spec.rotation
     retention = spec.retention
+    maximum_size_bytes = spec.maximum_size_bytes
     if spec.id == "alert-store-application":
         size, backups = _alert_store_policy(home)
+        maximum_size_bytes = size
         rotation = f"At {size:,} bytes; {backups} numbered backup(s)"
         retention = f"Current file plus {backups} configured backup(s)"
 
@@ -125,6 +128,8 @@ def _spec_catalog_item(spec: LogSpec, home: Path) -> dict[str, object]:
         "category": spec.category,
         "description": spec.description,
         "path": str(root / spec.basename),
+        "path_class": spec.path_class,
+        "owner": spec.owner,
         "exists": bool(members),
         "size_bytes": int(current["size_bytes"]) if current else 0,
         "retained_size_bytes": retained_size,
@@ -132,6 +137,11 @@ def _spec_catalog_item(spec: LogSpec, home: Path) -> dict[str, object]:
         "format": spec.format,
         "rotation": rotation,
         "retention": retention,
+        "retention_days": spec.retention_days,
+        "maximum_size_bytes": maximum_size_bytes,
+        "compression": spec.compression,
+        "disk_pressure": spec.disk_pressure,
+        "maintenance": spec.maintenance,
         "bounded": spec.bounded,
         "member_count": member_count,
         "omitted_member_count": omitted,
