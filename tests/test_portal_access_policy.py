@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -39,6 +40,8 @@ class PortalAccessPolicyTests(unittest.TestCase):
             "portal_access_observer.py",
             "portal_access_observer_runtime.py",
             "onion_sentinel_access_adapter.py",
+            "portal_human_session_store.py",
+            "portal_human_session_runtime.py",
         ):
             with self.subTest(name=name):
                 self.assertIn(
@@ -46,6 +49,31 @@ class PortalAccessPolicyTests(unittest.TestCase):
                     f'"$DASHBOARD_RUNTIME_DIR/{name}"',
                     installer,
                 )
+
+    def test_modularization_contract_covers_the_access_runtime_tree(self) -> None:
+        contract = json.loads(
+            (
+                ROOT / "operations/quality/modularization-contracts.json"
+            ).read_text(encoding="utf-8")
+        )
+        contracted = {
+            entry["path"] for entry in contract["python_entry_points"]
+        }
+        expected = {
+            "onion-sentinel-dashboard/onion_sentinel_access_adapter.py",
+            "onion-sentinel-dashboard/onion_sentinel_request_routes.py",
+            "onion-sentinel-dashboard/onion_sentinel_server.py",
+            "onion-sentinel-dashboard/portal_access_enforcement.py",
+            "onion-sentinel-dashboard/portal_access_observer.py",
+            "onion-sentinel-dashboard/portal_access_observer_runtime.py",
+            "onion-sentinel-dashboard/portal_access_policy.py",
+            "onion-sentinel-dashboard/portal_admin_audit_chain.py",
+            "onion-sentinel-dashboard/portal_admin_audit_store.py",
+            "onion-sentinel-dashboard/portal_human_session_runtime.py",
+            "onion-sentinel-dashboard/portal_human_session_store.py",
+            "onion-sentinel-dashboard/portal_session_principal.py",
+        }
+        self.assertEqual(expected - contracted, set())
 
     def test_human_roles_are_explicit_and_monotonically_privileged(self) -> None:
         self.assertEqual(
