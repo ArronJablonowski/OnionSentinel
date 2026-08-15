@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import stat
 import sys
@@ -14,6 +15,7 @@ DASHBOARD = ROOT / "onion-sentinel-dashboard"
 sys.path.insert(0, str(DASHBOARD))
 
 import portal_admin_recovery as recovery  # noqa: E402
+import portal_admin_recovery_cli as recovery_cli  # noqa: E402
 from portal_admin_session_store import verify_admin_password  # noqa: E402
 from portal_human_session_store import STORE_SCHEMA  # noqa: E402
 
@@ -146,6 +148,54 @@ class PortalAdminRecoveryTests(unittest.TestCase):
                     revoke_sessions=False,
                 )
             self.assertNotIn(secret, str(raised.exception))
+
+    def test_cli_requires_offline_confirmation_and_never_prints_password(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stack = Path(tmp) / "n8n-local"
+            self.private_directory(stack / "config")
+            self.private_directory(stack / "admin-state")
+            output = io.StringIO()
+            errors = io.StringIO()
+            secret = "correct horse battery staple"
+
+            self.assertEqual(
+                recovery_cli.main(
+                    ["--stack-dir", str(stack), "--revoke-sessions"],
+                    stdout=output,
+                    stderr=errors,
+                ),
+                2,
+            )
+            self.assertIn("must be stopped", errors.getvalue())
+
+            output = io.StringIO()
+            errors = io.StringIO()
+            answers = iter((secret, secret))
+            self.assertEqual(
+                recovery_cli.main(
+                    [
+                        "--stack-dir",
+                        str(stack),
+                        "--confirm-service-stopped",
+                        "--reset-password",
+                        "--revoke-sessions",
+                    ],
+                    read_password=lambda _prompt: next(answers),
+                    stdout=output,
+                    stderr=errors,
+                ),
+                0,
+            )
+            self.assertNotIn(secret, output.getvalue() + errors.getvalue())
+            self.assertEqual(
+                json.loads(output.getvalue()),
+                {
+                    "human_sessions_revoked": True,
+                    "legacy_sessions_revoked": True,
+                    "ok": True,
+                    "password_reset": True,
+                },
+            )
 
 
 if __name__ == "__main__":
