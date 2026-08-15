@@ -65,6 +65,7 @@ class RecoveryEncryptionTests(unittest.TestCase):
                     data = bytearray(encrypted.read_bytes())
                     data[len(data) // 2] ^= 1
                     candidate.write_bytes(data)
+                    candidate.chmod(0o600)
                     decryptor = owner
                 else:
                     decryptor = module.RecoveryEncryption(
@@ -84,6 +85,11 @@ class RecoveryEncryptionTests(unittest.TestCase):
         module = load_module()
         with self.assertRaisesRegex(ValueError, "at least 32 bytes"):
             module.RecoveryEncryption(b"short", openssl="/usr/bin/openssl")
+        with self.assertRaisesRegex(ValueError, "at least 32 bytes"):
+            module.RecoveryEncryption(
+                b"fixture-secret-that-is-long-enough\ntruncated",
+                openssl="/usr/bin/openssl",
+            )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             real = root / "real"
