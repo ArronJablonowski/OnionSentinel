@@ -25,6 +25,8 @@ dependency.
 | `portal_admin_audit_chain.py` | Canonical keyed administrative event chain and retained-chain verification. |
 | `portal_admin_audit_store.py` | Owner-only bounded, serialized, crash-safe audit-ledger persistence. |
 | `portal_session_principal.py` | Versioned human principal, expiry, policy-generation, and per-session CSRF contract. |
+| `portal_human_session_store.py` | Digest-keyed, owner-only, bounded, atomic target human-session persistence. |
+| `portal_human_session_runtime.py` | Legacy no-op/observe dual-write, session resolution/touch/revocation, and CSRF cookie policy. |
 | `cti_program.py` | Exact compatibility facade for the owner-managed CTI workspace namespace. |
 | `cti_program_contract.py` | CTI schema, limits, defaults, lock, and typed validation/conflict errors. |
 | `cti_program_lifecycle.py` | Durable requirements, intelligence, evidence/entity link, timestamp, expiration, and context-only validation. |

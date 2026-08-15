@@ -48,6 +48,14 @@ role change, recovery, and enforcement-mode rollback revoke affected sessions.
 Absolute and idle timeouts are enforced server-side; client clocks are not
 trusted.
 
+The observe bridge stores target records in
+`$HOME/n8n-local/admin-state/.human_sessions.json`. The parent is owner-owned
+`0700`; the store and sibling lock are owner-owned regular `0600` files. The
+versioned envelope is limited to 1 MiB and 256 sessions, uses digest-keyed
+records, compare-and-swap activity touches, and atomic file replacement. The
+raw session ID and raw CSRF value are never persisted. `legacy` mode does not
+read, validate, create, or remove this store.
+
 ## CSRF and unsafe-request contract
 
 Every form or JSON mutation requires all of the following before dispatch:
@@ -65,6 +73,20 @@ The existing persisted Administration form token is transitional. It must not
 be treated as a user identity or retained as the final CSRF mechanism. JSON
 requests continue to require `X-Onion-Sentinel-Request: dashboard`; that header
 is defense in depth, not authentication.
+
+In observe mode, login also issues a host-only `onion_sentinel_csrf` cookie with
+`SameSite=Strict`, `Path=/`, and the session's bounded maximum age. It is
+intentionally readable by dashboard JavaScript and therefore is not
+`HttpOnly`; the authenticated session cookie remains `HttpOnly`. A bootstrap in
+the generated page runs before all application scripts, reads this value only
+from the current origin, and sets `X-Onion-Sentinel-CSRF` only on same-origin
+`POST`, `PUT`, `PATCH`, and `DELETE` fetches. It never attaches the value to a
+safe method or cross-origin URL and overwrites any caller-supplied value with
+the session cookie. The server still validates the stored digest in constant
+time, so a forged browser cookie cannot authorize a request. This design relies
+on the existing no-third-party-script boundary and strict output escaping;
+future TLS deployment must add `Secure` to both cookies before exposing a
+secure remote origin.
 
 Authorization occurs before body parsing and before settings normalization.
 After authorization, settings saves retain their current JSON schema,
@@ -134,6 +156,13 @@ be owner-owned `0600` beneath an owner-owned `0700` directory. The installer
 deploys code only and never creates, replaces, parses, or removes either
 operator-owned object.
 
+The daily encrypted/operator-controlled runtime recovery bundle includes the
+verified ledger when it exists and refuses unsafe ledger custody. Human session
+stores are deliberately excluded: a restore drill rejects any `admin-state`
+member so recovery cannot resurrect an authenticated browser. After restore,
+the operator establishes a new login and target session while the retained
+audit chain continues from its verified head.
+
 Promotion requires owner-only configuration validation, an active
 Administrator session smoke test, negative cross-origin/CSRF/role tests,
 settings-save parity, audit-chain verification, logout/absolute/idle expiry,
@@ -142,8 +171,10 @@ production soak. Each mode change revokes sessions to prevent authority from
 crossing policy generations.
 
 Recovery is local and operator-controlled: stop the dashboard write listener,
-run the owner-only password/role recovery command, verify runtime file modes,
-revoke all sessions, and restart into the previously qualified mode. There is
+run the owner-only password/role recovery command, remove both
+`admin-state/.admin_sessions.json` and `admin-state/.human_sessions.json`,
+verify runtime file modes and the restored audit chain, and restart into the
+previously qualified mode. There is
 no network recovery token, query parameter bypass, universal service token, or
 fail-open environment value. Rollback restores the prior qualified source and
 mode through the guarded installer without replacing the password record,

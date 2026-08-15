@@ -3549,8 +3549,22 @@ session, audit-chain, service-identity, and recovery design is documented in
 absolute and idle expiry admission, policy-generation invalidation, opaque
 session/CSRF token separation, stored CSRF digests, and bounded idle touches.
 It is pure and does not read cookies, credentials, clocks, files, or sockets;
-the existing Administration session store remains the persistence owner until
-the separately gated enforcement adapter migrates it.
+transport and persistence remain outside this pure policy layer.
+
+`portal_human_session_store.py` owns the target versioned-session envelope,
+digest-only session keys, exact record admission, owner/0600 file and lock
+custody beneath an owner/0700 directory, bounded reads, process/thread
+serialization, compare-and-swap touches, crash-safe replacement, and directory
+durability. It never receives a raw CSRF value and persists neither a raw
+session ID nor a browser cookie.
+
+`portal_human_session_runtime.py` owns the exact legacy no-op and opt-in observe
+bridge. In observe mode it dual-writes a target Administrator session after the
+existing login succeeds, resolves and touches that record for write
+observation, compares the per-session CSRF value, revokes the target record on
+logout, and emits only type-level failure telemetry. Legacy mode never reads or
+creates the target store. Unsafe retained custody fails observe startup;
+request-level observation failure cannot change the legacy HTTP result.
 
 `portal_access_enforcement.py` owns validation of the explicit legacy, observe,
 Administration-enforcement, and full-RBAC modes; ordered principal, role,
@@ -3588,9 +3602,10 @@ requests, and finalizes exactly once from the first response status. Audit
 failure is observable but cannot change a legacy-compatible response.
 
 `onion_sentinel_access_adapter.py` owns the dedicated server's logger/runtime
-composition and the pre-body begin / first-response finalize hooks. Keeping
-these ports outside `onion_sentinel_server.py` leaves the stable executable and
-HTTP compatibility surface below the module-size warning threshold.
+composition, target-session login/logout bridge, pre-body principal/CSRF
+resolution, and first-response finalize hooks. Keeping these ports outside
+`onion_sentinel_server.py` leaves the stable executable and HTTP compatibility
+surface below the module-size warning threshold.
 
 ### Portal catalog runtime
 

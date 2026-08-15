@@ -718,6 +718,16 @@ with files mode `0600`, retained for seven days, and must never enter Git.
 Because it contains secrets and live operator state, any off-host copy must
 use an operator-controlled encrypted backup target.
 
+When present, the same archive includes the owner-only
+`logs/onion-sentinel-admin-audit.jsonl` chain and refuses a symlink, non-regular
+file, wrong owner, or mode other than `0600`. It deliberately excludes
+`admin-state`: neither the legacy `.admin_sessions.json` nor the versioned
+`.human_sessions.json` may survive a restore. The isolated restore drill rejects
+any archive containing `admin-state` and reports whether the audit chain is
+present. Restore the audit chain and its separately protected signing key,
+verify both before starting observe/enforcement mode, then create a new browser
+session through the normal local Administrator login.
+
 The SQLite backup path keeps online copy/canonicalization, persisted snapshot
 verification, logical in-memory restore, and transient-sidecar refusal as
 separate fail-closed phases. Every connection is explicitly closed; no bundle
