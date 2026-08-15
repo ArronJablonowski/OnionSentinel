@@ -385,6 +385,10 @@ class RecoveryOperationTests(unittest.TestCase):
             (stack / "logs/onion-sentinel-admin-audit.jsonl").write_text(
                 '{"schema":"audit-fixture"}\n'
             )
+            os.chmod(
+                stack / "logs/onion-sentinel-admin-audit.jsonl",
+                0o600,
+            )
             (stack / "admin-state/.admin_sessions.json").write_text("{}")
             (stack / "admin-state/.human_sessions.json").write_text("{}")
             archive = root / "runtime-secrets.tar.gz"
@@ -400,6 +404,25 @@ class RecoveryOperationTests(unittest.TestCase):
             self.assertIn("logs/onion-sentinel-admin-audit.jsonl", names)
             self.assertNotIn("admin-state", included)
             self.assertFalse(any("session" in name for name in names))
+            validation = self.restore.validate_runtime_archive(archive)
+            self.assertTrue(validation["audit_chain_present"])
+
+    def test_runtime_archive_rejects_session_resurrection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "runtime.tar.gz"
+            required = {
+                ".env": "PLACEHOLDER=value\n",
+                "n8n_data/config": "{}",
+                "admin-state/.human_sessions.json": "{}",
+            }
+            with tarfile.open(archive, "w:gz") as stream:
+                for name, content in required.items():
+                    path = root / name.replace("/", "-")
+                    path.write_text(content)
+                    stream.add(path, arcname=name)
+            with self.assertRaisesRegex(RuntimeError, "session state"):
+                self.restore.validate_runtime_archive(archive)
 
 
 if __name__ == "__main__":
