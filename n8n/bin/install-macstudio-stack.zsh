@@ -268,10 +268,12 @@ import portal_access_policy
 import portal_access_enforcement
 import portal_access_observer
 import portal_access_observer_runtime
-import onion_sentinel_access_adapter
 import portal_admin_audit_chain
 import portal_admin_audit_store
 import portal_session_principal
+import portal_human_session_store
+import portal_human_session_runtime
+import onion_sentinel_access_adapter
 import onion_sentinel_server
 
 result = bounded_process.run_bounded_command(
@@ -1266,6 +1268,8 @@ cp "$REPO_DIR/onion-sentinel-dashboard/portal_access_enforcement.py" "$DASHBOARD
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_access_observer.py" "$DASHBOARD_RUNTIME_DIR/portal_access_observer.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_access_observer_runtime.py" "$DASHBOARD_RUNTIME_DIR/portal_access_observer_runtime.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_session_principal.py" "$DASHBOARD_RUNTIME_DIR/portal_session_principal.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_human_session_store.py" "$DASHBOARD_RUNTIME_DIR/portal_human_session_store.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_human_session_runtime.py" "$DASHBOARD_RUNTIME_DIR/portal_human_session_runtime.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_audit_chain.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_audit_chain.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_audit_store.py" "$DASHBOARD_RUNTIME_DIR/portal_admin_audit_store.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_access_runtime.py" "$DASHBOARD_RUNTIME_DIR/portal_access_runtime.py"

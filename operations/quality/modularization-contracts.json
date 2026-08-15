@@ -3023,6 +3023,138 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/onion_sentinel_server.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/onion_sentinel_server.py",
+      "required_symbols": [
+        "OnionSentinelHandler",
+        "OnionSentinelHTTPServer",
+        "is_soc_get_api",
+        "is_soc_post_api",
+        "main"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/onion_sentinel_request_routes.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/onion_sentinel_request_routes.py",
+      "required_symbols": [
+        "do_get",
+        "do_head",
+        "do_post"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/onion_sentinel_access_adapter.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/onion_sentinel_access_adapter.py",
+      "required_symbols": [
+        "DedicatedAccessRuntime",
+        "begin_access_observation",
+        "build_access_runtime",
+        "finalize_access_observation"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_access_policy.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_access_policy.py",
+      "required_symbols": [
+        "AccessPolicyError",
+        "HUMAN_ROLES",
+        "ROLE_PERMISSIONS",
+        "required_permission"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_access_enforcement.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_access_enforcement.py",
+      "required_symbols": [
+        "AccessDecision",
+        "AccessEnforcementError",
+        "decide_write_access",
+        "parse_mode"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_access_observer.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_access_observer.py",
+      "required_symbols": [
+        "AccessObservation",
+        "begin_observation",
+        "finalize_observation"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_access_observer_runtime.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_access_observer_runtime.py",
+      "required_symbols": [
+        "AccessObserverRuntime",
+        "load_access_observer_runtime"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_admin_audit_chain.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_audit_chain.py",
+      "required_symbols": [
+        "AuditContractError",
+        "AuditVerification",
+        "build_event",
+        "verify_chain"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_admin_audit_store.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_audit_store.py",
+      "required_symbols": [
+        "AuditStoreError",
+        "append_verified_event",
+        "load_verified_events"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_session_principal.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_session_principal.py",
+      "required_symbols": [
+        "HumanPrincipal",
+        "SessionBundle",
+        "SessionDecision",
+        "create_session_bundle",
+        "session_decision"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_human_session_store.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_human_session_store.py",
+      "required_symbols": [
+        "HumanSessionStoreError",
+        "delete_session_record",
+        "load_session_record",
+        "put_session_record",
+        "replace_session_record",
+        "validate_session_store"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_human_session_runtime.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_human_session_runtime.py",
+      "required_symbols": [
+        "HumanSessionConfigurationError",
+        "HumanSessionRuntime",
+        "SessionObservation",
+        "csrf_cookie_header",
+        "load_human_session_runtime"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_runtime_config.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_runtime_config.py",
