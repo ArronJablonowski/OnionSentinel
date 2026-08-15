@@ -152,6 +152,7 @@ def _evaluation_inputs(
         "harness_maintenance": read_json_object(
             args.stack_dir / "logs/investigation-harness-maintenance.json"
         ),
+        **_evaluation_artifact_inputs(args.stack_dir),
         "alert_store_postgres_shadow_enabled": runtime_context[
             "alert_store_postgres_shadow_enabled"
         ],
@@ -165,6 +166,17 @@ def _evaluation_inputs(
         ),
         "software_inventory_health": dict(
             alert_store_health.get("software_inventory") or {}
+        ),
+    }
+
+
+def _evaluation_artifact_inputs(stack_dir: Path) -> dict[str, object]:
+    return {
+        "evaluation_artifact_root_present": (
+            stack_dir / "harness-evaluations"
+        ).is_dir(),
+        "evaluation_artifact_maintenance": read_json_object(
+            stack_dir / "logs/evaluation-artifact-maintenance.json"
         ),
     }
 

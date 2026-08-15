@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.arron.onion-sentinel.evaluation-artifact-maintenance</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__HOME__/n8n-local/bin/maintain-evaluation-artifacts.py</string>
+    <string>--stack-dir</string>
+    <string>__HOME__/n8n-local</string>
+    <string>--apply</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StartInterval</key>
+  <integer>3600</integer>
+
+  <key>LowPriorityIO</key>
+  <true/>
+
+  <key>Nice</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/n8n-local/logs/evaluation-artifact-maintenance.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__HOME__/n8n-local/logs/evaluation-artifact-maintenance.err.log</string>
+</dict>
+</plist>

@@ -11,7 +11,11 @@ from dataclasses import dataclass
 
 from operational_slo_primitives import age_seconds, parse_timestamp
 from operational_slo_queue_policy import evaluate_jobs
-from operational_slo_resilience_policy import evaluate_harness, evaluate_storage
+from operational_slo_resilience_policy import (
+    evaluate_evaluation_artifacts,
+    evaluate_harness,
+    evaluate_storage,
+)
 
 
 CAPTURE_TELEMETRY_UNAVAILABLE_GRACE_SECONDS = 3 * 60
@@ -28,6 +32,8 @@ class EvaluationInputs:
     previous_pending_job_counts: dict[str, int]
     harness_database_present: bool
     harness_maintenance: dict[str, object]
+    evaluation_artifact_root_present: bool
+    evaluation_artifact_maintenance: dict[str, object]
     alert_store_postgres_shadow_enabled: bool
     alert_store_postgres_backup_age: int | None
     previous_capture_telemetry_unavailable_since: object
@@ -231,6 +237,8 @@ def _build_inputs(
     previous_pending_job_counts: dict[str, int] | None,
     harness_database_present: bool,
     harness_maintenance: dict[str, object] | None,
+    evaluation_artifact_root_present: bool,
+    evaluation_artifact_maintenance: dict[str, object] | None,
     alert_store_postgres_shadow_enabled: bool,
     alert_store_postgres_backup_age: int | None,
     previous_capture_telemetry_unavailable_since: object,
@@ -246,6 +254,8 @@ def _build_inputs(
         previous_pending_job_counts=previous_pending_job_counts or {},
         harness_database_present=harness_database_present,
         harness_maintenance=dict(harness_maintenance or {}),
+        evaluation_artifact_root_present=evaluation_artifact_root_present,
+        evaluation_artifact_maintenance=dict(evaluation_artifact_maintenance or {}),
         alert_store_postgres_shadow_enabled=alert_store_postgres_shadow_enabled,
         alert_store_postgres_backup_age=alert_store_postgres_backup_age,
         previous_capture_telemetry_unavailable_since=previous_capture_telemetry_unavailable_since,
@@ -349,6 +359,13 @@ def _compose_signals(
         failures=failures,
         advisories=advisories,
     )
+    signals["evaluation_artifacts"] = evaluate_evaluation_artifacts(
+        root_present=inputs.evaluation_artifact_root_present,
+        maintenance=inputs.evaluation_artifact_maintenance,
+        now=inputs.now,
+        failures=failures,
+        advisories=advisories,
+    )
     return signals
 
 
@@ -416,6 +433,8 @@ def evaluate(
     previous_pending_job_counts: dict[str, int] | None = None,
     harness_database_present: bool = False,
     harness_maintenance: dict[str, object] | None = None,
+    evaluation_artifact_root_present: bool = False,
+    evaluation_artifact_maintenance: dict[str, object] | None = None,
     alert_store_postgres_shadow_enabled: bool = False,
     alert_store_postgres_backup_age: int | None = None,
     previous_capture_telemetry_unavailable_since: object = None,
@@ -431,6 +450,8 @@ def evaluate(
         previous_pending_job_counts=previous_pending_job_counts,
         harness_database_present=harness_database_present,
         harness_maintenance=harness_maintenance,
+        evaluation_artifact_root_present=evaluation_artifact_root_present,
+        evaluation_artifact_maintenance=evaluation_artifact_maintenance,
         alert_store_postgres_shadow_enabled=alert_store_postgres_shadow_enabled,
         alert_store_postgres_backup_age=alert_store_postgres_backup_age,
         previous_capture_telemetry_unavailable_since=previous_capture_telemetry_unavailable_since,

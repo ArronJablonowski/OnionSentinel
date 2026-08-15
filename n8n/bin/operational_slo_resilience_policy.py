@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import datetime as dt
 
-from operational_slo_primitives import age_seconds
+from operational_slo_primitives import age_seconds, parse_timestamp
+
+
+EVALUATION_ARTIFACT_REPORT_SCHEMA = (
+    "onion-sentinel-evaluation-artifact-maintenance-v1"
+)
 
 
 def evaluate_storage(
@@ -212,3 +217,99 @@ def _harness_projection(
         "follow_up_required": bool(maintenance.get("follow_up_required")),
         "checkpoint_busy": int(checkpoint.get("busy") or 0),
     }
+
+
+def evaluate_evaluation_artifacts(
+    *,
+    root_present: bool,
+    maintenance: dict[str, object],
+    now: dt.datetime,
+    failures: list[str],
+    advisories: list[str],
+) -> dict[str, object]:
+    """Project filesystem evaluation retention without exposing artifact paths."""
+    signal: dict[str, object] = {"root_present": root_present}
+    if not root_present:
+        return signal
+    report_age = _evaluation_report_age(maintenance.get("generated_at"), now)
+    status = str(maintenance.get("status") or "missing")
+    _evaluate_evaluation_artifact_health(
+        report_age,
+        status,
+        maintenance.get("schema") == EVALUATION_ARTIFACT_REPORT_SCHEMA,
+        failures,
+        advisories,
+    )
+    signal.update(
+        _evaluation_artifact_projection(maintenance, report_age, status)
+    )
+    return signal
+
+
+def _evaluate_evaluation_artifact_health(
+    report_age: int | None,
+    status: str,
+    schema_valid: bool,
+    failures: list[str],
+    advisories: list[str],
+) -> None:
+    if not schema_valid:
+        failures.append("evaluation artifact maintenance report schema is invalid")
+    if report_age is None or report_age > 2 * 60 * 60:
+        failures.append(
+            "evaluation artifact maintenance report is missing or older than 2 hours"
+        )
+    if status in {"missing", "failure"}:
+        failures.append(f"evaluation artifact maintenance is not healthy ({status})")
+    elif status not in {"ok", "warning"}:
+        failures.append(f"evaluation artifact maintenance status is invalid ({status})")
+    elif status == "warning":
+        advisories.append("evaluation artifact maintenance has capacity warnings")
+
+
+def _evaluation_report_age(value: object, now: dt.datetime) -> int | None:
+    generated = parse_timestamp(value)
+    if generated is None:
+        return None
+    normalized_now = now.astimezone(dt.timezone.utc)
+    normalized_generated = generated.astimezone(dt.timezone.utc)
+    if normalized_generated > normalized_now + dt.timedelta(minutes=5):
+        return None
+    return age_seconds(value, now)
+
+
+def _evaluation_artifact_projection(
+    maintenance: dict[str, object],
+    report_age: int | None,
+    status: str,
+) -> dict[str, object]:
+    inventory = dict(maintenance.get("inventory") or {})
+    cleanup = dict(maintenance.get("cleanup") or {})
+    storage = dict(maintenance.get("storage") or {})
+    local = dict(storage.get("local") or {})
+    encrypted = dict(storage.get("encrypted") or {})
+    return {
+        "maintenance_status": status,
+        "maintenance_age_seconds": report_age,
+        "run_directories": _integer(inventory, "run_directories"),
+        "run_bytes": _integer(inventory, "run_bytes"),
+        "sealed_runs": _integer(inventory, "sealed_runs"),
+        "unsealed_runs": _integer(inventory, "unsealed_runs"),
+        "temporary_candidates": _integer(cleanup, "temporary_candidates"),
+        "run_directory_candidates": _integer(cleanup, "run_directory_candidates"),
+        "report_file_candidates": _integer(cleanup, "report_file_candidates"),
+        "local_used_percent": local.get("used_percent"),
+        "local_warning_percent": local.get("warning_percent"),
+        "local_failure_percent": local.get("failure_percent"),
+        "encrypted_configured": bool(encrypted.get("configured")),
+        "encrypted_used_percent": encrypted.get("used_percent"),
+        "encrypted_warning_percent": encrypted.get("warning_percent"),
+        "encrypted_failure_percent": encrypted.get("failure_percent"),
+    }
+
+
+def _integer(values: dict[str, object], key: str) -> int:
+    try:
+        return int(values.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0

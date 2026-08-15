@@ -222,6 +222,7 @@ LAUNCHD_STEMS: Final = (
     ("launchd-ensure-stack", "Stack ensure scheduler"),
     ("launchd-monitor-stack", "Stack monitor"),
     ("harness-maintenance", "Harness maintenance"),
+    ("evaluation-artifact-maintenance", "Evaluation artifact maintenance"),
     ("runtime-backup", "Runtime backup"),
     ("onion-sentinel-web-guard", "Onion Sentinel web guard"),
     ("onion-sentinel-web", "Onion Sentinel web service"),

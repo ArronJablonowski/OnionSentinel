@@ -3209,6 +3209,7 @@ required before extracted code is imported in production:
 | `n8n/bin/agent_memory*.py` | `$HOME/n8n-local/bin` | copy the facade plus validation, journal, and promotion owners before running the memory verifier |
 | `n8n/bin/bounded_process*.py` | `$HOME/n8n-local/bin` | copy the facade plus policy, observation, I/O, termination, and runtime owners as one flat-bin unit |
 | `n8n/bin/maintain-investigation-harness.py` and `harness_maintenance*.py` | `$HOME/n8n-local/bin` | copy all maintenance owners before the package-free compatibility facade |
+| `n8n/bin/{maintain,seal}-evaluation-artifacts.py` and `evaluation_artifact_*.py` | `$HOME/n8n-local/bin` | copy contract, seal, and retention owners before both package-free facades and load the hourly seal-gated maintenance job |
 | `n8n/bin/harness_policy.py` and `harness_policy_{primitives,capabilities,document}.py` | `$HOME/n8n-local/bin` | copy the three policy owners before the stable harness-policy facade |
 | `onion-sentinel-dashboard/application_logs.py` and `application_log_{contract,filesystem,catalog,content}.py` | `$HOME/n8n-local/onion-sentinel-dashboard` | copy the four protected log owners before the stable dashboard log facade |
 | `n8n/bin/pcap_evidence_query*.py` | `$HOME/n8n-local/bin` | copy policy, validation, matching, selection, projection, and response owners before the stable facade |
@@ -3758,6 +3759,27 @@ follow-up accounting. `harness_maintenance_reporting.py` owns private atomic
 report writes, while `harness_maintenance_cli.py` composes paths, policy,
 locking, preview/backup/apply ordering, report schemas, and exit codes. The Mac
 Studio installer copies every implementation module before the facade.
+
+## Evaluation Artifact Retention
+
+`maintain-evaluation-artifacts.py` is the package-free scheduled facade for
+filesystem evaluation custody. `evaluation_artifact_contract.py` owns fixed
+age/count/byte and independent local/encrypted-storage thresholds.
+`evaluation_artifact_seal.py` owns canonical terminal-output admission,
+SHA-256 sealing, atomic owner-only publication, and pre-cleanup verification.
+`evaluation_artifact_retention.py` owns metadata-only inventory, fixed
+temporary-path selection, sealed oldest-first run and report planning,
+bounded application, and content-free capacity projection. The separate
+`seal-evaluation-artifacts.py` facade creates a terminal seal only from exact
+operator-selected outputs. Dependencies flow from both facades into these
+inward owners; retention may verify seals, while the seal owner never imports
+retention or operational SLO policy.
+
+The hourly LaunchAgent takes a non-overlapping owner-only lock. It cannot
+delete an unsealed run, a run containing unsafe filesystem members, or any
+final output before its whole-run retention boundary. The operational SLO
+projects only aggregate counts, bytes, cleanup candidates, report age, and
+capacity thresholds—never paths or artifact content.
 
 ## Daily SOC Rollup
 

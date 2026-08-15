@@ -264,6 +264,142 @@ class OperationalSloTests(unittest.TestCase):
             failures,
         )
 
+    def test_evaluation_artifact_maintenance_is_projected_into_slo(self):
+        now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
+        metrics = {"metrics": {
+            "process": {"ingest_errors": 0},
+            "oldest_pending_job_seconds": 0,
+            "oldest_pending_jobs": [],
+            "oldest_pending_pcap_seconds": 0,
+        }}
+        health = {
+            "summary": {"latest": {"timestamp_utc": "2026-07-14T17:55:00Z"}},
+            "pcap": {"warning_count": 0},
+        }
+        report = {
+            "schema": "onion-sentinel-evaluation-artifact-maintenance-v1",
+            "generated_at": "2026-07-14T17:50:00Z",
+            "status": "warning",
+            "inventory": {
+                "run_directories": 7,
+                "run_bytes": 12345,
+                "sealed_runs": 6,
+                "unsealed_runs": 1,
+            },
+            "cleanup": {
+                "temporary_candidates": 2,
+                "run_directory_candidates": 1,
+                "report_file_candidates": 3,
+            },
+            "storage": {
+                "local": {
+                    "used_percent": 66.0,
+                    "warning_percent": 65,
+                    "failure_percent": 75,
+                },
+                "encrypted": {
+                    "configured": True,
+                    "used_percent": 71.0,
+                    "warning_percent": 70,
+                    "failure_percent": 85,
+                },
+            },
+        }
+        failures, snapshot = self.slo.evaluate(
+            metrics,
+            health,
+            now=now,
+            disk_used_percent=55,
+            sqlite_backup_age=60,
+            postgres_backup_age=60,
+            previous_ingest_errors=0,
+            evaluation_artifact_root_present=True,
+            evaluation_artifact_maintenance=report,
+        )
+        self.assertEqual(failures, [])
+        self.assertIn(
+            "evaluation artifact maintenance has capacity warnings",
+            snapshot["advisories"],
+        )
+        signal = snapshot["signals"]["evaluation_artifacts"]
+        self.assertEqual(signal["run_directories"], 7)
+        self.assertEqual(signal["run_bytes"], 12345)
+        self.assertTrue(signal["encrypted_configured"])
+        self.assertEqual(signal["encrypted_failure_percent"], 85)
+
+    def test_missing_evaluation_artifact_report_fails_when_root_exists(self):
+        now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
+        metrics = {"metrics": {
+            "process": {"ingest_errors": 0},
+            "oldest_pending_job_seconds": 0,
+            "oldest_pending_jobs": [],
+            "oldest_pending_pcap_seconds": 0,
+        }}
+        health = {
+            "summary": {"latest": {"timestamp_utc": "2026-07-14T17:55:00Z"}},
+            "pcap": {"warning_count": 0},
+        }
+        failures, _ = self.slo.evaluate(
+            metrics,
+            health,
+            now=now,
+            disk_used_percent=55,
+            sqlite_backup_age=60,
+            postgres_backup_age=60,
+            previous_ingest_errors=0,
+            evaluation_artifact_root_present=True,
+            evaluation_artifact_maintenance=None,
+        )
+        self.assertIn(
+            "evaluation artifact maintenance report is missing or older than 2 hours",
+            failures,
+        )
+        self.assertIn(
+            "evaluation artifact maintenance is not healthy (missing)", failures
+        )
+
+    def test_invalid_or_future_evaluation_artifact_report_fails_closed(self):
+        now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
+        metrics = {"metrics": {
+            "process": {"ingest_errors": 0},
+            "oldest_pending_job_seconds": 0,
+            "oldest_pending_jobs": [],
+            "oldest_pending_pcap_seconds": 0,
+        }}
+        health = {
+            "summary": {"latest": {"timestamp_utc": "2026-07-14T17:55:00Z"}},
+            "pcap": {"warning_count": 0},
+        }
+        failures, snapshot = self.slo.evaluate(
+            metrics,
+            health,
+            now=now,
+            disk_used_percent=55,
+            sqlite_backup_age=60,
+            postgres_backup_age=60,
+            previous_ingest_errors=0,
+            evaluation_artifact_root_present=True,
+            evaluation_artifact_maintenance={
+                "schema": "wrong-schema",
+                "generated_at": "2026-07-15T18:00:00Z",
+                "status": "unexpected",
+                "inventory": {"run_directories": "not-an-integer"},
+            },
+        )
+        self.assertIn(
+            "evaluation artifact maintenance report schema is invalid", failures
+        )
+        self.assertIn(
+            "evaluation artifact maintenance report is missing or older than 2 hours",
+            failures,
+        )
+        self.assertIn(
+            "evaluation artifact maintenance status is invalid (unexpected)", failures
+        )
+        self.assertEqual(
+            snapshot["signals"]["evaluation_artifacts"]["run_directories"], 0
+        )
+
     def test_known_pipeline_backlog_is_admitted_before_disk_ceiling(self):
         now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
         metrics = {"metrics": {

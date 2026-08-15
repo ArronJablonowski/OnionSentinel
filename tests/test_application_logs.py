@@ -151,10 +151,10 @@ class ApplicationLogTests(unittest.TestCase):
                 projection, sort_keys=True, separators=(",", ":")
             ).encode("utf-8")
         ).hexdigest()
-        self.assertEqual(len(projection), 50)
+        self.assertEqual(len(projection), 52)
         self.assertEqual(
             digest,
-            "0c8e7a7979b939e5376da07ba05bc0631b325375b9853badd41b49ca13e01c51",
+            "ebeadbff1a2e9ad55545cf1b45011bb0fbce4c80a08373d375e814c2b430c77b",
         )
 
     def test_application_logs_starts_from_an_isolated_dashboard_directory(self) -> None:

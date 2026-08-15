@@ -42,6 +42,7 @@ by the named job, rotates at 10 MiB, retains five gzip generations for at most
 | `launchd-ensure-stack` | Stack ensure scheduler |
 | `launchd-monitor-stack` | Stack monitor |
 | `harness-maintenance` | Harness database maintenance |
+| `evaluation-artifact-maintenance` | Evaluation artifact retention and capacity monitoring |
 | `runtime-backup` | Runtime backup |
 | `onion-sentinel-web-guard` | Web recovery supervisor |
 | `onion-sentinel-web` | Web service bootstrap output |

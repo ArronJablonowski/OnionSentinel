@@ -340,6 +340,12 @@ existing stateful stack monitor every five minutes. The CLI owns bounded local
 probes, the pure policy modules own timestamp, capacity/recovery, threshold,
 and snapshot projection, and `operational_slo_state.py` owns owner-only
 state/history persistence.
+The same snapshot requires a fresh evaluation-artifact maintenance report
+whenever `harness-evaluations` exists. It projects only aggregate run counts,
+bytes, seal/cleanup counts, and the 65/75-percent local plus 70/85-percent
+configured encrypted-storage thresholds. A missing or failed report stops the
+soak; threshold warnings degrade it. See
+`docs/evaluation-artifact-retention.md` for seal and cleanup ordering.
 It fails the monitor when
 the heartbeat is older than 20 minutes, enrichment is older than 15 minutes,
 an active AI claim has made no state progress for 15 minutes, an idle AI worker

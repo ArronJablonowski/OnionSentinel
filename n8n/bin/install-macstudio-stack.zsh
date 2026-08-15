@@ -237,6 +237,9 @@ sys.path.insert(0, str(bin_dir))
 
 import agent_memory
 import bounded_process
+import evaluation_artifact_contract
+import evaluation_artifact_retention
+import evaluation_artifact_seal
 import harness_maintenance_cli
 import pcap_evidence_query
 
@@ -257,6 +260,14 @@ load_file(
 load_file(
     "_onion_sentinel_harness_maintenance",
     bin_dir / "maintain-investigation-harness.py",
+)
+load_file(
+    "_onion_sentinel_evaluation_artifact_maintenance",
+    bin_dir / "maintain-evaluation-artifacts.py",
+)
+load_file(
+    "_onion_sentinel_evaluation_artifact_seal",
+    bin_dir / "seal-evaluation-artifacts.py",
 )
 load_file(
     "_onion_sentinel_operational_slos",
@@ -442,6 +453,7 @@ critical_launch_agents_down() {
     com.arron.soc.endpoint-software-inventory.plist \
     com.arron.soc.software-inventory.plist \
     com.arron.soc.ac-hunter.plist \
+    com.arron.onion-sentinel.evaluation-artifact-maintenance.plist \
     com.arron.onion-sentinel.application-log-maintenance.plist
   do
     launchctl unload "$LAUNCHD_DIR/$plist" >/dev/null 2>&1 || true
@@ -454,6 +466,7 @@ critical_launch_agents_down() {
     com.arron.soc.endpoint-software-inventory \
     com.arron.soc.software-inventory \
     com.arron.soc.ac-hunter \
+    com.arron.onion-sentinel.evaluation-artifact-maintenance \
     com.arron.onion-sentinel.application-log-maintenance
   do
     launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
@@ -868,6 +881,11 @@ cp "$REPO_DIR/n8n/bin/harness_maintenance_retention.py" "$STACK_DIR/bin/harness_
 cp "$REPO_DIR/n8n/bin/harness_maintenance_reporting.py" "$STACK_DIR/bin/harness_maintenance_reporting.py"
 cp "$REPO_DIR/n8n/bin/harness_maintenance_cli.py" "$STACK_DIR/bin/harness_maintenance_cli.py"
 cp "$REPO_DIR/n8n/bin/maintain-investigation-harness.py" "$STACK_DIR/bin/maintain-investigation-harness.py"
+cp "$REPO_DIR/n8n/bin/evaluation_artifact_contract.py" "$STACK_DIR/bin/evaluation_artifact_contract.py"
+cp "$REPO_DIR/n8n/bin/evaluation_artifact_seal.py" "$STACK_DIR/bin/evaluation_artifact_seal.py"
+cp "$REPO_DIR/n8n/bin/evaluation_artifact_retention.py" "$STACK_DIR/bin/evaluation_artifact_retention.py"
+cp "$REPO_DIR/n8n/bin/maintain-evaluation-artifacts.py" "$STACK_DIR/bin/maintain-evaluation-artifacts.py"
+cp "$REPO_DIR/n8n/bin/seal-evaluation-artifacts.py" "$STACK_DIR/bin/seal-evaluation-artifacts.py"
 cp "$REPO_DIR/n8n/bin/report-production-soak.py" "$STACK_DIR/bin/report-production-soak.py"
 cp "$REPO_DIR/n8n/bin/report-harness-observability.py" "$STACK_DIR/bin/report-harness-observability.py"
 cp "$REPO_DIR/n8n/bin/run-recovery-restore-drill.py" "$STACK_DIR/bin/run-recovery-restore-drill.py"
@@ -1611,6 +1629,7 @@ for plist in \
   com.arron.onion-sentinel.web.plist \
   com.arron.onion-sentinel.web-guard.plist \
   com.arron.onion-sentinel.harness-maintenance.plist \
+  com.arron.onion-sentinel.evaluation-artifact-maintenance.plist \
   com.arron.onion-sentinel.application-log-maintenance.plist \
   com.arron.onion-sentinel.runtime-backup.plist
 do
@@ -1660,6 +1679,7 @@ launchctl unload "$LAUNCHD_DIR/com.arron.soc.ac-hunter.plist" >/dev/null 2>&1 ||
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.web-guard.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.web.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.harness-maintenance.plist" >/dev/null 2>&1 || true
+launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.evaluation-artifact-maintenance.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.application-log-maintenance.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.runtime-backup.plist" >/dev/null 2>&1 || true
 launchctl load "$LAUNCHD_DIR/com.arron.n8n.ensure-stack.plist"
@@ -1741,6 +1761,7 @@ launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.web.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.web-guard.plist"
 wait_for_harness_maintenance_readiness
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.harness-maintenance.plist"
+launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.evaluation-artifact-maintenance.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.application-log-maintenance.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.runtime-backup.plist"
 
