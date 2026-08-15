@@ -683,8 +683,30 @@ replace the live DB unless `ALERT_STORE_AUTO_RECOVER=1` is explicitly set for
 that run. Online backup operations wait up to 60 seconds for active writers and
 retry a bounded number of times; a transient `database is locked` result is not
 evidence of corruption. The hourly tier retains the newest 10 verified
-`alerts.sqlite3.*.backup` snapshots; daily recovery bundles remain a separate
-longer-lived DR tier.
+authenticated pairs: `alerts.sqlite3.*.backup.enc` plus the content-free
+`alerts.sqlite3.*.backup.json` commit record. Retention and cleanup manage the
+pair together. A completed plaintext `.backup` is never published; legacy
+plaintext snapshots are encrypted before maintenance can return healthy. Daily
+recovery bundles remain a separate longer-lived DR tier.
+
+To restore one hourly snapshot into a new owner-only test directory, use the
+same Keychain generation and verify SQLite before considering it a recovery
+candidate:
+
+```bash
+install -d -m 0700 "$HOME/n8n-local/restore-test"
+snapshot="$HOME/n8n-local/alert_store_backups/alerts.sqlite3.<timestamp>.backup"
+"$HOME/n8n-local/bin/recovery_snapshot.py" restore \
+  --artifact "${snapshot}.enc" \
+  --metadata "${snapshot}.json" \
+  --destination "$HOME/n8n-local/restore-test/alerts.sqlite3"
+sqlite3 "$HOME/n8n-local/restore-test/alerts.sqlite3" \
+  'PRAGMA quick_check; PRAGMA foreign_key_check;'
+```
+
+Delete the isolated plaintext after the drill. Never restore directly over the
+live database, and never copy an hourly snapshot off-host; use the governed
+daily recovery bundle for disaster-recovery replication.
 
 During an authorized `ALERT_STORE_AUTO_RECOVER=1` swap, maintenance creates a
 short-lived web guard hold and installs an exit trap before stopping services.
@@ -699,7 +721,8 @@ tracebacks.
 The daily runtime recovery bundle complements the hourly SQLite backups with
 n8n PostgreSQL and encryption/configuration state:
 
-Before enabling the daily LaunchAgent, provision its recovery key as the
+Before enabling either encrypted backup LaunchAgent, provision their shared
+recovery key as the
 interactive Mac Studio operator. Generate at least 32 random bytes and store
 their single-line base64url encoding (at least 43 characters) in the approved
 password manager. Escrow the same encoded value in the separate offline

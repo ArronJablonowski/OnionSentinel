@@ -379,14 +379,20 @@ failure, allowing a stopped or deregistered exact LaunchAgent to self-heal.
 ## Verified Recovery Bundles
 
 Hourly alert-store maintenance continues to make online SQLite backups and run
-`PRAGMA quick_check`. It uses a bounded busy timeout and retry window so an
+`PRAGMA quick_check`. Each verified temporary copy is authenticated and
+encrypted with the same versioned Keychain generation as the daily recovery
+bundle before a content-free `.backup.json` commit record is published. The
+plaintext temporary is removed by normal, failure, and signal paths. It uses a
+bounded busy timeout and retry window so an
 ordinary alert-store write transaction cannot create a false backup outage.
 Temporary backup targets from interrupted runs are removed only after they are
-30 minutes old, while completed backups are promoted atomically after their own
-independent `quick_check` succeeds. The hourly backup directory is owner-only
+30 minutes old, while orphaned ciphertext or metadata is not counted as a
+completed backup. The hourly backup directory is owner-only
 (`0700`), direct regular backup and recovery artifacts are stripped of ACLs and
 normalized to `0600`, and a symlinked backup root fails the durable maintenance
-transition without being followed.
+transition without being followed. Retention prunes the newest ten encrypted
+artifact/metadata pairs together; any legacy plaintext snapshots are encrypted
+before the job can return healthy.
 A separate daily LaunchAgent creates an atomic recovery
 bundle under `$HOME/n8n-local/recovery_backups` containing:
 
@@ -417,8 +423,9 @@ python3 "$HOME/n8n-local/bin/backup-onion-sentinel-runtime.py"
 python3 -m json.tool "$HOME/n8n-local/recovery_backups/$(ls -1 "$HOME/n8n-local/recovery_backups" | tail -1)/manifest.json"
 ```
 
-The SQLite SLO is healthy when the newest hourly backup is at most two hours
-old. The PostgreSQL/runtime SLO is healthy when the newest daily bundle is at
+The SQLite SLO is healthy when the newest committed encrypted hourly snapshot
+metadata is at most two hours old. A ciphertext without its metadata commit
+record cannot satisfy the SLO. The PostgreSQL/runtime SLO is healthy when the newest daily bundle is at
 most 26 hours old. When the alert-store shadow is enabled, its dump is also
 required to be no older than 26 hours; omission fails the SLO instead of
 silently publishing a partial bundle.

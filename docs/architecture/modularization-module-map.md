@@ -3734,6 +3734,17 @@ orchestrator.
 
 ## Recovery Restore Drill
 
+`recovery_encryption.py` remains the single secret-bearing cryptographic owner.
+`recovery_snapshot.py` is the bounded single-artifact adapter for hourly
+alert-store repair snapshots: it validates owner-only inputs, creates
+authenticated ciphertext, publishes content-free commit metadata last, and
+authenticates the exact metadata/ciphertext/key-generation binding before any
+restore plaintext is published. `maintain-alert-store-sqlite.zsh` owns SQLite
+online-copy, `quick_check`, retention, and plaintext lifecycle; the SLO reads
+only committed `.backup.json` metadata. Dependencies flow from maintenance and
+restore callers into the snapshot adapter and then into encryption, never back
+into maintenance or database policy.
+
 `run-recovery-restore-drill.py` remains the package-free operational CLI. Its
 private phases independently own owner-only bundle/manifest admission, bounded
 hash and optional-component consistency, harness SQLite integrity projection,

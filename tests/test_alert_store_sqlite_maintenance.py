@@ -53,6 +53,27 @@ class AlertStoreSqliteMaintenancePermissionsTests(unittest.TestCase):
         self.database = self.database_dir / "alerts.sqlite3"
         self.backup_dir = self.stack / "alert_store_backups"
         self.log_dir = self.stack / "logs"
+        tool_dir = self.stack / "bin"
+        tool_dir.mkdir()
+        snapshot_tool = tool_dir / "recovery_snapshot.py"
+        snapshot_tool.write_text(
+            "#!/bin/zsh\n"
+            "action=$1; shift\n"
+            "while (( $# )); do\n"
+            "  case $1 in\n"
+            "    --source) source=$2; shift 2;;\n"
+            "    --artifact) artifact=$2; shift 2;;\n"
+            "    --metadata) metadata=$2; shift 2;;\n"
+            "    *) shift;;\n"
+            "  esac\n"
+            "done\n"
+            "[[ $action == create ]] || exit 2\n"
+            "cp $source $artifact || exit 2\n"
+            "print -r -- '{\"format\":\"fixture\"}' > $metadata || exit 2\n"
+            "chmod 0600 $artifact $metadata\n",
+            encoding="utf-8",
+        )
+        snapshot_tool.chmod(0o755)
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -117,7 +138,7 @@ class AlertStoreSqliteMaintenancePermissionsTests(unittest.TestCase):
             text=True,
         )
         retained = self.backup_dir / "alerts.sqlite3.retained.backup"
-        retained.write_bytes(b"retained")
+        shutil.copy2(self.database, retained)
         retained.chmod(0o644)
         subprocess.run(
             ["chmod", "+a", "everyone allow read", str(retained)],
@@ -141,16 +162,30 @@ class AlertStoreSqliteMaintenancePermissionsTests(unittest.TestCase):
             text=True,
         ).stdout
         self.assertNotIn("everyone allow read", directory_acl)
-        backups = sorted(self.backup_dir.glob("alerts.sqlite3.*.backup"))
+        backups = sorted(self.backup_dir.glob("alerts.sqlite3.*.backup.enc"))
         self.assertGreaterEqual(len(backups), 2)
+        self.assertEqual(
+            len(list(self.backup_dir.glob("alerts.sqlite3.*.backup.json"))),
+            len(backups),
+        )
+        self.assertEqual(
+            [
+                path
+                for path in self.backup_dir.glob("alerts.sqlite3.*.backup")
+                if not path.is_symlink()
+            ],
+            [],
+        )
         self.assert_owner_only_regular_files(self.backup_dir)
+        retained_encrypted = Path(f"{retained}.enc")
         retained_acl = subprocess.run(
-            ["ls", "-lde", str(retained)],
+            ["ls", "-lde", str(retained_encrypted)],
             check=True,
             capture_output=True,
             text=True,
         ).stdout
         self.assertNotIn("everyone allow read", retained_acl)
+        self.assertEqual(mode(retained_encrypted), 0o600)
         self.assertEqual(mode(external), 0o644)
 
     def test_recovery_artifacts_are_owner_only(self) -> None:
@@ -251,7 +286,13 @@ class AlertStoreSqliteMaintenancePermissionsTests(unittest.TestCase):
             'metadata="$BACKUP_DIR/alerts.sqlite3.$STAMP.backup.json"',
             source,
         )
-        self.assertIn("trap 'cleanup_backup_plaintext' EXIT INT TERM", source)
+        self.assertIn("trap 'cleanup_backup_plaintext' EXIT", source)
+        self.assertIn(
+            "trap 'cleanup_backup_plaintext; exit 130' INT", source
+        )
+        self.assertIn(
+            "trap 'cleanup_backup_plaintext; exit 143' TERM", source
+        )
         self.assertLess(create, plaintext_cleanup)
         self.assertLess(plaintext_cleanup, commit_log)
         self.assertNotIn('mv "$backup_tmp" "$backup"', source)
@@ -262,6 +303,24 @@ class AlertStoreSqliteMaintenancePermissionsTests(unittest.TestCase):
         self.assertIn('encrypted="${old_metadata%.json}.enc"', source)
         self.assertIn('rm -f "$old_metadata" "$encrypted"', source)
         self.assertIn("-name 'alerts.sqlite3.*.backup.enc'", source)
+        self.assertLess(
+            source.index("encrypt_retained_plaintext_backups\n", source.index("main()")),
+            source.index("verified_backup\n", source.index("main()")),
+        )
+
+    def test_installer_copies_snapshot_dependency_before_maintenance(self) -> None:
+        installer = (
+            ROOT / "n8n/bin/install-macstudio-stack.zsh"
+        ).read_text(encoding="utf-8")
+        dependency = installer.index(
+            'cp "$REPO_DIR/n8n/bin/recovery_snapshot.py" '
+            '"$STACK_DIR/bin/recovery_snapshot.py"'
+        )
+        maintenance = installer.index(
+            'cp "$REPO_DIR/n8n/bin/maintain-alert-store-sqlite.zsh" '
+            '"$STACK_DIR/bin/maintain-alert-store-sqlite.zsh"'
+        )
+        self.assertLess(dependency, maintenance)
 
 
 if __name__ == "__main__":
