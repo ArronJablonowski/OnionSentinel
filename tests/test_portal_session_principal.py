@@ -85,6 +85,9 @@ class PortalSessionPrincipalTests(unittest.TestCase):
             {},
             {"created_at": 1_000, "expires_at": 4_600, "client_ip": "127.0.0.1"},
             {**self.bundle().record, "csrf_digest": "not-a-digest"},
+            {**self.bundle().record, "unexpected": "must-fail"},
+            {**self.bundle().record, "last_activity_at": 999},
+            {**self.bundle().record, "idle_expires_at": 4_601},
         ):
             with self.subTest(record=record):
                 decision = sessions.session_decision(
@@ -94,6 +97,18 @@ class PortalSessionPrincipalTests(unittest.TestCase):
                 )
                 self.assertFalse(decision.authorized)
                 self.assertIsNone(decision.principal)
+
+    def test_record_validator_accepts_only_the_exact_versioned_shape(self):
+        record = self.bundle().record
+        self.assertTrue(sessions.is_valid_session_record(record))
+        for candidate in (
+            {**record, "unexpected": "must-fail"},
+            {**record, "last_activity_at": 999},
+            {**record, "idle_expires_at": 4_601},
+            {**record, "policy_generation": True},
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertFalse(sessions.is_valid_session_record(candidate))
 
     def test_csrf_is_constant_shape_bound_and_fail_closed(self) -> None:
         record = self.bundle().record
