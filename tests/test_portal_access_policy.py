@@ -26,6 +26,23 @@ def route(path: str):
 
 
 class PortalAccessPolicyTests(unittest.TestCase):
+    def test_installer_deploys_access_session_and_audit_modules(self) -> None:
+        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text(
+            encoding="utf-8"
+        )
+        for name in (
+            "portal_access_policy.py",
+            "portal_session_principal.py",
+            "portal_admin_audit_chain.py",
+            "portal_admin_audit_store.py",
+        ):
+            with self.subTest(name=name):
+                self.assertIn(
+                    f'cp "$REPO_DIR/onion-sentinel-dashboard/{name}" '
+                    f'"$DASHBOARD_RUNTIME_DIR/{name}"',
+                    installer,
+                )
+
     def test_human_roles_are_explicit_and_monotonically_privileged(self) -> None:
         self.assertEqual(
             policy.HUMAN_ROLES,
