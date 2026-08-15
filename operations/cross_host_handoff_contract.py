@@ -118,7 +118,7 @@ def _mapping(value: Any, label: str) -> Mapping[str, Any]:
 def _exact_fields(value: Mapping[str, Any], allowed: set[str], label: str) -> None:
     unknown = sorted(set(value) - allowed)
     if unknown:
-        raise HandoffError(f"{label} contains unknown field: {unknown[0]}")
+        raise HandoffError(f"{label} contains an unknown field")
     missing = sorted(allowed - set(value))
     if missing:
         raise HandoffError(f"{label} is missing field: {missing[0]}")
@@ -465,6 +465,8 @@ def _acknowledgement_decision(
         return decision, status, drifted
     if status == "rejected":
         return "request_rejected", status, 0
+    if any(item["status"] != "pass" for item in acknowledgement["verification"]):
+        return "verification_review_required", status, 0
     return "rollback_acknowledged", status, 0
 
 

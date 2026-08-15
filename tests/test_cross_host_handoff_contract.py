@@ -180,6 +180,27 @@ class CrossHostHandoffContractTests(unittest.TestCase):
         plan = handoff.build_handoff_plan(self.repo, document)
         self.assertEqual(plan["decision"], "verification_review_required")
 
+    def test_failed_rollback_verification_requires_review(self) -> None:
+        document = copy.deepcopy(self.document)
+        digest = handoff.request_digest(document)
+        document["acknowledgement"] = {
+            "status": "rolled_back",
+            "request_sha256": digest,
+            "applied_version": self.revision,
+            "applied_at": "2026-08-15T04:10:00Z",
+            "rollback_point": self.revision,
+            "artifacts": [],
+            "verification": [
+                {
+                    "check": "rollback_readiness",
+                    "status": "fail",
+                    "evidence_sha256": "a" * 64,
+                }
+            ],
+        }
+        plan = handoff.build_handoff_plan(self.repo, document)
+        self.assertEqual(plan["decision"], "verification_review_required")
+
     def test_acknowledgement_cannot_claim_an_unauthorized_write(self) -> None:
         document = copy.deepcopy(self.document)
         document["request"]["write_authorized"] = False
@@ -286,6 +307,14 @@ class CrossHostHandoffContractTests(unittest.TestCase):
         document["request"]["artifacts"][0]["source"] = "../relay.py"
         with self.assertRaisesRegex(handoff.HandoffError, "source path"):
             handoff.build_handoff_plan(self.repo, document)
+
+    def test_unknown_field_name_is_not_echoed_in_the_error(self) -> None:
+        document = copy.deepcopy(self.document)
+        sensitive_name = "BOT_" + "TOKEN=" + "not-for-output"
+        document["request"][sensitive_name] = True
+        with self.assertRaises(handoff.HandoffError) as raised:
+            handoff.build_handoff_plan(self.repo, document)
+        self.assertNotIn(sensitive_name, str(raised.exception))
 
     def test_live_configuration_destinations_cannot_be_overwritten(self) -> None:
         document = copy.deepcopy(self.document)
