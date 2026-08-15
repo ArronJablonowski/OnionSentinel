@@ -135,6 +135,8 @@ def _compact_ac_hunter(package: dict, steps: list[str]) -> None:
     ):
         changed = _truncate_list(context, key, retain) or changed
     if changed:
+        context["status"] = "partial"
+        context["complete"] = False
         context["truncated"] = True
         context["negative_evidence_allowed"] = False
         steps.append("ac_hunter_evidence")

@@ -70,16 +70,31 @@ def _add_authorization_references(
         )
 
 
+def _ac_hunter_identity(context: dict[str, Any]) -> tuple[str, str] | None:
+    reference = context.get("evidence_ref")
+    digest = context.get("evidence_digest")
+    if not isinstance(reference, str) or not isinstance(digest, str):
+        return None
+    normalized_digest = digest.strip().lower()
+    valid_digest = (
+        len(normalized_digest) == 64
+        and all(character in "0123456789abcdef" for character in normalized_digest)
+    )
+    if not valid_digest or reference != f"ac-hunter:{normalized_digest}":
+        return None
+    return reference, normalized_digest
+
+
 def _add_ac_hunter_reference(
     prompt_package: dict[str, Any], registry: ReferenceRegistry,
 ) -> None:
     context = prompt_package.get("ac_hunter_evidence")
     if not isinstance(context, dict) or context.get("available") is not True:
         return
-    reference = context.get("evidence_ref")
-    digest = context.get("evidence_digest")
-    if not reference or not digest:
+    identity = _ac_hunter_identity(context)
+    if identity is None:
         return
+    reference, normalized_digest = identity
     status = str(context.get("status") or "")
     returned = context.get("returned")
     valid_returned = (
@@ -94,7 +109,7 @@ def _add_ac_hunter_reference(
         corroborating=status == "fresh" and valid_returned and returned > 0,
         status=status,
         returned=returned,
-        evidence_digest=digest,
+        evidence_digest=normalized_digest,
         require_valid_count=True,
     )
 

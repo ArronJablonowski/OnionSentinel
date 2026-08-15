@@ -89,11 +89,12 @@ def _inspect_list(value: list[Any], depth: int) -> None:
 
 
 def _valid_key(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) <= 128
-        and value.strip().lower() not in FORBIDDEN_KEYS
-    )
+    if not isinstance(value, str) or len(value) > 128:
+        return False
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value.strip())
+    normalized = separated.lower()
+    parts = {part for part in re.split(r"[^a-z0-9]+", normalized) if part}
+    return normalized not in FORBIDDEN_KEYS and not (parts & FORBIDDEN_KEYS)
 
 
 def _inspect_mapping(value: dict[Any, Any], depth: int) -> None:
@@ -362,13 +363,16 @@ def _context_payload(
     truncated: bool,
 ) -> dict[str, Any]:
     returned = len(findings) + len(correlated)
-    status = _status(stale=stale, complete=complete, returned=returned)
+    effective_complete = complete and not truncated
+    status = _status(
+        stale=stale, complete=effective_complete, returned=returned,
+    )
     notes = value.get("analyst_notes")
     return {
         "schema": CONTEXT_SCHEMA,
         "status": status,
         "available": True,
-        "complete": complete,
+        "complete": effective_complete,
         "stale": stale,
         "dataset": FIXED_DATASET,
         "dataset_time_range": _bounded_time_range(value.get("time_range")),
