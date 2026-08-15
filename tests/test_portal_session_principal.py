@@ -15,7 +15,7 @@ import portal_session_principal as sessions  # noqa: E402
 
 class PortalSessionPrincipalTests(unittest.TestCase):
     def bundle(self, role: str = "analyst") -> sessions.SessionBundle:
-        values = iter(("raw-session-token", "raw-csrf-token"))
+        values = iter(("session-" + "s" * 36, "csrf-" + "c" * 38))
         return sessions.create_session_bundle(
             principal_id="operator-7",
             role=role,
@@ -29,8 +29,8 @@ class PortalSessionPrincipalTests(unittest.TestCase):
 
     def test_new_record_contains_no_raw_session_or_csrf_material(self) -> None:
         bundle = self.bundle()
-        self.assertEqual(bundle.session_id, "raw-session-token")
-        self.assertEqual(bundle.csrf_token, "raw-csrf-token")
+        self.assertEqual(bundle.session_id, "session-" + "s" * 36)
+        self.assertEqual(bundle.csrf_token, "csrf-" + "c" * 38)
         encoded = json.dumps(bundle.record, sort_keys=True)
         self.assertNotIn(bundle.session_id, encoded)
         self.assertNotIn(bundle.csrf_token, encoded)
@@ -97,13 +97,14 @@ class PortalSessionPrincipalTests(unittest.TestCase):
 
     def test_csrf_is_constant_shape_bound_and_fail_closed(self) -> None:
         record = self.bundle().record
-        self.assertTrue(sessions.csrf_authorized("raw-csrf-token", record))
-        for value in ("", "wrong", "raw-csrf-token-extra", None):
+        csrf_token = "csrf-" + "c" * 38
+        self.assertTrue(sessions.csrf_authorized(csrf_token, record))
+        for value in ("", "wrong", csrf_token + "extra", None):
             with self.subTest(value=value):
                 self.assertFalse(sessions.csrf_authorized(value, record))
         self.assertFalse(
             sessions.csrf_authorized(
-                "raw-csrf-token",
+                csrf_token,
                 {**record, "csrf_digest": "0" * 64},
             )
         )

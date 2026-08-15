@@ -3545,6 +3545,13 @@ I/O remain outside this pure policy layer. The complete phased access-control,
 session, audit-chain, service-identity, and recovery design is documented in
 `docs/security/application-access-control.md`.
 
+`portal_session_principal.py` owns versioned human-session principal records,
+absolute and idle expiry admission, policy-generation invalidation, opaque
+session/CSRF token separation, stored CSRF digests, and bounded idle touches.
+It is pure and does not read cookies, credentials, clocks, files, or sockets;
+the existing Administration session store remains the persistence owner until
+the separately gated enforcement adapter migrates it.
+
 ### Portal catalog runtime
 
 `portal_catalog_runtime.py` owns local-address discovery, report title/category
