@@ -238,6 +238,27 @@ class RelayReadinessTests(unittest.TestCase):
         self.assertEqual(report["schema"], "onion-sentinel-relay-readiness-v1")
         self.assertFalse(report["ok"])
 
+    def test_local_probe_commands_receive_no_relay_secret_environment(self) -> None:
+        module = self.require_module()
+        completed = subprocess.CompletedProcess(["/usr/bin/true"], 0, b"", b"")
+        with mock.patch.object(
+            module,
+            "run_bounded_command",
+            return_value=completed,
+        ) as bounded:
+            module._run_local(["/usr/bin/true"])
+        child_environment = bounded.call_args.kwargs["env"]
+        self.assertEqual(
+            child_environment,
+            {
+                "HOME": "/opt/so-alert-relay",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            },
+        )
+        self.assertFalse(any("TOKEN" in name or "SECRET" in name for name in child_environment))
+
     def test_installer_wrapper_contract_and_runbooks_include_readiness_recovery(self) -> None:
         installer = INSTALLER.read_text(encoding="utf-8")
         contract = HEALTH_CONTRACT.read_text(encoding="utf-8")
