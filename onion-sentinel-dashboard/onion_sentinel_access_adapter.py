@@ -7,6 +7,13 @@ from typing import Any, Mapping
 from portal_access_observer_runtime import load_access_observer_runtime
 
 
+def _record_boundary_failure(observer: Any, exc: Exception) -> None:
+    try:
+        observer.record_boundary_failure(type(exc).__name__)
+    except Exception:
+        pass
+
+
 def build_access_observer(
     *,
     environ: Mapping[str, str],
@@ -37,23 +44,25 @@ def begin_access_observation(
 ) -> None:
     """Attach one pre-body observe decision to a classified human write."""
     handler._access_observation = None
-    if controlled_evaluation or not observer.enabled:
+    if controlled_evaluation:
         return
-    route = runtime.classify_post_route(
-        path,
-        cti_program_path=runtime.CTI_PROGRAM_API_PATH,
-        prompt_paths=runtime.SOC_SETTINGS_PROMPT_API_PATHS,
-    )
-    if not route.accepted:
-        return
-    fetch_site = str(
-        handler.headers.get("Sec-Fetch-Site") or ""
-    ).strip().lower()
-    same_origin = bool(
-        fetch_site in {"", "same-origin"}
-        and handler._soc_review_origin_authorized()
-    )
     try:
+        if not observer.enabled:
+            return
+        route = runtime.classify_post_route(
+            path,
+            cti_program_path=runtime.CTI_PROGRAM_API_PATH,
+            prompt_paths=runtime.SOC_SETTINGS_PROMPT_API_PATHS,
+        )
+        if not route.accepted:
+            return
+        fetch_site = str(
+            handler.headers.get("Sec-Fetch-Site") or ""
+        ).strip().lower()
+        same_origin = bool(
+            fetch_site in {"", "same-origin"}
+            and handler._soc_review_origin_authorized()
+        )
         handler._access_observation = observer.begin(
             route,
             principal=None,
@@ -64,7 +73,7 @@ def begin_access_observation(
             ),
         )
     except Exception as exc:
-        observer.record_boundary_failure(type(exc).__name__)
+        _record_boundary_failure(observer, exc)
 
 
 def finalize_access_observation(
@@ -85,7 +94,7 @@ def finalize_access_observation(
             occurred_at=runtime.now_iso_utc(),
         )
     except Exception as exc:
-        observer.record_boundary_failure(type(exc).__name__)
+        _record_boundary_failure(observer, exc)
 
 
 __all__ = (
