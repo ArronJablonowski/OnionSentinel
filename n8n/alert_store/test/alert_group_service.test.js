@@ -90,12 +90,12 @@ test('rebuild uses one windowed scan, owns gate, and rolls back failures', async
     ok: true, status: 'group_summary_rebuilt', groups: 1,
   });
   assert.equal(success.counts().gateCalls, 1);
-  assert.match(success.statements[0].sql, /BEGIN IMMEDIATE/);
-  assert.match(success.statements.at(-1).sql, /COMMIT/);
+  assert.equal(success.counts().transactionCalls, 1);
+  assert.match(success.statements[0].sql, /DELETE FROM alert_group_summary/);
 
   const failure = createHarness({rows: [[row]], failInsert: true});
   await assert.rejects(failure.service.rebuildAlertGroupSummaries(), /insert failed/);
-  assert.match(failure.statements.at(-1).sql, /ROLLBACK/);
+  assert.equal(failure.counts().transactionCalls, 1);
 });
 
 test('bulk alias refresh is one immediate transaction', async () => {

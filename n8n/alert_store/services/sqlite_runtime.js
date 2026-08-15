@@ -1,5 +1,7 @@
 'use strict';
 
+const {AsyncLocalStorage} = require('node:async_hooks');
+
 function createSqliteRuntime({
   fs, path, processApi, sqlite3, dbPath, controlledEvaluationMode, busyTimeoutMs,
 }) {
@@ -79,6 +81,7 @@ function createSqliteRuntime({
 
   let sqliteWriteGate = Promise.resolve();
   let activeSqliteWrites = 0;
+  const transactionContext = new AsyncLocalStorage();
 
   function withWriteGate(task) {
     // sqlite3 serializes individual statements, but request handlers can still
@@ -97,11 +100,28 @@ function createSqliteRuntime({
   }
 
   async function withImmediateTransaction(task) {
+    const context = transactionContext.getStore();
+    if (context) {
+      context.nextSavepoint += 1;
+      const savepoint = `onion_sentinel_nested_${context.nextSavepoint}`;
+      await run(`SAVEPOINT ${savepoint}`);
+      try {
+        const result = await task();
+        await run(`RELEASE SAVEPOINT ${savepoint}`);
+        return result;
+      } catch (error) {
+        await run(`ROLLBACK TO SAVEPOINT ${savepoint}`).catch(() => undefined);
+        await run(`RELEASE SAVEPOINT ${savepoint}`).catch(() => undefined);
+        throw error;
+      }
+    }
     await run('BEGIN IMMEDIATE');
     try {
-      const result = await task();
-      await run('COMMIT');
-      return result;
+      return await transactionContext.run({nextSavepoint: 0}, async () => {
+        const result = await task();
+        await run('COMMIT');
+        return result;
+      });
     } catch (error) {
       await run('ROLLBACK').catch(() => undefined);
       throw error;

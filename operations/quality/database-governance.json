@@ -12,10 +12,10 @@
         "durable-job-state",
         "derived-investigation-artifacts"
       ],
-      "schema_version_contract": "The startup schema module set is source-versioned, but the aggregate database does not yet persist one exact schema version.",
-      "schema_version_state": "legacy-unversioned",
-      "migration_strategy": "Additive startup migrations execute before HTTP admission; destructive changes require a separately reviewed export, rollback, and recovery plan.",
-      "migration_atomicity_state": "not-transactional",
+      "schema_version_contract": "alert_store_metadata persists aggregate schema version 1; startup rejects invalid or newer versions and controlled evaluation requires the exact supported version.",
+      "schema_version_state": "persisted",
+      "migration_strategy": "Runtime PRAGMAs settle before one BEGIN IMMEDIATE transaction owns schema admission, additive DDL, compatibility backfills, consistency rebuilds, and final version persistence; destructive changes require a separately reviewed export, rollback, and recovery plan.",
+      "migration_atomicity_state": "transactional",
       "rollback_strategy": "Stop all writers, preserve the current database and sidecars, restore a verified prior snapshot, then rebuild derived group summaries before admission.",
       "backup_schedule": "Verified online SQLite backup every hour plus one complete runtime recovery bundle daily at 02:30 local time.",
       "backup_artifacts": [
@@ -70,6 +70,7 @@
       ],
       "source_anchors": [
         "n8n/alert_store/services/sqlite_runtime.js",
+        "n8n/alert_store/services/alert_store_schema_version.js",
         "n8n/alert_store/services/alert_store_schema_foundation.js",
         "n8n/bin/maintain-alert-store-sqlite.zsh",
         "n8n/bin/backup-onion-sentinel-runtime.py",

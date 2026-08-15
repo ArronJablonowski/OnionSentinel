@@ -61,6 +61,7 @@ function createStartupPersistenceCompatibility(options = {}) {
 
   function createSchemaInitializer(owners = {}) {
     const required = [
+      'alertStoreSchemaVersion',
       'alertStoreSchemaFoundation',
       'incidentAnalysisSchema',
       'aiReviewSchema',
@@ -74,13 +75,20 @@ function createStartupPersistenceCompatibility(options = {}) {
       }
     }
     return async function initDb() {
-      if (await owners.alertStoreSchemaFoundation.configureRuntime()) return;
-      await owners.alertStoreSchemaFoundation.installFoundation();
-      await owners.incidentAnalysisSchema.install();
-      await owners.aiReviewSchema.install();
-      await owners.notificationEnrichmentSchema.install();
-      await owners.pcapSchema.install();
-      await owners.startupPersistenceOrchestrator.initialize();
+      if (await owners.alertStoreSchemaFoundation.configureRuntime()) {
+        await owners.alertStoreSchemaVersion.assertCurrent();
+        return;
+      }
+      await database.withTransaction(async () => {
+        await owners.alertStoreSchemaVersion.prepareMigration();
+        await owners.alertStoreSchemaFoundation.installFoundation();
+        await owners.incidentAnalysisSchema.install();
+        await owners.aiReviewSchema.install();
+        await owners.notificationEnrichmentSchema.install();
+        await owners.pcapSchema.install();
+        await owners.startupPersistenceOrchestrator.initialize();
+        await owners.alertStoreSchemaVersion.persistCurrent();
+      });
     };
   }
 
