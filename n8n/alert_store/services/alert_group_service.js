@@ -215,8 +215,7 @@ function createAlertGroupService({
       )
       SELECT * FROM ranked WHERE representative_rank = 1
     `);
-    await run('BEGIN IMMEDIATE');
-    try {
+    await withImmediateTransaction(async () => {
       await run('DELETE FROM alert_group_summary');
       for (const row of groups) {
         await run(
@@ -243,11 +242,7 @@ function createAlertGroupService({
           ],
         );
       }
-      await run('COMMIT');
-    } catch (error) {
-      await run('ROLLBACK').catch(() => undefined);
-      throw error;
-    }
+    });
     return {ok: true, status: 'group_summary_rebuilt', groups: groups.length};
   }
 

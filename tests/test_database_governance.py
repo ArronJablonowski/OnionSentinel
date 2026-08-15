@@ -48,8 +48,6 @@ class DatabaseGovernanceTests(unittest.TestCase):
             result["declared_gaps"],
             sorted([
                 "mac.alert-store-postgresql: backup encryption is not enforced",
-                "mac.alert-store-sqlite: schema version is not persisted",
-                "mac.alert-store-sqlite: schema migration is not atomic",
                 "mac.alert-store-sqlite: backup encryption is not enforced",
                 "mac.investigation-harness-sqlite: backup encryption is not enforced",
                 "mac.n8n-postgresql: backup encryption is not enforced",
@@ -123,7 +121,7 @@ class DatabaseGovernanceTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["schema"], "onion-sentinel-database-governance-result-v1")
         self.assertEqual(payload["catalog_entries"], 5)
-        self.assertEqual(payload["declared_gap_count"], 8)
+        self.assertEqual(payload["declared_gap_count"], 6)
         self.assertEqual(payload["status"], "catalog_valid_with_declared_gaps")
         self.assertTrue(payload["ok"])
 

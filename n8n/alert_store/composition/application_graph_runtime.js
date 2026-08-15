@@ -360,6 +360,7 @@ function createApplicationGraphRuntime(options = {}) {
     },
   });
   const initDb = startupCompatibility.createSchemaInitializer({
+    alertStoreSchemaVersion: applicationOwners.alertStoreSchemaVersion,
     alertStoreSchemaFoundation: applicationOwners.alertStoreSchemaFoundation,
     incidentAnalysisSchema: applicationOwners.incidentAnalysisSchema,
     aiReviewSchema: applicationOwners.aiReviewSchema,

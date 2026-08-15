@@ -4,6 +4,9 @@ const {createControlledEvaluationSchema} = require('../lib/controlled_evaluation
 const {
   createAlertStoreSchemaFoundation,
 } = require('../services/alert_store_schema_foundation');
+const {
+  createAlertStoreSchemaVersion,
+} = require('../services/alert_store_schema_version');
 const {createIncidentAnalysisSchema} = require('../services/incident_analysis_schema');
 const {createAiReviewSchema} = require('../services/ai_review_schema');
 const {
@@ -48,6 +51,7 @@ function createApplicationComposition(options = {}) {
     initializeDurableJobs: lifecycle.initializeDurableJobs,
     initializePipelineMetrics: lifecycle.initializePipelineMetrics,
   });
+  const alertStoreSchemaVersion = createAlertStoreSchemaVersion({run, get});
   const alertStoreSchemaFoundation = createAlertStoreSchemaFoundation({
     run,
     ensureColumn,
@@ -233,6 +237,7 @@ function createApplicationComposition(options = {}) {
     alertIngestOrchestrator,
     alertPersistence,
     alertStoreSchemaFoundation,
+    alertStoreSchemaVersion,
     analystDecisionPersistence,
     analystReviewProjection,
     authorizedCampaignPersistence,
