@@ -241,6 +241,28 @@ class AlertStoreSqliteMaintenancePermissionsTests(unittest.TestCase):
         self.assertLess(swap_secure, live_copy)
         self.assertLess(live_copy, live_secure)
 
+    def test_verified_backup_is_encrypted_before_plaintext_cleanup_and_commit(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        create = source.index('"$SNAPSHOT_TOOL" create')
+        plaintext_cleanup = source.index('rm -f "$backup_tmp"', create)
+        commit_log = source.index('log "backup_ok path=$backup"', plaintext_cleanup)
+        self.assertIn('backup="$BACKUP_DIR/alerts.sqlite3.$STAMP.backup.enc"', source)
+        self.assertIn(
+            'metadata="$BACKUP_DIR/alerts.sqlite3.$STAMP.backup.json"',
+            source,
+        )
+        self.assertIn("trap 'cleanup_backup_plaintext' EXIT INT TERM", source)
+        self.assertLess(create, plaintext_cleanup)
+        self.assertLess(plaintext_cleanup, commit_log)
+        self.assertNotIn('mv "$backup_tmp" "$backup"', source)
+
+    def test_retention_and_stale_cleanup_manage_encrypted_snapshot_pairs(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("-name 'alerts.sqlite3.*.backup.json'", source)
+        self.assertIn('encrypted="${old_metadata%.json}.enc"', source)
+        self.assertIn('rm -f "$old_metadata" "$encrypted"', source)
+        self.assertIn("-name 'alerts.sqlite3.*.backup.enc'", source)
+
 
 if __name__ == "__main__":
     unittest.main()
