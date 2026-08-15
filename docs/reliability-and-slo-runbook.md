@@ -62,7 +62,10 @@ only for credential files. Its output is a fixed eight-check schema containing
 only check IDs, pass/fail status, and allowlisted reason codes. The existing
 health wrapper sanitizes that schema and applies the same three-consecutive-run
 notification threshold and single recovery notification, so transient link or
-boot convergence does not flap alerts.
+boot convergence does not flap alerts. The probe requires its own systemd unit
+to remain loaded but does not treat that unit's previous `Result` as current
+evidence; otherwise one failed run could self-latch forever. Alert and PCAP
+service results remain independent readiness inputs.
 
 Run it without touching downstream evidence systems:
 

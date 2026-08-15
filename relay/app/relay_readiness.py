@@ -213,27 +213,40 @@ def _timers_ready(run_command) -> bool:
     return True
 
 
+def _service_properties(result) -> dict[str, str]:
+    if result is None or result.returncode != 0:
+        return {}
+    properties = {}
+    for line in _decode(result.stdout, 256).splitlines():
+        name, separator, value = line.partition("=")
+        if separator and name in {"LoadState", "Result"}:
+            properties[name] = value
+    return properties
+
+
 def _services_ready(run_command) -> bool:
     for unit in SYSTEMD_SERVICES:
-        result = _completed(
-            run_command,
-            [
-                "/usr/bin/systemctl",
-                "show",
-                "--property=LoadState",
-                "--property=Result",
-                unit,
-            ],
+        properties = _service_properties(
+            _completed(
+                run_command,
+                [
+                    "/usr/bin/systemctl",
+                    "show",
+                    "--property=LoadState",
+                    "--property=Result",
+                    unit,
+                ],
+            )
         )
-        properties = {}
-        if result is not None:
-            for line in _decode(result.stdout, 256).splitlines():
-                name, separator, value = line.partition("=")
-                if separator and name in {"LoadState", "Result"}:
-                    properties[name] = value
-        if result is None or result.returncode != 0 or properties.get("LoadState") != "loaded":
+        if properties.get("LoadState") != "loaded":
             return False
-        if properties.get("Result", "") not in {"", "success"}:
+        # The readiness probe runs inside so-storage-health.service. Its prior
+        # failed Result must not make recovery impossible; the wrapper's own
+        # debounced state proves failure/recovery for this component.
+        if (
+            unit != "so-storage-health.service"
+            and properties.get("Result", "") not in {"", "success"}
+        ):
             return False
     return True
 
