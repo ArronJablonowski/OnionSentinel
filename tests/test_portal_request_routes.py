@@ -61,7 +61,8 @@ class PortalRequestRouteTests(unittest.TestCase):
     def test_exact_form_and_json_routes_are_acceptlisted(self) -> None:
         paths = (
             "/admin/login", "/admin/logout", "/admin/action",
-            "/api/admin/start-service", "/api/soc-alerts/status",
+            "/api/admin/start-service", "/api/ac-hunter/refresh",
+            "/api/soc-alerts/status",
             "/api/soc-settings/ai-model", "/api/soc-settings/agent-model",
             "/api/resource-library/remove", "/api/resource-library/tags",
             "/api/resource-library/rename", "/api/resource-library/favorite",

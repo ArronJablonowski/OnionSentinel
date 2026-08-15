@@ -36,6 +36,8 @@ class PortalAccessPolicyTests(unittest.TestCase):
             "portal_session_principal.py",
             "portal_admin_audit_chain.py",
             "portal_admin_audit_store.py",
+            "portal_access_observer.py",
+            "portal_access_observer_runtime.py",
         ):
             with self.subTest(name=name):
                 self.assertIn(
@@ -106,6 +108,7 @@ class PortalAccessPolicyTests(unittest.TestCase):
             "/admin/logout": "session.logout",
             "/admin/action": "privileged-action.execute",
             "/api/admin/start-service": "integration.manage",
+            "/api/ac-hunter/refresh": "integration.manage",
             "/api/soc-alerts/status": "incident.status",
             "/api/soc-settings/ai-model": "settings.manage",
             "/api/soc-settings/agent-model": "settings.manage",
