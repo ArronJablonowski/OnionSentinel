@@ -261,24 +261,53 @@ class HumanSessionRuntime:
         now_timestamp: int,
         activity_authorized: bool = True,
     ) -> SessionObservation:
+        return self._resolve_session(
+            session_id,
+            csrf_value=csrf_value,
+            now_timestamp=now_timestamp,
+            activity_authorized=activity_authorized,
+            csrf_required=True,
+        )
+
+    def resolve_read_session(
+        self,
+        session_id: str,
+        *,
+        now_timestamp: int,
+    ) -> SessionObservation:
+        """Resolve and touch an authenticated read without requiring CSRF."""
+        return self._resolve_session(
+            session_id,
+            csrf_value=None,
+            now_timestamp=now_timestamp,
+            activity_authorized=True,
+            csrf_required=False,
+        )
+
+    def _resolve_session(
+        self,
+        session_id: str,
+        *,
+        csrf_value: object,
+        now_timestamp: int,
+        activity_authorized: bool,
+        csrf_required: bool,
+    ) -> SessionObservation:
         if not self.enabled:
             return SessionObservation(None, False, "observation_disabled")
         if not session_id:
             return SessionObservation(None, False, "session_missing")
         try:
-            record = self._load_record(self.store_path, session_id)
-            if record is None:
-                return SessionObservation(None, False, "session_missing")
-            decision = session_decision(
-                record,
-                now_timestamp=now_timestamp,
-                expected_policy_generation=self.policy_generation,
+            current = self._load_current_session(
+                session_id, now_timestamp
             )
-            if not decision.authorized:
-                self._remove_invalid(session_id)
-                return SessionObservation(None, False, decision.reason)
+            if isinstance(current, SessionObservation):
+                return current
+            record, decision = current
             csrf_ok = csrf_authorized(csrf_value, record)
-            if self.enforcing and (not activity_authorized or not csrf_ok):
+            if self.enforcing and (
+                not activity_authorized or (csrf_required and not csrf_ok)
+            ):
                 return SessionObservation(
                     decision.principal, csrf_ok, decision.reason
                 )
@@ -296,6 +325,25 @@ class HumanSessionRuntime:
         with self._lock:
             self._resolved_count += 1
         return SessionObservation(decision.principal, csrf_ok, decision.reason)
+
+    def _load_current_session(
+        self,
+        session_id: str,
+        now_timestamp: int,
+    ) -> tuple[dict[str, object], object] | SessionObservation:
+        record = self._load_record(self.store_path, session_id)
+        if record is None:
+            return SessionObservation(None, False, "session_missing")
+        decision = session_decision(
+            record,
+            now_timestamp=now_timestamp,
+            expected_policy_generation=self.policy_generation,
+        )
+        if not decision.authorized:
+            self._remove_invalid(session_id)
+            return SessionObservation(None, False, decision.reason)
+        assert isinstance(record, dict)
+        return record, decision
 
     def destroy_session(self, session_id: str) -> bool:
         if not self.enabled or not session_id:

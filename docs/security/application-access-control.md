@@ -30,6 +30,11 @@ database authority.
 The canonical machine-readable names and route mapping live in
 `onion-sentinel-dashboard/portal_access_policy.py`. Adding an unsafe route
 without adding exactly one permission mapping is a release-gate failure.
+In `rbac-enforce`, the dedicated server also applies `evidence.view` to every
+known static dashboard, SOC API, and evidence GET/HEAD route. Health and the
+sign-in bootstrap remain public; Administration status and application logs
+remain Administrator-only. Unknown routes retain 404 and cannot become an
+authentication oracle.
 
 ## Browser session contract
 
@@ -47,6 +52,11 @@ cookie. Login rotates the session identifier. Logout, expiry, password reset,
 role change, recovery, and enforcement-mode rollback revoke affected sessions.
 Absolute and idle timeouts are enforced server-side; client clocks are not
 trusted.
+
+An admitted safe read resolves the same versioned principal and extends idle
+expiry with the same compare-and-swap ownership check. It does not require or
+consume the CSRF value. Unsafe requests continue to require CSRF and do not
+extend idle expiry when origin or CSRF authorization fails.
 
 The observe bridge stores target records in
 `$HOME/n8n-local/admin-state/.human_sessions.json`. The parent is owner-owned
@@ -117,6 +127,10 @@ runtime file represented by `file:mac-admin-audit-signing-key`. Startup verifies
 retained chain and fails closed for enforcement if the ledger is malformed or
 the head cannot be verified. Rotation creates an explicit signed key-transition
 event. Retention exports preserve a verified head receipt before pruning.
+Evidence reads are intentionally excluded from this administrative-change
+ledger so high-volume access cannot record evidence identifiers or crowd out
+change custody; application request logging retains its existing bounded,
+redacted operational metadata.
 
 ## Service identities
 
@@ -152,12 +166,14 @@ gate even after source qualification.
    service-offline restart. JSON clients receive bounded 401/403/503 responses,
    and the dashboard redirects authentication failures or displays a no-change
    banner.
-4. `rbac-enforce`: enforce the canonical role mapping for every unsafe browser
-   route. No legacy unauthenticated mutation remains. The initial local PBKDF2
-   credential issues only the fixed `local-administrator` principal; it cannot
-   accept a browser-supplied role. Viewer or Analyst issuance requires a
-   separately qualified trusted identity owner, while retained records for
-   those roles are already validated and enforced by the session boundary.
+4. `rbac-enforce`: require `evidence.view` for every known static dashboard,
+   SOC API, and evidence GET/HEAD route, then enforce the canonical role mapping
+   for every unsafe browser route. No legacy unauthenticated evidence read or
+   mutation remains. The initial local PBKDF2 credential issues only the fixed
+   `local-administrator` principal; it cannot accept a browser-supplied role.
+   Viewer or Analyst issuance requires a separately qualified trusted identity
+   owner, while retained records for those roles are already validated and
+   enforced by the session boundary.
 
 Observe mode requires the operator-created file
 `$HOME/n8n-local/config/onion-sentinel-admin-audit-signing.key` to be a regular,

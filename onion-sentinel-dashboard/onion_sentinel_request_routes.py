@@ -20,28 +20,58 @@ def _admin_authenticated(handler: object, c: ModuleType) -> bool:
     return bool(handler._admin_authenticated())
 
 
+def _read_authenticated(handler: object, c: ModuleType) -> bool:
+    access_runtime = getattr(c, "ACCESS_RUNTIME", None)
+    authenticate = getattr(access_runtime, "read_authenticated", None)
+    return True if not callable(authenticate) else bool(authenticate(handler))
+
+
+def _read_denial(handler: object, *, json_request: bool) -> object:
+    if json_request:
+        return _json_response(
+            handler,
+            HTTPStatus.UNAUTHORIZED,
+            {
+                "ok": False,
+                "authentication_required": True,
+                "error": "Sign-in is required to view evidence.",
+            },
+        )
+    return handler._redirect("/admin/login")
+
+
 def do_head(handler: object, c: ModuleType) -> None:
     path = urlparse(handler.path).path
     if c.CONTROLLED_EVALUATION_MODE and handler.path != "/healthz":
         handler.send_response(HTTPStatus.FORBIDDEN)
         handler.end_headers()
         return
+    target = c.resolve_dashboard_target(handler.dashboard_root, handler.path)
+    status = _head_status(handler, c, path, target)
+    if status != HTTPStatus.NOT_FOUND:
+        return _send_head(handler, status)
+    handler.send_response(HTTPStatus.NOT_FOUND)
+    handler.end_headers()
+
+
+def _head_status(
+    handler: object,
+    c: ModuleType,
+    path: str,
+    target: object,
+) -> int:
     if c.is_application_log_get_api(path):
-        status = (
+        return (
             HTTPStatus.OK
             if _admin_authenticated(handler, c)
             else HTTPStatus.FORBIDDEN
         )
-        return _send_head(handler, status)
-    target = c.resolve_dashboard_target(handler.dashboard_root, handler.path)
-    if (
-        path in ("/healthz", "/admin", "/admin/login")
-        or c.is_soc_get_api(path)
-        or target
-    ):
-        return _send_head(handler, HTTPStatus.OK)
-    handler.send_response(HTTPStatus.NOT_FOUND)
-    handler.end_headers()
+    soc_read = c.is_soc_get_api(path)
+    if (soc_read or target is not None) and not _read_authenticated(handler, c):
+        return HTTPStatus.UNAUTHORIZED
+    if path in ("/healthz", "/admin", "/admin/login") or soc_read or target:
+        return HTTPStatus.OK
+    return HTTPStatus.NOT_FOUND
 
 
 def _send_head(handler: object, status: int) -> None:
@@ -64,16 +94,34 @@ def do_get(handler: object, c: ModuleType) -> None:
         )
     if path == "/healthz":
         return _health(handler, c)
+    return _dispatch_get(handler, c, parsed, path)
+
+
+def _dispatch_get(
+    handler: object,
+    c: ModuleType,
+    parsed: object,
+    path: str,
+) -> object:
     log_id = c.application_log_route_identifier(path)
     if path == c.APPLICATION_LOG_API_PATH or log_id is not None:
         return _application_logs(handler, c, parsed, log_id)
+    soc_read = c.is_soc_get_api(path)
+    if soc_read and not _read_authenticated(handler, c):
+        return _read_denial(handler, json_request=True)
     dedicated = _dedicated_get(handler, c, path)
     if dedicated is not _UNHANDLED:
         return dedicated
-    if c.is_soc_get_api(path):
+    if soc_read:
         return c.runtime.PortalHandler.do_GET(handler)
+    return _static_get(handler, c)
+
+
+def _static_get(handler: object, c: ModuleType) -> object:
     target = c.resolve_dashboard_target(handler.dashboard_root, handler.path)
     if target is not None:
+        if not _read_authenticated(handler, c):
+            return _read_denial(handler, json_request=False)
         return handler._serve_file(target)
     return handler._send(
         HTTPStatus.NOT_FOUND,

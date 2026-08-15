@@ -11,7 +11,7 @@ dependency.
 | --- | --- |
 | `onion_sentinel_server.py` | Dedicated port `8766` compatibility surface and bounded HTTP server/handler. |
 | `onion_sentinel_application.py` | CLI validation, controlled-evaluation admission, and service lifecycle composition. |
-| `onion_sentinel_access_adapter.py` | Dedicated-server observe/enforcement admission, pinned strict password record, audit precommit, denial, session, and safe-failure composition. |
+| `onion_sentinel_access_adapter.py` | Dedicated-server evidence/Admin read and unsafe-write admission, pinned strict password record, audit precommit, denial, session, and safe-failure composition. |
 | `onion_sentinel_auth_pages.py` | Pure sign-in/status rendering and session-CSRF logout bootstrap. |
 | `onion_sentinel_request_routes.py` | Exact HEAD/GET/POST dispatch, health, authentication, logs, static, and SOC adapters. |
 | `onion_sentinel_release.py` | Literal owner-only runtime release identity loading without evaluating secrets. |
@@ -27,7 +27,7 @@ dependency.
 | `portal_admin_audit_store.py` | Owner-only bounded, serialized, crash-safe audit-ledger persistence. |
 | `portal_session_principal.py` | Versioned human principal, expiry, policy-generation, and per-session CSRF contract. |
 | `portal_human_session_store.py` | Digest-keyed, owner-only, bounded, atomic target human-session persistence. |
-| `portal_human_session_runtime.py` | Legacy no-op plus observe/admin/RBAC session resolution, authorized touch, revocation, and CSRF cookie policy. |
+| `portal_human_session_runtime.py` | Legacy no-op plus observe/admin/RBAC read/write session resolution, authorized touch, revocation, and CSRF cookie policy. |
 | `portal_admin_recovery.py` | Owner-only password-record replacement and complete legacy/versioned human-session revocation. |
 | `portal_admin_recovery_cli.py` | Service-offline confirmation, secret-safe password prompting, and bounded recovery result projection. |
 | `recover-admin-access.py` | Thin local operator entry point for administrator recovery. |

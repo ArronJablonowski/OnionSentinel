@@ -12,7 +12,8 @@ from portal_human_session_runtime import (
     load_human_session_runtime,
 )
 from portal_access_observer_runtime import load_access_observer_runtime
-from portal_access_policy import ROLE_ADMINISTRATOR
+from portal_access_enforcement import MODE_RBAC_ENFORCE
+from portal_access_policy import ROLE_ADMINISTRATOR, is_authorized
 from portal_admin_session_store import (
     load_enforcement_admin_password_record,
     validate_admin_session_store,
@@ -408,25 +409,43 @@ class DedicatedAccessRuntime:
     def admin_authenticated(self, handler: Any) -> bool:
         if not self.session_required:
             return bool(handler._admin_authenticated())
-        try:
-            observation = _resolve_human_session(
-                handler,
-                runtime=self.runtime,
-                session_runtime=self.sessions,
-                activity_authorized=False,
-            )
-        except Exception as exc:
-            _record_session_failure(self.sessions, exc)
-            return False
-        principal = getattr(observation, "principal", None)
+        principal = self._read_principal(handler)
         return bool(
             principal is not None
             and getattr(principal, "role", "") == ROLE_ADMINISTRATOR
         )
 
+    def read_authenticated(self, handler: Any) -> bool:
+        if not self.read_session_required:
+            return True
+        principal = self._read_principal(handler)
+        return bool(
+            principal is not None
+            and is_authorized(
+                principal_kind=getattr(principal, "principal_kind", ""),
+                role=getattr(principal, "role", ""),
+                permission="evidence.view",
+            )
+        )
+
+    def _read_principal(self, handler: Any) -> Any:
+        try:
+            observation = self.sessions.resolve_read_session(
+                handler._admin_session_id(),
+                now_timestamp=int(self.runtime.time.time()),
+            )
+        except Exception as exc:
+            _record_session_failure(self.sessions, exc)
+            return None
+        return getattr(observation, "principal", None)
+
     @property
     def session_required(self) -> bool:
         return bool(getattr(self.sessions, "enforcing", False))
+
+    @property
+    def read_session_required(self) -> bool:
+        return getattr(self.sessions, "mode", "") == MODE_RBAC_ENFORCE
 
 
 def build_access_runtime(

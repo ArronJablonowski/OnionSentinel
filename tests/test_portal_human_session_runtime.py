@@ -156,6 +156,15 @@ class PortalHumanSessionRuntimeTests(unittest.TestCase):
             replacements[0]["replacement"]["last_activity_at"], 1_100
         )
 
+        service._replace_record = lambda *_args, **_kwargs: False
+        conflict = service.resolve_read_session(
+            "session-" + "s" * 36,
+            now_timestamp=1_101,
+        )
+        self.assertIsNone(conflict.principal)
+        self.assertFalse(conflict.csrf_authorized)
+        self.assertEqual(conflict.reason, "session_touch_conflict")
+
     def test_forward_mode_promotion_invalidates_the_prior_session_generation(self):
         record = runtime.create_session_bundle(
             principal_id="local-administrator",

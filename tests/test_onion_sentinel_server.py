@@ -440,7 +440,7 @@ class OnionSentinelServerTests(unittest.TestCase):
         )
         sessions = SimpleNamespace(
             enforcing=True,
-            resolve_session=mock.Mock(return_value=SimpleNamespace(
+            resolve_read_session=mock.Mock(return_value=SimpleNamespace(
                 principal=None,
                 csrf_authorized=False,
                 reason="policy_generation_mismatch",
@@ -480,6 +480,16 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertTrue(access.read_authenticated(handler))
         self.assertFalse(access.admin_authenticated(handler))
         self.assertEqual(sessions.resolve_read_session.call_count, 2)
+
+        observation.principal = principal_module.HumanPrincipal(
+            "service_identity", "service-1", "administrator"
+        )
+        self.assertFalse(access.read_authenticated(handler))
+
+        sessions.mode = "admin-enforce"
+        sessions.resolve_read_session.reset_mock()
+        self.assertTrue(access.read_authenticated(handler))
+        sessions.resolve_read_session.assert_not_called()
 
     def test_admin_logout_bootstrap_sends_the_session_csrf_header(self):
         rendered = server.render_admin_status().decode("utf-8")
