@@ -15,6 +15,7 @@ from portal_access_enforcement import (
     MODE_RBAC_ENFORCE,
     parse_mode,
 )
+from portal_access_policy import HUMAN_PRINCIPAL_KIND
 from portal_human_session_store import (
     delete_session_record,
     load_session_record,
@@ -196,6 +197,7 @@ class HumanSessionRuntime:
         self,
         session_id: str,
         *,
+        principal: HumanPrincipal | None = None,
         client_identity: object,
         now_timestamp: int,
         new_token: Callable[[], str],
@@ -203,11 +205,20 @@ class HumanSessionRuntime:
         if not self.enabled:
             return None
         try:
+            selected_principal = principal or HumanPrincipal(
+                HUMAN_PRINCIPAL_KIND,
+                "local-administrator",
+                "administrator",
+            )
+            if selected_principal.principal_kind != HUMAN_PRINCIPAL_KIND:
+                raise HumanSessionConfigurationError(
+                    "human-session principal kind is invalid"
+                )
             csrf_token = new_token()
             values = iter((session_id, csrf_token))
             bundle = create_session_bundle(
-                principal_id="local-administrator",
-                role="administrator",
+                principal_id=selected_principal.principal_id,
+                role=selected_principal.role,
                 now_timestamp=now_timestamp,
                 absolute_ttl_seconds=self.absolute_ttl_seconds,
                 idle_ttl_seconds=self.idle_ttl_seconds,
@@ -372,6 +383,7 @@ def load_human_session_runtime(
     mode: str,
     home: Path,
     failure_sink: Callable[[str], object] | None = None,
+    policy_generation: int | None = None,
 ) -> HumanSessionRuntime:
     try:
         selected_mode = parse_mode(mode)
@@ -394,6 +406,7 @@ def load_human_session_runtime(
     return HumanSessionRuntime(
         mode=selected_mode,
         store_path=path,
+        policy_generation=policy_generation,
         failure_sink=failure_sink,
     )
 

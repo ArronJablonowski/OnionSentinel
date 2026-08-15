@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from http import HTTPStatus
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 
@@ -24,6 +24,16 @@ def _read_authenticated(handler: object, c: ModuleType) -> bool:
     access_runtime = getattr(c, "ACCESS_RUNTIME", None)
     authenticate = getattr(access_runtime, "read_authenticated", None)
     return True if not callable(authenticate) else bool(authenticate(handler))
+
+
+def _current_principal(handler: object, c: ModuleType) -> object | None:
+    access_runtime = getattr(c, "ACCESS_RUNTIME", None)
+    resolve = getattr(access_runtime, "current_principal", None)
+    if callable(resolve):
+        return resolve(handler)
+    if _admin_authenticated(handler, c):
+        return SimpleNamespace(role="administrator")
+    return None
 
 
 def _read_denial(handler: object, *, json_request: bool) -> object:
@@ -60,18 +70,33 @@ def _head_status(
     path: str,
     target: object,
 ) -> int:
-    if c.is_application_log_get_api(path):
-        return (
-            HTTPStatus.OK
-            if _admin_authenticated(handler, c)
-            else HTTPStatus.FORBIDDEN
-        )
+    dedicated_status = _dedicated_head_status(handler, c, path)
+    if dedicated_status is not None:
+        return dedicated_status
     soc_read = c.is_soc_get_api(path)
     if (soc_read or target is not None) and not _read_authenticated(handler, c):
         return HTTPStatus.UNAUTHORIZED
     if path in ("/healthz", "/admin", "/admin/login") or soc_read or target:
         return HTTPStatus.OK
     return HTTPStatus.NOT_FOUND
+
+
+def _dedicated_head_status(
+    handler: object,
+    c: ModuleType,
+    path: str,
+) -> int | None:
+    if c.is_application_log_get_api(path):
+        return (
+            HTTPStatus.OK
+            if _admin_authenticated(handler, c)
+            else HTTPStatus.FORBIDDEN
+        )
+    if path == "/session" and _current_principal(handler, c) is None:
+        return HTTPStatus.UNAUTHORIZED
+    if path == "/session":
+        return HTTPStatus.OK
+    return None
 
 
 def _send_head(handler: object, status: int) -> None:
@@ -137,9 +162,23 @@ def _dedicated_get(handler: object, c: ModuleType, path: str) -> object:
         )
         return _json_response(handler, status, data, indent=2)
     if path == "/admin/login":
-        if _admin_authenticated(handler, c):
+        principal = _current_principal(handler, c)
+        if getattr(principal, "role", "") == "administrator":
             return handler._redirect("/admin")
+        if principal is not None:
+            return handler._send(
+                HTTPStatus.OK,
+                c.render_session_status(getattr(principal, "role", "")),
+            )
         return handler._send(HTTPStatus.OK, c.render_login())
+    if path == "/session":
+        principal = _current_principal(handler, c)
+        if principal is None:
+            return handler._redirect("/admin/login")
+        return handler._send(
+            HTTPStatus.OK,
+            c.render_session_status(getattr(principal, "role", "")),
+        )
     if path == "/admin":
         if not _admin_authenticated(handler, c):
             return handler._redirect("/admin/login")
@@ -372,13 +411,21 @@ def _admin_login_post(
                 True,
             ),
         )
-    if not c.ACCESS_RUNTIME.verify_password(form.get("password", [""])[0]):
+    principal = c.ACCESS_RUNTIME.authenticate(
+        form.get("username", [""])[0],
+        form.get("password", [""])[0],
+    )
+    if principal is None:
         return handler._send(
             HTTPStatus.UNAUTHORIZED,
-            c.render_login("Invalid password.", True),
+            c.render_login("Invalid username or password.", True),
         )
-    session_id = c.runtime.create_admin_session(handler.client_address[0])
-    csrf_token = c.ACCESS_RUNTIME.create_session(handler, session_id)
+    session_id = c.ACCESS_RUNTIME.create_browser_session_id(
+        handler, principal
+    )
+    csrf_token = c.ACCESS_RUNTIME.create_session(
+        handler, session_id, principal
+    )
     if getattr(c.ACCESS_RUNTIME, "session_required", False) and csrf_token is None:
         c.runtime.destroy_admin_session(session_id)
         return handler._send(
@@ -388,7 +435,11 @@ def _admin_login_post(
             ),
         )
     return handler._redirect(
-        "/admin",
+        (
+            "/admin"
+            if getattr(principal, "role", "") == "administrator"
+            else "/session"
+        ),
         {"Set-Cookie": c.ACCESS_RUNTIME.login_cookie_headers(
             session_id, csrf_token
         )},

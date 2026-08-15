@@ -49,6 +49,7 @@ class DashboardGetDispatchTests(unittest.TestCase):
                 )
             ),
             render_login=lambda: b"login",
+            render_session_status=lambda role: f"session:{role}".encode(),
             render_admin_status=lambda: b"admin",
             is_soc_get_api=lambda path: path in {
                 "/api/ac-hunter/deep-review",
@@ -147,6 +148,26 @@ class DashboardGetDispatchTests(unittest.TestCase):
         self.assertEqual(routes.do_get(handler, context), "redirect")
         self.assertEqual(events, [("redirect", "/admin/login")])
 
+    def test_delegated_session_page_exposes_logout_without_admin_access(self):
+        handler, events = self.handler("/session")
+        context = self.context(events)
+        viewer = SimpleNamespace(role="viewer")
+        context.ACCESS_RUNTIME = SimpleNamespace(
+            current_principal=lambda _handler: viewer,
+            admin_authenticated=lambda _handler: False,
+        )
+        self.assertEqual(routes.do_get(handler, context), "send")
+        self.assertEqual(events, [("send", 200, b"session:viewer")])
+
+        handler, events = self.handler("/admin")
+        context = self.context(events)
+        context.ACCESS_RUNTIME = SimpleNamespace(
+            current_principal=lambda _handler: viewer,
+            admin_authenticated=lambda _handler: False,
+        )
+        self.assertEqual(routes.do_get(handler, context), "redirect")
+        self.assertEqual(events, [("redirect", "/admin/login")])
+
     def test_rbac_read_denies_evidence_before_api_or_static_dispatch(self):
         for path, expected, blocked_event in (
             ("/api/soc-alerts", "json", ("soc", "/api/soc-alerts")),
@@ -208,6 +229,23 @@ class DashboardGetDispatchTests(unittest.TestCase):
                 routes.do_head(handler, context)
                 self.assertEqual(events[0], ("status", expected))
 
+        events = []
+        handler = SimpleNamespace(
+            path="/session",
+            dashboard_root=Path("/dashboard"),
+            send_response=lambda status: events.append(("status", status)),
+            send_header=lambda key, value: events.append(("header", key, value)),
+            end_headers=lambda: events.append(("end",)),
+            _security_headers=lambda: {},
+            _admin_authenticated=lambda: False,
+        )
+        context = self.context(events)
+        context.ACCESS_RUNTIME = SimpleNamespace(
+            current_principal=lambda _handler: None,
+        )
+        routes.do_head(handler, context)
+        self.assertEqual(events[0], ("status", 401))
+
 
 class DedicatedAdminSessionBridgeTests(unittest.TestCase):
     @staticmethod
@@ -248,11 +286,29 @@ class DedicatedAdminSessionBridgeTests(unittest.TestCase):
             password_configured=lambda: (
                 events.append(("password-configured",)) or True
             ),
-            verify_password=lambda password: (
-                events.append(("verify-password", password)) or True
+            authenticate=lambda username, password: (
+                events.append(("authenticate", username, password))
+                or SimpleNamespace(
+                    principal_kind="human_session",
+                    principal_id="local-administrator",
+                    role="administrator",
+                )
             ),
-            create_session=lambda handler, session_id: (
-                events.append(("create-target", session_id)) or "csrf-token"
+            create_browser_session_id=lambda handler, principal: (
+                events.append(
+                    (
+                        "create-browser-session",
+                        handler.client_address[0],
+                        principal.role,
+                    )
+                )
+                or "legacy-session"
+            ),
+            create_session=lambda handler, session_id, principal: (
+                events.append(
+                    ("create-target", session_id, principal.principal_id, principal.role)
+                )
+                or "csrf-token"
             ),
             destroy_session=lambda session_id: events.append(
                 ("destroy-target", session_id)
@@ -285,9 +341,18 @@ class DedicatedAdminSessionBridgeTests(unittest.TestCase):
             [
                 ("validate-form-token",),
                 ("password-configured",),
-                ("verify-password", "secret"),
-                ("create-legacy", "127.0.0.1"),
-                ("create-target", "legacy-session"),
+                ("authenticate", "", "secret"),
+                (
+                    "create-browser-session",
+                    "127.0.0.1",
+                    "administrator",
+                ),
+                (
+                    "create-target",
+                    "legacy-session",
+                    "local-administrator",
+                    "administrator",
+                ),
                 ("login-cookies", "legacy-session", "csrf-token"),
                 (
                     "redirect",
@@ -330,7 +395,7 @@ class DedicatedAdminSessionBridgeTests(unittest.TestCase):
         handler, events = self.handler(b"token=form-token&password=secret")
         context = self.context(events)
         context.ACCESS_RUNTIME.session_required = True
-        context.ACCESS_RUNTIME.create_session = lambda _handler, session_id: (
+        context.ACCESS_RUNTIME.create_session = lambda _handler, session_id, _principal: (
             events.append(("create-target-failed", session_id)) or None
         )
 
@@ -346,6 +411,34 @@ class DedicatedAdminSessionBridgeTests(unittest.TestCase):
                 ("send", 503, b"login"),
             ],
         )
+
+    def test_delegated_login_redirects_to_evidence_and_ignores_browser_role(self):
+        handler, events = self.handler(
+            b"token=form-token&username=viewer.one&password=secret&role=administrator"
+        )
+        context = self.context(events)
+        viewer = SimpleNamespace(
+            principal_kind="human_session",
+            principal_id="viewer-1",
+            role="viewer",
+        )
+        context.ACCESS_RUNTIME.authenticate = lambda username, password: (
+            events.append(("authenticate", username, password)) or viewer
+        )
+
+        self.assertEqual(
+            routes._admin_post(handler, context, "/admin/login"),
+            "redirect",
+        )
+        self.assertIn(("authenticate", "viewer.one", "secret"), events)
+        self.assertIn(
+            ("create-browser-session", "127.0.0.1", "viewer"), events
+        )
+        self.assertIn(
+            ("create-target", "legacy-session", "viewer-1", "viewer"),
+            events,
+        )
+        self.assertEqual(events[-1][0:2], ("redirect", "/session"))
 
     def test_access_denial_has_stable_json_and_form_responses(self):
         handler, events = self.handler(b"")

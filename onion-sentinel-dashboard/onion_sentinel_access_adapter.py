@@ -13,12 +13,23 @@ from portal_human_session_runtime import (
 )
 from portal_access_observer_runtime import load_access_observer_runtime
 from portal_access_enforcement import MODE_RBAC_ENFORCE
-from portal_access_policy import ROLE_ADMINISTRATOR, is_authorized
+from portal_access_policy import (
+    HUMAN_PRINCIPAL_KIND,
+    ROLE_ADMINISTRATOR,
+    is_authorized,
+)
 from portal_admin_session_store import (
     load_enforcement_admin_password_record,
     validate_admin_session_store,
     verify_admin_password,
 )
+from portal_human_identity_store import (
+    HumanIdentityStore,
+    authenticate_human_identity,
+    empty_human_identity_store,
+    load_enforcement_human_identity_store,
+)
+from portal_session_principal import HumanPrincipal
 
 
 @dataclass(frozen=True)
@@ -80,6 +91,7 @@ def build_human_session_runtime(
     mode: str,
     home: Path,
     application_logger: Any,
+    policy_generation: int | None = None,
 ) -> Any:
     def failure_sink(error_type: str) -> None:
         application_logger.log(
@@ -92,6 +104,7 @@ def build_human_session_runtime(
         mode=mode,
         home=home,
         failure_sink=failure_sink,
+        policy_generation=policy_generation,
     )
 
 
@@ -106,12 +119,14 @@ def create_human_session(
     handler: Any,
     session_id: str,
     *,
+    principal: HumanPrincipal | None = None,
     runtime: Any,
     session_runtime: Any,
 ) -> str | None:
     try:
         return session_runtime.create_session(
             session_id,
+            principal=principal,
             client_identity=handler.client_address[0],
             now_timestamp=int(runtime.time.time()),
             new_token=lambda: runtime.secrets.token_urlsafe(32),
@@ -338,6 +353,7 @@ class DedicatedAccessRuntime:
         observer: Any,
         sessions: Any,
         password_record: Mapping[str, object] | None = None,
+        identity_store: HumanIdentityStore | None = None,
     ) -> None:
         self.runtime = runtime
         self.observer = observer
@@ -345,6 +361,7 @@ class DedicatedAccessRuntime:
         self._password_record = (
             dict(password_record) if password_record is not None else None
         )
+        self._identity_store = identity_store or empty_human_identity_store()
 
     def begin(
         self, handler: Any, path: str, *, controlled_evaluation: bool
@@ -366,13 +383,31 @@ class DedicatedAccessRuntime:
             observer=self.observer,
         )
 
-    def create_session(self, handler: Any, session_id: str) -> str | None:
+    def create_session(
+        self,
+        handler: Any,
+        session_id: str,
+        principal: HumanPrincipal | None = None,
+    ) -> str | None:
         return create_human_session(
             handler,
             session_id,
+            principal=principal,
             runtime=self.runtime,
             session_runtime=self.sessions,
         )
+
+    def create_browser_session_id(
+        self,
+        handler: Any,
+        principal: HumanPrincipal,
+    ) -> str:
+        """Retain legacy admin state only for the local Administrator."""
+        if principal.role == ROLE_ADMINISTRATOR:
+            return self.runtime.create_admin_session(
+                handler.client_address[0]
+            )
+        return self.runtime.secrets.token_urlsafe(32)
 
     def destroy_session(self, session_id: str) -> bool:
         return destroy_human_session(
@@ -402,23 +437,64 @@ class DedicatedAccessRuntime:
         return bool(self.runtime.admin_password_configured())
 
     def verify_password(self, password: str) -> bool:
-        if self.session_required:
-            return verify_admin_password(password, self._password_record)
-        return bool(self.runtime.verify_admin_password(password))
+        return self.authenticate("", password) is not None
+
+    def authenticate(
+        self,
+        username: object,
+        password: object,
+    ) -> HumanPrincipal | None:
+        """Map exact server-owned credentials to one trusted principal."""
+        selected_username = username if isinstance(username, str) else ""
+        if selected_username in {"", "local-administrator"}:
+            if self.session_required:
+                authorized = verify_admin_password(
+                    password if isinstance(password, str) else "",
+                    self._password_record,
+                )
+            else:
+                authorized = bool(
+                    self.runtime.verify_admin_password(
+                        password if isinstance(password, str) else ""
+                    )
+                )
+            if authorized:
+                return HumanPrincipal(
+                    HUMAN_PRINCIPAL_KIND,
+                    "local-administrator",
+                    ROLE_ADMINISTRATOR,
+                )
+            return None
+        if not self.read_session_required:
+            return None
+        return authenticate_human_identity(
+            selected_username,
+            password,
+            self._identity_store,
+        )
 
     def admin_authenticated(self, handler: Any) -> bool:
-        if not self.session_required:
-            return bool(handler._admin_authenticated())
-        principal = self._read_principal(handler)
+        principal = self.current_principal(handler)
         return bool(
             principal is not None
             and getattr(principal, "role", "") == ROLE_ADMINISTRATOR
         )
 
+    def current_principal(self, handler: Any) -> HumanPrincipal | None:
+        if not self.session_required:
+            if not handler._admin_authenticated():
+                return None
+            return HumanPrincipal(
+                HUMAN_PRINCIPAL_KIND,
+                "local-administrator",
+                ROLE_ADMINISTRATOR,
+            )
+        return self._read_principal(handler)
+
     def read_authenticated(self, handler: Any) -> bool:
         if not self.read_session_required:
             return True
-        principal = self._read_principal(handler)
+        principal = self.current_principal(handler)
         return bool(
             principal is not None
             and is_authorized(
@@ -461,6 +537,8 @@ def build_access_runtime(
         application_logger=application_logger,
     )
     password_record = None
+    identity_store = empty_human_identity_store()
+    session_policy_generation = None
     if bool(getattr(observer, "enforcing", False)):
         stack_dir = Path(home) / "n8n-local"
         password_record = load_enforcement_admin_password_record(
@@ -470,16 +548,23 @@ def build_access_runtime(
             stack_dir / "admin-state",
             stack_dir / "admin-state/.admin_sessions.json",
         )
+        if getattr(observer, "mode", "") == MODE_RBAC_ENFORCE:
+            identity_store = load_enforcement_human_identity_store(
+                stack_dir / "config/onion-sentinel-human-identities.json"
+            )
+            session_policy_generation = 3 + identity_store.generation
     sessions = build_human_session_runtime(
         mode=observer.mode,
         home=home,
         application_logger=application_logger,
+        policy_generation=session_policy_generation,
     )
     return DedicatedAccessRuntime(
         runtime=runtime,
         observer=observer,
         sessions=sessions,
         password_record=password_record,
+        identity_store=identity_store,
     )
 
 

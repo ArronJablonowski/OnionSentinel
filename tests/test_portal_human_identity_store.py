@@ -115,6 +115,14 @@ class PortalHumanIdentityStoreTests(unittest.TestCase):
             ],
             [
                 {
+                    "username": "local-administrator",
+                    "principal_id": "viewer-1",
+                    "role": "viewer",
+                    "password": password_record("password password"),
+                }
+            ],
+            [
+                {
                     "username": "duplicate",
                     "principal_id": "viewer-1",
                     "role": "viewer",

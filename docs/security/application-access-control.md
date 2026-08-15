@@ -38,8 +38,13 @@ authentication oracle.
 
 ## Browser session contract
 
-The existing owner-managed PBKDF2 password record remains the initial login
-credential. A successful login creates a random opaque session ID; only its
+The existing owner-managed PBKDF2 Administrator password record remains the
+password-only compatibility login. In `rbac-enforce`, the optional owner-only
+`config/onion-sentinel-human-identities.json` store maps an exact lowercase
+username to one stable principal ID and either the Viewer or Analyst role. The
+browser never submits a role, and the delegated store cannot define an
+Administrator or reuse the reserved `local-administrator` identity. A
+successful login creates a random opaque session ID; only its
 digest is stored server-side. The target session record adds a schema version,
 immutable principal ID, role, issued time, absolute expiry, idle expiry, last
 activity time, and a digest of a per-session CSRF secret. Raw session and CSRF
@@ -49,7 +54,8 @@ Session cookies are `HttpOnly`, `SameSite=Strict`, and `Path=/`. `Secure` is
 mandatory when TLS terminates at Onion Sentinel or a trusted local proxy; a
 deployment may not advertise a secure remote origin while issuing a non-Secure
 cookie. Login rotates the session identifier. Logout, expiry, password reset,
-role change, recovery, and enforcement-mode rollback revoke affected sessions.
+delegated-store generation change, role change, recovery, and enforcement-mode
+rollback revoke affected sessions.
 Absolute and idle timeouts are enforced server-side; client clocks are not
 trusted.
 
@@ -171,9 +177,10 @@ gate even after source qualification.
    for every unsafe browser route. No legacy unauthenticated evidence read or
    mutation remains. The initial local PBKDF2 credential issues only the fixed
    `local-administrator` principal; it cannot accept a browser-supplied role.
-   Viewer or Analyst issuance requires a separately qualified trusted identity
-   owner, while retained records for those roles are already validated and
-   enforced by the session boundary.
+   The separately pinned owner-only identity store issues only exact Viewer or
+   Analyst principals. It has an explicit generation bound into the session
+   policy generation, so a service-offline identity or role update invalidates
+   every prior delegated session at restart.
 
 Observe mode requires the operator-created file
 `$HOME/n8n-local/config/onion-sentinel-admin-audit-signing.key` to be a regular,
@@ -225,3 +232,22 @@ no network recovery token, query parameter bypass, universal service token, or
 fail-open environment value. Rollback restores the prior qualified source and
 mode through the guarded installer without replacing the password record,
 audit key/ledger, service credentials, configuration, databases, or evidence.
+
+Delegated identity management is likewise local and service-offline. The
+deployed command prompts twice without echoing password material, writes only a
+salted PBKDF2 record beneath the owner/0700 configuration directory, atomically
+bumps the store generation, and prints only identity metadata:
+
+```sh
+/usr/bin/python3 "$HOME/n8n-local/onion-sentinel-dashboard/manage-human-identities.py" \
+  --stack-dir "$HOME/n8n-local" \
+  --confirm-service-stopped \
+  --set analyst.one \
+  --principal-id analyst-1 \
+  --role analyst
+```
+
+Use `--remove USERNAME` with the same stopped-service confirmation to revoke an
+identity. Restart is required after either operation. The command cannot create
+an Administrator, accept a browser role, print a digest or salt, or modify the
+legacy Administrator password, audit key/ledger, runtime data, or evidence.

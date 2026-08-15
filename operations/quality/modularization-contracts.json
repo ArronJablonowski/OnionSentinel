@@ -3180,6 +3180,46 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_human_identity_store.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_human_identity_store.py",
+      "required_symbols": [
+        "HumanIdentity",
+        "HumanIdentityConfigurationError",
+        "HumanIdentityStore",
+        "authenticate_human_identity",
+        "load_enforcement_human_identity_store",
+        "serialize_human_identity_store"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_human_identity_management.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_human_identity_management.py",
+      "required_symbols": [
+        "HumanIdentityManagementError",
+        "HumanIdentityManagementResult",
+        "remove_human_identity",
+        "set_human_identity"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_human_identity_cli.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_human_identity_cli.py",
+      "required_symbols": [
+        "main"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/manage-human-identities.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/manage-human-identities.py",
+      "required_symbols": [
+        "main"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_admin_recovery.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_admin_recovery.py",

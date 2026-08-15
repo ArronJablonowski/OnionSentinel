@@ -3560,8 +3560,8 @@ session ID nor a browser cookie.
 
 `portal_human_session_runtime.py` owns the exact legacy no-op plus opt-in
 observe, Administration-enforcement, and RBAC session bridge. In enabled modes it
-dual-writes a target Administrator session after the
-existing login succeeds, resolves and touches that record for write
+dual-writes a target session for the exact server-authenticated principal after
+the existing or delegated login succeeds, resolves and touches that record for write
 observation, compares the per-session CSRF value, revokes the target record on
 logout, and emits only type-level failure telemetry. Enforcement does not
 extend idle expiry on an origin or CSRF denial and fails closed on a lost touch
@@ -3572,6 +3572,18 @@ generations invalidate sessions on forward promotion. Legacy mode never reads
 or creates the target store. Unsafe
 retained custody fails enabled-mode startup; request-level observation failure
 cannot change the legacy or observe HTTP result.
+
+`portal_human_identity_store.py` owns the optional RBAC delegated-identity
+schema, bounded no-follow owner/0600 admission beneath an owner/0700 directory,
+unique username/principal mapping, Viewer/Analyst-only role boundary, strict
+PBKDF2 record validation, constant-work unknown-user verification, canonical
+serialization, and secret-free principal projection. It cannot define or
+replace the reserved local Administrator.
+`portal_human_identity_management.py` owns service-offline password policy,
+atomic set/remove commits, store-generation increments, and metadata-only
+results. `portal_human_identity_cli.py` owns stopped-service confirmation,
+double no-echo secret input, and bounded JSON/error output;
+`manage-human-identities.py` is its thin executable facade.
 
 `portal_admin_recovery.py` owns the service-offline administrator recovery
 transaction: it validates owner/0700 configuration and state directories plus
@@ -3623,7 +3635,9 @@ requires a durable metadata-only precommit receipt before body parsing.
 
 `onion_sentinel_access_adapter.py` owns the dedicated server's logger/runtime
 composition, strict enforcement password-record startup admission,
-process-lifetime password-hash pinning, legacy/target-session custody and
+process-lifetime Administrator and delegated password-hash pinning, trusted
+username-to-principal mapping, identity-generation session invalidation,
+legacy/target-session custody and
 login/logout bridge, `evidence.view` and Administrator read admission, pre-body
 principal/origin/CSRF resolution, bounded denial projection, audit precommit,
 and first-response finalize hooks. `onion_sentinel_request_routes.py` preserves

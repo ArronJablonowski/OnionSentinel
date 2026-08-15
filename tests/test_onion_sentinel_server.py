@@ -20,6 +20,7 @@ observer_runtime_module = importlib.import_module(
     "portal_access_observer_runtime"
 )
 principal_module = importlib.import_module("portal_session_principal")
+identity_module = importlib.import_module("portal_human_identity_store")
 
 
 class OnionSentinelServerTests(unittest.TestCase):
@@ -431,6 +432,116 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertTrue(access.verify_password(password))
         self.assertFalse(access.verify_password("wrong"))
 
+    def test_rbac_authentication_maps_named_identity_without_client_role_input(self):
+        viewer_password = "viewer password!"
+        salt = b"0123456789abcdef"
+        identity_store = identity_module.HumanIdentityStore(
+            7,
+            {
+                "viewer.one": identity_module.HumanIdentity(
+                    "viewer.one",
+                    "viewer-1",
+                    "viewer",
+                    {
+                        "algorithm": "pbkdf2_sha256",
+                        "iterations": 200_000,
+                        "salt": salt.hex(),
+                        "hash": hashlib.pbkdf2_hmac(
+                            "sha256",
+                            viewer_password.encode(),
+                            salt,
+                            200_000,
+                        ).hex(),
+                    },
+                )
+            },
+        )
+        access = server._access_adapter.DedicatedAccessRuntime(
+            runtime=SimpleNamespace(verify_admin_password=mock.Mock()),
+            observer=SimpleNamespace(),
+            sessions=SimpleNamespace(mode="rbac-enforce", enforcing=True),
+            password_record={},
+            identity_store=identity_store,
+        )
+        principal = access.authenticate("viewer.one", viewer_password)
+        self.assertEqual(
+            (principal.principal_id, principal.role), ("viewer-1", "viewer")
+        )
+        self.assertIsNone(access.authenticate("viewer.one", "wrong"))
+        self.assertIsNone(access.authenticate("unknown", viewer_password))
+        access.runtime.verify_admin_password.assert_not_called()
+
+    def test_delegated_session_id_never_creates_legacy_admin_state(self):
+        runtime = SimpleNamespace(
+            create_admin_session=mock.Mock(return_value="legacy-session"),
+            secrets=SimpleNamespace(
+                token_urlsafe=mock.Mock(return_value="delegated-session")
+            ),
+        )
+        access = server._access_adapter.DedicatedAccessRuntime(
+            runtime=runtime,
+            observer=SimpleNamespace(),
+            sessions=SimpleNamespace(),
+        )
+        handler = SimpleNamespace(client_address=("127.0.0.1", 41414))
+        viewer = principal_module.HumanPrincipal(
+            "human_session", "viewer-1", "viewer"
+        )
+        administrator = principal_module.HumanPrincipal(
+            "human_session", "local-administrator", "administrator"
+        )
+        self.assertEqual(
+            access.create_browser_session_id(handler, viewer),
+            "delegated-session",
+        )
+        runtime.create_admin_session.assert_not_called()
+        self.assertEqual(
+            access.create_browser_session_id(handler, administrator),
+            "legacy-session",
+        )
+        runtime.create_admin_session.assert_called_once_with("127.0.0.1")
+
+    def test_rbac_identity_generation_is_bound_to_new_sessions_at_startup(self):
+        observer = SimpleNamespace(mode="rbac-enforce", enforcing=True)
+        identity_store = identity_module.HumanIdentityStore(7, {})
+        sessions = SimpleNamespace(mode="rbac-enforce", enforcing=True)
+        with (
+            mock.patch.object(
+                server._access_adapter,
+                "build_access_observer",
+                return_value=observer,
+            ),
+            mock.patch.object(
+                server._access_adapter,
+                "load_enforcement_admin_password_record",
+                return_value={},
+            ),
+            mock.patch.object(
+                server._access_adapter, "validate_admin_session_store"
+            ),
+            mock.patch.object(
+                server._access_adapter,
+                "load_enforcement_human_identity_store",
+                return_value=identity_store,
+            ) as load_identities,
+            mock.patch.object(
+                server._access_adapter,
+                "build_human_session_runtime",
+                return_value=sessions,
+            ) as build_sessions,
+        ):
+            built = server._access_adapter.build_access_runtime(
+                environ={},
+                home=Path("/operator"),
+                application_logger=object(),
+                runtime=server.runtime,
+            )
+        load_identities.assert_called_once_with(
+            Path("/operator/n8n-local/config/onion-sentinel-human-identities.json")
+        )
+        self.assertEqual(build_sessions.call_args.kwargs["policy_generation"], 10)
+        self.assertIs(built._identity_store, identity_store)
+
     def test_enforcement_get_auth_never_trusts_only_the_legacy_cookie(self):
         handler = SimpleNamespace(
             headers=Message(),
@@ -497,6 +608,12 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertIn("X-Onion-Sentinel-CSRF", rendered)
         self.assertIn("credentials:'same-origin'", rendered)
         self.assertIn("event.preventDefault()", rendered)
+
+        viewer = server.render_session_status("viewer").decode("utf-8")
+        self.assertIn("Authenticated as <strong>Viewer</strong>", viewer)
+        self.assertIn('action="/admin/logout"', viewer)
+        self.assertIn("X-Onion-Sentinel-CSRF", viewer)
+        self.assertNotIn("Administration access is enabled", viewer)
 
     def test_enforcement_modes_have_an_isolated_clean_startup_boundary(self):
         for mode in ("admin-enforce", "rbac-enforce"):
@@ -642,6 +759,8 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertIn("&lt;img", rendered)
         self.assertIn("token&quot;&gt;&lt;script&gt;", rendered)
         self.assertIn('<p class="error">', rendered)
+        self.assertIn('name="username"', rendered)
+        self.assertNotIn('name="role"', rendered)
 
     def test_controlled_readiness_requires_exact_downstream_identity(self):
         healthy = {

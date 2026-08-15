@@ -382,6 +382,12 @@ def render_admin_status() -> bytes:
     return _auth_pages.render_admin_status(runtime.ensure_admin_token())
 
 
+def render_session_status(role: object) -> bytes:
+    return _auth_pages.render_session_status(
+        runtime.ensure_admin_token(), role
+    )
+
+
 class OnionSentinelHandler(runtime.PortalHandler):
     server_version = "OnionSentinel/1.0"
 

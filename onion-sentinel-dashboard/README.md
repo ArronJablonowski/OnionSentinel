@@ -28,6 +28,10 @@ dependency.
 | `portal_session_principal.py` | Versioned human principal, expiry, policy-generation, and per-session CSRF contract. |
 | `portal_human_session_store.py` | Digest-keyed, owner-only, bounded, atomic target human-session persistence. |
 | `portal_human_session_runtime.py` | Legacy no-op plus observe/admin/RBAC read/write session resolution, authorized touch, revocation, and CSRF cookie policy. |
+| `portal_human_identity_store.py` | Owner-only RBAC Viewer/Analyst credential schema, admission, authentication, and canonical serialization. |
+| `portal_human_identity_management.py` | Service-offline atomic identity set/remove operations and session-policy generation changes. |
+| `portal_human_identity_cli.py` | Stopped-service confirmation, no-echo password input, and metadata-only management receipts. |
+| `manage-human-identities.py` | Thin local operator entry point for Viewer/Analyst identity management. |
 | `portal_admin_recovery.py` | Owner-only password-record replacement and complete legacy/versioned human-session revocation. |
 | `portal_admin_recovery_cli.py` | Service-offline confirmation, secret-safe password prompting, and bounded recovery result projection. |
 | `recover-admin-access.py` | Thin local operator entry point for administrator recovery. |

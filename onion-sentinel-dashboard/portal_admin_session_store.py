@@ -91,13 +91,8 @@ def _owner_private_password_payload(path: Path) -> bytes:
     return payload
 
 
-def _validated_password_record(payload: bytes) -> dict[str, object]:
-    try:
-        record = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise AdminPasswordConfigurationError(
-            "administrator password record has an invalid format"
-        ) from exc
+def validate_password_record(record: object) -> dict[str, object]:
+    """Validate one exact PBKDF2 record independent of its file owner."""
     if (
         not isinstance(record, dict)
         or set(record) != PASSWORD_RECORD_FIELDS
@@ -118,6 +113,16 @@ def _validated_password_record(payload: bytes) -> dict[str, object]:
     _password_hex(record.get("salt"), minimum=16, maximum=64)
     _password_hex(record.get("hash"), minimum=32, maximum=32)
     return dict(record)
+
+
+def _validated_password_record(payload: bytes) -> dict[str, object]:
+    try:
+        record = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AdminPasswordConfigurationError(
+            "administrator password record has an invalid format"
+        ) from exc
+    return validate_password_record(record)
 
 
 def load_enforcement_admin_password_record(path: Path) -> dict[str, object]:
