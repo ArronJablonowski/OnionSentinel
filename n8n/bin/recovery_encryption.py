@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import tempfile
@@ -113,16 +114,25 @@ def _remove(path: Path | None) -> None:
 class RecoveryEncryption:
     """One secret-bearing encryption owner; its secret is never projected."""
 
-    def __init__(self, secret: bytes, *, openssl: str = "/usr/bin/openssl"):
+    def __init__(
+        self,
+        secret: bytes,
+        *,
+        openssl: str = "/usr/bin/openssl",
+        key_source: str = "injected",
+    ):
         if (
             not isinstance(secret, bytes)
             or not MIN_SECRET_BYTES <= len(secret) <= MAX_SECRET_BYTES
             or any(marker in secret for marker in (b"\x00", b"\r", b"\n"))
         ):
             raise ValueError("recovery encryption secret must be at least 32 bytes")
+        if key_source not in {"injected", "macos-keychain"}:
+            raise ValueError("recovery encryption key source is invalid")
         executable = _trusted_executable(openssl)
         self.__secret = bytes(secret)
         self.__openssl = str(executable)
+        self.__key_source = key_source
 
     @classmethod
     def from_keychain(
@@ -154,7 +164,11 @@ class RecoveryEncryption:
         secret = result.stdout.rstrip(b"\r\n")
         if result.returncode != 0 or not MIN_SECRET_BYTES <= len(secret) <= MAX_SECRET_BYTES:
             raise RuntimeError("recovery encryption key is unavailable")
-        return cls(secret, openssl=openssl)
+        return cls(
+            secret,
+            openssl=openssl,
+            key_source="macos-keychain",
+        )
 
     @property
     def descriptor(self) -> dict[str, object]:
@@ -162,6 +176,7 @@ class RecoveryEncryption:
             "scheme": ENCRYPTION_SCHEME,
             "pbkdf2_iterations": PBKDF2_ITERATIONS,
             "authenticated": True,
+            "key_source": self.__key_source,
         }
 
     def __run_openssl(self, arguments: list[str]) -> None:
@@ -268,7 +283,10 @@ class RecoveryEncryption:
         destination = Path(destination)
         _regular_source(source, owner_only=True)
         _destination_parent(destination)
-        if not isinstance(expected_plaintext_sha256, str) or len(expected_plaintext_sha256) != 64:
+        if (
+            not isinstance(expected_plaintext_sha256, str)
+            or re.fullmatch(r"[a-f0-9]{64}", expected_plaintext_sha256) is None
+        ):
             raise RuntimeError("recovery plaintext digest is invalid")
         raw_fd, raw_path = _temporary_path(destination, "cipher")
         os.close(raw_fd)

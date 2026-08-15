@@ -1018,10 +1018,14 @@ class OperationalSloTests(unittest.TestCase):
                     stack,
                     backup_root,
                     "/fake/docker",
+                    encryption=self.backup.RecoveryEncryption(
+                        b"fixture-recovery-secret-with-at-least-32-bytes",
+                        openssl="/usr/bin/openssl",
+                    ),
                 )
             manifest = json.loads((bundle / "manifest.json").read_text())
             self.assertTrue(
-                (bundle / "investigation-harness.sqlite3").is_file()
+                (bundle / "investigation-harness.sqlite3.enc").is_file()
             )
             self.assertEqual(manifest["harness_runs"], 1)
             self.assertTrue(
@@ -1060,6 +1064,10 @@ class OperationalSloTests(unittest.TestCase):
                     stack,
                     backup_root,
                     "/fake/docker",
+                    encryption=self.backup.RecoveryEncryption(
+                        b"fixture-recovery-secret-with-at-least-32-bytes",
+                        openssl="/usr/bin/openssl",
+                    ),
                 )
             manifest = json.loads((bundle / "manifest.json").read_text())
             self.assertFalse(

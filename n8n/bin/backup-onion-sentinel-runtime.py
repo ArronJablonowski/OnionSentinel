@@ -7,6 +7,7 @@ import argparse
 from contextlib import closing
 import datetime as dt
 import fcntl
+import getpass
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ BIN_DIR = Path(__file__).resolve().parent
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 from disk_capacity import require_runtime_capacity
+from recovery_encryption import RecoveryEncryption
 
 
 def sha256_file(path: Path) -> str:
@@ -387,17 +389,22 @@ def __dump_optional_alert_store_postgres(
     return {"present": True, "container": container}
 
 
-def __bundle_file_inventory(
+def __encrypt_bundle_payloads(
     staging: Path,
+    encryption: RecoveryEncryption,
 ) -> dict[str, dict[str, object]]:
     files: dict[str, dict[str, object]] = {}
     for path in sorted(staging.iterdir()):
-        if path.is_file():
-            os.chmod(path, 0o600)
-            files[path.name] = {
-                "bytes": path.stat().st_size,
-                "sha256": sha256_file(path),
-            }
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError("recovery bundle payload must be a regular file")
+        os.chmod(path, 0o600)
+        encrypted = path.with_name(f"{path.name}.enc")
+        metadata = encryption.encrypt_file(path, encrypted)
+        files[encrypted.name] = {
+            **metadata,
+            "plaintext_name": path.name,
+        }
+        path.unlink()
     return files
 
 
@@ -408,6 +415,7 @@ def __bundle_manifest(
     alert_store_postgres: dict[str, object],
     included: list[str],
     files: dict[str, dict[str, object]],
+    encryption: RecoveryEncryption,
 ) -> dict[str, object]:
     return {
         "created_at": dt.datetime.now()
@@ -430,11 +438,18 @@ def __bundle_manifest(
             "alert_store_shadow": alert_store_postgres,
         },
         "runtime_paths": included,
+        "encryption": encryption.descriptor,
         "files": files,
     }
 
 
-def create_bundle(stack_dir: Path, backup_root: Path, docker: str) -> Path:
+def create_bundle(
+    stack_dir: Path,
+    backup_root: Path,
+    docker: str,
+    *,
+    encryption: RecoveryEncryption,
+) -> Path:
     sqlite_source, harness_source = __require_bundle_capacity(
         stack_dir,
         backup_root,
@@ -461,13 +476,14 @@ def create_bundle(stack_dir: Path, backup_root: Path, docker: str) -> Path:
             docker,
         )
         included = archive_runtime_secrets(stack_dir, staging / "runtime-secrets.tar.gz")
-        files = __bundle_file_inventory(staging)
+        files = __encrypt_bundle_payloads(staging, encryption)
         manifest = __bundle_manifest(
             alert_sqlite=alert_sqlite,
             harness_sqlite=harness_sqlite,
             alert_store_postgres=alert_store_postgres,
             included=included,
             files=files,
+            encryption=encryption,
         )
         (staging / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n"
@@ -492,13 +508,31 @@ def main() -> int:
     parser.add_argument("--backup-root", type=Path)
     parser.add_argument("--docker", default="/usr/local/bin/docker")
     parser.add_argument("--keep", type=int, default=7)
+    parser.add_argument(
+        "--keychain-service",
+        default="com.arron.onion-sentinel.runtime-backup",
+    )
+    parser.add_argument("--keychain-account", default=getpass.getuser())
+    parser.add_argument("--security", default="/usr/bin/security")
+    parser.add_argument("--openssl", default="/usr/bin/openssl")
     args = parser.parse_args()
+    encryption = RecoveryEncryption.from_keychain(
+        service=args.keychain_service,
+        account=args.keychain_account,
+        security=args.security,
+        openssl=args.openssl,
+    )
     backup_root = args.backup_root or args.stack_dir / "recovery_backups"
     backup_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(backup_root, 0o700)
     with (backup_root / ".backup.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        bundle = create_bundle(args.stack_dir, backup_root, args.docker)
+        bundle = create_bundle(
+            args.stack_dir,
+            backup_root,
+            args.docker,
+            encryption=encryption,
+        )
         prune(backup_root, max(2, args.keep))
     print(f"backup_ok path={bundle}")
     return 0
