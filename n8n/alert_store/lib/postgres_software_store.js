@@ -6,14 +6,27 @@ const SOURCES = new Set(['osquery_apps', 'zeek_software', 'http_user_agent']);
 const TIERS = new Set(['installed', 'observed', 'inferred']);
 const CONFIDENCES = new Set(['low', 'medium', 'high']);
 const FRESHNESS = new Set(['current', 'recent', 'historical', 'expired']);
+const VERSION_CONFLICT = 'simultaneous-version-disagreement';
 const WINDOWS = Object.freeze({24: '24 hours', 7: '7 days', 30: '30 days'});
 const SORT_COLUMNS = Object.freeze({
   last_seen: ['record.last_seen', 'record.evidence_id'],
   first_seen: ['record.first_seen', 'record.evidence_id'],
-  product: ['lower(record.product)', 'lower(record.version)', 'record.evidence_id'],
-  asset: ['lower(record.asset_ref)', 'lower(record.product)', 'record.evidence_id'],
-  tier: ['record.tier', 'lower(record.product)', 'record.evidence_id'],
-  confidence: ['record.confidence', 'lower(record.product)', 'record.evidence_id'],
+  product: [
+    'left(lower(record.product), 256)', 'lower(record.product)',
+    'left(lower(record.version), 128)', 'lower(record.version)', 'record.evidence_id',
+  ],
+  asset: [
+    'lower(record.asset_ref)', 'left(lower(record.product), 256)',
+    'lower(record.product)', 'record.evidence_id',
+  ],
+  tier: [
+    'record.tier', 'left(lower(record.product), 256)',
+    'lower(record.product)', 'record.evidence_id',
+  ],
+  confidence: [
+    'record.confidence', 'left(lower(record.product), 256)',
+    'lower(record.product)', 'record.evidence_id',
+  ],
 });
 const RECORD_FIELDS = Object.freeze([
   'evidence_id', 'source', 'source_dataset', 'tier', 'confidence',
@@ -137,6 +150,22 @@ function freshnessSql(alias = 'record') {
     ELSE 'expired' END)`;
 }
 
+function conflictSql(alias = 'record') {
+  return `EXISTS (
+    SELECT 1 FROM onion_sentinel_software.inventory_records peer
+    WHERE peer.snapshot_id = ${alias}.snapshot_id
+      AND peer.evidence_id <> ${alias}.evidence_id
+      AND peer.asset_ref_type = ${alias}.asset_ref_type
+      AND peer.asset_ref = ${alias}.asset_ref
+      AND md5(lower(peer.product)) = md5(lower(${alias}.product))
+      AND lower(peer.product) = lower(${alias}.product)
+      AND peer.last_seen = ${alias}.last_seen
+      AND peer.version <> ''
+      AND ${alias}.version <> ''
+      AND lower(peer.version) <> lower(${alias}.version)
+  )`;
+}
+
 function publicRow(row) {
   const result = {};
   for (const field of RECORD_FIELDS) {
@@ -146,6 +175,7 @@ function publicRow(row) {
     result[field] = value ?? '';
   }
   result.freshness = row.freshness;
+  result.evidence_conflict = row.evidence_conflict ? VERSION_CONFLICT : '';
   result.asset_label = '';
   result.operating_system_observed_at = (
     result.source === 'osquery_apps'
@@ -407,7 +437,8 @@ function createPostgresSoftwareStore({pool, schemaPath, logger = console}) {
     const order = SORT_COLUMNS[filters.sort].join(` ${filters.direction.toUpperCase()}, `);
     const pageParams = [...params, filters.limit, filters.offset];
     const rows = await pool.query(
-      `SELECT record.*, ${freshnessSql()} AS freshness
+      `SELECT record.*, ${freshnessSql()} AS freshness,
+         ${conflictSql()} AS evidence_conflict
        FROM onion_sentinel_software.inventory_records record
        WHERE ${where}
        ORDER BY ${order} ${filters.direction.toUpperCase()}
@@ -424,7 +455,8 @@ function createPostgresSoftwareStore({pool, schemaPath, logger = console}) {
          count(*) FILTER (WHERE ${freshnessSql()} = 'current')::bigint AS current,
          count(*) FILTER (WHERE ${freshnessSql()} = 'recent')::bigint AS recent,
          count(*) FILTER (WHERE ${freshnessSql()} = 'historical')::bigint AS historical,
-         count(*) FILTER (WHERE ${freshnessSql()} = 'expired')::bigint AS expired
+         count(*) FILTER (WHERE ${freshnessSql()} = 'expired')::bigint AS expired,
+         count(*) FILTER (WHERE ${conflictSql()})::bigint AS conflicting_records
        FROM onion_sentinel_software.inventory_records record WHERE ${where}`,
       params,
     );
@@ -467,6 +499,9 @@ function createPostgresSoftwareStore({pool, schemaPath, logger = console}) {
     if (collection.last_error) warnings.push(`Latest collection warning: ${collection.last_error}`);
     if (Number(coverageRows.fresh_endpoint_inventories) === 0) {
       warnings.push('No current endpoint-reported inventory is visible; passive network evidence cannot prove software is absent.');
+    }
+    if (summary.conflicting_records > 0) {
+      warnings.push(`${summary.conflicting_records} records have simultaneous version disagreements; each evidence row is retained and no version is selected as authoritative.`);
     }
     const sourceStatuses = collection.source_statuses && typeof collection.source_statuses === 'object'
       && !Array.isArray(collection.source_statuses) ? collection.source_statuses : {};
@@ -539,7 +574,9 @@ function createPostgresSoftwareStore({pool, schemaPath, logger = console}) {
 }
 
 module.exports = {
+  conflictSql,
   createPostgresSoftwareStore,
   normalizeRecord,
   parseQuery,
+  publicRow,
 };

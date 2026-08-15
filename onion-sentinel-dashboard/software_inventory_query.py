@@ -208,6 +208,7 @@ def _empty_summary() -> dict[str, object]:
         "records": 0,
         "products": 0,
         "assets": 0,
+        "conflicting_records": 0,
         "installed": 0,
         "observed": 0,
         "inferred": 0,

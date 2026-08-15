@@ -85,6 +85,7 @@ test('projects database-wide simultaneous version conflicts explicitly', () => {
   const sql = conflictSql();
   assert.match(sql, /peer\.snapshot_id = record\.snapshot_id/);
   assert.match(sql, /peer\.last_seen = record\.last_seen/);
+  assert.match(sql, /md5\(lower\(peer\.product\)\) = md5\(lower\(record\.product\)\)/);
   assert.match(sql, /lower\(peer\.version\) <> lower\(record\.version\)/);
 
   const projected = publicRow({

@@ -85,24 +85,31 @@ CREATE INDEX IF NOT EXISTS idx_ossi_records_last_seen
 CREATE INDEX IF NOT EXISTS idx_ossi_records_first_seen
   ON onion_sentinel_software.inventory_records
   (snapshot_id, first_seen DESC, evidence_id DESC);
-CREATE INDEX IF NOT EXISTS idx_ossi_records_product
+DROP INDEX IF EXISTS onion_sentinel_software.idx_ossi_records_product;
+DROP INDEX IF EXISTS onion_sentinel_software.idx_ossi_records_asset;
+DROP INDEX IF EXISTS onion_sentinel_software.idx_ossi_records_tier;
+DROP INDEX IF EXISTS onion_sentinel_software.idx_ossi_records_confidence;
+CREATE INDEX IF NOT EXISTS idx_ossi_records_product_bounded
   ON onion_sentinel_software.inventory_records
-  (snapshot_id, lower(product), lower(version), evidence_id);
-CREATE INDEX IF NOT EXISTS idx_ossi_records_asset
+  (snapshot_id, left(lower(product), 256), left(lower(version), 128), evidence_id);
+CREATE INDEX IF NOT EXISTS idx_ossi_records_asset_bounded
   ON onion_sentinel_software.inventory_records
-  (snapshot_id, lower(asset_ref), lower(product), evidence_id);
-CREATE INDEX IF NOT EXISTS idx_ossi_records_tier
+  (snapshot_id, lower(asset_ref), left(lower(product), 256), evidence_id);
+CREATE INDEX IF NOT EXISTS idx_ossi_records_tier_bounded
   ON onion_sentinel_software.inventory_records
-  (snapshot_id, tier, lower(product), evidence_id);
-CREATE INDEX IF NOT EXISTS idx_ossi_records_confidence
+  (snapshot_id, tier, left(lower(product), 256), evidence_id);
+CREATE INDEX IF NOT EXISTS idx_ossi_records_confidence_bounded
   ON onion_sentinel_software.inventory_records
-  (snapshot_id, confidence, lower(product), evidence_id);
+  (snapshot_id, confidence, left(lower(product), 256), evidence_id);
 CREATE INDEX IF NOT EXISTS idx_ossi_records_platform
   ON onion_sentinel_software.inventory_records
   (snapshot_id, lower(platform), last_seen DESC);
 CREATE INDEX IF NOT EXISTS idx_ossi_records_source
   ON onion_sentinel_software.inventory_records
   (snapshot_id, source, last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_ossi_records_version_conflict
+  ON onion_sentinel_software.inventory_records
+  (snapshot_id, asset_ref_type, asset_ref, last_seen, md5(lower(product)));
 CREATE INDEX IF NOT EXISTS idx_ossi_records_search
   ON onion_sentinel_software.inventory_records
   USING GIN (search_text public.gin_trgm_ops);

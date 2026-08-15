@@ -429,6 +429,7 @@ class SoftwareInventoryQueryFilterArchitectureTests(unittest.TestCase):
                 "records",
                 "products",
                 "assets",
+                "conflicting_records",
                 "installed",
                 "observed",
                 "inferred",

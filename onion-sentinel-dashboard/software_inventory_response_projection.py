@@ -7,6 +7,40 @@ from software_inventory_query import _public_record
 from software_inventory_state import API_SCHEMA, TIERS, _utc_iso
 
 
+VERSION_CONFLICT = "simultaneous-version-disagreement"
+
+
+def _conflict_key(record: dict[str, object]) -> tuple[str, str, str, str]:
+    return (
+        str(record.get("asset_ref_type") or ""),
+        str(record.get("asset_ref") or ""),
+        str(record.get("product") or "").casefold(),
+        str(record.get("last_seen") or ""),
+    )
+
+
+def _version_groups(
+    records: list[dict[str, object]],
+) -> dict[tuple[str, str, str, str], set[str]]:
+    groups: dict[tuple[str, str, str, str], set[str]] = {}
+    for record in records:
+        version = str(record.get("version") or "").strip().casefold()
+        if version:
+            groups.setdefault(_conflict_key(record), set()).add(version)
+    return groups
+
+
+def annotate_version_conflicts(records: list[dict[str, object]]) -> int:
+    """Mark simultaneous version disagreements across the complete window."""
+    groups = _version_groups(records)
+    conflicting = 0
+    for record in records:
+        conflict = len(groups.get(_conflict_key(record), set())) > 1
+        record["evidence_conflict"] = VERSION_CONFLICT if conflict else ""
+        conflicting += int(conflict)
+    return conflicting
+
+
 def _summary(
     records: list[dict[str, object]],
     public_records: list[dict[str, object]],
@@ -17,6 +51,9 @@ def _summary(
             {str(item["product"]).casefold() for item in records}
         ),
         "assets": len({str(item["asset_ref"]) for item in records}),
+        "conflicting_records": sum(
+            item.get("evidence_conflict") == VERSION_CONFLICT for item in records
+        ),
     }
     for tier in sorted(TIERS):
         summary[tier] = sum(item["tier"] == tier for item in records)
@@ -84,6 +121,7 @@ def _coverage(
 def _warnings(
     collection: dict[str, object],
     fresh_endpoint_assets: set[str],
+    conflicting_records: int,
 ) -> list[str]:
     warnings = [
         (
@@ -102,6 +140,12 @@ def _warnings(
         warnings.append(
             "No current endpoint-reported inventory is visible; passive "
             "network evidence cannot prove software is absent."
+        )
+    if conflicting_records:
+        warnings.append(
+            f"{conflicting_records} records have simultaneous version "
+            "disagreements; each evidence row is retained and no version "
+            "is selected as authoritative."
         )
     return warnings
 
@@ -145,6 +189,7 @@ def build_success_payload(
     asset_inventory_complete: bool,
 ) -> dict[str, object]:
     """Build the exact public success payload from selected records."""
+    annotate_version_conflicts(all_window_records)
     public_records = [_public_record(item, observed_at) for item in records]
     summary = _summary(records, public_records)
     window_public = [
@@ -170,7 +215,9 @@ def build_success_payload(
         "page": _page(records, selected, limit, offset),
         "items": [_public_record(item, observed_at) for item in selected],
         "warnings": _warnings(
-            collection, fresh_endpoint_assets  # type: ignore[arg-type]
+            collection,  # type: ignore[arg-type]
+            fresh_endpoint_assets,
+            summary["conflicting_records"],
         ),
         "revision": revision,
     }

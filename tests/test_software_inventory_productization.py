@@ -18,6 +18,10 @@ PAGE = (
     / "dashboard_software_inventory_page.py"
 )
 EVIDENCE_MODEL = ROOT / "docs" / "software-inventory-evidence-model.md"
+POSTGRES_SCHEMA = ROOT / "n8n" / "postgres" / "software-inventory-schema.sql"
+POSTGRES_STORE = (
+    ROOT / "n8n" / "alert_store" / "lib" / "postgres_software_store.js"
+)
 
 
 class SoftwareInventoryProductizationTests(unittest.TestCase):
@@ -54,6 +58,19 @@ class SoftwareInventoryProductizationTests(unittest.TestCase):
         self.assertIn('<dt>Conflict state</dt>', source)
         self.assertIn('id="software-conflicting-total"', source)
         self.assertIn("item?.evidence_conflict", source)
+
+    def test_long_values_use_bounded_database_sort_indexes(self) -> None:
+        schema = POSTGRES_SCHEMA.read_text(encoding="utf-8")
+        store = POSTGRES_STORE.read_text(encoding="utf-8")
+        self.assertIn("idx_ossi_records_product_bounded", schema)
+        self.assertIn("left(lower(product), 256)", schema)
+        self.assertIn("left(lower(version), 128)", schema)
+        self.assertNotIn(
+            "(snapshot_id, lower(product), lower(version), evidence_id)",
+            schema,
+        )
+        self.assertIn("left(lower(record.product), 256)", store)
+        self.assertIn("left(lower(record.version), 128)", store)
 
     def test_evidence_model_documents_database_and_uncertainty_semantics(self) -> None:
         source = EVIDENCE_MODEL.read_text(encoding="utf-8")

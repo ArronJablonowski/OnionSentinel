@@ -3600,6 +3600,7 @@ the state/query contracts and never import the facade.
 `software_inventory_response_selection.py` owns time-window selection, fixed
 filter application, stable sort tie-breakers, and bounded pagination.
 `software_inventory_response_projection.py` owns public-record conversion,
+database-equivalent simultaneous-version conflict annotation,
 summary/platform counts, truthful endpoint/network coverage, ordered warnings,
 page metadata, and revision projection. The bounded
 `software_inventory_response.py` orchestrator retains exact query-error and
