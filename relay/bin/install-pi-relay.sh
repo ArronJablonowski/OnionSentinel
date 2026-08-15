@@ -38,8 +38,8 @@ install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay/state/batches
 install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay/state/new-alerts
 install -o root -g soalert -m 0750 -d /etc/so-alert-relay
 
-install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/relay_core.py" /opt/so-alert-relay/app/relay_core.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/relay_database_schema.py" /opt/so-alert-relay/app/relay_database_schema.py
+install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/relay_core.py" /opt/so-alert-relay/app/relay_core.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/relay_pcap_spool_policy.py" /opt/so-alert-relay/app/relay_pcap_spool_policy.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/relay_pcap_capture_policy.py" /opt/so-alert-relay/app/relay_pcap_capture_policy.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/relay_pcap_streaming.py" /opt/so-alert-relay/app/relay_pcap_streaming.py
