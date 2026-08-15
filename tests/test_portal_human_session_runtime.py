@@ -75,27 +75,49 @@ class PortalHumanSessionRuntimeTests(unittest.TestCase):
             self.assertIsNone(missing.principal)
             self.assertEqual(missing.reason, "session_missing")
 
-    def test_admin_enforcement_uses_the_versioned_store_and_rbac_stays_blocked(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            service = runtime.load_human_session_runtime(
-                mode="admin-enforce",
-                home=Path(tmp),
-            )
-            self.assertTrue(service.enabled)
-            self.assertTrue(service.enforcing)
-            token = service.create_session(
-                "session-" + "s" * 36,
-                client_identity="192.0.2.4",
-                now_timestamp=1_000,
-                new_token=lambda: "csrf-" + "c" * 38,
-            )
-            self.assertEqual(token, "csrf-" + "c" * 38)
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaises(runtime.HumanSessionConfigurationError):
-                runtime.load_human_session_runtime(
-                    mode="rbac-enforce",
+    def test_enforcement_modes_use_the_versioned_store(self):
+        for mode in ("admin-enforce", "rbac-enforce"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                service = runtime.load_human_session_runtime(
+                    mode=mode,
                     home=Path(tmp),
                 )
+                self.assertTrue(service.enabled)
+                self.assertTrue(service.enforcing)
+                token = service.create_session(
+                    "session-" + "s" * 36,
+                    client_identity="192.0.2.4",
+                    now_timestamp=1_000,
+                    new_token=lambda: "csrf-" + "c" * 38,
+                )
+                self.assertEqual(token, "csrf-" + "c" * 38)
+
+    def test_rbac_runtime_resolves_a_retained_analyst_principal(self):
+        record = runtime.create_session_bundle(
+            principal_id="analyst-1",
+            role="analyst",
+            now_timestamp=1_000,
+            absolute_ttl_seconds=1_000,
+            idle_ttl_seconds=500,
+            policy_generation=1,
+            client_fingerprint="1" * 64,
+            new_token=iter(
+                ("session-" + "s" * 36, "csrf-" + "c" * 38)
+            ).__next__,
+        ).record
+        service = runtime.HumanSessionRuntime(
+            mode="rbac-enforce",
+            store_path=Path("/not-used"),
+            load_record=lambda *_args, **_kwargs: record,
+            replace_record=lambda *_args, **_kwargs: True,
+        )
+        result = service.resolve_session(
+            "session-" + "s" * 36,
+            csrf_value="csrf-" + "c" * 38,
+            now_timestamp=1_100,
+        )
+        self.assertTrue(result.csrf_authorized)
+        self.assertEqual(result.principal.role, "analyst")
 
     def test_enforcement_fails_closed_when_idle_touch_loses_ownership(self):
         record = runtime.create_session_bundle(

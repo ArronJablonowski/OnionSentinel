@@ -52,30 +52,21 @@ class PortalAccessObserverRuntimeTests(unittest.TestCase):
             self.assertTrue(service.enabled)
             self.assertEqual(service.snapshot()["audit_event_count"], 0)
 
-    def test_admin_enforcement_requires_a_verified_key_and_rbac_stays_blocked(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            key_path = runtime.audit_signing_key_path(home)
-            key_path.parent.mkdir(parents=True)
-            key_path.write_text("ab" * 32 + "\n", encoding="ascii")
-            os.chmod(key_path, 0o600)
-            service = runtime.load_access_observer_runtime(
-                environ={runtime.ACCESS_MODE_ENV: "admin-enforce"},
-                home=home,
-            )
-            self.assertTrue(service.enabled)
-            self.assertTrue(service.enforcing)
-
-        for mode in ("rbac-enforce",):
+    def test_enforcement_modes_require_a_verified_key_and_are_explicit(self) -> None:
+        for mode in ("admin-enforce", "rbac-enforce"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
-                with self.assertRaisesRegex(
-                    runtime.AccessObserverConfigurationError,
-                    "not qualified",
-                ):
-                    runtime.load_access_observer_runtime(
-                        environ={runtime.ACCESS_MODE_ENV: mode},
-                        home=Path(tmp),
-                    )
+                home = Path(tmp)
+                key_path = runtime.audit_signing_key_path(home)
+                key_path.parent.mkdir(parents=True)
+                key_path.write_text("ab" * 32 + "\n", encoding="ascii")
+                os.chmod(key_path, 0o600)
+                service = runtime.load_access_observer_runtime(
+                    environ={runtime.ACCESS_MODE_ENV: mode},
+                    home=home,
+                )
+                self.assertTrue(service.enabled)
+                self.assertTrue(service.enforcing)
+                self.assertEqual(service.mode, mode)
 
     def test_enforcement_precommit_must_reach_verified_ledger_before_mutation(self) -> None:
         appended = []
@@ -113,6 +104,34 @@ class PortalAccessObserverRuntimeTests(unittest.TestCase):
                 observation,
                 occurred_at="2026-08-15T06:50:01Z",
             )
+        )
+
+    def test_rbac_analyst_write_requires_the_same_durable_precommit(self) -> None:
+        appended = []
+        service = runtime.AccessObserverRuntime(
+            mode="rbac-enforce",
+            signing_key=b"k" * 32,
+            ledger_path=Path("/not-used"),
+            append_event=lambda *_args, **kwargs: appended.append(kwargs) or {},
+        )
+        observation = service.begin(
+            route("/api/soc-alerts/group/escalate"),
+            principal=runtime.HumanPrincipal(
+                "human_session", "analyst-1", "analyst"
+            ),
+            same_origin_authorized=True,
+            csrf_authorized=True,
+            request_id="request-rbac-1",
+        )
+        self.assertTrue(
+            service.precommit(
+                observation,
+                occurred_at="2026-08-15T07:30:00Z",
+            )
+        )
+        self.assertEqual(
+            appended[0]["fields"]["reason_code"],
+            "enforce_authorized_precommit",
         )
 
     def test_append_failure_is_telemetry_only_and_never_escapes_observe(self) -> None:

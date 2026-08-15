@@ -16,6 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_DIR = ROOT / "onion-sentinel-dashboard"
 sys.path.insert(0, str(DASHBOARD_DIR))
 server = importlib.import_module("onion_sentinel_server")
+observer_runtime_module = importlib.import_module(
+    "portal_access_observer_runtime"
+)
+principal_module = importlib.import_module("portal_session_principal")
 
 
 class OnionSentinelServerTests(unittest.TestCase):
@@ -247,6 +251,62 @@ class OnionSentinelServerTests(unittest.TestCase):
             (503, "audit_precommit_failed"),
         )
 
+    def test_rbac_adapter_enforces_analyst_and_administrator_route_boundaries(self):
+        appended = []
+        observer = observer_runtime_module.AccessObserverRuntime(
+            mode="rbac-enforce",
+            signing_key=b"k" * 32,
+            ledger_path=Path("/not-used"),
+            append_event=lambda *_args, **kwargs: appended.append(kwargs) or {},
+        )
+        session = SimpleNamespace(
+            principal=principal_module.HumanPrincipal(
+                "human_session", "analyst-1", "analyst"
+            ),
+            csrf_authorized=True,
+            reason="authorized",
+        )
+        sessions = SimpleNamespace(
+            enabled=True,
+            enforcing=True,
+            resolve_session=mock.Mock(return_value=session),
+        )
+        access = server._access_adapter.DedicatedAccessRuntime(
+            runtime=server.runtime,
+            observer=observer,
+            sessions=sessions,
+        )
+        headers = Message()
+        headers["Host"] = "10.77.7.225:8766"
+        headers["Origin"] = "http://10.77.7.225:8766"
+        headers["X-Onion-Sentinel-CSRF"] = "csrf-" + "c" * 38
+        handler = SimpleNamespace(
+            headers=headers,
+            application_request_id="request-rbac-2",
+            _soc_review_origin_authorized=lambda: True,
+            _admin_session_id=lambda: "session-" + "s" * 36,
+        )
+        analyst_write = access.begin(
+            handler,
+            "/api/soc-alerts/group/escalate",
+            controlled_evaluation=False,
+        )
+        self.assertTrue(analyst_write.allowed)
+        self.assertEqual(
+            appended[0]["fields"]["reason_code"],
+            "enforce_authorized_precommit",
+        )
+        admin_write = access.begin(
+            handler,
+            "/api/soc-settings/ai-model",
+            controlled_evaluation=False,
+        )
+        self.assertFalse(admin_write.allowed)
+        self.assertEqual(
+            (admin_write.status, admin_write.reason),
+            (403, "role_denied"),
+        )
+
     def test_observe_login_and_logout_cookie_headers_preserve_legacy_default(self):
         disabled_sessions = SimpleNamespace(
             enabled=False,
@@ -371,55 +431,58 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertTrue(access.verify_password(password))
         self.assertFalse(access.verify_password("wrong"))
 
-    def test_admin_enforcement_has_an_isolated_clean_startup_boundary(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            stack = home / "n8n-local"
-            config = stack / "config"
-            state = stack / "admin-state"
-            config.mkdir(parents=True, mode=0o700)
-            state.mkdir(mode=0o700)
-            os.chmod(config, 0o700)
-            os.chmod(state, 0o700)
-            key = config / "onion-sentinel-admin-audit-signing.key"
-            key.write_text("ab" * 32 + "\n", encoding="ascii")
-            os.chmod(key, 0o600)
-            password = config / "onion-sentinel-admin-password.json"
-            password.write_text(
-                json.dumps({
-                    "algorithm": "pbkdf2_sha256",
-                    "iterations": 200_000,
-                    "salt": "00" * 16,
-                    "hash": "00" * 32,
-                }),
-                encoding="utf-8",
-            )
-            os.chmod(password, 0o600)
-            command = (
-                "import sys; "
-                f"sys.path.insert(0, {str(DASHBOARD_DIR)!r}); "
-                "import onion_sentinel_server as server; "
-                "assert server.ACCESS_RUNTIME.observer.enforcing; "
-                "assert server.ACCESS_RUNTIME.session_required; "
-                "assert server.ACCESS_RUNTIME.password_configured()"
-            )
-            result = subprocess.run(
-                [sys.executable, "-I", "-c", command],
-                env={
-                    "HOME": str(home),
-                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                    "ONION_SENTINEL_ACCESS_MODE": "admin-enforce",
-                    "ONION_SENTINEL_APPLICATION_LOG": str(
-                        stack / "logs/application.jsonl"
-                    ),
-                },
-                cwd=home,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
+    def test_enforcement_modes_have_an_isolated_clean_startup_boundary(self):
+        for mode in ("admin-enforce", "rbac-enforce"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                self._assert_isolated_enforcement_startup(Path(tmp), mode)
+
+    def _assert_isolated_enforcement_startup(self, home: Path, mode: str):
+        stack = home / "n8n-local"
+        config = stack / "config"
+        state = stack / "admin-state"
+        config.mkdir(parents=True, mode=0o700)
+        state.mkdir(mode=0o700)
+        os.chmod(config, 0o700)
+        os.chmod(state, 0o700)
+        key = config / "onion-sentinel-admin-audit-signing.key"
+        key.write_text("ab" * 32 + "\n", encoding="ascii")
+        os.chmod(key, 0o600)
+        password = config / "onion-sentinel-admin-password.json"
+        password.write_text(
+            json.dumps({
+                "algorithm": "pbkdf2_sha256",
+                "iterations": 200_000,
+                "salt": "00" * 16,
+                "hash": "00" * 32,
+            }),
+            encoding="utf-8",
+        )
+        os.chmod(password, 0o600)
+        command = (
+            "import sys; "
+            f"sys.path.insert(0, {str(DASHBOARD_DIR)!r}); "
+            "import onion_sentinel_server as server; "
+            "assert server.ACCESS_RUNTIME.observer.enforcing; "
+            "assert server.ACCESS_RUNTIME.session_required; "
+            "assert server.ACCESS_RUNTIME.password_configured()"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", command],
+            env={
+                "HOME": str(home),
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "ONION_SENTINEL_ACCESS_MODE": mode,
+                "ONION_SENTINEL_APPLICATION_LOG": str(
+                    stack / "logs/application.jsonl"
+                ),
+            },
+            cwd=home,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_begin_observation_boundary_failure_never_escapes_dispatch(self):
         handler = SimpleNamespace(
