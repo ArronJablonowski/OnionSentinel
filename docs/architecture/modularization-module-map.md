@@ -3559,6 +3559,13 @@ signing bytes from an external credential owner and never reads, persists, or
 projects that key; ledger locking, atomic append, retention, and startup policy
 belong to the later audit-store adapter.
 
+`portal_admin_audit_store.py` owns bounded JSONL admission, regular-file and
+symlink policy, process/thread serialization, pre-append full-chain
+verification, owner-only crash-safe replacement, and directory durability for
+the Administration audit ledger. Signing-key loading, event projection from an
+HTTP decision, retention export, and startup enforcement remain outside this
+storage layer.
+
 ### Portal catalog runtime
 
 `portal_catalog_runtime.py` owns local-address discovery, report title/category
