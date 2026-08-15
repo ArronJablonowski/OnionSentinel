@@ -373,6 +373,34 @@ class RecoveryOperationTests(unittest.TestCase):
             result = self.restore.validate_runtime_archive(archive)
             self.assertEqual(result["member_count"], 2)
 
+    def test_runtime_archive_preserves_audit_chain_but_never_sessions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stack = root / "stack"
+            (stack / "n8n_data").mkdir(parents=True)
+            (stack / "logs").mkdir()
+            (stack / "admin-state").mkdir()
+            (stack / ".env").write_text("PLACEHOLDER=value\n")
+            (stack / "n8n_data/config").write_text("{}")
+            (stack / "logs/onion-sentinel-admin-audit.jsonl").write_text(
+                '{"schema":"audit-fixture"}\n'
+            )
+            (stack / "admin-state/.admin_sessions.json").write_text("{}")
+            (stack / "admin-state/.human_sessions.json").write_text("{}")
+            archive = root / "runtime-secrets.tar.gz"
+
+            included = self.backup.archive_runtime_secrets(stack, archive)
+            with tarfile.open(archive, "r:gz") as stream:
+                names = set(stream.getnames())
+
+            self.assertIn(
+                "logs/onion-sentinel-admin-audit.jsonl",
+                included,
+            )
+            self.assertIn("logs/onion-sentinel-admin-audit.jsonl", names)
+            self.assertNotIn("admin-state", included)
+            self.assertFalse(any("session" in name for name in names))
+
 
 if __name__ == "__main__":
     unittest.main()
