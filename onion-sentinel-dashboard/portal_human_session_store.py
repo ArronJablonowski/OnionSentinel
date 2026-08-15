@@ -49,7 +49,9 @@ def _session_key(session_id: object) -> str:
 
 
 def _private_parent(parent: Path, *, create: bool) -> bool:
-    if not parent.exists():
+    try:
+        metadata = parent.lstat()
+    except FileNotFoundError:
         if not create:
             return False
         try:
@@ -59,8 +61,12 @@ def _private_parent(parent: Path, *, create: bool) -> bool:
             raise HumanSessionStoreError(
                 "session store directory could not be prepared"
             ) from exc
-    try:
-        metadata = parent.lstat()
+        try:
+            metadata = parent.lstat()
+        except OSError as exc:
+            raise HumanSessionStoreError(
+                "session store parent metadata could not be read"
+            ) from exc
     except OSError as exc:
         raise HumanSessionStoreError(
             "session store parent metadata could not be read"
@@ -254,7 +260,7 @@ def load_session_record(
     with _STORE_LOCK:
         if not _private_parent(path.parent, create=False):
             return None
-        if not path.exists():
+        if not _private_file(path):
             return None
         with _locked(path):
             record = _decode_store(path, maximum_bytes, maximum_sessions).get(key)
@@ -272,7 +278,7 @@ def validate_session_store(
     with _STORE_LOCK:
         if not _private_parent(path.parent, create=False):
             return 0
-        if not path.exists():
+        if not _private_file(path):
             return 0
         with _locked(path):
             return len(_decode_store(path, maximum_bytes, maximum_sessions))
