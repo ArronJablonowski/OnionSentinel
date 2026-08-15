@@ -123,6 +123,39 @@ class PortalHumanSessionRuntimeTests(unittest.TestCase):
         self.assertTrue(result.csrf_authorized)
         self.assertEqual(result.principal.role, "analyst")
 
+    def test_rbac_read_resolution_skips_csrf_and_extends_idle_expiry(self):
+        record = runtime.create_session_bundle(
+            principal_id="viewer-1",
+            role="viewer",
+            now_timestamp=1_000,
+            absolute_ttl_seconds=1_000,
+            idle_ttl_seconds=500,
+            policy_generation=3,
+            client_fingerprint="1" * 64,
+            new_token=iter(
+                ("session-" + "s" * 36, "csrf-" + "c" * 38)
+            ).__next__,
+        ).record
+        replacements = []
+        service = runtime.HumanSessionRuntime(
+            mode="rbac-enforce",
+            store_path=Path("/not-used"),
+            load_record=lambda *_args, **_kwargs: record,
+            replace_record=lambda *_args, **kwargs: (
+                replacements.append(kwargs) or True
+            ),
+        )
+        result = service.resolve_read_session(
+            "session-" + "s" * 36,
+            now_timestamp=1_100,
+        )
+        self.assertEqual(result.principal.role, "viewer")
+        self.assertFalse(result.csrf_authorized)
+        self.assertEqual(result.reason, "authorized")
+        self.assertEqual(
+            replacements[0]["replacement"]["last_activity_at"], 1_100
+        )
+
     def test_forward_mode_promotion_invalidates_the_prior_session_generation(self):
         record = runtime.create_session_bundle(
             principal_id="local-administrator",

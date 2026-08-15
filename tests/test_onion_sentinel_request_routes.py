@@ -40,6 +40,9 @@ class DashboardGetDispatchTests(unittest.TestCase):
                 if path == "/api/application-logs/onion-sentinel-application"
                 else None
             ),
+            is_application_log_get_api=lambda path: path.startswith(
+                "/api/application-logs"
+            ),
             ac_hunter_review=SimpleNamespace(
                 deep_review_response=lambda **kwargs: (
                     events.append(("deep-review", kwargs)) or (200, {"ok": True})
@@ -143,6 +146,67 @@ class DashboardGetDispatchTests(unittest.TestCase):
         )
         self.assertEqual(routes.do_get(handler, context), "redirect")
         self.assertEqual(events, [("redirect", "/admin/login")])
+
+    def test_rbac_read_denies_evidence_before_api_or_static_dispatch(self):
+        for path, expected, blocked_event in (
+            ("/api/soc-alerts", "json", ("soc", "/api/soc-alerts")),
+            ("/", "redirect", ("file", Path("/dashboard/index.html"))),
+        ):
+            with self.subTest(path=path):
+                handler, events = self.handler(path)
+                context = self.context(events)
+                context.ACCESS_RUNTIME = SimpleNamespace(
+                    read_authenticated=lambda _handler: False
+                )
+                with mock.patch.object(
+                    routes, "_json_response", return_value="json"
+                ) as response:
+                    self.assertEqual(routes.do_get(handler, context), expected)
+                self.assertNotIn(blocked_event, events)
+                if path.startswith("/api/"):
+                    response.assert_called_once_with(
+                        handler,
+                        401,
+                        {
+                            "ok": False,
+                            "authentication_required": True,
+                            "error": "Sign-in is required to view evidence.",
+                        },
+                    )
+                else:
+                    self.assertEqual(events, [("redirect", "/admin/login")])
+
+        handler, events = self.handler("/unknown")
+        context = self.context(events)
+        context.ACCESS_RUNTIME = SimpleNamespace(
+            read_authenticated=lambda _handler: False
+        )
+        self.assertEqual(routes.do_get(handler, context), "send")
+        self.assertEqual(
+            events,
+            [("send", 404, b"Not found", "text/plain; charset=utf-8")],
+        )
+
+    def test_rbac_head_denies_known_evidence_without_changing_unknown_404(self):
+        for path, expected in (("/api/soc-alerts", 401), ("/unknown", 404)):
+            with self.subTest(path=path):
+                events = []
+                handler = SimpleNamespace(
+                    path=path,
+                    dashboard_root=Path("/dashboard"),
+                    send_response=lambda status: events.append(("status", status)),
+                    send_header=lambda key, value: events.append(
+                        ("header", key, value)
+                    ),
+                    end_headers=lambda: events.append(("end",)),
+                    _security_headers=lambda: {},
+                )
+                context = self.context(events)
+                context.ACCESS_RUNTIME = SimpleNamespace(
+                    read_authenticated=lambda _handler: False
+                )
+                routes.do_head(handler, context)
+                self.assertEqual(events[0], ("status", expected))
 
 
 class DedicatedAdminSessionBridgeTests(unittest.TestCase):

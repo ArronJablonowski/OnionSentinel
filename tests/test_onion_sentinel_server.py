@@ -455,6 +455,32 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertFalse(access.admin_authenticated(handler))
         handler._admin_authenticated.assert_not_called()
 
+    def test_rbac_read_auth_accepts_every_human_role_but_admin_stays_narrow(self):
+        handler = SimpleNamespace(
+            _admin_session_id=lambda: "session-" + "s" * 36,
+        )
+        observation = SimpleNamespace(
+            principal=principal_module.HumanPrincipal(
+                "human_session", "viewer-1", "viewer"
+            ),
+            csrf_authorized=False,
+            reason="authorized",
+        )
+        sessions = SimpleNamespace(
+            mode="rbac-enforce",
+            enforcing=True,
+            resolve_read_session=mock.Mock(return_value=observation),
+        )
+        access = server._access_adapter.DedicatedAccessRuntime(
+            runtime=server.runtime,
+            observer=SimpleNamespace(),
+            sessions=sessions,
+            password_record={},
+        )
+        self.assertTrue(access.read_authenticated(handler))
+        self.assertFalse(access.admin_authenticated(handler))
+        self.assertEqual(sessions.resolve_read_session.call_count, 2)
+
     def test_admin_logout_bootstrap_sends_the_session_csrf_header(self):
         rendered = server.render_admin_status().decode("utf-8")
         self.assertIn("onion_sentinel_csrf=", rendered)
