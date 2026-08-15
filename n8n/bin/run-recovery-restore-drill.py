@@ -149,19 +149,44 @@ def verify_bundle(bundle: Path) -> dict[str, object]:
     return manifest
 
 
-def validate_runtime_archive(path: Path) -> dict[str, object]:
-    with tarfile.open(path) as archive:
-        members = archive.getmembers()
-    names = [member.name for member in members]
-    for name in names:
+def __runtime_archive_member_state(
+    members: list[tarfile.TarInfo],
+) -> tuple[list[str], bool]:
+    names: list[str] = []
+    audit_name = "logs/onion-sentinel-admin-audit.jsonl"
+    audit_chain_present = False
+    for member in members:
+        name = member.name
         pure = PurePosixPath(name)
         if pure.is_absolute() or ".." in pure.parts:
             raise RuntimeError("unsafe path in runtime recovery archive")
+        if pure.parts and pure.parts[0] == "admin-state":
+            raise RuntimeError(
+                "runtime recovery archive must not contain active session state"
+            )
+        if name == audit_name:
+            if not member.isfile():
+                raise RuntimeError(
+                    "runtime recovery archive audit chain is not a regular file"
+                )
+            audit_chain_present = True
+        names.append(name)
+    return names, audit_chain_present
+
+
+def validate_runtime_archive(path: Path) -> dict[str, object]:
+    with tarfile.open(path) as archive:
+        members = archive.getmembers()
+    names, audit_chain_present = __runtime_archive_member_state(members)
     required_prefixes = {".env", "n8n_data/config"}
     missing = [prefix for prefix in required_prefixes if not any(name == prefix or name.startswith(prefix + "/") for name in names)]
     if missing:
         raise RuntimeError("runtime recovery archive lacks required configuration")
-    return {"member_count": len(names), "required_paths": sorted(required_prefixes)}
+    return {
+        "member_count": len(names),
+        "required_paths": sorted(required_prefixes),
+        "audit_chain_present": audit_chain_present,
+    }
 
 
 def validate_sqlite(source: Path, temp_dir: Path) -> dict[str, object]:

@@ -285,11 +285,28 @@ def archive_runtime_secrets(stack_dir: Path, destination: Path) -> list[str]:
         Path("config"),
         Path("soc-alerts/agent-memory"),
         Path("asset-discovery"),
+        Path("logs/onion-sentinel-admin-audit.jsonl"),
     ]
     included: list[str] = []
     with tarfile.open(destination, "w:gz") as archive:
         for relative in candidates:
             source = stack_dir / relative
+            if relative == Path("logs/onion-sentinel-admin-audit.jsonl"):
+                if source.is_symlink():
+                    raise RuntimeError(
+                        "Administration audit ledger must not be a symlink"
+                    )
+                if not source.exists():
+                    continue
+                source_stat = source.stat()
+                if (
+                    not source.is_file()
+                    or source_stat.st_uid != os.getuid()
+                    or source_stat.st_mode & 0o777 != 0o600
+                ):
+                    raise RuntimeError(
+                        "Administration audit ledger custody is unsafe"
+                    )
             if source.exists():
                 archive.add(source, arcname=str(relative), recursive=True)
                 included.append(str(relative))
