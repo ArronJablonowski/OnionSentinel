@@ -37,7 +37,7 @@ class RuntimeBackupSqlitePhaseTests(unittest.TestCase):
         encoded = json.dumps(names, separators=(",", ":"), sort_keys=True).encode()
         self.assertEqual(
             (len(names), hashlib.sha256(encoded).hexdigest()),
-            (30, "ac78e85dc0aaf678660a08a4c83d66b5c5698c348a9bbb1320148e3aa3d1558c"),
+            (32, "09a2126219933bd4c09294e9af9504d800ae14702de6276a0e2f9bc24dea3565"),
         )
         self.assertEqual(
             str(inspect.signature(backup.backup_sqlite_database)),

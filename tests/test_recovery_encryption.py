@@ -46,6 +46,7 @@ class RecoveryEncryptionTests(unittest.TestCase):
             self.assertNotEqual(encrypted.read_bytes(), payload)
             self.assertEqual(result["plaintext_bytes"], len(payload))
             self.assertEqual(metadata["scheme"], module.ENCRYPTION_SCHEME)
+            self.assertEqual(metadata["key_source"], "injected")
             self.assertNotIn(SECRET.decode(), repr(metadata))
 
     def test_wrong_key_and_tampering_fail_before_plaintext_publication(self) -> None:
@@ -80,6 +81,13 @@ class RecoveryEncryptionTests(unittest.TestCase):
                         expected_plaintext_sha256=metadata["plaintext_sha256"],
                     )
                 self.assertFalse(output.exists())
+
+            with self.assertRaisesRegex(RuntimeError, "digest is invalid"):
+                owner.decrypt_file(
+                    encrypted,
+                    root / "invalid-digest.dump",
+                    expected_plaintext_sha256="g" * 64,
+                )
 
     def test_secret_and_file_admission_fail_closed(self) -> None:
         module = load_module()
