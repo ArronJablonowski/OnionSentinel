@@ -3738,8 +3738,9 @@ transfer timeout/bandwidth policy. It imports and re-exports the capture-,
 spool-, and streaming-policy surfaces so the original flat Relay API remains
 compatible, and remains below the 600-line target.
 
-`relay_pcap_delivery.py` owns the bounded SSH/rsync handoff to the Mac Studio,
-remote verification/cleanup, broker completion callbacks, and retry scheduling.
+`relay_pcap_delivery.py` owns the bounded, host-key-pinned SSH/rsync handoff to
+the Mac Studio, remote verification/cleanup, broker completion callbacks, and
+retry scheduling.
 `relay_pcap_service.py` owns the single-flight, one-request-per-run PCAP state
 machine and outcome accounting. Its bounded phases separately own polling and
 capture-protection admission, claimed-request streaming/upload, retry and

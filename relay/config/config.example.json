@@ -76,6 +76,7 @@
       "host": "10.77.7.225",
       "user": "__MAC_STUDIO_SSH_USER__",
       "ssh_key": "/opt/so-alert-relay/keys/macstudio-pcap-transfer_ed25519",
+      "known_hosts": "/opt/so-alert-relay/keys/macstudio_known_hosts",
       "artifact_dir": "n8n-local/pcap-evidence/artifacts",
       "connect_timeout_seconds": 20,
       "rsync_timeout_seconds": 1800,

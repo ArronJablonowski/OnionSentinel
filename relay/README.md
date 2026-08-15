@@ -264,6 +264,7 @@ PCAP fulfillment is disabled by default in `config/config.example.json`:
     "host": "10.77.7.225",
     "user": "__MAC_STUDIO_SSH_USER__",
     "ssh_key": "/opt/so-alert-relay/keys/macstudio-pcap-transfer_ed25519",
+    "known_hosts": "/opt/so-alert-relay/keys/macstudio_known_hosts",
     "artifact_dir": "n8n-local/pcap-evidence/artifacts",
     "connect_timeout_seconds": 20,
     "rsync_timeout_seconds": 1800,
@@ -548,10 +549,14 @@ sudo -u soalert /usr/bin/python3 /opt/so-alert-relay/app/relay_readiness.py \
   --config /opt/so-alert-relay/app/config.json
 ```
 
-PCAP SSH runs under the service account used for the broker command. If the
-broker is invoked with `sudo`, make sure the Security Onion host key is present
-in that account's `known_hosts`; otherwise PCAP export will fail before the
-forced-command wrapper receives the request.
+PCAP SSH runs under the service account used for the broker command. Before
+enabling it, independently verify the Mac Studio host fingerprint and write the
+pin to `/opt/so-alert-relay/keys/macstudio_known_hosts` as an owner-only regular
+file. Relay-to-Mac SSH uses `StrictHostKeyChecking=yes` with only that configured
+file; it never accepts a first-seen key. The unified readiness probe rejects an
+enabled PCAP transfer whose key or host-pin metadata is absent or permissive.
+The field defaults to that same path for an older live config, so an upgrade can
+preprovision the pin without rewriting the rest of `config.json`.
 
 ## Incident Evidence Relay
 

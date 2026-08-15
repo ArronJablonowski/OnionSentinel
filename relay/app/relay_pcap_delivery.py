@@ -13,6 +13,9 @@ from pathlib import Path
 from relay_pcap_transport import *  # noqa: F401,F403
 
 
+DEFAULT_MAC_KNOWN_HOSTS = "/opt/so-alert-relay/keys/macstudio_known_hosts"
+
+
 def remote_shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
@@ -30,8 +33,13 @@ def mac_ssh_base(config: dict) -> list[str]:
     host = str(transfer.get("host") or "").strip()
     user = str(transfer.get("user") or "").strip()
     key = str(transfer.get("ssh_key") or "").strip()
-    if not host or not user or not key:
-        raise RuntimeError("mac_transfer requires host, user, and ssh_key")
+    known_hosts = str(
+        transfer.get("known_hosts") or DEFAULT_MAC_KNOWN_HOSTS
+    ).strip()
+    if not host or not user or not key or not known_hosts:
+        raise RuntimeError(
+            "mac_transfer requires host, user, ssh_key, and known_hosts"
+        )
     return [
         "ssh",
         "-i",
@@ -41,7 +49,9 @@ def mac_ssh_base(config: dict) -> list[str]:
         "-o",
         "BatchMode=yes",
         "-o",
-        "StrictHostKeyChecking=accept-new",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={resolve_path(known_hosts)}",
         "-o",
         f"ConnectTimeout={int(transfer.get('connect_timeout_seconds') or 20)}",
         f"{user}@{host}",

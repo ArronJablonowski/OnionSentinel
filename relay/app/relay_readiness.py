@@ -43,6 +43,7 @@ MAX_CONFIG_BYTES = 1024 * 1024
 MAX_KERNEL_BYTES = 64 * 1024
 DEFAULT_CONFIG = Path("/opt/so-alert-relay/app/config.json")
 DEFAULT_THERMAL_PATH = Path("/sys/class/thermal/thermal_zone0/temp")
+DEFAULT_MAC_KNOWN_HOSTS = "/opt/so-alert-relay/keys/macstudio_known_hosts"
 PROBE_ENVIRONMENT = {
     "HOME": "/opt/so-alert-relay",
     "LANG": "C",
@@ -311,22 +312,35 @@ def evaluate_route_health(config: dict, run_command=_run_local) -> dict:
     return _check("routes", True, "routes_ready", "routes_unavailable")
 
 
+def _pcap_credential_paths(config: dict, security_onion: object) -> list[object]:
+    pcap = config.get("pcap_broker")
+    if not isinstance(pcap, dict) or pcap.get("enabled") is not True:
+        return []
+    paths = []
+    if isinstance(security_onion, dict):
+        paths.append(
+            security_onion.get("pcap_ssh_key") or security_onion.get("ssh_key")
+        )
+    transfer = pcap.get("mac_transfer")
+    if isinstance(transfer, dict):
+        paths.extend(
+            (
+                transfer.get("ssh_key"),
+                transfer.get("known_hosts") or DEFAULT_MAC_KNOWN_HOSTS,
+            )
+        )
+    return paths
+
+
 def _credential_paths(config: dict) -> list[object]:
     paths: list[object] = []
     security_onion = config.get("security_onion")
     if isinstance(security_onion, dict):
         paths.append(security_onion.get("ssh_key"))
-        pcap = config.get("pcap_broker")
-        if isinstance(pcap, dict) and pcap.get("enabled") is True:
-            paths.append(security_onion.get("pcap_ssh_key") or security_onion.get("ssh_key"))
+    paths.extend(_pcap_credential_paths(config, security_onion))
     alert_ingest = config.get("alert_ingest")
     if isinstance(alert_ingest, dict) and alert_ingest.get("enabled") is True:
         paths.extend((alert_ingest.get("ssh_key"), alert_ingest.get("known_hosts")))
-    pcap = config.get("pcap_broker")
-    if isinstance(pcap, dict) and pcap.get("enabled") is True:
-        transfer = pcap.get("mac_transfer")
-        if isinstance(transfer, dict):
-            paths.append(transfer.get("ssh_key"))
     return paths
 
 

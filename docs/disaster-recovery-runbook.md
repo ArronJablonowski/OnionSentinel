@@ -1231,6 +1231,7 @@ The default n8n proxy configuration is:
     "host": "10.77.7.225",
     "user": "__MAC_STUDIO_SSH_USER__",
     "ssh_key": "/opt/so-alert-relay/keys/macstudio-pcap-transfer_ed25519",
+    "known_hosts": "/opt/so-alert-relay/keys/macstudio_known_hosts",
     "artifact_dir": "n8n-local/pcap-evidence/artifacts",
     "connect_timeout_seconds": 20,
     "rsync_timeout_seconds": 1800,
@@ -1241,6 +1242,13 @@ The default n8n proxy configuration is:
   "limit": 1
 }
 ```
+
+Before enabling PCAP transfer, verify the Mac Studio host fingerprint through
+an independent operator channel and install only that pin at
+`/opt/so-alert-relay/keys/macstudio_known_hosts` with owner-only permissions.
+The transfer uses `StrictHostKeyChecking=yes`; never substitute trust-on-first-
+use. Older live configs may omit `known_hosts` only because the runtime defaults
+to this exact path, allowing the pin to be staged before the config is upgraded.
 
 When enabled, it uses a separate Security Onion forced-command key and this
 relay mode:
