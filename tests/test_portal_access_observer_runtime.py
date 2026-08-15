@@ -52,8 +52,21 @@ class PortalAccessObserverRuntimeTests(unittest.TestCase):
             self.assertTrue(service.enabled)
             self.assertEqual(service.snapshot()["audit_event_count"], 0)
 
-    def test_unqualified_enforcement_modes_fail_at_startup(self) -> None:
-        for mode in ("admin-enforce", "rbac-enforce"):
+    def test_admin_enforcement_requires_a_verified_key_and_rbac_stays_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            key_path = runtime.audit_signing_key_path(home)
+            key_path.parent.mkdir(parents=True)
+            key_path.write_text("ab" * 32 + "\n", encoding="ascii")
+            os.chmod(key_path, 0o600)
+            service = runtime.load_access_observer_runtime(
+                environ={runtime.ACCESS_MODE_ENV: "admin-enforce"},
+                home=home,
+            )
+            self.assertTrue(service.enabled)
+            self.assertTrue(service.enforcing)
+
+        for mode in ("rbac-enforce",):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
                 with self.assertRaisesRegex(
                     runtime.AccessObserverConfigurationError,
@@ -63,6 +76,44 @@ class PortalAccessObserverRuntimeTests(unittest.TestCase):
                         environ={runtime.ACCESS_MODE_ENV: mode},
                         home=Path(tmp),
                     )
+
+    def test_enforcement_precommit_must_reach_verified_ledger_before_mutation(self) -> None:
+        appended = []
+        service = runtime.AccessObserverRuntime(
+            mode="admin-enforce",
+            signing_key=b"k" * 32,
+            ledger_path=Path("/not-used"),
+            append_event=lambda *_args, **kwargs: appended.append(kwargs) or {},
+        )
+        observation = service.begin(
+            route("/api/soc-settings/ai-model"),
+            principal=runtime.HumanPrincipal(
+                "human_session", "operator-1", "administrator"
+            ),
+            same_origin_authorized=True,
+            csrf_authorized=True,
+            request_id="request-precommit-1",
+        )
+        self.assertTrue(
+            service.precommit(
+                observation,
+                occurred_at="2026-08-15T06:50:00Z",
+            )
+        )
+        self.assertEqual(len(appended), 1)
+        fields = appended[0]["fields"]
+        self.assertEqual(fields["http_status"], 100)
+        self.assertEqual(fields["reason_code"], "enforce_authorized_precommit")
+
+        service._append_event = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("must not escape")
+        )
+        self.assertFalse(
+            service.precommit(
+                observation,
+                occurred_at="2026-08-15T06:50:01Z",
+            )
+        )
 
     def test_append_failure_is_telemetry_only_and_never_escapes_observe(self) -> None:
         failures: list[str] = []

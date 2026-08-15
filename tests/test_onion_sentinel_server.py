@@ -23,7 +23,7 @@ class OnionSentinelServerTests(unittest.TestCase):
         access_runtime = SimpleNamespace(
             begin=lambda value, path, **kwargs: events.append(
                 ("begin", value is handler, path, kwargs)
-            )
+            ) or SimpleNamespace(allowed=True)
         )
         with (
             mock.patch.object(server, "ACCESS_RUNTIME", access_runtime),
@@ -49,6 +49,32 @@ class OnionSentinelServerTests(unittest.TestCase):
                 ("dispatch", True, True),
             ],
         )
+
+    def test_post_enforcement_denial_stops_before_existing_dispatch(self):
+        handler = object.__new__(server.OnionSentinelHandler)
+        handler.path = "/api/soc-settings/ai-model"
+        admission = SimpleNamespace(
+            allowed=False,
+            status=401,
+            reason="unauthenticated",
+            json_request=True,
+        )
+        access_runtime = SimpleNamespace(begin=mock.Mock(return_value=admission))
+        with (
+            mock.patch.object(server, "ACCESS_RUNTIME", access_runtime),
+            mock.patch.object(
+                server._request_routes,
+                "send_access_denial",
+                return_value="denied",
+                create=True,
+            ) as deny,
+            mock.patch.object(server._request_routes, "do_post") as dispatch,
+        ):
+            self.assertEqual(
+                server.OnionSentinelHandler.do_POST(handler), "denied"
+            )
+        deny.assert_called_once_with(handler, server, admission)
+        dispatch.assert_not_called()
 
     def test_response_finalizes_observation_once_without_changing_response(self):
         handler = object.__new__(server.OnionSentinelHandler)
@@ -121,7 +147,7 @@ class OnionSentinelServerTests(unittest.TestCase):
             observer=observer_runtime,
             sessions=session_runtime,
         )
-        access_runtime.begin(
+        admission = access_runtime.begin(
             handler,
             "/api/ac-hunter/refresh",
             controlled_evaluation=False,
@@ -140,6 +166,7 @@ class OnionSentinelServerTests(unittest.TestCase):
             },
         )
         session_runtime.resolve_session.assert_called_once()
+        self.assertTrue(admission.allowed)
 
     def test_observe_login_and_logout_cookie_headers_preserve_legacy_default(self):
         disabled_sessions = SimpleNamespace(
@@ -221,7 +248,7 @@ class OnionSentinelServerTests(unittest.TestCase):
                 return_value=accepted_route,
             ),
         ):
-            access_runtime.begin(
+            admission = access_runtime.begin(
                 handler,
                 "/api/soc-settings/ai-model",
                 controlled_evaluation=False,
@@ -231,6 +258,7 @@ class OnionSentinelServerTests(unittest.TestCase):
         observer_runtime.record_boundary_failure.assert_called_once_with(
             "RuntimeError"
         )
+        self.assertTrue(admission.allowed)
 
     def test_server_release_reader_is_literal_private_and_duplicate_safe(self):
         with tempfile.TemporaryDirectory() as tmp:
