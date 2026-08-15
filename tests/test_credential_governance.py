@@ -85,6 +85,7 @@ class CredentialGovernanceTests(unittest.TestCase):
         good = {
             "schema": "onion-sentinel-credential-inventory-v1",
             "generated_at": "2026-08-15T00:00:00Z",
+            "required_ids": [entry["id"]],
             "records": [
                 {
                     "credential_id": entry["id"],
@@ -142,6 +143,7 @@ class CredentialGovernanceTests(unittest.TestCase):
                 json.dumps({
                     "schema": "onion-sentinel-credential-inventory-v1",
                     "generated_at": "2026-08-15T00:00:00Z",
+                    "required_ids": ["notification.telegram"],
                     "records": [],
                     "token": "must-not-be-admitted",
                 }),

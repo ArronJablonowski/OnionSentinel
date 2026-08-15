@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 MAX_CONFIG_BYTES = 1024 * 1024
 MAX_HEALTH_BYTES = 64 * 1024
+MAX_CREDENTIAL_RESULT_BYTES = 16 * 1024
 RELEASE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{6,99}$")
 __PROVIDER_EXECUTABLES = {
     "codex-cli": ("codex_cli_path", "codex"),
@@ -227,6 +228,47 @@ def bounded_health(url: str, service: str) -> bool:
     return bool(value.get("ok") is True and value.get("service") == service)
 
 
+def check_credentials(stack: Path) -> dict[str, Any]:
+    started = time.monotonic()
+    command = [
+        "/usr/bin/python3",
+        str(stack / "bin" / "validate-credential-governance.py"),
+        "--deployed-runtime",
+        "--catalog",
+        str(stack / "config" / "credential-governance.json"),
+        "--inventory",
+        str(stack / "config" / "service-identity-inventory.json"),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            check=False,
+            env={"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"},
+            text=True,
+            timeout=5,
+        )
+        if completed.returncode != 0:
+            raise ValueError("validator_failed")
+        if len(completed.stdout.encode("utf-8")) > MAX_CREDENTIAL_RESULT_BYTES:
+            raise ValueError("validator_output_oversized")
+        payload = json.loads(completed.stdout)
+        if not (
+            isinstance(payload, dict)
+            and payload.get("schema") == "onion-sentinel-credential-governance-result-v1"
+            and payload.get("ok") is True
+            and payload.get("status") == "inventory_valid"
+        ):
+            raise ValueError("validator_result_invalid")
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError):
+        return result(
+            "credentials", "failed", "credential_governance_failed", started
+        )
+    item = result("credentials", "ready", "lifecycle_inventory_valid", started)
+    item["catalog_entries"] = int(payload.get("catalog_entries") or 0)
+    return item
+
+
 def check_services() -> dict[str, Any]:
     started = time.monotonic()
     checks = (
@@ -349,6 +391,7 @@ def check_relay(stack: Path, network: bool) -> dict[str, Any]:
 def snapshot(stack: Path, *, network: bool, minimum_free_bytes: int) -> dict[str, Any]:
     checks: list[Callable[[], dict[str, Any]]] = [
         lambda: check_configuration(stack),
+        lambda: check_credentials(stack),
         lambda: check_database(stack / "alert_store_data" / "alerts.sqlite3", "alert_store_database"),
         lambda: check_database(stack / "alert_store_data" / "investigation-harness.sqlite3", "harness_database"),
         lambda: check_storage(stack, minimum_free_bytes),

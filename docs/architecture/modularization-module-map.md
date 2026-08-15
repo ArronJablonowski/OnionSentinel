@@ -3185,7 +3185,9 @@ Private provider phases own assigned-route validation, Ollama endpoint policy,
 and executable resolution. Private supervision phases own restart-quarantine
 evaluation, bounded launchd registration probes, and duplicate worker-lane
 detection. The public checks retain their stable, secret-safe component results;
-network contact remains an explicit Relay TCP opt-in owned by `check_relay`.
+the credential component executes the deployed lifecycle validator in a
+secret-empty environment and projects only a categorical outcome. Network
+contact remains an explicit Relay TCP opt-in owned by `check_relay`.
 
 ### Web recovery supervisor
 
@@ -3212,6 +3214,7 @@ required before extracted code is imported in production:
 | `n8n/bin/pcap_evidence_query*.py` | `$HOME/n8n-local/bin` | copy policy, validation, matching, selection, projection, and response owners before the stable facade |
 | `n8n/bin/incident_evidence_contract.py` and `incident_evidence_*_contract.py` plus shared primitives | `$HOME/n8n-local/bin` | copy validation, scope/digest, search, OSQuery, control, and artifact owners before the stable contract facade |
 | `n8n/bin/evaluate-operational-slos.py` and `operational_slo_*.py` | `$HOME/n8n-local/bin` | copy timestamp, resilience, and aggregate policy owners before validating the stable launchd-facing evaluator |
+| `operations/validate-credential-governance.py` and `operations/security/credential-governance.json` | `$HOME/n8n-local/bin` and `$HOME/n8n-local/config` | deploy the source-owned validator/catalog without creating or replacing the operator-owned private inventory; alert-store startup fails closed until the inventory is valid |
 | `n8n/bin/collect-dhcp-asset-discovery.py` and `dhcp_asset_*.py` | `$HOME/n8n-local/bin` | copy contract, state, persistence/Relay adapters, and workflows before the stable launchd-facing facade |
 | `n8n/onion_sentinel` | `$HOME/n8n-local/onion_sentinel` | staged complete-tree copy and atomic replacement |
 | `onion-sentinel-dashboard/onion_sentinel_server.py` and `onion_sentinel_{release,application,request_routes}.py` | `$HOME/n8n-local/onion-sentinel-dashboard` | stage the three implementation owners before the stable web-service surface |

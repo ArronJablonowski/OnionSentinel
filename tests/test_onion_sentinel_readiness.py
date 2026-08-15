@@ -13,6 +13,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "n8n/bin/check-onion-sentinel-readiness.py"
+VALIDATOR = ROOT / "operations/validate-credential-governance.py"
+CREDENTIAL_CATALOG = ROOT / "operations/security/credential-governance.json"
 SPEC = importlib.util.spec_from_file_location("readiness", SCRIPT)
 assert SPEC and SPEC.loader
 READINESS = importlib.util.module_from_spec(SPEC)
@@ -22,7 +24,7 @@ SPEC.loader.exec_module(READINESS)
 class ReadinessTests(unittest.TestCase):
     def make_stack(self, root: Path) -> Path:
         stack = root / "n8n-local"
-        for name in ("config", "run", "logs", "soc-alerts", "alert_store_data"):
+        for name in ("bin", "config", "run", "logs", "soc-alerts", "alert_store_data"):
             (stack / name).mkdir(parents=True, exist_ok=True)
         (stack / ".env").write_text("ONION_SENTINEL_RELEASE_ID=abcdef1234567\nSECRET=not-read\n")
         os.chmod(stack / ".env", 0o600)
@@ -41,6 +43,33 @@ class ReadinessTests(unittest.TestCase):
             path = stack / "config" / name
             path.write_text(json.dumps(value))
             os.chmod(path, 0o600 if name == "incident-evidence.json" else 0o644)
+        (stack / "bin" / "validate-credential-governance.py").write_bytes(
+            VALIDATOR.read_bytes()
+        )
+        (stack / "config" / "credential-governance.json").write_bytes(
+            CREDENTIAL_CATALOG.read_bytes()
+        )
+        catalog = json.loads(CREDENTIAL_CATALOG.read_text(encoding="utf-8"))
+        entry = catalog["entries"][0]
+        inventory = {
+            "schema": "onion-sentinel-credential-inventory-v1",
+            "generated_at": "2026-08-15T00:00:00Z",
+            "required_ids": [entry["id"]],
+            "records": [{
+                "credential_id": entry["id"],
+                "generation": 1,
+                "state": "active",
+                "created_at": "2026-08-14T00:00:00Z",
+                "expires_at": "2099-08-14T00:00:00Z",
+                "rotation_due_at": "2099-02-14T00:00:00Z",
+                "storage_class": entry["storage_class"],
+                "allowed_actions": entry["allowed_actions"],
+                "predecessor_generation": None,
+            }],
+        }
+        inventory_path = stack / "config" / "service-identity-inventory.json"
+        inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+        os.chmod(inventory_path, 0o600)
         for name in ("alerts.sqlite3", "investigation-harness.sqlite3"):
             with closing(
                 sqlite3.connect(stack / "alert_store_data" / name)

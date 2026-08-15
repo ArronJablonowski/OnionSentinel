@@ -39,7 +39,11 @@ class ProviderReadinessCharacterization(unittest.TestCase):
         encoded = json.dumps(names, separators=(",", ":"), sort_keys=True).encode()
         self.assertEqual(
             (len(names), hashlib.sha256(encoded).hexdigest()),
-            (35, "1f68aa66121759c08a1abd253f1d4b2094183b30dcdad37cdb6a6ff5a96b4ebd"),
+            (37, "e5085d6e6684f7398212fe40c42382cfdc3bce4d12e3156b801945c037b63945"),
+        )
+        self.assertEqual(
+            str(inspect.signature(readiness.check_credentials)),
+            "(stack: 'Path') -> 'dict[str, Any]'",
         )
         self.assertEqual(
             str(inspect.signature(readiness.check_providers)),

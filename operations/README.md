@@ -13,7 +13,10 @@ logical bindings, lifecycle policy fields, and repository credential-source
 coverage. An optional owner-only runtime inventory adds missing, duplicate,
 expired, overdue, mismatched, and rotation/rollback-lineage checks without
 reading or emitting credential material. The operating contract is documented
-in `../docs/security/service-identity-lifecycle.md`.
+in `../docs/security/service-identity-lifecycle.md`. The deployed alert-store
+startup wrapper and production readiness diagnostic run the private-inventory
+gate in a secret-empty child environment; the installer never seeds or replaces
+that operator-owned inventory.
 
 ## Module Quality Gate
 

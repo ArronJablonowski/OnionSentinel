@@ -50,5 +50,18 @@ export ALERT_STORE_SQLITE_JOURNAL_MODE="${ALERT_STORE_SQLITE_JOURNAL_MODE:-DELET
 export ALERT_STORE_SQLITE_SYNCHRONOUS="${ALERT_STORE_SQLITE_SYNCHRONOUS:-FULL}"
 export ALERT_STORE_SQLITE_TEMP_STORE="${ALERT_STORE_SQLITE_TEMP_STORE:-DEFAULT}"
 
+if ! /usr/bin/env -i \
+  PATH=/usr/bin:/bin \
+  PYTHONDONTWRITEBYTECODE=1 \
+  /usr/bin/python3 \
+  "$STACK_DIR/bin/validate-credential-governance.py" \
+  --deployed-runtime \
+  --catalog "$STACK_DIR/config/credential-governance.json" \
+  --inventory "$STACK_DIR/config/service-identity-inventory.json" >/dev/null
+then
+  echo "Credential lifecycle startup validation failed." >&2
+  exit 78
+fi
+
 cd "$ALERT_STORE_DIR"
 exec node alert_store.js

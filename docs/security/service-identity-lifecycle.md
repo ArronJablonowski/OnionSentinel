@@ -17,6 +17,13 @@ storage-class names, allowed-action names, and predecessor generation numbers.
 It must never contain a token, password, key, digest, endpoint, account name,
 public-key text, host fingerprint, or credential-file path.
 
+`required_ids` is the explicit enablement manifest. It must contain every
+catalog ID used by the deployment and must not contain duplicates. The
+validator requires one active, conforming record for each enabled ID. An empty
+template is intentionally not startup-ready. Provision the private inventory
+before a controlled deployment; the installer deploys the source catalog and
+validator but never creates, copies, or overwrites this operator-owned file.
+
 Validate the source catalog during every release:
 
 ```bash
@@ -55,6 +62,12 @@ class/action set, or broken rollback lineage fails validation.
 5. If validation fails, disable `N+1`, restore `N`, repeat the smoke/denial
    tests, and record only the categorical outcome. If it succeeds, revoke `N`
    at the provider or authorized-key boundary and mark it `revoked`.
+
+The alert-store host wrapper runs the deployed validator before Node starts and
+exits with a fixed, secret-free configuration error if validation fails. The
+production readiness snapshot independently reports only
+`lifecycle_inventory_valid` or `credential_governance_failed`. Neither boundary
+prints the inventory, catalog paths, credential values, or validator failures.
 
 Ephemeral evaluation, lease, capability, and browser-session secrets do not
 permit rollback. They are destroyed and regenerated. Provider refresh tokens

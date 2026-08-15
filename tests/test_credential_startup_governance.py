@@ -35,8 +35,8 @@ def record(entry: dict, generation: int, state: str, predecessor=None) -> dict:
         "generation": generation,
         "state": state,
         "created_at": "2026-08-14T00:00:00Z",
-        "expires_at": "2027-08-14T00:00:00Z",
-        "rotation_due_at": "2027-02-14T00:00:00Z",
+        "expires_at": "2099-08-14T00:00:00Z",
+        "rotation_due_at": "2099-02-14T00:00:00Z",
         "storage_class": entry["storage_class"],
         "allowed_actions": entry["allowed_actions"],
         "predecessor_generation": predecessor,
@@ -196,8 +196,56 @@ class CredentialStartupGovernanceTests(unittest.TestCase):
         )
         gate = '"$STACK_DIR/bin/validate-credential-governance.py"'
         self.assertIn(gate, host)
+        self.assertIn("/usr/bin/env -i", host)
         self.assertLess(host.index(gate), host.index("exec node alert_store.js"))
         self.assertNotIn("service-identity-inventory.example.json", installer)
+
+    def test_alert_store_startup_denies_invalid_and_admits_valid_inventory(self) -> None:
+        host = ROOT / "n8n/bin/run-alert-store-host.zsh"
+        with tempfile.TemporaryDirectory() as tmp:
+            stack = Path(tmp)
+            (stack / "bin").mkdir()
+            (stack / "config").mkdir()
+            alert_store = stack / "alert_store"
+            alert_store.mkdir()
+            (alert_store / "alert_store.js").write_text(
+                'console.log("synthetic-node-started");\n', encoding="utf-8"
+            )
+            (stack / "bin" / "validate-credential-governance.py").write_bytes(
+                VALIDATOR.read_bytes()
+            )
+            (stack / "config" / "credential-governance.json").write_bytes(
+                CATALOG.read_bytes()
+            )
+            environment = {**os.environ, "STACK_DIR": str(stack)}
+            denied = subprocess.run(
+                ["/bin/zsh", str(host)],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            self.assertEqual(denied.returncode, 78, denied.stderr)
+            self.assertEqual(
+                denied.stderr.strip(), "Credential lifecycle startup validation failed."
+            )
+            self.assertNotIn("synthetic-node-started", denied.stdout)
+
+            write_private(
+                stack / "config" / "service-identity-inventory.json",
+                inventory(self.entry["id"], [record(self.entry, 1, "active")]),
+            )
+            admitted = subprocess.run(
+                ["/bin/zsh", str(host)],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            self.assertEqual(admitted.returncode, 0, admitted.stderr)
+            self.assertEqual(admitted.stdout.strip(), "synthetic-node-started")
 
 
 if __name__ == "__main__":

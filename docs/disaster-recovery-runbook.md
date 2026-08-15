@@ -752,8 +752,9 @@ python3 "$HOME/n8n-local/bin/check-onion-sentinel-readiness.py" --network
 ```
 
 The check validates release configuration, read-only database integrity,
-storage capacity, provider configuration, service identity, required launchd
-registration, duplicate AI workers, web restart quarantine, and Relay TCP
+storage capacity, provider configuration, the owner-only service-identity
+lifecycle inventory, downstream service identity, required launchd registration,
+duplicate AI workers, web restart quarantine, and Relay TCP
 reachability. It does not execute a Security Onion evidence query or a model
 inference.
 

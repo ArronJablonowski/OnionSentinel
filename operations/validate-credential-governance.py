@@ -23,7 +23,7 @@ ENTRY_KEYS = frozenset({
     "expiration_policy", "rotation_policy", "revocation_procedure",
     "rollback_policy",
 })
-INVENTORY_KEYS = frozenset({"schema", "generated_at", "records"})
+INVENTORY_KEYS = frozenset({"schema", "generated_at", "required_ids", "records"})
 RECORD_KEYS = frozenset({
     "credential_id", "generation", "state", "created_at", "expires_at",
     "rotation_due_at", "storage_class", "allowed_actions",
@@ -57,15 +57,25 @@ SSH_BINDINGS = frozenset({
 })
 
 
-def _bounded_json(path: Path) -> object:
-    metadata = path.lstat()
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_FILE_BYTES:
+def _bounded_json_with_metadata(path: Path) -> tuple[os.stat_result, object]:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    elif path.is_symlink():
         raise ValueError("JSON source is not an admissible regular file")
-    with path.open("rb") as handle:
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "rb") as handle:
+        metadata = os.fstat(handle.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_FILE_BYTES:
+            raise ValueError("JSON source is not an admissible regular file")
         raw = handle.read(MAX_FILE_BYTES + 1)
     if len(raw) > MAX_FILE_BYTES:
         raise ValueError("JSON source exceeds its byte budget")
-    return json.loads(raw.decode("utf-8"))
+    return metadata, json.loads(raw.decode("utf-8"))
+
+
+def _bounded_json(path: Path) -> object:
+    return _bounded_json_with_metadata(path)[1]
 
 
 def load_catalog(path: Path) -> dict:
@@ -177,14 +187,16 @@ def _duplicate_catalog_errors(identifiers: list[object], bindings: list[str]) ->
     return errors
 
 
-def _binding_coverage_errors(bindings: list[str], root: Path) -> list[str]:
+def _binding_coverage_errors(bindings: list[str], root: Path | None) -> list[str]:
+    if root is None:
+        return []
     missing = sorted(_required_bindings(root) - set(bindings))
     if missing:
         return ["catalog is missing declared bindings: " + ", ".join(missing)]
     return []
 
 
-def validate_catalog(catalog: object, root: Path = ROOT) -> list[str]:
+def validate_catalog(catalog: object, root: Path | None = ROOT) -> list[str]:
     if not isinstance(catalog, dict) or set(catalog) != {"schema", "entries"}:
         return ["catalog field set is invalid"]
     if catalog.get("schema") != CATALOG_SCHEMA:
@@ -196,7 +208,7 @@ def validate_catalog(catalog: object, root: Path = ROOT) -> list[str]:
     return (
         errors
         + _duplicate_catalog_errors(identifiers, bindings)
-        + _binding_coverage_errors(bindings, Path(root))
+        + _binding_coverage_errors(bindings, Path(root) if root is not None else None)
     )
 
 
@@ -354,35 +366,50 @@ def _required_inventory_errors(
     return errors
 
 
-def validate_inventory(
-    catalog: dict,
-    inventory: object,
-    now: dt.datetime,
-    required_ids: set[str] | None = None,
-) -> list[str]:
+def _inventory_header_errors(inventory: object) -> list[str]:
     if not isinstance(inventory, dict) or set(inventory) != INVENTORY_KEYS:
         return ["inventory field set is invalid"]
     if inventory.get("schema") != INVENTORY_SCHEMA:
         return ["inventory schema is invalid"]
     if _timestamp(inventory.get("generated_at")) is None:
         return ["inventory generated_at is invalid"]
-    records = inventory.get("records")
-    if not isinstance(records, list):
+    declared_required = inventory.get("required_ids")
+    if not _string_list(declared_required) or not all(
+        IDENTIFIER_RE.fullmatch(identifier) for identifier in declared_required
+    ):
+        return ["inventory required_ids are invalid"]
+    if not isinstance(inventory.get("records"), list):
         return ["inventory records are invalid"]
+    return []
+
+
+def validate_inventory(
+    catalog: dict,
+    inventory: object,
+    now: dt.datetime,
+    required_ids: set[str] | None = None,
+) -> list[str]:
+    header_errors = _inventory_header_errors(inventory)
+    if header_errors:
+        return header_errors
+    declared_required = inventory["required_ids"]
+    records = inventory["records"]
     catalog_by_id = {entry["id"]: entry for entry in catalog["entries"]}
     errors, admitted = _admit_inventory_records(records, catalog_by_id, now)
     generation_errors, by_id = _grouped_generation_errors(admitted)
     return (
         errors
         + generation_errors
-        + _required_inventory_errors(required_ids or set(), catalog_by_id, by_id)
+        + _required_inventory_errors(
+            set(declared_required) | (required_ids or set()), catalog_by_id, by_id
+        )
     )
 
 
 def load_private_inventory(path: Path, owner_id: int | None = None) -> dict:
     candidate = Path(path)
     try:
-        metadata = candidate.lstat()
+        metadata, payload = _bounded_json_with_metadata(candidate)
         expected_owner = os.geteuid() if owner_id is None else owner_id
         if (
             not stat.S_ISREG(metadata.st_mode)
@@ -391,7 +418,6 @@ def load_private_inventory(path: Path, owner_id: int | None = None) -> dict:
             or metadata.st_size > MAX_FILE_BYTES
         ):
             raise ValueError("inventory metadata is unsafe")
-        payload = _bounded_json(candidate)
         if not isinstance(payload, dict) or set(payload) != INVENTORY_KEYS:
             raise ValueError("inventory schema is invalid")
         return payload
@@ -406,16 +432,10 @@ def _now(value: str | None) -> dt.datetime:
     return parsed
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate secret-free credential governance")
-    parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
-    parser.add_argument("--inventory", type=Path)
-    parser.add_argument("--required-id", action="append", default=[])
-    parser.add_argument("--at")
-    args = parser.parse_args()
+def _validation_outcome(args: argparse.Namespace) -> tuple[list[str], dict, str]:
     try:
         catalog = load_catalog(args.catalog)
-        failures = validate_catalog(catalog, ROOT)
+        failures = validate_catalog(catalog, None if args.deployed_runtime else ROOT)
         status = "catalog_valid"
         if not failures and args.inventory:
             inventory = load_private_inventory(args.inventory)
@@ -426,10 +446,12 @@ def main() -> int:
                     catalog, inventory, _now(args.at), set(args.required_id)
                 )
             status = "inventory_valid"
+        return failures, catalog, status
     except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-        failures = [str(exc)]
-        catalog = {"entries": []}
-        status = "invalid"
+        return [str(exc)], {"entries": []}, "invalid"
+
+
+def _render_result(failures: list[str], catalog: dict, status: str) -> dict:
     result = {
         "schema": RESULT_SCHEMA,
         "ok": not failures,
@@ -438,6 +460,25 @@ def main() -> int:
     }
     if failures:
         result["failures"] = failures
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Validate secret-free credential governance")
+    parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
+    parser.add_argument("--inventory", type=Path)
+    parser.add_argument(
+        "--deployed-runtime",
+        action="store_true",
+        help="Validate a deployed catalog whose source binding files are absent",
+    )
+    parser.add_argument("--required-id", action="append", default=[])
+    parser.add_argument("--at")
+    args = parser.parse_args()
+    if args.deployed_runtime and args.inventory is None:
+        parser.error("--deployed-runtime requires --inventory")
+    failures, catalog, status = _validation_outcome(args)
+    result = _render_result(failures, catalog, status)
     print(json.dumps(result, sort_keys=True))
     return 0 if not failures else 1
 
