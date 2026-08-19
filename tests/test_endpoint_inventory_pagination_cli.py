@@ -53,7 +53,7 @@ class EndpointInventoryPaginationCliCharacterizationTests(unittest.TestCase):
                     config,
                     "endpoint-a",
                     "SELECT name,path FROM apps WHERE path > '' "
-                    "ORDER BY path LIMIT 200;",
+                    "ORDER BY path LIMIT 50;",
                     "Scheduled read-only software inventory from apps",
                     "case-a",
                 )

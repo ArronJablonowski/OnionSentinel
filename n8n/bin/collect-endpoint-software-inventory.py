@@ -27,7 +27,7 @@ from live_osquery_client import (
     load_live_osquery_config,
     scheduled_inventory_approved,
 )
-from live_osquery_contract import LiveOsqueryContractError, MAX_ROWS
+from live_osquery_contract import LiveOsqueryContractError, MAX_ROWS as CONTRACT_MAX_ROWS
 from endpoint_inventory_collection import (
     CollectionDependencies,
     CollectionPolicy,
@@ -43,6 +43,10 @@ DEFAULT_CACHE = (
 )
 DEFAULT_LOG = Path.home() / "n8n-local" / "logs" / "endpoint-software-inventory.jsonl"
 MAX_CACHE_BYTES = 128 * 1024 * 1024
+# Kibana's live-query response path can return HTTP 500 for the macOS apps
+# table at the contract maximum. Keep scheduled inventory pages smaller while
+# retaining the contract ceiling and deterministic cursor pagination.
+MAX_ROWS = min(CONTRACT_MAX_ROWS, 50)
 MAX_PAGES = 16
 MAX_RECORDS = 100_000
 MAX_CURSOR_CHARS = 1500
