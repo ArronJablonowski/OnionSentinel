@@ -74,6 +74,11 @@ ALLOWED_REPOSITORY_ONLY_FRAGMENTS = (
     'local source="$REPO_DIR/n8n/alert_store/$tree"',
     '"$REPO_DIR/n8n/bin"  "$REPO_DIR/onion-sentinel-dashboard"',
 )
+CREDENTIAL_GOVERNANCE_PREFLIGHT_RE = re.compile(
+    r'^\s*PYTHONDONTWRITEBYTECODE=1\s+/usr/bin/python3\s+'
+    r'"\$REPO_DIR/operations/validate-credential-governance\.py"\s+--catalog\s+'
+    r'"\$REPO_DIR/operations/security/credential-governance\.json"\s+>/dev/null\s*$'
+)
 
 
 class ReconciliationError(RuntimeError):
@@ -198,12 +203,19 @@ def _validate_repository_runtime_operations(installer: str) -> None:
         )
 
 
+def _repository_only_reference_allowed(line: str) -> bool:
+    return (
+        any(fragment in line for fragment in ALLOWED_REPOSITORY_ONLY_FRAGMENTS)
+        or CREDENTIAL_GOVERNANCE_PREFLIGHT_RE.fullmatch(line) is not None
+    )
+
+
 def _validate_repository_only_references(installer: str) -> None:
     runtime_roots = ("$STACK_DIR", "$DASHBOARD_RUNTIME_DIR", "$LAUNCHD_DIR")
     for line in _logical_lines(installer):
         if "$REPO_DIR/" not in line or any(root in line for root in runtime_roots):
             continue
-        if any(fragment in line for fragment in ALLOWED_REPOSITORY_ONLY_FRAGMENTS):
+        if _repository_only_reference_allowed(line):
             continue
         raise ReconciliationError("installer contains an unclassified repository reference")
 

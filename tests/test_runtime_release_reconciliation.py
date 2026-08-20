@@ -37,6 +37,11 @@ cp -R "$REPO_DIR/onion-sentinel-dashboard/assets/." "$DASHBOARD_RUNTIME_DIR/asse
 '''
 
 
+CREDENTIAL_GOVERNANCE_PREFLIGHT = r'''PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 \
+  "$REPO_DIR/operations/validate-credential-governance.py" \
+  --catalog "$REPO_DIR/operations/security/credential-governance.json" >/dev/null'''
+
+
 class RuntimeReleaseReconciliationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -171,6 +176,61 @@ class RuntimeReleaseReconciliationTests(unittest.TestCase):
         changed = INSTALLER + 'source="$REPO_DIR/new"\ncp "$source" "$target"\n'
         with self.assertRaisesRegex(reconciliation.ReconciliationError, "unclassified"):
             reconciliation.validate_installer_coverage(changed)
+
+    def test_current_tracked_installer_has_complete_coverage(self) -> None:
+        installer = (ROOT / reconciliation.INSTALLER_PATH).read_text(encoding="utf-8")
+        reconciliation.validate_installer_coverage(installer)
+
+    def test_credential_governance_preflight_is_exactly_classified(self) -> None:
+        reconciliation.validate_installer_coverage(
+            INSTALLER + CREDENTIAL_GOVERNANCE_PREFLIGHT + "\n"
+        )
+
+    def test_credential_governance_preflight_rejects_extra_repository_reference(self) -> None:
+        changed = (
+            INSTALLER
+            + CREDENTIAL_GOVERNANCE_PREFLIGHT
+            + ' "$REPO_DIR/operations/unknown.json"\n'
+        )
+        with self.assertRaisesRegex(reconciliation.ReconciliationError, "unclassified"):
+            reconciliation.validate_installer_coverage(changed)
+
+    def test_credential_governance_preflight_rejects_substituted_source(self) -> None:
+        substitutions = (
+            (
+                "operations/validate-credential-governance.py",
+                "operations/other-validator.py",
+            ),
+            (
+                "operations/security/credential-governance.json",
+                "operations/security/other.json",
+            ),
+        )
+        for original, replacement in substitutions:
+            with self.subTest(replacement=replacement):
+                changed = CREDENTIAL_GOVERNANCE_PREFLIGHT.replace(
+                    original, replacement
+                )
+                with self.assertRaisesRegex(
+                    reconciliation.ReconciliationError, "unclassified"
+                ):
+                    reconciliation.validate_installer_coverage(INSTALLER + changed + "\n")
+
+    def test_credential_governance_preflight_rejects_command_mutations(self) -> None:
+        mutations = (
+            CREDENTIAL_GOVERNANCE_PREFLIGHT.replace(
+                " >/dev/null", " --verbose >/dev/null"
+            ),
+            CREDENTIAL_GOVERNANCE_PREFLIGHT + '; "$REPO_DIR/operations/unknown"',
+            "true; " + CREDENTIAL_GOVERNANCE_PREFLIGHT,
+            CREDENTIAL_GOVERNANCE_PREFLIGHT.replace(
+                ">/dev/null", ">/dev/null 2>&1"
+            ),
+        )
+        for changed in mutations:
+            with self.subTest(changed=changed):
+                with self.assertRaisesRegex(reconciliation.ReconciliationError, "unclassified"):
+                    reconciliation.validate_installer_coverage(INSTALLER + changed + "\n")
 
     def test_v2_contract_adds_versioned_dependencies(self) -> None:
         self._runtime_write(
