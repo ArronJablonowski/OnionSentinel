@@ -141,6 +141,7 @@ class OperationalSloTests(unittest.TestCase):
                 "operational_slo_resilience_policy.py",
                 "operational_slo_policy.py",
                 "operational_slo_state.py",
+                "sqlite_backup_recovery_gate.py",
                 "evaluate-operational-slos.py",
             ):
                 shutil.copy2(ROOT / "n8n/bin" / name, runtime / name)

@@ -273,6 +273,10 @@ load_file(
     "_onion_sentinel_operational_slos",
     bin_dir / "evaluate-operational-slos.py",
 )
+load_file(
+    "_onion_sentinel_sqlite_backup_recovery_gate",
+    bin_dir / "sqlite_backup_recovery_gate.py",
+)
 
 sys.path.insert(0, str(dashboard_dir))
 import portal_access_policy
@@ -859,6 +863,7 @@ do
     cp "$REPO_DIR/n8n/agent-memory/$memory_file" "$STACK_DIR/soc-alerts/agent-memory/$memory_file"
   fi
 done
+cp "$REPO_DIR/n8n/bin/sqlite_backup_recovery_gate.py" "$STACK_DIR/bin/sqlite_backup_recovery_gate.py"
 cp "$REPO_DIR/n8n/bin/ensure-n8n-stack.zsh" "$STACK_DIR/bin/ensure-n8n-stack.zsh"
 cp "$REPO_DIR/n8n/bin/monitor-n8n-stack.zsh" "$STACK_DIR/bin/monitor-n8n-stack.zsh"
 cp "$REPO_DIR/n8n/bin/ensure-onion-sentinel-web.py" "$STACK_DIR/bin/ensure-onion-sentinel-web.py"

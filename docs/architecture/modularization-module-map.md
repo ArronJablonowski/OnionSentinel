@@ -3179,6 +3179,9 @@ modules receive already collected values
 and perform no network, filesystem, database, process, credential, or
 persistence work. `operational_slo_state.py` owns owner-only snapshot, bounded
 history, counter state, and continuous-soak clock persistence.
+`sqlite_backup_recovery_gate.py` owns the bounded read-only wait that orders a
+coalesced post-idle maintenance completion before backup-threshold evaluation;
+it neither creates backup artifacts nor changes the threshold policy.
 `evaluate-operational-slos.py` remains the launchd-facing compatibility CLI and
 owns bounded local HTTP probes, runtime file discovery, and exit/output
 translation. The facade re-exports the historical evaluation, timestamp, and

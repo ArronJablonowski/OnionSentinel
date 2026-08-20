@@ -31,6 +31,7 @@ from operational_slo_state import (
     update_soak_state,
     write_outputs,
 )
+import sqlite_backup_recovery_gate
 
 
 MAX_PROBE_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -205,6 +206,9 @@ def main() -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
     previous = load_previous_state(
         log_dir / "operational-slo-counter-state.json"
+    )
+    sqlite_backup_recovery_gate.wait_for_fresh_backup(
+        args.stack_dir / "alert_store_backups"
     )
     now = dt.datetime.now(dt.timezone.utc)
     runtime_context = _runtime_context(args.stack_dir)

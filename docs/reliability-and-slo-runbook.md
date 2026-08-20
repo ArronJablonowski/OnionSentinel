@@ -340,6 +340,12 @@ existing stateful stack monitor every five minutes. The CLI owns bounded local
 probes, the pure policy modules own timestamp, capacity/recovery, threshold,
 and snapshot projection, and `operational_slo_state.py` owns owner-only
 state/history persistence.
+Before that canonical evaluation, `sqlite_backup_recovery_gate.py` returns
+immediately for a fresh verified backup. If the backup is already beyond the
+two-hour limit, it waits at most 90 seconds for coalesced hourly maintenance to
+finish after a GUI-session wake. The evaluator always runs afterward with the
+same threshold, so failed or absent maintenance still records a failed sample;
+the gate changes resume ordering, not the SLO policy.
 The same snapshot requires a fresh evaluation-artifact maintenance report
 whenever `harness-evaluations` exists. It projects only aggregate run counts,
 bytes, seal/cleanup counts, and the 65/75-percent local plus 70/85-percent
