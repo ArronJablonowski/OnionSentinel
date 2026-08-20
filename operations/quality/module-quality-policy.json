@@ -9,6 +9,7 @@
   "new_complexity_max": 15,
   "include": [
     "n8n/bin/*.py",
+    "n8n/install/*.py",
     "n8n/onion_sentinel/*.py",
     "n8n/onion_sentinel/**/*.py",
     "n8n/alert_store/*.js",
@@ -34,6 +35,7 @@
   ],
   "python_import_roots": [
     "n8n/bin",
+    "n8n/install",
     "n8n",
     "onion-sentinel-dashboard",
     "onion-sentinel-dashboard/scripts",

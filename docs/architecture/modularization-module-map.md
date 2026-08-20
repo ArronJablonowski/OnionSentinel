@@ -3816,6 +3816,18 @@ sections, and byte-deterministic Markdown composition. Dependencies flow from
 the facade to the data and Markdown owners only. The Mac Studio installer
 copies both inward owners beside the executable facade.
 
+## Mac Studio Installer
+
+`install-macstudio-stack.zsh` remains the production compatibility entrypoint
+during staged extraction. `n8n/install/macstudio-phases.json` is the versioned
+characterization contract for its 16 side-effect-sensitive phases, and
+`macstudio_phase_contract.py` validates unique identifiers and anchors, a
+closed acyclic dependency graph, and exact current source order without
+accessing the live runtime, services, credentials, databases, or network. The
+contract is the first migration seam; payload ownership and execution remain
+in the existing installer until their separate manifest and phase adapters
+pass failure-injection and byte-preservation qualification.
+
 ## Relay Runtime
 
 `relay.py` is the package-free, executable compatibility facade for the

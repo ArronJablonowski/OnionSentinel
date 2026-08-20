@@ -1,0 +1,85 @@
+{
+  "schema": "onion-sentinel-macstudio-phase-contract-v1",
+  "phases": [
+    {
+      "id": "cli_and_release_preflight",
+      "after": [],
+      "marker": "parse_installer_arguments \"$@\""
+    },
+    {
+      "id": "staging_and_source_validation",
+      "after": ["cli_and_release_preflight"],
+      "marker": "trap cleanup_alert_store_stage EXIT"
+    },
+    {
+      "id": "validate_only_exit",
+      "after": ["staging_and_source_validation"],
+      "marker": "if [[ \"${ONION_SENTINEL_VALIDATE_ONLY:-0}\" == \"1\" ]]; then"
+    },
+    {
+      "id": "ai_guard_acquire",
+      "after": ["validate_only_exit"],
+      "marker": "if ! start_ai_deployment_guard; then"
+    },
+    {
+      "id": "critical_service_quiescence",
+      "after": ["ai_guard_acquire"],
+      "marker": "trap keep_critical_agents_down_on_failure EXIT"
+    },
+    {
+      "id": "runtime_layout",
+      "after": ["critical_service_quiescence"],
+      "marker": "mkdir -p \"$STACK_DIR/alert_store/config\""
+    },
+    {
+      "id": "alert_store_payload",
+      "after": ["runtime_layout"],
+      "marker": "cp \"$REPO_DIR/n8n/docker-compose.yml\" \"$STACK_DIR/docker-compose.yml\""
+    },
+    {
+      "id": "runtime_configuration_and_policy",
+      "after": ["alert_store_payload"],
+      "marker": "if [[ ! -f \"$STACK_DIR/alert_store/config/scoring_rules.json\" ]]; then"
+    },
+    {
+      "id": "n8n_runtime_payload",
+      "after": ["runtime_configuration_and_policy"],
+      "marker": "cp \"$REPO_DIR/n8n/bin/ensure-n8n-stack.zsh\" \"$STACK_DIR/bin/ensure-n8n-stack.zsh\""
+    },
+    {
+      "id": "dashboard_payload",
+      "after": ["n8n_runtime_payload"],
+      "marker": "cp \"$REPO_DIR/onion-sentinel-dashboard/report_portal.py\" \"$DASHBOARD_RUNTIME_DIR/report_portal.py\""
+    },
+    {
+      "id": "credential_safe_runtime_config",
+      "after": ["dashboard_payload"],
+      "marker": "if [[ ! -f \"$STACK_DIR/.env\" ]]; then"
+    },
+    {
+      "id": "launchd_render",
+      "after": ["credential_safe_runtime_config"],
+      "marker": "mkdir -p \"$LAUNCHD_DIR\""
+    },
+    {
+      "id": "package_and_container_cutover",
+      "after": ["launchd_render"],
+      "marker": "const [major, minor] = process.versions.node.split(\".\").map(Number);"
+    },
+    {
+      "id": "service_reload_and_inventory_cutover",
+      "after": ["package_and_container_cutover"],
+      "marker": "# Reload LaunchAgents so Docker/n8n are monitored after future reboots."
+    },
+    {
+      "id": "harness_readiness_and_maintenance",
+      "after": ["service_reload_and_inventory_cutover"],
+      "marker": "launchctl load \"$LAUNCHD_DIR/com.arron.onion-sentinel.harness-maintenance.plist\""
+    },
+    {
+      "id": "dashboard_wake_and_handoff",
+      "after": ["harness_readiness_and_maintenance"],
+      "marker": "touch \"$STACK_DIR/run/dashboard-refresh.wake\""
+    }
+  ]
+}
