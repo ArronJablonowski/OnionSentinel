@@ -97,6 +97,14 @@ PLAN`, repeated health/metrics/UI requests under concurrent investigation load,
 queue throughput and SQLite writer contention. Only then start a fresh soak;
 no previous automated healthy clock is acceptable evidence.
 
+The exact-recovery probe at 11:55 returned HTTP 200 but metrics took 11.007
+seconds, further confirming that short healthy periods are not sustained
+latency qualification. The restarted prior maintenance job passed summary
+consistency at 11:56:25 with zero bad filters, missing summaries or orphans.
+Its first online-backup attempt reached the bounded deadline at 11:57:25 and
+continued its existing bounded retry policy. Do not claim a new verified backup
+until the maintenance log records `backup_ok` and `maintenance_complete`.
+
 ### PCAP broker operational failure — remote access required
 
 At 11:03 Denver time the local health API returned fresh Relay telemetry with
