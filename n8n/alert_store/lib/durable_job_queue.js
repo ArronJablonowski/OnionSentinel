@@ -77,6 +77,11 @@ function createDurableJobQueue({run, get, all, now, transitionLeaseSeconds = 900
     await run("UPDATE durable_jobs SET processing_started_at = COALESCE(processing_started_at, updated_at) WHERE status = 'processing' AND processing_started_at IS NULL");
     await run('CREATE INDEX IF NOT EXISTS idx_durable_jobs_due ON durable_jobs(status, job_type, next_attempt_at, priority DESC, id)');
     await run('CREATE INDEX IF NOT EXISTS idx_durable_jobs_lease ON durable_jobs(status, lease_expires_at)');
+    // Keep monitoring aggregates off the payload-bearing table pages. Without
+    // covering indexes a metrics read serializes every query behind a large
+    // historical payload scan on the shared SQLite connection.
+    await run('CREATE INDEX IF NOT EXISTS idx_durable_jobs_metrics ON durable_jobs(job_type, status, updated_at)');
+    await run('CREATE INDEX IF NOT EXISTS idx_durable_jobs_completed_metrics ON durable_jobs(job_type, last_completed_at)');
     await recoverExpired();
   }
 

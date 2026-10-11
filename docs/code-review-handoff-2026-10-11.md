@@ -11,6 +11,11 @@ been eliminated.
 - Grouped alert pages retain their primary-key enrichment fast path, but query
   earlier members when the representative has no enrichment or only errors.
 - Invalid enrichment JSON no longer aborts the best-member enrichment query.
+- Durable-job monitoring aggregates have covering indexes for status/time and
+  completion time. A production stack sample showed SQLite table-page reads
+  holding the shared connection mutex while other query workers waited; live
+  health/metrics probes timed out. Query-plan regression tests require covering
+  index access. Post-deploy latency must still be verified under real load.
 - AI page evidence includes grouped members and noncanonical legacy filenames,
   without opening unrelated canonical historical prompt artifacts.
 - The repository model catalog includes the two newer supported models as

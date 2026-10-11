@@ -36,6 +36,23 @@ async function fixture(options = {}) {
   return {...helpers, queue};
 }
 
+test('monitoring aggregates use covering indexes instead of payload pages', async (context) => {
+  const env = await fixture();
+  context.after(env.close);
+  const queries = [
+    `SELECT job_type, MAX(last_completed_at) FROM durable_jobs
+     WHERE last_completed_at IS NOT NULL GROUP BY job_type`,
+    `SELECT job_type, SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END),
+     MIN(CASE WHEN status = 'pending' THEN updated_at END)
+     FROM durable_jobs GROUP BY job_type`,
+  ];
+  for (const sql of queries) {
+    const plan = await env.all(`EXPLAIN QUERY PLAN ${sql}`);
+    assert.ok(plan.some((row) => /COVERING INDEX idx_durable_jobs_/.test(row.detail)),
+      JSON.stringify(plan));
+  }
+});
+
 test('claim ownership token rejects a stale worker after lease recovery', async (context) => {
   const env = await fixture();
   context.after(env.close);
