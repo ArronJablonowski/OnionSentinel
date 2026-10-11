@@ -789,5 +789,3 @@ class OnionSentinelHarnessTestsHarnessPolicyCompatibilitySurfaceAndSignaturesAre
                 self.assertIsNone(result)
                 self.assertFalse(db_path.exists())
                 self.assertFalse(db_path.parent.exists())
-
-

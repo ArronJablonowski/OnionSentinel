@@ -783,5 +783,3 @@ class AiSchedulerPriorityTestCliLaneReservesFollowUpHeadroomBetweenBuilderAndRun
         )
 
         self.assertEqual(reconciled, {"missed-completion-callback"})
-
-

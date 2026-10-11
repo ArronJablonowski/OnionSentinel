@@ -285,5 +285,3 @@ def main(r) -> int:
         "semantic_validity": validity,
     }
     return r.emit_response(response)
-
-

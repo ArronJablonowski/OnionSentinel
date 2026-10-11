@@ -55,5 +55,3 @@ class IncidentEvidenceBrokerErrorTestsFixtures(unittest.TestCase):
             "incident_evidence_broker_test",
             BROKER_PATH,
         )
-
-

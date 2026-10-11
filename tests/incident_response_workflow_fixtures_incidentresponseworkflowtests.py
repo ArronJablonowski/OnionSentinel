@@ -45,5 +45,3 @@ class IncidentResponseWorkflowTestsFixtures(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
-
-

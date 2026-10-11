@@ -225,5 +225,3 @@ def pivot_query_dsl(r, query: dict) -> dict:
                 "_shard_doc",
             ]
     return body
-
-

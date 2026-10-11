@@ -201,5 +201,3 @@ class AiModelRoutingTestsFixtures(unittest.TestCase):
         }
         prompt.update(overrides)
         return prompt
-
-

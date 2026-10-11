@@ -269,4 +269,3 @@ chmod +x "$DASHBOARD_RUNTIME_DIR/onion_sentinel_server.py" "$DASHBOARD_RUNTIME_D
 # Remove the obsolete Onion Sentinel-to-Hermes publisher from this runtime. Do
 # not touch any Hermes-owned files here; their owner performs the link migration.
 rm -f "$STACK_DIR/bin/sync-soc-alerts-portal.py"
-

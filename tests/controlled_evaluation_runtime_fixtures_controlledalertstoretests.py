@@ -899,5 +899,3 @@ class ControlledAlertStoreTestsFixtures(unittest.TestCase):
             "response": response,
             "controlled_job": identity,
         }
-
-

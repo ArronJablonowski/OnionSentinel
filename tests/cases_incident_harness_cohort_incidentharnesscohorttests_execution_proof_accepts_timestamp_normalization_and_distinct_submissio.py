@@ -575,5 +575,3 @@ class IncidentHarnessCohortTestsExecutionProofAcceptsTimestampNormalizationAndDi
                     member=member,
                     monitor=monitor,
                 )
-
-

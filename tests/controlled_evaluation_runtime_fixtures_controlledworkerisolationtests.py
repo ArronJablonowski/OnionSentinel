@@ -64,5 +64,3 @@ class ControlledWorkerIsolationTestsFixtures(unittest.TestCase):
             "controlled_evaluation_scheduler_tests",
             SCHEDULER_PATH,
         )
-
-

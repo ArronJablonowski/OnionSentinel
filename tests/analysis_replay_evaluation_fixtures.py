@@ -148,5 +148,3 @@ class EvaluationRunnerRecorder:
     def compare_analysis_results(cls, primary, reviewer):
         cls.calls.append(("compare_analysis_results", primary, reviewer))
         return cls.comparison
-
-

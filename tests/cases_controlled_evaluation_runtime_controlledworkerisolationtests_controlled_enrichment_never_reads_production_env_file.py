@@ -231,5 +231,3 @@ class ControlledWorkerIsolationTestsControlledEnrichmentNeverReadsProductionEnvF
                 sorted(path.name for path in global_memory.iterdir()),
                 ["production.json"],
             )
-
-

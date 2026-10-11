@@ -725,5 +725,3 @@ class AiSchedulerPriorityTestFixtures(unittest.TestCase):
             "stderr": worker_stderr.getvalue(),
             "stdout": worker_stdout.getvalue(),
         }
-
-

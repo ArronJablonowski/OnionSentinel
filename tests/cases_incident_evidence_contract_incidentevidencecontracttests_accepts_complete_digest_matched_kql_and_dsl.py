@@ -767,5 +767,3 @@ class IncidentEvidenceContractTestsAcceptsCompleteDigestMatchedKqlAndDslCases:
         validated = self.contract.validate_incident_evidence_artifact(artifact)
 
         self.assertFalse(validated["security_onion_response"]["complete"])
-
-

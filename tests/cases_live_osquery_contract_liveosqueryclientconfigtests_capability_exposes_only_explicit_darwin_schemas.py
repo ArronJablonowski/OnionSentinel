@@ -561,5 +561,3 @@ class LiveOsqueryClientConfigTestsCapabilityExposesOnlyExplicitDarwinSchemasCase
                     maximum_batches=2,
                 )
             self.assertFalse((case_dir / "manifest.json").exists())
-
-

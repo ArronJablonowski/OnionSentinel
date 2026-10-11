@@ -649,5 +649,3 @@ class InvestigationCohortEvaluationTestsFixtures(unittest.TestCase):
         target = self.root / f"{role}-adjudication.json"
         self._write_private(target, document)
         return target
-
-

@@ -742,5 +742,3 @@ class AlertStorePcapRetryTestExactAlertPcapUsesEventTimeNotLaterIngestRollupCase
                     (identity["stable_group_id"],),
                 ).fetchone()
             self.assertEqual(after_rejection, before)
-
-

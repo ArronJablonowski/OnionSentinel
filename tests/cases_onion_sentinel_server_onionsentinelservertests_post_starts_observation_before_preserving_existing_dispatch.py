@@ -766,5 +766,3 @@ class OnionSentinelServerTestsPostStartsObservationBeforePreservingExistingDispa
             ready, projection = server.controlled_alert_store_readiness()
         self.assertFalse(ready)
         self.assertEqual(projection["status"], "identity_mismatch")
-
-

@@ -786,5 +786,3 @@ class OperationalSloTestsHealthySnapshotPassesCases:
                                         sqlite_backup_age=60, postgres_backup_age=60,
                                         previous_ingest_errors=0)
         self.assertIn("enrichment job backlog exceeds 15 minutes", failures)
-
-

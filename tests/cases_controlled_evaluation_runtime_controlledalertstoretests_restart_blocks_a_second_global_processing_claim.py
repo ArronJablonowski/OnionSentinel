@@ -748,5 +748,3 @@ class ControlledAlertStoreTestsRestartBlocksASecondGlobalProcessingClaimCases:
                     evaluation_root,
                 )
         self.assertTrue(spool_path.exists())
-
-

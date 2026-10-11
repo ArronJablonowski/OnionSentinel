@@ -720,5 +720,3 @@ class ProviderNeutralInvestigationLoopTestsFollowUpAdmissionDoesNotMutateOnTrans
             evidence_ref,
             {item["ref"] for item in wrong_position_contract["references"]},
         )
-
-

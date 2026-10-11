@@ -524,5 +524,3 @@ class DhcpCollectorTestsPublicCompatibilitySurfaceAndSignaturesAreStableCases:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--require-database", result.stdout)
         self.assertIn("--backfill-days", result.stdout)
-
-

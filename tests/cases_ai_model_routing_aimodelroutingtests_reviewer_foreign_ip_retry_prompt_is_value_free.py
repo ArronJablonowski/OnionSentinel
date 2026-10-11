@@ -786,5 +786,3 @@ class AiModelRoutingTestsReviewerForeignIpRetryPromptIsValueFreeCases:
         self.assertNotIn("_second_opinion", result)
         analyze.assert_not_called()
         self.assertEqual(phases, [("post_processing", "", "")])
-
-

@@ -49,5 +49,3 @@ class SecurityOnionLiveOsqueryResponseTestsFixtures(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.wrapper = load_security_onion_wrapper()
-
-

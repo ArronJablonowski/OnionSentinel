@@ -777,5 +777,3 @@ class IncidentHarnessCohortTestsRunnerUsesCanonicalQueryAuditServicesCases:
                 expected_count=1,
                 expected_release_id=self.release_id,
             )
-
-

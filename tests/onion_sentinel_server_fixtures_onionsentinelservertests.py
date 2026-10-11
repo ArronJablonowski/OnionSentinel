@@ -69,5 +69,3 @@ class OnionSentinelServerTestsFixtures(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-
-

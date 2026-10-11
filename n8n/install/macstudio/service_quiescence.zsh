@@ -135,4 +135,3 @@ keep_critical_agents_down_on_failure() {
   cleanup_alert_store_stage
   return $exit_code
 }
-

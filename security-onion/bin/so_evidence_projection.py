@@ -487,5 +487,3 @@ def pivot_semantic_validity(r, results: list[dict], controls: dict) -> dict:
         "semantic_valid": semantic_valid,
         "reasons": reasons,
     }
-
-

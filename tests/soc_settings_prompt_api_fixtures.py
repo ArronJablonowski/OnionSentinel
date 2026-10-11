@@ -59,5 +59,3 @@ class SettingsPostRequest:
 
     def _send(self, status: int, body: bytes, _content_type: str = "") -> None:
         self.response = (int(status), json.loads(body.decode("utf-8")))
-
-

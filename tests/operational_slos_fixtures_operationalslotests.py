@@ -23,5 +23,3 @@ class OperationalSloTestsFixtures(unittest.TestCase):
     def setUpClass(cls):
         cls.slo = load_module("operational_slos", ROOT / "n8n/bin/evaluate-operational-slos.py")
         cls.backup = load_module("runtime_backup", ROOT / "n8n/bin/backup-onion-sentinel-runtime.py")
-
-

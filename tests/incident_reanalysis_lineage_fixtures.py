@@ -123,5 +123,3 @@ def request_json(
             return error.code, json.loads(error.read())
         finally:
             error.close()
-
-

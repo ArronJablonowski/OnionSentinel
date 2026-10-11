@@ -179,5 +179,3 @@ class RecordingHarness:
         self.events.append(
             ("model_call", call_id, independent_review)
         )
-
-

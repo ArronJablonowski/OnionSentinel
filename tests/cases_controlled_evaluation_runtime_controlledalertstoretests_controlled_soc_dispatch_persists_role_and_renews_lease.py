@@ -769,5 +769,3 @@ class ControlledAlertStoreTestsControlledSocDispatchPersistsRoleAndRenewsLeaseCa
                 (second_id,),
             ).fetchone()
         self.assertEqual(after, before)
-
-

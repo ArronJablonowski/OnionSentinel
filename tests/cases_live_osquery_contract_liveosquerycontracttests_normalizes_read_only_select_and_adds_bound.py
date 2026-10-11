@@ -256,5 +256,3 @@ class LiveOsqueryContractTestsNormalizesReadOnlySelectAndAddsBoundCases:
                 impossible_count,
                 expected_requests=requests_with_one_row_limit,
             )
-
-

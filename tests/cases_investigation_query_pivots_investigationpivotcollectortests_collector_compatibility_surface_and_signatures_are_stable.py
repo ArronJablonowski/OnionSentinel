@@ -427,5 +427,3 @@ class InvestigationPivotCollectorTestsCollectorCompatibilitySurfaceAndSignatures
                 self.assertNotIn("MUST-NOT-BE-REFLECTED", message)
                 self.assertNotIn("\x1b", message)
                 self.assertNotIn("\n", message)
-
-

@@ -778,5 +778,3 @@ class AiModelRoutingTestsSuppliedEndpointPathIsRemovedFromGapListsCases:
             )
 
         run.assert_not_called()
-
-

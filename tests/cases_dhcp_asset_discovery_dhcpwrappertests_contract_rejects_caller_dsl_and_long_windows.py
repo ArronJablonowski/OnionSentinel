@@ -145,4 +145,3 @@ class DhcpWrapperTestsContractRejectsCallerDslAndLongWindowsCases:
         self.assertIn("so_evidence_dispatch.execute_dhcp_discovery", incident_source)
         dispatcher = (ROOT / "security-onion/bin/so_evidence_dispatch.py").read_text()
         self.assertIn("r.execute_dhcp_discovery(request_data)", dispatcher)
-

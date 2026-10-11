@@ -785,5 +785,3 @@ class ControlledWorkerIsolationTestsSchedulerRetriesAnIndeterminateExactClaimBou
                     files["live-osquery.json"],
                 )
             loader.assert_called_once_with(files["live-osquery.json"])
-
-

@@ -765,5 +765,3 @@ class ProviderNeutralInvestigationLoopTestsSecurityPreflightIsolatesOneInvalidOb
         second = self.runner._derived_evidence_source_digest(context("b" * 64))
 
         self.assertNotEqual(first, second)
-
-

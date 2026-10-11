@@ -280,5 +280,3 @@ class ModularizationCompatibilityContractTestsPcapProcessorSupportsIsolatedFileL
         self.assertIn("HTTP route", invariants)
         self.assertIn("launchd", invariants)
         self.assertIn("versioned migrations", invariants)
-
-

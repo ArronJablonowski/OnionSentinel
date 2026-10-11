@@ -49,5 +49,3 @@ class SocSettingsPromptApiTestFixtures(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
-
-

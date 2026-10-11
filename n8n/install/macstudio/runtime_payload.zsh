@@ -342,4 +342,3 @@ if ! PYTHONPATH="$STACK_DIR/python" /usr/bin/python3 -c 'import maxminddb' >/dev
     echo "WARNING: optional MaxMind reader installation failed; PCAP parsing will continue without GeoIP until maxminddb is installed." >&2
   fi
 fi
-

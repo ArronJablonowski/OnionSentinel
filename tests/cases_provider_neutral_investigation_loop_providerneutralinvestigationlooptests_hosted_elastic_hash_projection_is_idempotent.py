@@ -762,5 +762,3 @@ class ProviderNeutralInvestigationLoopTestsHostedElasticHashProjectionIsIdempote
         adjustment = normalized["normalization"]["window_adjustment"]
         self.assertTrue(adjustment["adjusted"])
         self.assertIn("clamped_to_24_hours_nearest_alert", adjustment["reasons"])
-
-

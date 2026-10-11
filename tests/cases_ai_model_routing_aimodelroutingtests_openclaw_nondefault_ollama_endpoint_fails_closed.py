@@ -703,5 +703,3 @@ class AiModelRoutingTestsOpenclawNondefaultOllamaEndpointFailsClosedCases:
         self.assertEqual(settings["agent_adjudicator_models"]["incident-responder"], "")
         self.assertEqual(settings["agent_adjudicator_models"]["siem-engineer"], "")
         self.assertEqual(settings["agent_adjudicator_models"]["threat-hunter"], "")
-
-

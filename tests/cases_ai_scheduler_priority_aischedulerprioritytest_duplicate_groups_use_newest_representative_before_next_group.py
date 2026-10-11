@@ -376,5 +376,3 @@ class AiSchedulerPriorityTestDuplicateGroupsUseNewestRepresentativeBeforeNextGro
             )
 
         self.assertEqual(group_ids, {"stable-group-id"})
-
-

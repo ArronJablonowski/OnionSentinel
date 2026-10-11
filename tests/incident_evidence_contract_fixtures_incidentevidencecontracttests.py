@@ -28,5 +28,3 @@ class IncidentEvidenceContractTestsFixtures(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.contract = load_contract_module()
         cls.builder = load_builder_module()
-
-

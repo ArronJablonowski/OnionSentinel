@@ -749,5 +749,3 @@ class RelayHealthWrapperTestNotificationTestShortCircuitsEveryComponentProbeCase
                         completed(0, stdout=json.dumps(summary) + "\n")
                     )
                 )
-
-

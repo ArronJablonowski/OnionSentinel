@@ -134,5 +134,3 @@ import cohort_freeze_state_composition  # noqa: E402
 
 
 import cohort_runtime_composition  # noqa: E402
-
-

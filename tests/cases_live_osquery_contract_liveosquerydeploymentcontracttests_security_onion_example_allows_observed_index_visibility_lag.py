@@ -285,5 +285,3 @@ class LiveOsqueryDeploymentContractTestsSecurityOnionExampleAllowsObservedIndexV
             "install -o soalert -g soalert -m 0700 -d /opt/so-alert-relay",
             installer,
         )
-
-

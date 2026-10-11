@@ -64,5 +64,3 @@ class LiveOsqueryClientConfigTestsFixtures(unittest.TestCase):
             "port": 22,
             "artifact_dir": Path(temp_name) / "artifacts",
         }
-
-

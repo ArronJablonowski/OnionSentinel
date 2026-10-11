@@ -765,5 +765,3 @@ class AiModelRoutingTestsHermesRouteIsToolEmptyIsolatedAndRecordsProvenanceCases
             )
         resolve.assert_not_called()
         run.assert_not_called()
-
-

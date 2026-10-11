@@ -464,5 +464,3 @@ class RelayHealthWrapperTestPcapFailureOutputIsRebuiltFromStrictAllowlistsCases:
         self.assertEqual(rc, 0)
         run_storage.assert_called_once()
         self.assertIn("storage_health=ok", persist.call_args.args[0]["last_summary"])
-
-

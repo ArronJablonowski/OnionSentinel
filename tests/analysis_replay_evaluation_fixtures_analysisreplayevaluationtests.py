@@ -36,5 +36,3 @@ class AnalysisReplayEvaluationTestsFixtures(unittest.TestCase):
             result = evaluator.load_suite(path)
         loads.assert_called_once_with("serialized")
         return result
-
-

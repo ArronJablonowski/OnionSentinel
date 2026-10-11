@@ -505,5 +505,3 @@ class IncidentResponseWorkflowTestsIncidentListReturnsCaseAndOnlyIncidentRespond
             {"queued": 1, "running": 1, "completed": 1, "failed": 0, "skipped": 1},
         )
         self.assertEqual(len(payload["cases"]), 4)
-
-

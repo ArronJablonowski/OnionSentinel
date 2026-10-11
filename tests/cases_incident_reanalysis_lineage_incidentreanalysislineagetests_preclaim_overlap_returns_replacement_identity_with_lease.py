@@ -729,5 +729,3 @@ class IncidentReanalysisLineageTestsPreclaimOverlapReturnsReplacementIdentityWit
             claim["claim"]["payload"]["reanalysis_run_id"],
             second["run_id"],
         )
-
-

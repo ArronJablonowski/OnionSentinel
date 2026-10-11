@@ -555,5 +555,3 @@ class RelayPcapBrokerTestArtifactUploadFailureRecordsFulfillmentMetadataCases:
         self.assertEqual(str(raised.exception), "Zeek capture loss 6.0000% exceeds 5.0000%")
         self.assertEqual(raised.exception.diagnostics["observed_percent"], 6.0)
         self.assertEqual(raised.exception.diagnostics["threshold_percent"], 5.0)
-
-

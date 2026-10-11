@@ -44,5 +44,3 @@ class RequestJsonOwnershipTestHttpErrorResponseIsClosedAfterReadCases:
             )
 
         self.assertTrue(error.fp.closed)
-
-

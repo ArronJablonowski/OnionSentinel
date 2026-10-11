@@ -80,5 +80,3 @@ import cohort_evaluation_result_policy  # noqa: E402
 
 
 import cohort_execution_result  # noqa: E402
-
-

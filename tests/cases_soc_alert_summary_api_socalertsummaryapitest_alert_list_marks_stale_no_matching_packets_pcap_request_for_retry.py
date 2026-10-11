@@ -720,5 +720,3 @@ class SocAlertSummaryApiTestAlertListMarksStaleNoMatchingPacketsPcapRequestForRe
         )
         self.assertEqual(idle["runtime_model_label"], "No model running")
         self.assertEqual(idle["phase_label"], "Idle")
-
-

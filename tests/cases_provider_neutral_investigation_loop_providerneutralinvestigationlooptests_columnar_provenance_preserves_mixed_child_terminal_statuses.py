@@ -772,5 +772,3 @@ class ProviderNeutralInvestigationLoopTestsColumnarProvenancePreservesMixedChild
             self.runner._validated_discovered_observables([forged_filter]),
             [],
         )
-
-

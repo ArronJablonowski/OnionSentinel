@@ -388,5 +388,3 @@ class IncidentReanalysisLineageTestsProcessingIdentityDriftAllowsOldResultNonAut
                 "lease_token": normal_claim["lease_token"],
             },
         )
-
-

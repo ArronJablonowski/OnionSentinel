@@ -553,5 +553,3 @@ class AiModelRoutingTestsUnknownRuleIntentCapsAndReviewsConsequentialConclusionC
                 "enabled_ollama_models": [],
                 "gpt_cli_enabled": False,
             })
-
-

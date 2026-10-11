@@ -792,5 +792,3 @@ class ProviderNeutralInvestigationLoopTestsRepairCannotDropOriginalEventTupleCon
         self.assertEqual(without_freeze, baseline)
         self.assertEqual(without_harness, baseline)
         model_executor.assert_not_called()
-
-

@@ -422,5 +422,3 @@ def execute_search(r, body: dict, index_scope: list[str]) -> dict:
         "shards": shards,
         "hits": hits,
     }
-
-

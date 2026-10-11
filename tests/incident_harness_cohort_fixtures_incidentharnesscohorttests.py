@@ -714,5 +714,3 @@ class IncidentHarnessCohortTestsFixtures(unittest.TestCase):
             digest_field="manifest_sha256",
         )
         return calls, result
-
-

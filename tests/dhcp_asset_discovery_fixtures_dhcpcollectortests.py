@@ -59,5 +59,3 @@ class DhcpCollectorTestsFixtures(unittest.TestCase):
             "sensor": "so-sensor-1",
             "evidence_id": evidence_id,
         }
-
-

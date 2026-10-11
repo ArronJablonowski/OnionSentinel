@@ -123,5 +123,3 @@ class IncidentEvidenceBrokerErrorTestsNonzeroInnerCommandPreservesOnlyBoundedJso
             len(payload["detail"].encode("utf-8")),
             self.broker.MAX_ERROR_FIELD_BYTES,
         )
-
-

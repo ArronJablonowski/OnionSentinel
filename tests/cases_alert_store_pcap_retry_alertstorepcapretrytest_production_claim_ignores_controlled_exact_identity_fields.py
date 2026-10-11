@@ -341,5 +341,3 @@ class AlertStorePcapRetryTestProductionClaimIgnoresControlledExactIdentityFields
         self.assertEqual(after_case, before_case)
         self.assertEqual(after_events, before_events)
         self.assertEqual(after_job, before_job)
-
-

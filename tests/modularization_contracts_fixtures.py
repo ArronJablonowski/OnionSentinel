@@ -178,5 +178,3 @@ def undefined_global_names(source: str, filename: str) -> set[str]:
         "__name__",
     }
     return referenced - defined - allowed - annotation_only
-
-

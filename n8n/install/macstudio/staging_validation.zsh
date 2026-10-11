@@ -238,4 +238,3 @@ if result.returncode != 0:
     raise RuntimeError("production Python bounded-process smoke failed")
 PY
 }
-

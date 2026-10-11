@@ -56,5 +56,3 @@ class InvestigationPivotCollectorTestsFixtures(unittest.TestCase):
             "investigation_pivot_collector_v1_test",
             COMPAT_V1_COLLECTOR_PATH,
         )
-
-

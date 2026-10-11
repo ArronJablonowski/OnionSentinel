@@ -781,5 +781,3 @@ class SecurityOnionLiveOsqueryResponseTestsReadsQueryLevelExecutionCountersCases
                 expected_agent_id="agent-id",
                 expected_query="SELECT hostname FROM system_info LIMIT 1;",
             )
-
-

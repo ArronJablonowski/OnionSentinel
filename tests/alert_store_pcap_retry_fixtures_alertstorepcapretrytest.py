@@ -199,5 +199,3 @@ class AlertStorePcapRetryTestFixtures(unittest.TestCase):
             "POST",
             payload,
         )
-
-

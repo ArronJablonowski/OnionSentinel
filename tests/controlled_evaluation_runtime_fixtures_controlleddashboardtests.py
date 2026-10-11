@@ -221,5 +221,3 @@ class ControlledDashboardTestsFixtures(unittest.TestCase):
         self.alert_store_thread.join(timeout=5)
         self.log_file.close()
         self.temporary.cleanup()
-
-

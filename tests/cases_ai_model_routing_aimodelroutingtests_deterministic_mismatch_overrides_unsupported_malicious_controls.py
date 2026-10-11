@@ -775,5 +775,3 @@ class AiModelRoutingTestsDeterministicMismatchOverridesUnsupportedMaliciousContr
             "investigation_pivot_evidence_truncated",
             response["_confidence_calibration"]["limiters"],
         )
-
-

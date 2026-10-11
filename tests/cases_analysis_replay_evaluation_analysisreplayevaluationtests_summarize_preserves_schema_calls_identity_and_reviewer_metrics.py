@@ -319,5 +319,3 @@ class AnalysisReplayEvaluationTestsSummarizePreservesSchemaCallsIdentityAndRevie
             path = Path(directory) / "reports" / "result.json"
             evaluator.atomic_private_text(path, "{}\n")
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
-
-

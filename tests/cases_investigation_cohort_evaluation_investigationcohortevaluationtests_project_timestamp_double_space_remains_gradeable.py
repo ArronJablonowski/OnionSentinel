@@ -282,5 +282,3 @@ class InvestigationCohortEvaluationTestsProjectTimestampDoubleSpaceRemainsGradea
                         adjudication_path=self.adjudication_path,
                         expected_count=invalid_count,
                     )
-
-

@@ -48,5 +48,3 @@ def load_wrapper():
 
 def completed(returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess("unit-test", returncode, stdout, stderr)
-
-

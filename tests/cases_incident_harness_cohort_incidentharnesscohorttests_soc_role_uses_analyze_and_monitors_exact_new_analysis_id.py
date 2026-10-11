@@ -632,5 +632,3 @@ class IncidentHarnessCohortTestsSocRoleUsesAnalyzeAndMonitorsExactNewAnalysisIdC
         )
         source = MODULE_PATH.read_text(encoding="utf-8")
         self.assertNotIn('"/api/soc-incidents/reanalyze-all"', source)
-
-

@@ -62,5 +62,3 @@ def load_relay():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
-
-

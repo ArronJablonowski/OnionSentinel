@@ -768,5 +768,3 @@ class ControlledWorkerIsolationTestsInstallerCopiesControlledEvaluationRuntimeDe
                 "controlled result identity requires",
                 failure.args[3],
             )
-
-

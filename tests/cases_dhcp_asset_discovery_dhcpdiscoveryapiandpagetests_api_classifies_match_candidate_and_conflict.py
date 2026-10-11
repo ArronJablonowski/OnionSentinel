@@ -120,4 +120,3 @@ class DhcpDiscoveryApiAndPageTestsApiClassifiesMatchCandidateAndConflictCases:
         self.assertIn('"query_window_minutes": 1440', config)
         plist = (ROOT / "n8n" / "launchd" / "com.arron.soc.dhcp-asset-discovery.plist").read_text(encoding="utf-8")
         self.assertIn("<integer>900</integer>", plist)
-

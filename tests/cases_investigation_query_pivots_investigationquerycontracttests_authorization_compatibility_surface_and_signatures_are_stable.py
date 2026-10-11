@@ -758,5 +758,3 @@ class InvestigationQueryContractTestsAuthorizationCompatibilitySurfaceAndSignatu
             "negative_filter.*digest",
         ):
             validate_investigation_query_response(response, request)
-
-

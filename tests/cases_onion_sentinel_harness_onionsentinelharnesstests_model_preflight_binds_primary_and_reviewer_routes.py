@@ -474,5 +474,3 @@ class OnionSentinelHarnessTestsModelPreflightBindsPrimaryAndReviewerRoutesCases:
         self.assertEqual(query_event["payload"]["result_count"], 4)
         self.assertEqual(query_event["payload"]["rejected_proposal_count"], 1)
         self.assertTrue(trace["integrity"]["valid"])
-
-

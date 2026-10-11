@@ -33,5 +33,3 @@ class DhcpRelayTestsFixtures(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.broker = load_module("dhcp_relay_broker_test", BROKER)
-
-

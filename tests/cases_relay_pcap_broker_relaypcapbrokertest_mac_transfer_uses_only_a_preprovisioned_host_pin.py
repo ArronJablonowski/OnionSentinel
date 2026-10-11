@@ -761,5 +761,3 @@ class RelayPcapBrokerTestMacTransferUsesOnlyAPreprovisionedHostPinCases:
                     "artifact_size_bytes": 12,
                 },
             )
-
-

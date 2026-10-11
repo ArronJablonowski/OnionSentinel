@@ -224,5 +224,3 @@ class RelayHealthWrapperTestFixtures(unittest.TestCase):
             "telegram_messages": telegram_messages,
             "webhook_events": webhook_events,
         }
-
-

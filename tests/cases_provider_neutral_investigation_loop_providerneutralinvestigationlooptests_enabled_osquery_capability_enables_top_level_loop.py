@@ -641,5 +641,3 @@ class ProviderNeutralInvestigationLoopTestsEnabledOsqueryCapabilityEnablesTopLev
             authorized["queries"][0]["observable_provenance"]["ips"][0]["source"],
             "trusted_context",
         )
-
-

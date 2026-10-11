@@ -699,5 +699,3 @@ class ProviderNeutralInvestigationLoopTestsRunnerDoesNotRequirePython310ZipStric
         self.assertNotIn('"cwd"', encoded)
         self.assertNotIn("/Users/alice", encoded)
         self.assertNotIn(r"C:\\Users\\alice", encoded)
-
-

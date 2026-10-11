@@ -55,5 +55,3 @@ principal_module = importlib.import_module("portal_session_principal")
 
 
 identity_module = importlib.import_module("portal_human_identity_store")
-
-

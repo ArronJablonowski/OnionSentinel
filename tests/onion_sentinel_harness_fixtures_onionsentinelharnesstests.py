@@ -317,4 +317,3 @@ class OnionSentinelHarnessTestsFixtures(unittest.TestCase):
                     ),
                 )
                 previous = event_sha256
-

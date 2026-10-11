@@ -779,5 +779,3 @@ class ControlledAlertStoreTestsStartupRequiresEveryExplicitRuntimeFieldCases:
         self.assertEqual(replay_bytes, first_bytes)
         with closing(sqlite3.connect(self.db, timeout=5)) as connection:
             self.assertEqual(tuple(connection.iterdump()), after_first)
-
-

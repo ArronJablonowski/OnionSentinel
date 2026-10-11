@@ -596,5 +596,3 @@ def validated_pivot_request(r, data: dict) -> dict:
         "authorization": clean_authorization,
         "queries": clean_queries,
     }
-
-

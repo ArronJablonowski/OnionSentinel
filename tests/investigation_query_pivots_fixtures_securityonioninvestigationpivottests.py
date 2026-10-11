@@ -52,5 +52,3 @@ class SecurityOnionInvestigationPivotTestsFixtures(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.wrapper = load_source_module("investigation_pivot_wrapper_test", WRAPPER_PATH)
-
-

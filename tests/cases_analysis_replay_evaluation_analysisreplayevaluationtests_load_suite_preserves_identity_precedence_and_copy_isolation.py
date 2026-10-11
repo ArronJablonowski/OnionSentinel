@@ -772,5 +772,3 @@ class AnalysisReplayEvaluationTestsLoadSuitePreservesIdentityPrecedenceAndCopyIs
                 [{"confidence_score": 1.1, "exact_factored_verdict": True}]
             )
         self.assertEqual(error.exception.args, ("confidence_brier",))
-
-

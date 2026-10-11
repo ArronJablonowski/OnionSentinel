@@ -749,5 +749,3 @@ class AiModelRoutingTestsStringFalseDoesNotRequestSecondOpinionCases:
         self.assertNotIn("raw_rule", hosted_marker)
         self.assertEqual(hosted_marker["length"], 9)
         self.assertIn("hex", local_copy["detection_validation"]["marker"])
-
-

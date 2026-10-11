@@ -443,5 +443,3 @@ class ControlledAlertStoreTestsUtf16TruncationConflictUsesFullTerminalDbProofCas
                     recovery,
                 )
             )
-
-

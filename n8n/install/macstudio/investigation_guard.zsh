@@ -105,4 +105,3 @@ wait_for_harness_maintenance_readiness() {
   echo "Harness maintenance did not become database-ready (last exit $exit_code)." >&2
   return 1
 }
-

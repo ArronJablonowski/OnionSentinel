@@ -379,5 +379,3 @@ class OnionSentinelServerTestsControlledReadinessProjectsMismatchFieldsWithoutWi
         self.assertIn("http://127.0.0.1:8765/api/soc-alerts", verifier)
         self.assertIn("http://127.0.0.1:8765/api/system-health/beacons", verifier)
         self.assertIn(')\" = 404', verifier)
-
-

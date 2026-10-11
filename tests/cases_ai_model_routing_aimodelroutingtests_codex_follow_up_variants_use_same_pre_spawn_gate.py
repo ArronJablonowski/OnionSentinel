@@ -676,5 +676,3 @@ class AiModelRoutingTestsCodexFollowUpVariantsUseSamePreSpawnGateCases:
                 settings,
             )
         resolve.assert_not_called()
-
-

@@ -88,5 +88,3 @@ def request_json(url: str, method: str = "GET", payload: dict | None = None) -> 
     except urllib.error.HTTPError as error:
         with closing(error):
             return error.code, json.loads(error.read())
-
-

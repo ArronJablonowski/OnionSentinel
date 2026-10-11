@@ -706,5 +706,3 @@ class AiSchedulerPriorityTestControlledPromptFailureReturnsNonzeroAndRequeuesOwn
             command[command.index("--reanalysis-attempt-id") + 1],
             "ira-" + ("a" * 40),
         )
-
-

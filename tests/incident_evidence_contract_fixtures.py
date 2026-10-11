@@ -244,5 +244,3 @@ def evidence_artifact(*, status: str = "ok") -> dict:
             },
         },
     }
-
-

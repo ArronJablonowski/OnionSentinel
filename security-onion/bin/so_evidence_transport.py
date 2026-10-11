@@ -365,5 +365,3 @@ def validated_request(
         r.fail(f"size must be between 1 and {r.MAX_HITS}")
     anchor = r.validated_anchor(data.get("anchor"))
     return packs, osquery_packs, clean_windows, clean_observables, size, anchor
-
-

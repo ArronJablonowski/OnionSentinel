@@ -778,5 +778,3 @@ def build(value: MissingAtDefinition) -> MissingAtDefinition:
             timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-
-

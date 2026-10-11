@@ -748,5 +748,3 @@ class OnionSentinelHarnessTestsQueryRoundResolvesDigestBoundNestedStatusInPartia
         )
         self.assertTrue(approved.allowed)
         self.assertTrue(approved.requires_approval)
-
-

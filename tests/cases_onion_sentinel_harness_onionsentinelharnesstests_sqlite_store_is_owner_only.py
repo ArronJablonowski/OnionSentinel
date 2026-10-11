@@ -656,5 +656,3 @@ class OnionSentinelHarnessTestsSqliteStoreIsOwnerOnlyCases:
             ).fetchall()
         self.assertEqual([row["reservation_id"] for row in reservations], [reserved[0][1]])
         self.assertTrue(first.store.verify_chain(first.run_id)["valid"])
-
-

@@ -286,5 +286,3 @@ class ControlledDashboardTestsHealthIdentifiesExactRuntimeAndAllOtherReadsAreBlo
                     # case, so this exact route is accepted and terminates
                     # locally before a downstream request is needed.
                     self.assertEqual(self.alert_store_post_count, before)
-
-

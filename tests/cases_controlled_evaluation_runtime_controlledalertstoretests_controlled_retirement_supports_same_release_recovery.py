@@ -762,5 +762,3 @@ class ControlledAlertStoreTestsControlledRetirementSupportsSameReleaseRecoveryCa
                 ).fetchone()[0],
                 1,
             )
-
-

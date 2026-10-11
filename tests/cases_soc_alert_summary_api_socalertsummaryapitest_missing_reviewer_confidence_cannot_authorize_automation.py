@@ -783,5 +783,3 @@ class SocAlertSummaryApiTestMissingReviewerConfidenceCannotAuthorizeAutomationCa
         self.assertEqual(payload["alerts"][0]["representative_alert_id"], "newest-alert")
         self.assertEqual(payload["alerts"][0]["pcap_status_key"], "no-packets")
         self.assertEqual(payload["alerts"][0]["pcap_status_label"], "No Packets")
-
-

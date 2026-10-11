@@ -205,5 +205,3 @@ class IncidentEvidenceContractTestsAnchorlessV2RequestIsAcceptedOnlyAsSemantical
         self.assertIn("False Negative", prompt)
         self.assertIn("exact OSQuery SQL", prompt)
         self.assertIn("query digest", prompt)
-
-

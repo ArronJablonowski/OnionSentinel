@@ -784,5 +784,3 @@ class InvestigationCohortEvaluationTestsEvaluatorUsesExtractedQueryAuditServices
                 },
                 adjudication_path=self.adjudication_path,
             )
-
-

@@ -675,5 +675,3 @@ def replace_terminal_manifest(
                 ),
             )
             previous = event_sha256
-
-

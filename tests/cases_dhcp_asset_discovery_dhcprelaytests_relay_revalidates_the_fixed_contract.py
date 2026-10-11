@@ -116,5 +116,3 @@ class DhcpRelayTestsRelayRevalidatesTheFixedContractCases:
             with self.subTest(message=message, value=value):
                 with self.assertRaisesRegex(ValueError, message):
                     self.broker.validate_dhcp_request(value)
-
-

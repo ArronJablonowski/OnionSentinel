@@ -765,5 +765,3 @@ class ProviderNeutralInvestigationLoopTestsEvaluationQueryPlanningRetryEnforcesP
                 for item in trace["evidence"]
             )
         )
-
-

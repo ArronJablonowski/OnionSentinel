@@ -767,5 +767,3 @@ class SocAlertSummaryApiTestLlmAnalysisLogIncludesDistinctSecondOpinionRunsCases
         self.assertFalse(ok)
         self.assertEqual(payload["status"], 503)
         self.assertIn("Direct SQLite writes are disabled", payload["error"])
-
-

@@ -95,5 +95,3 @@ class SecurityOnionQueryClientTestsManualQueryRunsWhileScheduledCollectionIsDisa
             self.assertTrue(record["timestamp"].endswith("Z"))
             self.assertEqual(record["event"], "security_onion_query.completed")
             self.assertNotIn("10.66.6.210", json.dumps(record))
-
-

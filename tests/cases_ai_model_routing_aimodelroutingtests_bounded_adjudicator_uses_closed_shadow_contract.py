@@ -649,5 +649,3 @@ class AiModelRoutingTestsBoundedAdjudicatorUsesClosedShadowContractCases:
                     len(response["_second_opinion"]["validation_failures"]),
                     1 if repaired else 0,
                 )
-
-

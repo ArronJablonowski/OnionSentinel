@@ -775,5 +775,3 @@ class HarnessTraceEvaluatorTestsModelPurposeCompletionRejectsMalformedRetryPatte
                 report["runs"][0]["coverage_gap_reasons"],
             )
             self.assertTrue(report["runs"][0]["integrity"]["valid"])
-
-

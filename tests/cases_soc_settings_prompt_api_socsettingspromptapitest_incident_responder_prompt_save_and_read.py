@@ -791,5 +791,3 @@ class SocSettingsPromptApiTestIncidentResponderPromptSaveAndReadCases:
 
                 self.assertFalse(ok)
                 self.assertIn(expected, response["error"])
-
-

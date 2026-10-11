@@ -50,5 +50,3 @@ def load_portal():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
-
-

@@ -98,5 +98,3 @@ def load_scheduler():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
-
-

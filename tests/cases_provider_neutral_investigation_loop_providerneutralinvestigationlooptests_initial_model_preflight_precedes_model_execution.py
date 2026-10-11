@@ -770,5 +770,3 @@ class ProviderNeutralInvestigationLoopTestsInitialModelPreflightPrecedesModelExe
                 "deterministic_scope_execution"
             ]
         )
-
-

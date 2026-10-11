@@ -400,5 +400,3 @@ class IncidentReanalysisLineageTestsFixtures(unittest.TestCase):
                     (analysis_id, generated_at, self.case_id),
                 )
             connection.commit()
-
-

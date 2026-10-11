@@ -379,5 +379,3 @@ def valid_response(request: dict) -> dict:
             "reasons": [],
         },
     }
-
-

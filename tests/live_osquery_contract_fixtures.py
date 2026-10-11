@@ -139,5 +139,3 @@ def load_relay_broker():
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
-
-

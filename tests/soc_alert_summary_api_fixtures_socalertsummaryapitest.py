@@ -256,5 +256,3 @@ class SocAlertSummaryApiTestFixtures(unittest.TestCase):
             ),
         )
         return group_id
-
-

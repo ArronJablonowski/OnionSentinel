@@ -84,5 +84,3 @@ class DhcpAssetPromotionTestsFixtures(unittest.TestCase):
         }
         values.update(overrides)
         return SimpleNamespace(**values)
-
-

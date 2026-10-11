@@ -783,5 +783,3 @@ class ProviderNeutralInvestigationLoopTestsLoopRejectsDisabledOrUnadvertisedBack
             ],
             2,
         )
-
-

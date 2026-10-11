@@ -33,5 +33,3 @@ class SecurityOnionQueryClientTestsFixtures(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.query_client = load_module("security_onion_query_client_test", QUERY_CLIENT)
-
-

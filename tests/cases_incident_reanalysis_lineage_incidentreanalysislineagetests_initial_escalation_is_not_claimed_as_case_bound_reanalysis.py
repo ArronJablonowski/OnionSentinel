@@ -770,5 +770,3 @@ class IncidentReanalysisLineageTestsInitialEscalationIsNotClaimedAsCaseBoundRean
             },
         )
         self.assertEqual({item[0] for item in releases}, {DEPLOYED_RELEASE})
-
-

@@ -379,5 +379,3 @@ class SecurityOnionInvestigationPivotTestsWrapperPackAndObservableContractMatche
                 flow_query,
             )
         )
-
-

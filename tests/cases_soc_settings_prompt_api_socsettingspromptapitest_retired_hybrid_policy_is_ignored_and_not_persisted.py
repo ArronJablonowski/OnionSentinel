@@ -298,5 +298,3 @@ class SocSettingsPromptApiTestRetiredHybridPolicyIsIgnoredAndNotPersistedCases:
         self.assertTrue(assessment["compatible"])
         self.assertEqual(assessment["status"], "compatible")
         self.assertEqual(assessment["context_length"], 32768)
-
-

@@ -764,5 +764,3 @@ class AiSchedulerPriorityTestTerminalSuccessRecoveryProvesExactIrCommitCases:
             result["build_prompt"].call_args.args[0],
             alert_id,
         )
-
-

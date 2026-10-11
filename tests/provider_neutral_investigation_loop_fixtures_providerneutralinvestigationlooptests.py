@@ -112,5 +112,3 @@ class ProviderNeutralInvestigationLoopTestsFixtures(unittest.TestCase):
                 }
             ],
         }
-
-

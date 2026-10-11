@@ -697,5 +697,3 @@ class HarnessTraceEvaluatorTestsEvaluatorUsesExtractedSkillAttestationServiceCas
                 1,
             )
             self.assertTrue(report["runs"][0]["integrity"]["valid"])
-
-

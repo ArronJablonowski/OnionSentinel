@@ -33,5 +33,3 @@ class DhcpWrapperTestsFixtures(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.wrapper = load_module("dhcp_so_wrapper_test", WRAPPER)
-
-

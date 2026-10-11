@@ -249,5 +249,3 @@ class SecurityOnionLiveOsqueryResponseTestsAllowsOnlyExplicitLoopbackHttpOrVerif
             )
         self.assertEqual(len(results), 8)
         self.assertEqual(set(deadlines), {1130.0})
-
-

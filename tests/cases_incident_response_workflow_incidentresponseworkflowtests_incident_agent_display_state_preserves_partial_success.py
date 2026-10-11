@@ -792,5 +792,3 @@ class IncidentResponseWorkflowTestsIncidentAgentDisplayStatePreservesPartialSucc
         self.assertEqual(result, "sent")
         detail_response.assert_called_once_with("ir case")
         self.assertEqual(handler._send.call_args.args[0], 200)
-
-

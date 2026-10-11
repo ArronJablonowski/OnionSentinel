@@ -379,5 +379,3 @@ class OperationalSloTestsPendingAiRequiresRecentForwardProgressCases:
             with tarfile.open(archive) as stream:
                 names = stream.getnames()
             self.assertNotIn("unrelated-live-data.log", names)
-
-

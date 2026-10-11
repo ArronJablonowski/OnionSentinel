@@ -726,5 +726,3 @@ class AiModelRoutingTestsControlledEvaluationTwoInvalidReviewsStopBeforeResultCo
             "foreign.example",
             repair_prompt_serializations[0],
         )
-
-

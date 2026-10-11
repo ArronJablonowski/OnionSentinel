@@ -759,5 +759,3 @@ class IncidentHarnessCohortTestsCaseAndRunIdentityGrammarsMatchRuntimeBoundsCase
                 base_url="http://127.0.0.1:8766",
                 poster=missing_key,
             )
-
-

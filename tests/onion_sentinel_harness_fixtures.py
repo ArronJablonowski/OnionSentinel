@@ -74,5 +74,3 @@ sys.modules[SPEC.name] = HARNESS
 
 
 SPEC.loader.exec_module(HARNESS)
-
-
