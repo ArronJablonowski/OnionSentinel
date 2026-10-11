@@ -1,3 +1,5 @@
+
+from installer_source_fixture import read_installer_source
 import importlib.util
 from pathlib import Path
 import tempfile
@@ -103,9 +105,7 @@ class SqliteBackupRecoveryGateTests(unittest.TestCase):
         self.assertLess(timestamp, evaluation)
 
     def test_installer_deploys_gate_before_monitor(self):
-        source = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text(
-            encoding="utf-8"
-        )
+        source = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         gate_copy = source.index(
             'cp "$REPO_DIR/n8n/bin/sqlite_backup_recovery_gate.py" '
             '"$STACK_DIR/bin/sqlite_backup_recovery_gate.py"'

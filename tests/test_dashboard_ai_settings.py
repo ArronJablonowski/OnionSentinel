@@ -2,6 +2,8 @@
 """Contracts for persisted dashboard AI settings and legacy migration."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib.util
 import json
 import sys
@@ -204,7 +206,7 @@ class DashboardAiSettingsTests(unittest.TestCase):
         self.assertLessEqual(len(source.splitlines()), 320)
         for forbidden in ("subprocess", "urllib", "sqlite3", "write_text("):
             self.assertNotIn(forbidden, source)
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
         self.assertEqual(installer.count("dashboard_ai_settings.py"), 2)
         self.assertLess(
             installer.index("dashboard_model_routing.py"),

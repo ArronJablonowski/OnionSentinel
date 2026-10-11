@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import json
 import sys
 import unittest
@@ -28,9 +30,7 @@ def route(path: str):
 
 class PortalAccessPolicyTests(unittest.TestCase):
     def test_installer_deploys_access_session_and_audit_modules(self) -> None:
-        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text(
-            encoding="utf-8"
-        )
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         for name in (
             "portal_access_policy.py",
             "portal_access_enforcement.py",

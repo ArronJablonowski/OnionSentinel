@@ -1,3 +1,5 @@
+
+from installer_source_fixture import read_installer_source
 import concurrent.futures
 import importlib.util
 import json
@@ -378,17 +380,13 @@ class AgentMemoryTests(unittest.TestCase):
         self.assertEqual(set(payload["agents"]), set(MEMORY.MEMORY_ROLES))
 
     def test_installer_seeds_every_reviewer_prompt_without_overwriting_runtime_policy(self) -> None:
-        installer = (ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh").read_text(
-            encoding="utf-8"
-        )
+        installer = read_installer_source(ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh")
         for prompt_file in MEMORY.AGENT_SECOND_OPINION_PROMPT_FILES.values():
             self.assertIn(prompt_file, installer)
         self.assertIn('if [[ ! -f "$STACK_DIR/config/$reviewer_prompt" ]]', installer)
 
     def test_installer_deploys_the_complete_agent_memory_module_set(self) -> None:
-        installer = (ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh").read_text(
-            encoding="utf-8"
-        )
+        installer = read_installer_source(ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh")
         for module in (
             "agent_memory.py",
             "agent_memory_validation.py",

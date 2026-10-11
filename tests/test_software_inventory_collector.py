@@ -2,6 +2,8 @@
 """Focused tests for the bounded Mac Studio software inventory collector."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import ast
 import datetime as dt
 import hashlib
@@ -764,7 +766,7 @@ class SoftwareInventoryCollectorTests(unittest.TestCase):
             "com.arron.soc.endpoint-software-inventory",
         )
         self.assertEqual(endpoint_plist["StartCalendarInterval"]["Hour"], 3)
-        installer = INSTALLER.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER)
         for required in (
             "collect-software-inventory.py",
             "collect-endpoint-software-inventory.py",

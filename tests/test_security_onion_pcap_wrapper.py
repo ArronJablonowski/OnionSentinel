@@ -2,6 +2,8 @@
 """Regression checks for the Security Onion bounded PCAP wrapper."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import datetime as dt
 import io
 import importlib.util
@@ -421,7 +423,7 @@ class SecurityOnionPcapWrapperTest(unittest.TestCase):
         self.assertEqual(status["suricata_packet_loss_age_seconds"], 15)
 
     def test_installer_retires_legacy_staging_and_provisions_stream_signing(self) -> None:
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
 
         self.assertIn("rm -f /usr/local/sbin/onion-sentinel-rsync-pcapout", installer)
         self.assertIn("rm -f /etc/onion-sentinel/pcapout-rsync.conf", installer)

@@ -2,7 +2,7 @@
   "schema": "onion-sentinel-module-quality-policy-v1",
   "module_target_lines": 600,
   "new_module_max_lines": 800,
-  "absolute_new_file_max_lines": 1200,
+  "absolute_new_file_max_lines": 1000,
   "function_target_lines": 50,
   "new_function_max_lines": 100,
   "complexity_target": 10,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib.util
 import sys
 import unittest
@@ -69,7 +71,7 @@ class DashboardShellComponentTests(unittest.TestCase):
         self.assertIn('class="nav-item active" href="playbooks.html"', page)
 
     def test_installer_copies_shell_component(self) -> None:
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
         self.assertIn(
             'cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_shell_components.py" '
             '"$DASHBOARD_RUNTIME_DIR/scripts/dashboard_shell_components.py"',

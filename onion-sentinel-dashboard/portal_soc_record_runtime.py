@@ -92,16 +92,22 @@ def soc_ai_group_members(r: Any, group_keys: list[str]) -> list[tuple[str, str]]
 
 
 def soc_alert_page_ai_artifact_context(r: Any, rows: list[Any]) -> dict[str, object]:
-    # Index only files for the visible representatives. A table request must
-    # not parse the entire historical prompt/analysis corpus.
+    # Include grouped members and legacy filenames; filename matching is only
+    # an optimization for canonical timestamp-prefixed artifacts.
+    members = r._soc_ai_group_members(r.page_group_keys(rows))
     tokens = {
         str(row["alert_id"]).rsplit(":", 1)[-1]
         for row in rows if "alert_id" in row.keys() and row["alert_id"]
     }
+    tokens.update(alert_id.rsplit(":", 1)[-1] for _, alert_id in members)
     tokens = {token for token in tokens if r.re.fullmatch(r"[A-Za-z0-9_.=-]{1,512}", token)}
     base = r._soc_ai_artifact_sources()
     def visible(paths):
-        return (path for path in paths if any(token in path.name for token in tokens))
+        return (
+            path for path in paths
+            if not r.re.match(r"^\d{8}-\d{6}[+-]\d{4}-", path.name)
+            or any(token in path.name for token in tokens)
+        )
     sources = r.AiArtifactSources(
         prompt_paths=lambda: visible(base.prompt_paths()),
         analysis_paths=lambda: visible(base.analysis_paths()),

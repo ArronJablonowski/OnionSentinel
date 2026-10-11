@@ -2,6 +2,8 @@
 """Contracts for the shared dashboard alert report view model."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib.util
 import sys
 import unittest
@@ -53,7 +55,7 @@ class DashboardAlertReportModelTests(unittest.TestCase):
         self.assertLessEqual(len(source.splitlines()), 90)
         for forbidden in ("sqlite3", "subprocess", "json", "open("):
             self.assertNotIn(forbidden, source)
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
         self.assertEqual(installer.count("dashboard_alert_report_model.py"), 2)
 
 

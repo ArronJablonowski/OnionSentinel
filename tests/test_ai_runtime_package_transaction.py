@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import ast
 import importlib.util
 import os
@@ -23,7 +25,7 @@ SPEC.loader.exec_module(installer)
 
 
 def function_metrics(name: str) -> tuple[int, int]:
-    tree = ast.parse(INSTALLER_PATH.read_text(encoding="utf-8"))
+    tree = ast.parse(read_installer_source(INSTALLER_PATH))
     target = next(
         node
         for node in tree.body

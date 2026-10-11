@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import ast
 import copy
 import importlib.machinery
@@ -156,7 +158,7 @@ class MaxmindGeoipSummaryArchitectureTests(unittest.TestCase):
             self.assertLessEqual(lines, 50)
             self.assertLessEqual(complexity, 10)
         self.assertLessEqual(len(WORKFLOW.read_text().splitlines()), 600)
-        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         self.assertIn(
             'cp "$REPO_DIR/n8n/bin/pcap_geoip_workflow.py" '
             '"$STACK_DIR/bin/pcap_geoip_workflow.py"',

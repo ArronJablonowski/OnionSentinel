@@ -2,6 +2,8 @@
 """Deployment contracts for scheduled PostgreSQL-backed AC Hunter caching."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import plistlib
 import unittest
 from pathlib import Path
@@ -33,7 +35,7 @@ class AcHunterPostgresCacheTests(unittest.TestCase):
         self.assertNotIn("RunAtLoad", value)
 
     def test_installer_deploys_store_schema_collector_and_launch_agent(self) -> None:
-        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         for required in (
             "postgres_ac_hunter_store.js",
             "ac-hunter-schema.sql",

@@ -2,6 +2,8 @@
 """Cross-boundary adversarial release contracts for untrusted telemetry."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 from types import SimpleNamespace
 import html
 import json
@@ -211,9 +213,7 @@ class UntrustedTelemetryAdversarialGateTests(unittest.TestCase):
         self.assertEqual(dashboard_text(valid), valid)
 
     def test_gate_and_boundary_modules_are_in_the_production_contract(self) -> None:
-        installer = (ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh").read_text(
-            encoding="utf-8"
-        )
+        installer = read_installer_source(ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh")
         self.assertEqual(installer.count("portal_untrusted_text.py"), 2)
         self.assertEqual(installer.count("dashboard_untrusted_text.py"), 2)
         deployment = (ROOT / "docs" / "product-deployment-requirements.md").read_text(

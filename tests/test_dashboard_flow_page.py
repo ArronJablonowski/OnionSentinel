@@ -2,6 +2,8 @@
 """Contract tests for the analyst-facing Onion Sentinel data-flow page."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib.util
 import sys
 import unittest
@@ -117,7 +119,7 @@ class DashboardFlowPageTests(unittest.TestCase):
         self.assertIn('<article id="owned-tile"></article>', rendered)
 
     def test_installer_copies_flow_module_once(self) -> None:
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
         command = (
             'cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_flow_page.py" '
             '"$DASHBOARD_RUNTIME_DIR/scripts/dashboard_flow_page.py"'

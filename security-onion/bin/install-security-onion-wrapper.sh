@@ -18,6 +18,11 @@ install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/export-software-ob
 install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/run-live-osquery" /usr/local/sbin/run-live-osquery
 install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/run-live-osquery-forced" /usr/local/sbin/run-live-osquery-forced
 install -o root -g root -m 0755 -d /usr/local/lib/onion-sentinel
+for owner in transport validation query_execution history projection dispatch; do
+  install -o root -g root -m 0644 \
+    "$REPO_DIR/security-onion/bin/so_evidence_${owner}.py" \
+    "/usr/local/lib/onion-sentinel/so_evidence_${owner}.py"
+done
 install -o root -g root -m 0644 "$REPO_DIR/n8n/bin/investigation_query_schema.py" /usr/local/lib/onion-sentinel/investigation_query_schema.py
 install -o root -g root -m 0644 "$REPO_DIR/n8n/bin/historical_osquery_schema.py" /usr/local/lib/onion-sentinel/historical_osquery_schema.py
 install -o root -g root -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract_schema.py" /usr/local/lib/onion-sentinel/live_osquery_contract_schema.py

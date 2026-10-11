@@ -2,6 +2,8 @@
 """Startup and rotation acceptance for credential lifecycle governance."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import datetime as dt
 import importlib.util
 import json
@@ -178,9 +180,7 @@ class CredentialStartupGovernanceTests(unittest.TestCase):
             self.assertNotIn(str(private), json.dumps(value))
 
     def test_installer_deploys_gate_and_alert_store_runs_it_before_node(self) -> None:
-        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text(
-            encoding="utf-8"
-        )
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         host = (ROOT / "n8n/bin/run-alert-store-host.zsh").read_text(
             encoding="utf-8"
         )

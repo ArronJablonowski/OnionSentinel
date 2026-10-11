@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import ast
 import copy
 import importlib.util
@@ -309,7 +311,7 @@ class PcapToolStreamRuntimeArchitectureTests(unittest.TestCase):
             self.assertLessEqual(lines, 50)
             self.assertLessEqual(complexity, 10)
         self.assertLessEqual(len(WORKFLOW.read_text().splitlines()), 600)
-        installer = (BIN / "install-macstudio-stack.zsh").read_text()
+        installer = read_installer_source(BIN / "install-macstudio-stack.zsh")
         workflow_copy = (
             'cp "$REPO_DIR/n8n/bin/pcap_tool_stream_runtime.py" '
             '"$STACK_DIR/bin/pcap_tool_stream_runtime.py"'

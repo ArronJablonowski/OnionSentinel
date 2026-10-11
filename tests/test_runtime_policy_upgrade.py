@@ -1,3 +1,5 @@
+
+from installer_source_fixture import read_installer_source
 import hashlib
 import importlib.util
 import json
@@ -157,6 +159,10 @@ class RuntimePolicyUpgradeTests(unittest.TestCase):
             if entry["model"] == "gpt-5.6-sol":
                 entry["enabled"] = False
                 entry["reasoning_effort"] = "medium"
+        settings["codex_cli_models"] = [
+            entry for entry in settings["codex_cli_models"]
+            if entry["model"] not in {"gpt-6-astra", "gpt-6.1-sol"}
+        ]
         return settings
 
     @staticmethod
@@ -209,7 +215,7 @@ class RuntimePolicyUpgradeTests(unittest.TestCase):
             self.assertEqual(destination.read_bytes(), original)
 
     def test_installer_seeds_then_exactly_migrates_model_settings(self) -> None:
-        installer = INSTALLER.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER)
         seed = (
             'cp "$REPO_DIR/n8n/config/ai_model_settings.json" '
             '"$STACK_DIR/config/ai_model_settings.json"'
@@ -232,7 +238,7 @@ class RuntimePolicyUpgradeTests(unittest.TestCase):
         self.assertLess(installer.index(seed), installer.index(migration))
 
     def test_installer_exactly_migrates_every_shipped_reviewer_prompt(self) -> None:
-        installer = INSTALLER.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER)
         seed_loop = installer.index("for reviewer_prompt in")
 
         for prompt_name, prior_digest in PRIOR_REVIEWER_PROMPT_SHA256.items():
@@ -255,7 +261,7 @@ class RuntimePolicyUpgradeTests(unittest.TestCase):
                 )
 
     def test_installer_retains_older_incident_responder_upgrade_path(self) -> None:
-        installer = INSTALLER.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER)
         incident_migration = installer.index(
             '--source "$REPO_DIR/n8n/config/'
             'incident_responder_second_opinion_prompt.md"'
@@ -281,7 +287,7 @@ class RuntimePolicyUpgradeTests(unittest.TestCase):
     def test_installer_accepts_endpoint_attribution_reviewer_baselines(
         self,
     ) -> None:
-        installer = INSTALLER.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER)
         for prompt_name, prior_digest in (
             ENDPOINT_ATTRIBUTION_REVIEWER_PROMPT_SHA256.items()
         ):

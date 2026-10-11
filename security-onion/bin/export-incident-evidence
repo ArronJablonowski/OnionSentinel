@@ -382,6 +382,32 @@ class BoundedCommandError(RuntimeError):
         self.reason = reason
 
 
+
+_evidence_owner_dir = Path(__file__).resolve().parent
+if str(_evidence_owner_dir) not in sys.path:
+    sys.path.insert(0, str(_evidence_owner_dir))
+import so_evidence_transport
+import so_evidence_validation
+import so_evidence_query_execution
+import so_evidence_history
+import so_evidence_projection
+import so_evidence_dispatch
+
+class _EvidenceRuntime:
+    """Late-bound ports preserve the forced-command API and injected test seams.
+
+    Owners never import this entry point. The adapter retains configuration and
+    audit ownership, and supplies the original bounded operations to each owner.
+    """
+    def __init__(self, namespace):
+        self._namespace = namespace
+
+    def __getattr__(self, name):
+        return self._namespace[name]
+
+
+_evidence_runtime = _EvidenceRuntime(globals())
+
 def run_bounded_command(
     command: list[str],
     *,
@@ -389,88 +415,8 @@ def run_bounded_command(
     max_stdout_bytes: int,
     max_stderr_bytes: int,
 ) -> subprocess.CompletedProcess:
-    """Drain a no-shell child incrementally and enforce hard byte ceilings."""
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-    )
-    assert process.stdout is not None and process.stderr is not None
-    selector = selectors.DefaultSelector()
-    streams = {
-        process.stdout: ("stdout", bytearray(), max_stdout_bytes),
-        process.stderr: ("stderr", bytearray(), max_stderr_bytes),
-    }
-    for stream in streams:
-        os.set_blocking(stream.fileno(), False)
-        selector.register(stream, selectors.EVENT_READ)
-    deadline = time.monotonic() + timeout_seconds
-    try:
-        while selector.get_map():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise BoundedCommandError(
-                    "timeout",
-                    f"command timed out after {timeout_seconds:g} seconds",
-                )
-            events = selector.select(timeout=min(0.25, remaining))
-            if not events and process.poll() is not None:
-                events = [
-                    (key, selectors.EVENT_READ)
-                    for key in selector.get_map().values()
-                ]
-            for key, _mask in events:
-                stream = key.fileobj
-                label, target, limit = streams[stream]
-                try:
-                    chunk = os.read(stream.fileno(), 64 * 1024)
-                except BlockingIOError:
-                    continue
-                if not chunk:
-                    selector.unregister(stream)
-                    continue
-                if len(target) + len(chunk) > limit:
-                    raise BoundedCommandError(
-                        "output_limit",
-                        f"command {label} exceeded its {limit}-byte limit",
-                    )
-                target.extend(chunk)
-        return_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired as exc:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            process.kill()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-        raise BoundedCommandError(
-            "timeout",
-            f"command timed out after {timeout_seconds:g} seconds",
-        ) from exc
-    except BaseException:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            process.kill()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-        raise
-    finally:
-        selector.close()
-        process.stdout.close()
-        process.stderr.close()
-    return subprocess.CompletedProcess(
-        command,
-        return_code,
-        bytes(streams[process.stdout][1]),
-        bytes(streams[process.stderr][1]),
-    )
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_transport.run_bounded_command(_evidence_runtime, command, timeout_seconds=timeout_seconds, max_stdout_bytes=max_stdout_bytes, max_stderr_bytes=max_stderr_bytes)
 
 
 OSQUERY_PACKS = {
@@ -548,110 +494,33 @@ AUDIT_OPERATIONS = {
 
 
 def audit_value(value: object) -> str:
-    text = str(value if value is not None else "")[:160]
-    return re.sub(r"[^A-Za-z0-9_.:@+-]", "_", text)
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_transport.audit_value(_evidence_runtime, value)
 
 
 def audit_log(event: str, **fields: object) -> None:
-    if not AUDIT_CONTEXT:
-        return
-    if "operation" in fields and fields["operation"] not in AUDIT_OPERATIONS:
-        fields["operation"] = "unknown"
-    allowed = {
-        "event": event,
-        "correlation_id": AUDIT_CONTEXT.get("correlation_id", ""),
-        "request_digest": AUDIT_CONTEXT.get("request_digest", ""),
-        **fields,
-    }
-    try:
-        syslog.syslog(
-            syslog.LOG_INFO,
-            "onion-sentinel-evidence "
-            + " ".join(
-                f"{key}={audit_value(value)}"
-                for key, value in allowed.items()
-            ),
-        )
-    except OSError:
-        pass
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_transport.audit_log(_evidence_runtime, event, **fields)
 
 
 def fail(message: str, code: int = 2) -> None:
-    audit_log(
-        "security_onion_terminal",
-        status="error",
-        elastic_search_count=AUDIT_CONTEXT.get("elastic_search_count", 0),
-        osquery_query_count=AUDIT_CONTEXT.get("osquery_query_count", 0),
-        helper_invocation_count=AUDIT_CONTEXT.get("helper_invocation_count", 0),
-    )
-    print(json.dumps({"ok": False, "error": message}, separators=(",", ":")))
-    raise SystemExit(code)
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_transport.fail(_evidence_runtime, message, code)
 
 
 def parse_time(value: object) -> dt.datetime:
-    text = str(value or "").strip().replace("  ", "T")
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    parsed = dt.datetime.fromisoformat(text)
-    if parsed.tzinfo is None:
-        raise ValueError("timestamp must include a UTC offset")
-    return parsed.astimezone(dt.timezone.utc)
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_transport.parse_time(_evidence_runtime, value)
 
 
 def iso_utc(value: dt.datetime) -> str:
-    return value.astimezone(dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_transport.iso_utc(_evidence_runtime, value)
 
 
 def read_request() -> dict:
-    raw = sys.stdin.buffer.read(MAX_TRANSPORT_REQUEST_BYTES + 1)
-    if len(raw) > MAX_TRANSPORT_REQUEST_BYTES:
-        fail("request exceeds the transport byte limit")
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        fail(f"invalid JSON request: {exc}")
-    if not isinstance(data, dict):
-        fail("request root must be an object")
-    if data.get("transport_contract") == TRANSPORT_AUDIT_CONTRACT:
-        if set(data) != {
-            "transport_contract", "correlation_id", "request_digest", "payload"
-        }:
-            fail("request transport envelope is invalid")
-        payload = data.get("payload")
-        correlation_id = data.get("correlation_id")
-        request_digest = data.get("request_digest")
-        if (
-            not isinstance(payload, dict)
-            or not isinstance(correlation_id, str)
-            or not CORRELATION_ID.fullmatch(correlation_id)
-            or not isinstance(request_digest, str)
-            or not SHA256.fullmatch(request_digest)
-            or request_digest != canonical_digest(payload)
-        ):
-            fail("request transport envelope failed validation")
-    else:
-        # Transitional compatibility lets the Security Onion wrapper be
-        # deployed before the Relay without interrupting the forced lane.
-        payload = data
-        correlation_id = uuid.uuid4().hex
-        request_digest = canonical_digest(payload)
-    if (
-        len(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode())
-        > MAX_REQUEST_BYTES
-    ):
-        fail("request payload exceeds the 16384-byte limit")
-    AUDIT_CONTEXT.update({
-        "correlation_id": correlation_id,
-        "request_digest": request_digest,
-        "elastic_search_count": 0,
-        "osquery_query_count": 0,
-        "helper_invocation_count": 0,
-    })
-    audit_log(
-        "security_onion_start",
-        operation=payload.get("operation", "incident_evidence"),
-    )
-    return payload
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_transport.read_request(_evidence_runtime)
 
 
 def emit_response(
@@ -660,130 +529,25 @@ def emit_response(
     maximum_bytes: int = MAX_OUTPUT_BYTES,
     output_error: str = "bounded evidence response exceeded the output contract",
 ) -> int:
-    payload_digest = canonical_digest(response)
-    terminal_status = "complete" if response.get("complete") is True else "partial"
-    receipt = {
-        "receipt_contract": TRANSPORT_RECEIPT_CONTRACT,
-        "correlation_id": AUDIT_CONTEXT["correlation_id"],
-        "request_digest": AUDIT_CONTEXT["request_digest"],
-        "response_payload_digest": payload_digest,
-        "elastic_search_count": AUDIT_CONTEXT["elastic_search_count"],
-        "osquery_query_count": AUDIT_CONTEXT["osquery_query_count"],
-        "helper_invocation_count": AUDIT_CONTEXT["helper_invocation_count"],
-        "read_only": True,
-        "terminal_status": terminal_status,
-    }
-    emitted = {**response, "audit_receipt": receipt}
-    output = json.dumps(emitted, separators=(",", ":"), sort_keys=True).encode()
-    if len(output) > maximum_bytes:
-        fail(output_error, 4)
-    audit_log(
-        "security_onion_terminal",
-        status=terminal_status,
-        elastic_search_count=receipt["elastic_search_count"],
-        osquery_query_count=receipt["osquery_query_count"],
-        helper_invocation_count=receipt["helper_invocation_count"],
-        response_payload_digest=payload_digest,
-    )
-    sys.stdout.buffer.write(output + b"\n")
-    return 0
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_transport.emit_response(_evidence_runtime, response, maximum_bytes=maximum_bytes, output_error=output_error)
 
 
 def index_matches_scope(index_name: str, index_scope: list[str]) -> bool:
-    """Return whether an Elasticsearch backing index belongs to a reviewed scope."""
-    return any(
-        fnmatch.fnmatchcase(index_name, pattern)
-        or fnmatch.fnmatchcase(index_name, f".ds-{pattern}-*")
-        for pattern in index_scope
-    )
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_transport.index_matches_scope(_evidence_runtime, index_name, index_scope)
 
 
 def validated_anchor(value: object) -> dict[str, str] | None:
-    """Validate the collector-owned representative alert identifier.
-
-    Missing anchors remain protocol-compatible with older collectors, but the
-    response can never be semantically valid or complete without one.
-    """
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        fail("anchor must be an object")
-    index_name = str(value.get("index") or "").strip()
-    document_id = str(value.get("id") or "").strip()
-    if (
-        not index_name
-        or not SAFE_ELASTIC_INDEX.fullmatch(index_name)
-        or not index_matches_scope(index_name, ALERT_INDEX_SCOPE)
-    ):
-        fail("anchor index is not an allowlisted Security Onion alert index")
-    if not SAFE_ELASTIC_ID.fullmatch(document_id):
-        fail("anchor id is invalid")
-    return {"index": index_name, "id": document_id}
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_transport.validated_anchor(_evidence_runtime, value)
 
 
 def validated_request(
     data: dict,
 ) -> tuple[list[str], list[str], list[dict], dict[str, list[str]], int, dict[str, str] | None]:
-    packs = data.get("packs") or list(PACKS)
-    if not isinstance(packs, list) or not packs or len(packs) > len(PACKS):
-        fail("packs must be a non-empty bounded list")
-    packs = [str(item) for item in packs]
-    if len(set(packs)) != len(packs) or any(item not in PACKS for item in packs):
-        fail("one or more evidence packs are not allowlisted")
-    osquery_packs = data.get("osquery_packs") or list(OSQUERY_PACKS)
-    if (
-        not isinstance(osquery_packs, list)
-        or not osquery_packs
-        or len(osquery_packs) > len(OSQUERY_PACKS)
-    ):
-        fail("osquery_packs must be a non-empty bounded list")
-    osquery_packs = [str(item) for item in osquery_packs]
-    if (
-        len(set(osquery_packs)) != len(osquery_packs)
-        or any(item not in OSQUERY_PACKS for item in osquery_packs)
-    ):
-        fail("one or more OSquery packs are not allowlisted")
-    windows = data.get("windows")
-    if not isinstance(windows, list) or not windows or len(windows) > MAX_WINDOWS:
-        fail(f"windows must contain 1-{MAX_WINDOWS} entries")
-    clean_windows = []
-    for item in windows:
-        if not isinstance(item, dict):
-            fail("each window must be an object")
-        try:
-            start, end = parse_time(item.get("start")), parse_time(item.get("end"))
-        except (TypeError, ValueError) as exc:
-            fail(f"invalid evidence window: {exc}")
-        if end <= start or end - start > dt.timedelta(hours=24):
-            fail("each evidence window must be positive and no longer than 24 hours")
-        clean_windows.append({"start": iso_utc(start), "end": iso_utc(end)})
-    observables = data.get("observables") or {}
-    if not isinstance(observables, dict):
-        fail("observables must be an object")
-    clean_observables: dict[str, list[str]] = {}
-    for kind in OBSERVABLE_FIELDS:
-        values = observables.get(kind) or []
-        if not isinstance(values, list) or len(values) > 16:
-            fail(f"{kind} must contain at most 16 values")
-        clean = []
-        for value in values:
-            text = str(value or "").strip()
-            if not SAFE_VALUE.fullmatch(text):
-                fail(f"invalid {kind} observable")
-            if text not in clean:
-                clean.append(text)
-        clean_observables[kind] = clean
-    if not any(clean_observables.values()):
-        fail("at least one exact observable is required")
-    size = data.get("size", 100)
-    try:
-        size = int(size)
-    except (TypeError, ValueError):
-        fail("size must be an integer")
-    if size < 1 or size > MAX_HITS:
-        fail(f"size must be between 1 and {MAX_HITS}")
-    anchor = validated_anchor(data.get("anchor"))
-    return packs, osquery_packs, clean_windows, clean_observables, size, anchor
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_transport.validated_request(_evidence_runtime, data)
 
 
 def require_exact_keys(
@@ -793,19 +557,13 @@ def require_exact_keys(
     required: set[str],
     label: str,
 ) -> None:
-    missing = required - set(value)
-    unknown = set(value) - allowed
-    if missing:
-        fail(f"{label} is missing required fields: {', '.join(sorted(missing))}")
-    if unknown:
-        fail(f"{label} contains unsupported fields: {', '.join(sorted(unknown))}")
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_validation.require_exact_keys(_evidence_runtime, value, allowed=allowed, required=required, label=label)
 
 
 def validated_pivot_id(value: object, label: str) -> str:
-    text = str(value or "").strip()
-    if not SAFE_PIVOT_ID.fullmatch(text):
-        fail(f"{label} is invalid")
-    return text
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_validation.validated_pivot_id(_evidence_runtime, value, label)
 
 
 def validated_pivot_window(
@@ -814,155 +572,33 @@ def validated_pivot_window(
     label: str,
     max_duration: dt.timedelta,
 ) -> tuple[dict[str, str], dt.datetime, dt.datetime]:
-    if not isinstance(value, dict):
-        fail(f"{label} must be an object")
-    require_exact_keys(
-        value,
-        allowed={"start", "end"},
-        required={"start", "end"},
-        label=label,
-    )
-    try:
-        start, end = parse_time(value["start"]), parse_time(value["end"])
-    except (TypeError, ValueError) as exc:
-        fail(f"{label} is invalid: {exc}")
-    if start.utcoffset() != dt.timedelta(0) or end.utcoffset() != dt.timedelta(0):
-        fail(f"{label} must use UTC")
-    if end <= start or end - start > max_duration:
-        fail(f"{label} is outside its duration bound")
-    return {"start": iso_utc(start), "end": iso_utc(end)}, start, end
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_validation.validated_pivot_window(_evidence_runtime, value, label=label, max_duration=max_duration)
 
 
 def validated_pivot_observable(kind: str, value: object) -> str:
-    text = str(value or "").strip().rstrip(".")
-    if kind == "ips":
-        try:
-            return str(ipaddress.ip_address(text))
-        except ValueError:
-            fail("invalid exact IP pivot observable")
-    if kind == "domains":
-        if not SAFE_DOMAIN.fullmatch(text):
-            fail("invalid exact domain pivot observable")
-        return text.lower()
-    if kind in {"hosts", "users"} and SAFE_VALUE.fullmatch(text):
-        return text
-    fail(f"invalid exact {kind} pivot observable")
-    raise AssertionError("unreachable")
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_validation.validated_pivot_observable(_evidence_runtime, kind, value)
 
 
 def validated_pivot_observables(value: object, label: str) -> dict[str, list[str]]:
-    if not isinstance(value, dict) or set(value) != set(OBSERVABLE_FIELDS):
-        fail(f"{label} must contain exactly {', '.join(OBSERVABLE_FIELDS)}")
-    clean: dict[str, list[str]] = {}
-    for kind in OBSERVABLE_FIELDS:
-        items = value[kind]
-        if not isinstance(items, list) or len(items) > MAX_PIVOT_QUERY_OBSERVABLES:
-            fail(f"{label}.{kind} exceeds its value limit")
-        normalized = []
-        for item in items:
-            candidate = validated_pivot_observable(kind, item)
-            if candidate not in normalized:
-                normalized.append(candidate)
-        clean[kind] = normalized
-    count = sum(len(items) for items in clean.values())
-    if count < 1 or count > MAX_PIVOT_QUERY_OBSERVABLES:
-        fail(f"{label} must contain 1-{MAX_PIVOT_QUERY_OBSERVABLES} exact values")
-    return clean
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_validation.validated_pivot_observables(_evidence_runtime, value, label)
 
 
 def validated_event_tuple(value: object, label: str) -> dict:
-    if not isinstance(value, dict):
-        fail(f"{label} must be an object")
-    unknown = set(value) - set(EVENT_TUPLE_FIELDS)
-    if unknown:
-        fail(f"{label} contains unsupported fields: {', '.join(sorted(unknown))}")
-    if not value:
-        fail(f"{label} must not be empty")
-    clean = {}
-    for field in EVENT_TUPLE_FIELDS:
-        if field not in value:
-            continue
-        raw = value[field]
-        if field in {"source_ip", "destination_ip"}:
-            clean[field] = validated_pivot_observable("ips", raw)
-        elif field in {"source_port", "destination_port"}:
-            if isinstance(raw, bool):
-                fail(f"{label}.{field} is invalid")
-            try:
-                port = int(raw)
-            except (TypeError, ValueError):
-                fail(f"{label}.{field} is invalid")
-            if port < 0 or port > 65535:
-                fail(f"{label}.{field} is outside the port range")
-            clean[field] = port
-        elif field in {"transport", "protocol"}:
-            protocol = str(raw or "").strip().lower()
-            if not SAFE_VALUE.fullmatch(protocol):
-                fail(f"{label}.{field} is invalid")
-            clean[field] = protocol
-        elif field == "community_id":
-            community_id = str(raw or "").strip()
-            if not SAFE_COMMUNITY_ID.fullmatch(community_id):
-                fail(f"{label}.community_id is invalid")
-            clean[field] = community_id
-        else:
-            rule_id = str(raw or "").strip()
-            if not SAFE_VALUE.fullmatch(rule_id):
-                fail(f"{label}.rule_id is invalid")
-            clean[field] = rule_id
-    return clean
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_validation.validated_event_tuple(_evidence_runtime, value, label)
 
 
 def validated_event_tuple_manifest(value: object) -> list[dict]:
-    if value is None:
-        return []
-    if not isinstance(value, list) or len(value) > MAX_PIVOT_EVENT_TUPLES:
-        fail("investigation pivot event tuple manifest is out of bounds")
-    clean = []
-    for index, item in enumerate(value):
-        if not isinstance(item, dict):
-            fail(f"investigation pivot event tuple {index} must be an object")
-        require_exact_keys(
-            item,
-            allowed={
-                "event_tuple", "role_semantics", "source", "evidence_ref",
-            },
-            required={
-                "event_tuple", "role_semantics", "source", "evidence_ref",
-            },
-            label=f"investigation pivot event tuple {index}",
-        )
-        source = str(item["source"] or "")
-        role_semantics = str(item["role_semantics"] or "")
-        evidence_ref = str(item["evidence_ref"] or "")
-        if source not in {"trusted_context", "prior_evidence"}:
-            fail("investigation pivot event tuple source is unsupported")
-        if role_semantics not in PIVOT_ROLE_SEMANTICS:
-            fail("investigation pivot event tuple role semantics are unsupported")
-        if not SAFE_EVIDENCE_REF.fullmatch(evidence_ref):
-            fail("investigation pivot event tuple evidence reference is invalid")
-        normalized = {
-            "event_tuple": validated_event_tuple(
-                item["event_tuple"],
-                f"investigation pivot event tuple {index}.event_tuple",
-            ),
-            "role_semantics": role_semantics,
-            "source": source,
-            "evidence_ref": evidence_ref,
-        }
-        if normalized in clean:
-            fail("investigation pivot event tuple authorization is duplicated")
-        clean.append(normalized)
-    return clean
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_validation.validated_event_tuple_manifest(_evidence_runtime, value)
 
 
 def pack_event_tuple_fields(pack_name: str) -> dict[str, str]:
-    projected = set(PACKS[pack_name]["fields"])
-    return {
-        key: EVENT_TUPLE_FIELDS[key]
-        for key, paths in EVENT_TUPLE_PATHS.items()
-        if projected.intersection(paths)
-    }
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_validation.pack_event_tuple_fields(_evidence_runtime, pack_name)
 
 
 def validate_pack_observables(
@@ -970,22 +606,8 @@ def validate_pack_observables(
     pack_name: str,
     label: str,
 ) -> None:
-    fields_by_kind = pack_observable_fields(pack_name)
-    unsupported = sorted(
-        kind
-        for kind, values in observables.items()
-        if values and not fields_by_kind.get(kind)
-    )
-    if unsupported:
-        fail(
-            f"{label} uses observable kind(s) unsupported by pack "
-            f"{pack_name}: {', '.join(unsupported)}"
-        )
-    if not any(
-        values and fields_by_kind.get(kind)
-        for kind, values in observables.items()
-    ):
-        fail(f"{label} has no queryable observable in pack {pack_name}")
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_validation.validate_pack_observables(_evidence_runtime, observables, pack_name, label)
 
 
 def tuple_match_semantics(
@@ -993,20 +615,8 @@ def tuple_match_semantics(
     event_tuple: dict | None,
     role_semantics: str | None,
 ) -> str:
-    if not event_tuple:
-        return "observable_exact_any_field"
-    mode = PACK_ROLE_MODE[pack_name]
-    role = str(role_semantics or "")
-    if mode == "cross_sensor" or (
-        mode == "zeek_originator_responder"
-        and role != "zeek_originator_responder"
-    ):
-        return "community_id_cross_sensor"
-    if mode == "zeek_originator_responder":
-        return "zeek_originator_responder_exact"
-    if role == "packet_direction":
-        return "packet_direction_exact"
-    return "event_native_exact"
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_validation.tuple_match_semantics(_evidence_runtime, pack_name, event_tuple, role_semantics)
 
 
 def validate_tuple_role_compatibility(
@@ -1016,422 +626,46 @@ def validate_tuple_role_compatibility(
     role_semantics: str,
     label: str,
 ) -> None:
-    mode = PACK_ROLE_MODE[pack_name]
-    if mode == "cross_sensor":
-        if "community_id" not in event_tuple:
-            fail(
-                f"{label} requires community_id for deterministic "
-                f"cross-sensor correlation in pack {pack_name}"
-            )
-        return
-    if (
-        mode == "zeek_originator_responder"
-        and role_semantics != "zeek_originator_responder"
-        and "community_id" not in event_tuple
-    ):
-        fail(
-            f"{label} cannot project {role_semantics or 'unknown'} roles onto "
-            "Zeek originator/responder fields without community_id"
-        )
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_validation.validate_tuple_role_compatibility(_evidence_runtime, event_tuple, pack_name=pack_name, role_semantics=role_semantics, label=label)
 
 
 def validated_pivot_request(data: dict) -> dict:
-    """Independently validate a Mac-authorized iterative query batch."""
-    require_exact_keys(
-        data,
-        allowed={"query_contract", "operation", "batch_id", "authorization", "queries"},
-        required={"query_contract", "operation", "batch_id", "authorization", "queries"},
-        label="investigation pivot request",
-    )
-    if data["query_contract"] != INVESTIGATION_QUERY_CONTRACT:
-        fail("investigation pivot query contract is unsupported")
-    if data["operation"] != INVESTIGATION_QUERY_OPERATION:
-        fail("investigation pivot operation is unsupported")
-    authorization = data["authorization"]
-    if not isinstance(authorization, dict):
-        fail("investigation pivot authorization must be an object")
-    require_exact_keys(
-        authorization,
-        allowed={
-            "context_id", "case_id", "group_id", "actor_role", "anchor",
-            "anchor_time", "time_envelope", "context_digest", "observables",
-            "manifest_digest", "event_tuples",
-        },
-        required={
-            "context_id", "case_id", "group_id", "actor_role", "anchor",
-            "anchor_time", "time_envelope", "context_digest", "observables",
-            "manifest_digest",
-        },
-        label="investigation pivot authorization",
-    )
-    supplied_manifest_digest = str(authorization["manifest_digest"] or "")
-    if (
-        not SHA256.fullmatch(supplied_manifest_digest)
-        or canonical_digest({
-            key: value
-            for key, value in authorization.items()
-            if key != "manifest_digest"
-        }) != supplied_manifest_digest
-    ):
-        fail("investigation pivot authorization manifest digest is invalid")
-    context_digest = str(authorization["context_digest"] or "")
-    if not SHA256.fullmatch(context_digest):
-        fail("investigation pivot context digest is invalid")
-    actor_role = str(authorization["actor_role"] or "")
-    if actor_role not in PIVOT_ACTOR_ROLES:
-        fail("investigation pivot actor role is unsupported")
-    envelope, envelope_start, envelope_end = validated_pivot_window(
-        authorization["time_envelope"],
-        label="investigation pivot authorization window",
-        max_duration=MAX_AUTHORIZATION_WINDOW,
-    )
-    if authorization["time_envelope"] != envelope:
-        fail("investigation pivot authorization window is not canonical UTC")
-    try:
-        anchor_time_value = parse_time(authorization["anchor_time"])
-    except (TypeError, ValueError) as exc:
-        fail(f"investigation pivot anchor_time is invalid: {exc}")
-    if (
-        anchor_time_value < envelope_start
-        or anchor_time_value > envelope_end
-        or authorization["anchor_time"] != iso_utc(anchor_time_value)
-    ):
-        fail("investigation pivot anchor_time is outside its canonical envelope")
-    anchor = validated_anchor(authorization["anchor"])
-    if anchor is None:
-        fail("investigation pivot authorization anchor is required")
-    authorization_entries = authorization["observables"]
-    if (
-        not isinstance(authorization_entries, list)
-        or not authorization_entries
-        or len(authorization_entries) > MAX_PIVOT_BATCH_OBSERVABLES
-    ):
-        fail("investigation pivot authorization observable manifest is out of bounds")
-    authorized: dict[tuple[str, str], dict[str, str]] = {}
-    clean_entries: list[dict[str, str]] = []
-    for index, item in enumerate(authorization_entries):
-        if not isinstance(item, dict):
-            fail(f"investigation pivot authorization observable {index} must be an object")
-        require_exact_keys(
-            item,
-            allowed={"kind", "value", "source", "evidence_ref"},
-            required={"kind", "value", "source", "evidence_ref"},
-            label=f"investigation pivot authorization observable {index}",
-        )
-        kind = str(item["kind"] or "")
-        source = str(item["source"] or "")
-        evidence_ref = str(item["evidence_ref"] or "")
-        if kind not in OBSERVABLE_FIELDS:
-            fail("investigation pivot authorization observable kind is unsupported")
-        if source not in {"trusted_context", "prior_evidence"}:
-            fail("investigation pivot observable provenance source is unsupported")
-        if not SAFE_EVIDENCE_REF.fullmatch(evidence_ref):
-            fail("investigation pivot observable evidence reference is invalid")
-        clean = {
-            "kind": kind,
-            "value": validated_pivot_observable(kind, item["value"]),
-            "source": source,
-            "evidence_ref": evidence_ref,
-        }
-        key = (kind, clean["value"])
-        if key in authorized and authorized[key] != clean:
-            fail("investigation pivot observable authorization conflicts")
-        if key in authorized:
-            fail("investigation pivot observable authorization is duplicated")
-        authorized[key] = clean
-        clean_entries.append(clean)
-    authorized_event_tuples = validated_event_tuple_manifest(
-        authorization.get("event_tuples")
-    )
-    queries = data["queries"]
-    if not isinstance(queries, list) or not queries or len(queries) > MAX_PIVOT_QUERIES:
-        fail(f"investigation pivot request must contain 1-{MAX_PIVOT_QUERIES} queries")
-    clean_queries = []
-    query_ids = set()
-    used_authorizations = set()
-    used_event_tuple_digests = set()
-    hit_budget = 0
-    window_budget = dt.timedelta()
-    for index, item in enumerate(queries):
-        if not isinstance(item, dict):
-            fail(f"investigation pivot query {index} must be an object")
-        require_exact_keys(
-            item,
-            allowed={
-                "query_id", "dialect", "pack", "purpose", "window",
-                "observables", "observable_provenance", "size", "aggregation",
-                "event_tuple", "event_tuple_provenance", "match_semantics",
-                "anchor_time",
-            },
-            required={
-                "query_id", "dialect", "pack", "purpose", "window",
-                "observables", "observable_provenance", "size", "aggregation",
-                "match_semantics",
-            },
-            label=f"investigation pivot query {index}",
-        )
-        query_id = validated_pivot_id(item["query_id"], f"pivot query {index} id")
-        if query_id in query_ids:
-            fail("investigation pivot query ids must be unique")
-        query_ids.add(query_id)
-        dialect = str(item["dialect"] or "")
-        pack = str(item["pack"] or "")
-        purpose = str(item["purpose"] or "")
-        aggregation = str(item["aggregation"] or "")
-        if dialect not in PIVOT_DIALECTS:
-            fail("investigation pivot dialect is unsupported")
-        if pack not in PACKS:
-            fail("investigation pivot pack is unsupported")
-        if purpose not in PIVOT_PURPOSES:
-            fail("investigation pivot purpose is unsupported")
-        if aggregation not in PIVOT_AGGREGATIONS:
-            fail("investigation pivot aggregation is unsupported")
-        window, start, end = validated_pivot_window(
-            item["window"],
-            label=f"investigation pivot query {query_id} window",
-            max_duration=MAX_PIVOT_WINDOW,
-        )
-        if item["window"] != window:
-            fail("investigation pivot query window is not canonical UTC")
-        if start < envelope_start or end > envelope_end:
-            fail("investigation pivot query escapes its authorization time envelope")
-        window_budget += end - start
-        observables = validated_pivot_observables(
-            item["observables"],
-            f"investigation pivot query {query_id} observables",
-        )
-        validate_pack_observables(
-            observables,
-            pack,
-            f"investigation pivot query {query_id}",
-        )
-        provenance = item["observable_provenance"]
-        if not isinstance(provenance, dict) or set(provenance) != set(OBSERVABLE_FIELDS):
-            fail("investigation pivot observable provenance is incomplete")
-        clean_provenance = {}
-        for kind in OBSERVABLE_FIELDS:
-            expected = []
-            for observable in observables[kind]:
-                key = (kind, observable)
-                if key not in authorized:
-                    fail("investigation pivot observable is absent from its authorization manifest")
-                expected.append(authorized[key])
-                used_authorizations.add(key)
-            if provenance[kind] != expected:
-                fail("investigation pivot observable provenance does not match its manifest")
-            clean_provenance[kind] = [dict(entry) for entry in expected]
-        event_tuple = None
-        event_tuple_provenance = None
-        tuple_fields_present = {
-            field
-            for field in ("event_tuple", "event_tuple_provenance")
-            if field in item
-        }
-        if tuple_fields_present and tuple_fields_present != {
-            "event_tuple", "event_tuple_provenance"
-        }:
-            fail("investigation pivot event tuple and provenance must be supplied together")
-        if tuple_fields_present:
-            event_tuple = validated_event_tuple(
-                item["event_tuple"],
-                f"investigation pivot query {query_id} event_tuple",
-            )
-            unsupported = set(event_tuple) - set(pack_event_tuple_fields(pack))
-            if unsupported:
-                fail("investigation pivot event tuple is unsupported by its pack")
-            for field in ("source_ip", "destination_ip"):
-                if field in event_tuple and event_tuple[field] not in observables["ips"]:
-                    fail("investigation pivot role-aware IP is absent from observables")
-            event_tuple_provenance = item["event_tuple_provenance"]
-            if (
-                not isinstance(event_tuple_provenance, dict)
-                or event_tuple_provenance not in authorized_event_tuples
-                or not all(
-                    event_tuple_provenance["event_tuple"].get(field) == value
-                    for field, value in event_tuple.items()
-                )
-            ):
-                fail("investigation pivot event tuple provenance does not match its manifest")
-            if (
-                {"source_ip", "destination_ip"}.intersection(
-                    event_tuple_provenance["event_tuple"]
-                )
-                and not {"source_ip", "destination_ip"}.intersection(event_tuple)
-            ):
-                fail("investigation pivot event tuple dropped its trusted IP role")
-            validate_tuple_role_compatibility(
-                event_tuple,
-                pack_name=pack,
-                role_semantics=event_tuple_provenance["role_semantics"],
-                label=f"investigation pivot query {query_id} event_tuple",
-            )
-            used_event_tuple_digests.add(canonical_digest(event_tuple_provenance))
-        expected_match_semantics = tuple_match_semantics(
-            pack,
-            event_tuple,
-            (
-                event_tuple_provenance.get("role_semantics")
-                if event_tuple_provenance
-                else None
-            ),
-        )
-        if item["match_semantics"] != expected_match_semantics:
-            fail("investigation pivot match semantics are invalid")
-        if aggregation == "anchor_nearest":
-            if dialect != "elastic":
-                fail("anchor_nearest requires compiled Elastic DSL")
-            if item.get("anchor_time") != authorization["anchor_time"]:
-                fail("investigation pivot anchor_time does not match authorization")
-        elif "anchor_time" in item:
-            fail("investigation pivot unexpectedly supplied anchor_time")
-        size = item["size"]
-        if isinstance(size, bool) or not isinstance(size, int):
-            fail("investigation pivot query size must be an integer")
-        if size < 1 or size > MAX_PIVOT_HITS:
-            fail(f"investigation pivot query size must be between 1 and {MAX_PIVOT_HITS}")
-        hit_budget += 0 if aggregation == "count" else size
-        clean_query = {
-            "query_id": query_id,
-            "dialect": dialect,
-            "pack": pack,
-            "purpose": purpose,
-            "window": window,
-            "observables": observables,
-            "observable_provenance": clean_provenance,
-            "size": size,
-            "aggregation": aggregation,
-            "match_semantics": expected_match_semantics,
-        }
-        if aggregation == "anchor_nearest":
-            clean_query["anchor_time"] = authorization["anchor_time"]
-        if event_tuple is not None:
-            clean_query["event_tuple"] = event_tuple
-            clean_query["event_tuple_provenance"] = dict(
-                event_tuple_provenance or {}
-            )
-        clean_queries.append(clean_query)
-    if used_authorizations != set(authorized):
-        fail("investigation pivot authorization contains an unused observable")
-    if used_event_tuple_digests != {
-        canonical_digest(item) for item in authorized_event_tuples
-    }:
-        fail("investigation pivot authorization contains an unused event tuple")
-    if hit_budget > MAX_PIVOT_BATCH_HITS:
-        fail("investigation pivot request exceeds its batch hit budget")
-    if window_budget > MAX_PIVOT_BATCH_WINDOW:
-        fail("investigation pivot request exceeds its cumulative time budget")
-    clean_authorization = {
-        "context_id": validated_pivot_id(
-            authorization["context_id"], "investigation pivot context id"
-        ),
-        "case_id": validated_pivot_id(
-            authorization["case_id"], "investigation pivot case id"
-        ),
-        "group_id": (
-            validated_pivot_id(
-                authorization["group_id"], "investigation pivot group id"
-            )
-            if authorization["group_id"]
-            else ""
-        ),
-        "actor_role": actor_role,
-        "anchor": anchor,
-        "anchor_time": authorization["anchor_time"],
-        "time_envelope": envelope,
-        "context_digest": context_digest,
-        "observables": clean_entries,
-    }
-    if authorized_event_tuples:
-        clean_authorization["event_tuples"] = authorized_event_tuples
-    clean_authorization["manifest_digest"] = canonical_digest(clean_authorization)
-    if clean_authorization["manifest_digest"] != supplied_manifest_digest:
-        fail("investigation pivot normalized authorization manifest digest is invalid")
-    return {
-        "query_contract": INVESTIGATION_QUERY_CONTRACT,
-        "operation": INVESTIGATION_QUERY_OPERATION,
-        "batch_id": validated_pivot_id(data["batch_id"], "investigation pivot batch id"),
-        "authorization": clean_authorization,
-        "queries": clean_queries,
-    }
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_validation.validated_pivot_request(_evidence_runtime, data)
 
 
 def pack_observable_fields(pack_name: str) -> dict[str, list[str]]:
-    projected = set(PACKS[pack_name]["fields"])
-    return {
-        kind: [field for field in fields if field in projected]
-        for kind, fields in OBSERVABLE_FIELDS.items()
-    }
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_query_execution.pack_observable_fields(_evidence_runtime, pack_name)
 
 
 def observable_clause(
     observables: dict[str, list[str]],
     pack_name: str | None = None,
 ) -> dict:
-    should = []
-    fields_by_kind = (
-        pack_observable_fields(pack_name)
-        if pack_name is not None
-        else OBSERVABLE_FIELDS
-    )
-    for kind, fields in fields_by_kind.items():
-        for value in observables.get(kind, []):
-            should.extend({"term": {field: value}} for field in fields)
-    if not should:
-        fail(
-            f"pack {pack_name or 'incident-evidence'} produced no "
-            "observable query clauses"
-        )
-    return {"bool": {"should": should, "minimum_should_match": 1}}
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_query_execution.observable_clause(_evidence_runtime, observables, pack_name)
 
 
 def pivot_event_tuple_fields(query: dict) -> list[str]:
-    if query.get("match_semantics") == "community_id_cross_sensor":
-        return ["community_id"]
-    return list(query.get("event_tuple") or {})
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_query_execution.pivot_event_tuple_fields(_evidence_runtime, query)
 
 
 def pivot_event_tuple_term_clause(field: str, value: object) -> dict:
-    paths = EVENT_TUPLE_PATHS[field]
-    if len(paths) == 1:
-        return {"term": {paths[0]: value}}
-    return {
-        "bool": {
-            "should": [
-                {"term": {path: value}}
-                for path in paths
-            ],
-            "minimum_should_match": 1,
-        }
-    }
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_query_execution.pivot_event_tuple_term_clause(_evidence_runtime, field, value)
 
 
 def event_tuple_clause(query: dict) -> dict:
-    event_tuple = query.get("event_tuple") or {}
-    fields = pivot_event_tuple_fields(query)
-    if not fields:
-        fail("event tuple produced no role-compatible query clauses")
-    return {
-        "bool": {
-            "filter": [
-                pivot_event_tuple_term_clause(field, event_tuple[field])
-                for field in fields
-            ]
-        }
-    }
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_query_execution.event_tuple_clause(_evidence_runtime, query)
 
 
 def dataset_clause(datasets: list[str]) -> dict:
-    if not datasets:
-        fail("reviewed query pack has no datasets")
-    return {
-        "bool": {
-            "should": [
-                {"term": {"event.dataset": dataset}}
-                for dataset in datasets
-            ],
-            "minimum_should_match": 1,
-        }
-    }
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_query_execution.dataset_clause(_evidence_runtime, datasets)
 
 
 def kql_equivalent(
@@ -1439,520 +673,86 @@ def kql_equivalent(
     pack_name: str,
     observables: dict[str, list[str]],
 ) -> str:
-    pack = PACKS[pack_name]
-    dataset = " or ".join(
-        f'event.dataset : "{value}"'
-        for value in pack["datasets"]
-    )
-    obs = []
-    for kind, fields in pack_observable_fields(pack_name).items():
-        for value in observables.get(kind, []):
-            obs.append("(" + " or ".join(f'{field} : "{value}"' for field in fields) + ")")
-    return f'@timestamp >= "{window["start"]}" and @timestamp <= "{window["end"]}" and ({dataset}) and (' + " or ".join(obs) + ")"
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_query_execution.kql_equivalent(_evidence_runtime, window, pack_name, observables)
 
 
 def query_endpoint(index_scope: list[str]) -> str:
-    indices = ",".join(index_scope)
-    return (
-        f"{indices}/_search"
-        f"?ignore_unavailable=true&expand_wildcards=open&preference={QUERY_PREFERENCE}"
-    )
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_query_execution.query_endpoint(_evidence_runtime, index_scope)
 
 
 def canonical_digest(value: object) -> str:
-    encoded = json.dumps(value, separators=(",", ":"), sort_keys=True)
-    return hashlib.sha256(encoded.encode()).hexdigest()
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_query_execution.canonical_digest(_evidence_runtime, value)
 
 
 def search_audit(body: dict, index_scope: list[str]) -> dict:
-    endpoint = query_endpoint(index_scope)
-    return {
-        "query_digest": canonical_digest(body),
-        "execution_digest": canonical_digest({
-            "index_scope": index_scope,
-            "query_endpoint": endpoint,
-            "query_dsl": body,
-        }),
-        "query_dsl": body,
-        "index_scope": list(index_scope),
-        "query_endpoint": endpoint,
-    }
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_query_execution.search_audit(_evidence_runtime, body, index_scope)
 
 
 def bounded_error(value: object) -> str:
-    if isinstance(value, str):
-        return value[:1000]
-    try:
-        return json.dumps(value, separators=(",", ":"), sort_keys=True)[:1000]
-    except (TypeError, ValueError):
-        return str(value)[:1000]
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_query_execution.bounded_error(_evidence_runtime, value)
 
 
 def empty_search_result(body: dict, index_scope: list[str], status: str, duration_ms: int, **extra) -> dict:
-    return {
-        **search_audit(body, index_scope),
-        "status": status,
-        "semantic_valid": False,
-        "total_hits": 0,
-        "total_hits_relation": "eq",
-        "returned_hits": 0,
-        "truncated": False,
-        "duration_ms": duration_ms,
-        "timed_out": status == "timeout",
-        "took_ms": 0,
-        "shards": {
-            "total": 0,
-            "successful": 0,
-            "skipped": 0,
-            "failed": 0,
-            "failures": [],
-        },
-        "hits": [],
-        **extra,
-    }
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_query_execution.empty_search_result(_evidence_runtime, body, index_scope, status, duration_ms, **extra)
 
 
 def parse_shards(value: object) -> dict:
-    if not isinstance(value, dict):
-        raise ValueError("Elasticsearch response is missing _shards metadata")
-    parsed = {}
-    for field in ("total", "successful", "failed"):
-        item = value.get(field)
-        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
-            raise ValueError(f"Elasticsearch _shards.{field} is invalid")
-        parsed[field] = item
-    skipped = value.get("skipped", 0)
-    if isinstance(skipped, bool) or not isinstance(skipped, int) or skipped < 0:
-        raise ValueError("Elasticsearch _shards.skipped is invalid")
-    if parsed["failed"] > parsed["total"] or parsed["successful"] > parsed["total"]:
-        raise ValueError("Elasticsearch shard counts are inconsistent")
-    failures = value.get("failures") or []
-    if not isinstance(failures, list):
-        raise ValueError("Elasticsearch _shards.failures is invalid")
-    parsed["skipped"] = skipped
-    parsed["failures"] = [
-        {
-            "index": str(item.get("index") or "")[:255],
-            "type": str(((item.get("reason") or {}).get("type") if isinstance(item.get("reason"), dict) else "") or "")[:255],
-            "reason": str(((item.get("reason") or {}).get("reason") if isinstance(item.get("reason"), dict) else item.get("reason")) or "")[:1000],
-        }
-        for item in failures[:20]
-        if isinstance(item, dict)
-    ]
-    return parsed
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_query_execution.parse_shards(_evidence_runtime, value)
 
 
 def execute_search(body: dict, index_scope: list[str]) -> dict:
-    AUDIT_CONTEXT["elastic_search_count"] = int(
-        AUDIT_CONTEXT.get("elastic_search_count", 0)
-    ) + 1
-    audit = search_audit(body, index_scope)
-    encoded = json.dumps(body, separators=(",", ":"), sort_keys=True)
-    started = time.monotonic()
-    try:
-        proc = run_bounded_command(
-            [str(SO_QUERY), audit["query_endpoint"], "-d", encoded],
-            timeout_seconds=QUERY_TIMEOUT_SECONDS,
-            max_stdout_bytes=MAX_OUTPUT_BYTES,
-            max_stderr_bytes=MAX_STDERR_BYTES,
-        )
-    except BoundedCommandError as exc:
-        status = "timeout" if exc.reason == "timeout" else "output_limit"
-        return empty_search_result(
-            body,
-            index_scope,
-            status,
-            round((time.monotonic() - started) * 1000),
-            error=(
-                "Elasticsearch query exceeded the wrapper timeout"
-                if status == "timeout"
-                else "Elasticsearch response exceeded the wrapper output limit"
-            ),
-        )
-    duration_ms = round((time.monotonic() - started) * 1000)
-    if proc.returncode != 0:
-        error = proc.stderr.decode("utf-8", "replace")[:1000]
-        return empty_search_result(body, index_scope, "error", duration_ms, error=error)
-    try:
-        parsed = json.loads(proc.stdout.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return empty_search_result(body, index_scope, "invalid_response", duration_ms, error=str(exc))
-    if not isinstance(parsed, dict):
-        return empty_search_result(
-            body,
-            index_scope,
-            "invalid_response",
-            duration_ms,
-            error="Elasticsearch response root must be an object",
-        )
-    if parsed.get("error") is not None:
-        return empty_search_result(
-            body,
-            index_scope,
-            "error",
-            duration_ms,
-            error=bounded_error(parsed.get("error")),
-        )
-    try:
-        shards = parse_shards(parsed.get("_shards"))
-    except ValueError as exc:
-        return empty_search_result(body, index_scope, "invalid_response", duration_ms, error=str(exc))
-    timed_out = parsed.get("timed_out")
-    if not isinstance(timed_out, bool):
-        return empty_search_result(
-            body,
-            index_scope,
-            "invalid_response",
-            duration_ms,
-            shards=shards,
-            error="Elasticsearch timed_out flag is missing or invalid",
-        )
-    took_ms = parsed.get("took")
-    if isinstance(took_ms, bool) or not isinstance(took_ms, int) or took_ms < 0:
-        return empty_search_result(
-            body,
-            index_scope,
-            "invalid_response",
-            duration_ms,
-            timed_out=timed_out,
-            shards=shards,
-            error="Elasticsearch took value is missing or invalid",
-        )
-    if timed_out:
-        return empty_search_result(
-            body,
-            index_scope,
-            "timeout",
-            duration_ms,
-            timed_out=True,
-            took_ms=took_ms,
-            shards=shards,
-            error="Elasticsearch reported a timed-out partial response",
-        )
-    if (
-        shards["failed"]
-        or shards["successful"] != shards["total"]
-        or shards["skipped"] > shards["successful"]
-    ):
-        return empty_search_result(
-            body,
-            index_scope,
-            "invalid_response" if not shards["failed"] else "error",
-            duration_ms,
-            took_ms=took_ms,
-            shards=shards,
-            error=(
-                f"Elasticsearch returned {shards['failed']} failed shard(s)"
-                if shards["failed"]
-                else "Elasticsearch shard coverage is incomplete or inconsistent"
-            ),
-        )
-    if shards["total"] == 0 or shards["successful"] == 0:
-        return empty_search_result(
-            body,
-            index_scope,
-            "invalid_response",
-            duration_ms,
-            took_ms=took_ms,
-            shards=shards,
-            error="Elasticsearch query matched no searchable shards in its reviewed index scope",
-        )
-    hits_root = parsed.get("hits")
-    if not isinstance(hits_root, dict) or not isinstance(hits_root.get("hits"), list):
-        return empty_search_result(
-            body,
-            index_scope,
-            "invalid_response",
-            duration_ms,
-            took_ms=took_ms,
-            shards=shards,
-            error="Elasticsearch hits.hits must be an array",
-        )
-    raw_hits = hits_root["hits"]
-    requested_size = body.get("size")
-    if (
-        isinstance(requested_size, bool)
-        or not isinstance(requested_size, int)
-        or requested_size < 0
-        or len(raw_hits) > requested_size
-    ):
-        return empty_search_result(
-            body,
-            index_scope,
-            "invalid_response",
-            duration_ms,
-            took_ms=took_ms,
-            shards=shards,
-            error="Elasticsearch returned more hits than the reviewed request size",
-        )
-    hits = []
-    for hit in raw_hits:
-        if not isinstance(hit, dict):
-            return empty_search_result(
-                body,
-                index_scope,
-                "invalid_response",
-                duration_ms,
-                took_ms=took_ms,
-                shards=shards,
-                error="Elasticsearch hit entries must be objects",
-            )
-        document_id = str(hit.get("_id") or "")
-        index_name = str(hit.get("_index") or "")
-        source = hit.get("_source")
-        if (
-            not document_id
-            or not index_name
-            or not isinstance(source, dict)
-            or not index_matches_scope(index_name, index_scope)
-        ):
-            return empty_search_result(
-                body,
-                index_scope,
-                "invalid_response",
-                duration_ms,
-                took_ms=took_ms,
-                shards=shards,
-                error=f"Elasticsearch returned an invalid or out-of-scope hit index: {index_name[:255]}",
-            )
-        hits.append({"id": document_id, "index": index_name, "source": source})
-    total = hits_root.get("total")
-    relation = "eq"
-    if isinstance(total, dict):
-        relation = total.get("relation")
-        total = total.get("value")
-    if (
-        isinstance(total, bool)
-        or not isinstance(total, int)
-        or total < len(hits)
-        or relation not in {"eq", "gte"}
-    ):
-        return empty_search_result(
-            body,
-            index_scope,
-            "invalid_response",
-            duration_ms,
-            took_ms=took_ms,
-            shards=shards,
-            error="Elasticsearch hits.total metadata is invalid",
-        )
-    return {
-        **audit,
-        "status": "ok",
-        "semantic_valid": True,
-        "total_hits": total,
-        "total_hits_relation": relation,
-        "returned_hits": len(hits),
-        "truncated": relation != "eq" or total > len(hits),
-        "duration_ms": duration_ms,
-        "timed_out": False,
-        "took_ms": took_ms,
-        "shards": shards,
-        "hits": hits,
-    }
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_query_execution.execute_search(_evidence_runtime, body, index_scope)
 
 
 def historical_osquery_observable_fields(
     observables: dict[str, list[str]],
 ) -> list[str]:
-    """Return only fixed fields relevant to the authorized observable kinds."""
-    return [
-        field
-        for kind, fields in pack_observable_fields("osquery_history").items()
-        if observables.get(kind)
-        for field in fields
-    ]
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_history.historical_osquery_observable_fields(_evidence_runtime, observables)
 
 
 def discover_historical_osquery_schema(
     observables: dict[str, list[str]],
 ) -> dict:
-    """Run one bounded read-only field-capabilities preflight."""
-    pack = PACKS["osquery_history"]
-    endpoint = historical_osquery_field_caps_endpoint(pack["indices"])
-    body = historical_osquery_field_caps_body(pack["fields"])
-    AUDIT_CONTEXT["elastic_search_count"] = int(
-        AUDIT_CONTEXT.get("elastic_search_count", 0)
-    ) + 1
-    try:
-        completed = run_bounded_command(
-            [str(SO_QUERY), endpoint, "-d", json.dumps(
-                body, separators=(",", ":"), sort_keys=True
-            )],
-            timeout_seconds=QUERY_TIMEOUT_SECONDS,
-            max_stdout_bytes=MAX_OUTPUT_BYTES,
-            max_stderr_bytes=MAX_STDERR_BYTES,
-        )
-    except BoundedCommandError as exc:
-        status = "timeout" if exc.reason == "timeout" else "output_limit"
-        return historical_osquery_schema_failure(
-            status,
-            index_scope=pack["indices"],
-            projection_fields=pack["fields"],
-            error=(
-                "Elasticsearch field-capabilities request exceeded its timeout"
-                if status == "timeout"
-                else "Elasticsearch field-capabilities response exceeded its output limit"
-            ),
-        )
-    if completed.returncode != 0:
-        return historical_osquery_schema_failure(
-            "error",
-            index_scope=pack["indices"],
-            projection_fields=pack["fields"],
-            error="Elasticsearch field-capabilities request failed",
-        )
-    try:
-        raw = json.loads(completed.stdout.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return historical_osquery_schema_failure(
-            "invalid_response",
-            index_scope=pack["indices"],
-            projection_fields=pack["fields"],
-            error="Elasticsearch field-capabilities response was not valid JSON",
-        )
-    if isinstance(raw, dict) and raw.get("error") is not None:
-        return historical_osquery_schema_failure(
-            "error",
-            index_scope=pack["indices"],
-            projection_fields=pack["fields"],
-            error="Elasticsearch field-capabilities response reported an error",
-        )
-    try:
-        return compile_historical_osquery_schema_discovery(
-            raw,
-            index_scope=pack["indices"],
-            projection_fields=pack["fields"],
-            observable_fields=historical_osquery_observable_fields(observables),
-        )
-    except SharedQueryContractError:
-        return historical_osquery_schema_failure(
-            "invalid_response",
-            index_scope=pack["indices"],
-            projection_fields=pack["fields"],
-            error="Elasticsearch field-capabilities response failed validation",
-        )
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_history.discover_historical_osquery_schema(_evidence_runtime, observables)
 
 
 def historical_schema_failure_result(
     body: dict,
     schema_discovery: dict,
 ) -> dict:
-    status = str(schema_discovery.get("status") or "invalid_response")
-    if status == "ok":
-        status = "invalid_response"
-        error = "Historical OSQuery field mapping is incompatible"
-    else:
-        error = str(schema_discovery.get("error") or "")
-    return empty_search_result(
-        body,
-        PACKS["osquery_history"]["indices"],
-        status,
-        0,
-        error=error,
-    )
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_history.historical_schema_failure_result(_evidence_runtime, body, schema_discovery)
 
 
 def execute_pack(pack_name: str, window: dict, observables: dict[str, list[str]], size: int) -> dict:
-    pack = PACKS[pack_name]
-    body = {
-        "size": size,
-        "track_total_hits": True,
-        "timeout": "30s",
-        "sort": [{"@timestamp": {"order": "asc", "unmapped_type": "date"}}, "_shard_doc"],
-        "_source": pack["fields"],
-        "query": {"bool": {"filter": [
-            {"range": {"@timestamp": {"gte": window["start"], "lte": window["end"]}}},
-            dataset_clause(pack["datasets"]),
-            observable_clause(observables, pack_name),
-        ]}},
-    }
-    schema_discovery = (
-        discover_historical_osquery_schema(observables)
-        if pack_name == "osquery_history"
-        else None
-    )
-    result = (
-        historical_schema_failure_result(body, schema_discovery)
-        if schema_discovery is not None
-        and (
-            schema_discovery.get("status") != "ok"
-            or schema_discovery.get("mapping_compatible") is not True
-        )
-        else execute_search(body, pack["indices"])
-    )
-    if schema_discovery is not None:
-        result["schema_discovery"] = schema_discovery
-    return {"pack": pack_name, **result}
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_history.execute_pack(_evidence_runtime, pack_name, window, observables, size)
 
 
 def pivot_query_dsl(query: dict) -> dict:
-    pack = PACKS[query["pack"]]
-    filters = [
-        {"range": {"@timestamp": {
-            "gte": query["window"]["start"],
-            "lte": query["window"]["end"],
-        }}},
-        dataset_clause(pack["datasets"]),
-        observable_clause(query["observables"], query["pack"]),
-        *(
-            [event_tuple_clause(query)]
-            if query.get("event_tuple")
-            else []
-        ),
-    ]
-    filtered_query = {"bool": {"filter": filters}}
-    if query["aggregation"] == "anchor_nearest":
-        start = parse_time(query["window"]["start"])
-        end = parse_time(query["window"]["end"])
-        scale_seconds = max(1, round((end - start).total_seconds() / 2))
-        compiled_query = {
-            "function_score": {
-                "query": filtered_query,
-                "gauss": {
-                    "@timestamp": {
-                        "origin": query["anchor_time"],
-                        "scale": f"{scale_seconds}s",
-                        "decay": 0.5,
-                    }
-                },
-                "boost_mode": "replace",
-            }
-        }
-    else:
-        compiled_query = filtered_query
-    body = {
-        "size": 0 if query["aggregation"] == "count" else query["size"],
-        "track_total_hits": True,
-        "timeout": "30s",
-        "_source": False if query["aggregation"] == "count" else pack["fields"],
-        "query": compiled_query,
-    }
-    if query["aggregation"] != "count":
-        if query["aggregation"] == "anchor_nearest":
-            body["sort"] = [
-                {"_score": "desc"},
-                {"@timestamp": {"order": "asc", "unmapped_type": "date"}},
-                "_shard_doc",
-            ]
-        else:
-            order = "asc" if query["aggregation"] == "timeline" else "desc"
-            body["sort"] = [
-                {"@timestamp": {"order": order, "unmapped_type": "date"}},
-                "_shard_doc",
-            ]
-    return body
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_history.pivot_query_dsl(_evidence_runtime, query)
 
 
 def quoted_filter_value(value: str) -> str:
     # Exact observable validation excludes quote and backslash characters.
-    return f'"{value}"'
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_projection.quoted_filter_value(_evidence_runtime, value)
 
 
 def event_tuple_filter_value(field: str, value: object) -> str:
-    if field in {"source_port", "destination_port"}:
-        return str(value)
-    return quoted_filter_value(str(value))
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_projection.event_tuple_filter_value(_evidence_runtime, field, value)
 
 
 def render_pivot_event_tuple_filter(
@@ -1961,706 +761,98 @@ def render_pivot_event_tuple_filter(
     alternate_separator: str,
     field_separator: str,
 ) -> str:
-    event_tuple = query.get("event_tuple") or {}
-    clauses = []
-    for field in pivot_event_tuple_fields(query):
-        value = event_tuple_filter_value(field, event_tuple[field])
-        alternatives = [
-            f"{path}{field_separator}{value}"
-            for path in EVENT_TUPLE_PATHS[field]
-        ]
-        clauses.append(
-            alternatives[0]
-            if len(alternatives) == 1
-            else "(" + f" {alternate_separator} ".join(alternatives) + ")"
-        )
-    joiner = " and " if alternate_separator == "or" else " AND "
-    return joiner.join(clauses)
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_projection.render_pivot_event_tuple_filter(_evidence_runtime, query, alternate_separator=alternate_separator, field_separator=field_separator)
 
 
 def pivot_kql_equivalent(query: dict) -> str:
-    datasets = " or ".join(
-        f"event.dataset : {quoted_filter_value(value)}"
-        for value in PACKS[query["pack"]]["datasets"]
-    )
-    observable_filters = []
-    for kind, fields in pack_observable_fields(query["pack"]).items():
-        for value in query["observables"][kind]:
-            observable_filters.append(
-                "("
-                + " or ".join(
-                    f"{field} : {quoted_filter_value(value)}"
-                    for field in fields
-                )
-                + ")"
-            )
-    rendered = (
-        f'@timestamp >= {quoted_filter_value(query["window"]["start"])} and '
-        f'@timestamp <= {quoted_filter_value(query["window"]["end"])} and '
-        f"({datasets}) and (" + " or ".join(observable_filters) + ")"
-    )
-    if query.get("event_tuple"):
-        rendered += " and (" + render_pivot_event_tuple_filter(
-            query,
-            alternate_separator="or",
-            field_separator=" : ",
-        ) + ")"
-    return rendered
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_projection.pivot_kql_equivalent(_evidence_runtime, query)
 
 
 def pivot_oql_equivalent(query: dict) -> str:
-    """Return real Hunt OQL while execution uses compiled equivalent DSL."""
-    datasets = " OR ".join(
-        f"event.dataset:{quoted_filter_value(value)}"
-        for value in PACKS[query["pack"]]["datasets"]
-    )
-    observable_filters = []
-    for kind, fields in pack_observable_fields(query["pack"]).items():
-        for value in query["observables"][kind]:
-            observable_filters.append(
-                "("
-                + " OR ".join(
-                    f"{field}:{quoted_filter_value(value)}"
-                    for field in fields
-                )
-                + ")"
-            )
-    rendered = (
-        f'@timestamp:[{quoted_filter_value(query["window"]["start"])} TO '
-        f'{quoted_filter_value(query["window"]["end"])}] AND '
-        f"({datasets}) AND (" + " OR ".join(observable_filters) + ")"
-    )
-    if query.get("event_tuple"):
-        rendered += " AND (" + render_pivot_event_tuple_filter(
-            query,
-            alternate_separator="OR",
-            field_separator=":",
-        ) + ")"
-    if query["aggregation"] == "timeline":
-        rendered += " | sortby @timestamp^"
-    return rendered
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_projection.pivot_oql_equivalent(_evidence_runtime, query)
 
 
 def source_leaf_items(value: object, prefix: str = "") -> list[tuple[str, object]]:
-    """Flatten returned ECS leaves without accepting unprojected siblings."""
-    leaves: list[tuple[str, object]] = []
-    if isinstance(value, dict):
-        for key, child in value.items():
-            path = f"{prefix}.{key}" if prefix else str(key)
-            leaves.extend(source_leaf_items(child, path))
-    elif isinstance(value, list):
-        for child in value:
-            leaves.extend(source_leaf_items(child, prefix))
-    else:
-        leaves.append((prefix, value))
-    return leaves
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_projection.source_leaf_items(_evidence_runtime, value, prefix)
 
 
 def source_path_values(source: dict, path: str) -> list[object]:
-    current: list[object] = [source]
-    for part in path.split("."):
-        following: list[object] = []
-        for item in current:
-            if isinstance(item, dict) and part in item:
-                value = item[part]
-                following.extend(value if isinstance(value, list) else [value])
-            elif isinstance(item, list):
-                for child in item:
-                    if isinstance(child, dict) and part in child:
-                        value = child[part]
-                        following.extend(value if isinstance(value, list) else [value])
-        current = following
-    return [item for item in current if not isinstance(item, (dict, list))]
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_projection.source_path_values(_evidence_runtime, source, path)
 
 
 def returned_observable_matches(kind: str, expected: str, candidate: object) -> bool:
-    text = str(candidate or "").strip().rstrip(".")
-    if kind == "ips":
-        try:
-            return str(ipaddress.ip_address(text)) == expected
-        except ValueError:
-            return False
-    if kind == "domains":
-        return bool(SAFE_DOMAIN.fullmatch(text)) and text.lower() == expected
-    return bool(SAFE_VALUE.fullmatch(text)) and text == expected
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_projection.returned_observable_matches(_evidence_runtime, kind, expected, candidate)
 
 
 def returned_event_tuple_matches(field: str, expected: object, candidate: object) -> bool:
-    text = str(candidate or "").strip()
-    if field in {"source_ip", "destination_ip"}:
-        try:
-            return str(ipaddress.ip_address(text)) == expected
-        except ValueError:
-            return False
-    if field in {"source_port", "destination_port"}:
-        if isinstance(candidate, bool):
-            return False
-        try:
-            return int(candidate) == expected
-        except (TypeError, ValueError):
-            return False
-    if field in {"transport", "protocol"}:
-        return bool(SAFE_VALUE.fullmatch(text.lower())) and text.lower() == expected
-    if field == "community_id":
-        return bool(SAFE_COMMUNITY_ID.fullmatch(text)) and text == expected
-    return bool(SAFE_VALUE.fullmatch(text)) and text == expected
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_projection.returned_event_tuple_matches(_evidence_runtime, field, expected, candidate)
 
 
 def valid_pivot_hit_source(source: object, query: dict) -> bool:
-    if not isinstance(source, dict):
-        return False
-    pack = PACKS[query["pack"]]
-    if any(
-        path not in set(pack["fields"])
-        for path, _value in source_leaf_items(source)
-    ):
-        return False
-    timestamps = source_path_values(source, "@timestamp")
-    if len(timestamps) != 1:
-        return False
-    timestamp_text = str(timestamps[0] or "").strip()
-    if timestamp_text.endswith("Z"):
-        timestamp_text = timestamp_text[:-1] + "+00:00"
-    try:
-        timestamp = dt.datetime.fromisoformat(timestamp_text)
-    except ValueError:
-        return False
-    if timestamp.tzinfo is None or timestamp.utcoffset() != dt.timedelta(0):
-        return False
-    timestamp = timestamp.astimezone(dt.timezone.utc)
-    start = parse_time(query["window"]["start"])
-    end = parse_time(query["window"]["end"])
-    if timestamp < start or timestamp > end:
-        return False
-    datasets = [str(item) for item in source_path_values(source, "event.dataset")]
-    if len(datasets) != 1 or datasets[0] not in pack["datasets"]:
-        return False
-    observable_valid = any(
-        returned_observable_matches(kind, expected, candidate)
-        for kind, fields in pack_observable_fields(query["pack"]).items()
-        for expected in query["observables"].get(kind, [])
-        for field in fields
-        for candidate in source_path_values(source, field)
-    )
-    if not observable_valid:
-        return False
-    event_tuple = query.get("event_tuple") or {}
-    return all(
-        any(
-            returned_event_tuple_matches(field, expected, candidate)
-            for path in EVENT_TUPLE_PATHS[field]
-            for candidate in source_path_values(source, path)
-        )
-        for field in pivot_event_tuple_fields(query)
-        for expected in (event_tuple[field],)
-    )
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_projection.valid_pivot_hit_source(_evidence_runtime, source, query)
 
 
 def pivot_result_coverage(query: dict, result: dict) -> dict:
-    status = str(result.get("status") or "")
-    total_hits = int(result.get("total_hits") or 0)
-    returned_hits = int(result.get("returned_hits") or 0)
-    relation = str(result.get("total_hits_relation") or "")
-    exact_total = status == "ok" and relation == "eq"
-    if status != "ok":
-        coverage_status = "partial"
-        interpretation = "query_execution_incomplete"
-    elif not exact_total:
-        coverage_status = "partial"
-        interpretation = "lower_bound_only"
-    elif query["aggregation"] == "count":
-        coverage_status = "exact_aggregate"
-        interpretation = "exact_count_for_authorized_filter_and_window"
-    elif total_hits == 0:
-        coverage_status = "exact_zero"
-        interpretation = (
-            "no_matching_documents_for_authorized_filter_and_window"
-        )
-    elif returned_hits < total_hits:
-        coverage_status = "bounded_sample"
-        interpretation = "sample_only_not_complete_event_set"
-    else:
-        coverage_status = "complete_events"
-        interpretation = "complete_matching_event_set"
-    strategy = {
-        "events": "newest_first",
-        "timeline": "chronological",
-        "anchor_nearest": "anchor_nearest",
-        "count": "exact_count",
-    }[query["aggregation"]]
-    return {
-        "coverage_status": coverage_status,
-        "match_semantics": query["match_semantics"],
-        "sample_strategy": strategy,
-        "scope": "authorized_exact_filters_and_time_window",
-        "exact_total_hits": exact_total,
-        "zero_hits": exact_total and total_hits == 0,
-        "event_bodies_complete": (
-            exact_total
-            and query["aggregation"] != "count"
-            and returned_hits == total_hits
-        ),
-        "interpretation": interpretation,
-    }
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_projection.pivot_result_coverage(_evidence_runtime, query, result)
 
 
 def execute_pivot_query(query: dict) -> dict:
-    pack = PACKS[query["pack"]]
-    body = pivot_query_dsl(query)
-    kql = pivot_kql_equivalent(query)
-    oql = pivot_oql_equivalent(query)
-    schema_discovery = (
-        discover_historical_osquery_schema(query["observables"])
-        if query["pack"] == "osquery_history"
-        else None
-    )
-    result = (
-        historical_schema_failure_result(body, schema_discovery)
-        if schema_discovery is not None
-        and (
-            schema_discovery.get("status") != "ok"
-            or schema_discovery.get("mapping_compatible") is not True
-        )
-        else execute_search(body, pack["indices"])
-    )
-    if result.get("status") == "ok":
-        invalid_projection = any(
-            not isinstance(hit, dict)
-            or not valid_pivot_hit_source(hit.get("source"), query)
-            for hit in result.get("hits", [])
-        )
-        if invalid_projection or (
-            query["aggregation"] == "count" and result.get("hits")
-        ):
-            result = empty_search_result(
-                body,
-                pack["indices"],
-                "invalid_response",
-                int(result.get("duration_ms") or 0),
-                error="Elasticsearch returned data outside the reviewed pivot projection",
-            )
-    if schema_discovery is not None:
-        result["schema_discovery"] = schema_discovery
-    if query["aggregation"] == "count":
-        # A size-zero exact count is an aggregate, not a truncated event list.
-        result["truncated"] = result.get("total_hits_relation") != "eq"
-    result["result_coverage"] = pivot_result_coverage(query, result)
-    return {
-        "query_id": query["query_id"],
-        "dialect": query["dialect"],
-        "pack": query["pack"],
-        "purpose": query["purpose"],
-        "window": query["window"],
-        "observables": query["observables"],
-        "observable_provenance": query["observable_provenance"],
-        **(
-            {
-                "event_tuple": query["event_tuple"],
-                "event_tuple_provenance": query["event_tuple_provenance"],
-            }
-            if query.get("event_tuple")
-            else {}
-        ),
-        "size": query["size"],
-        "aggregation": query["aggregation"],
-        "match_semantics": query["match_semantics"],
-        **(
-            {"anchor_time": query["anchor_time"]}
-            if query["aggregation"] == "anchor_nearest"
-            else {}
-        ),
-        "request_item_digest": canonical_digest(query),
-        "execution_backend": "so-elasticsearch-query",
-        "execution_semantics": (
-            "compiled_oql_equivalent"
-            if query["dialect"] == "oql"
-            else "compiled_elastic_pack"
-        ),
-        "kql_equivalent": kql,
-        "kql_digest": hashlib.sha256(kql.encode("utf-8")).hexdigest(),
-        "oql_equivalent": oql,
-        "oql_digest": hashlib.sha256(oql.encode("utf-8")).hexdigest(),
-        **result,
-    }
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_projection.execute_pivot_query(_evidence_runtime, query)
 
 
 def execute_controls(anchor: dict[str, str] | None) -> dict:
-    if anchor is None:
-        missing = {
-            "status": "not_requested",
-            "passed": False,
-            "semantic_valid": False,
-            "error": "A representative Security Onion alert anchor was not supplied",
-        }
-        return {
-            "anchor": None,
-            "positive_anchor": dict(missing),
-            "negative_filter": dict(missing),
-        }
-
-    positive_body = {
-        "size": 1,
-        "track_total_hits": True,
-        "timeout": "30s",
-        "_source": ["@timestamp", "event.dataset"],
-        "query": {"ids": {"values": [anchor["id"]]}},
-    }
-    # The positive control is bound to the exact trusted backing index, not
-    # only the broader reviewed alert patterns. This prevents a duplicate ID
-    # in another data stream from satisfying or confusing the anchor proof.
-    positive = execute_search(positive_body, [anchor["index"]])
-    exact_hits = [
-        item for item in positive.get("hits", [])
-        if item.get("id") == anchor["id"] and item.get("index") == anchor["index"]
-    ]
-    positive["passed"] = (
-        positive.get("status") == "ok"
-        and positive.get("total_hits_relation") == "eq"
-        and positive.get("total_hits") == 1
-        and len(exact_hits) == 1
-    )
-    if positive.get("status") == "ok" and not positive["passed"]:
-        positive["error"] = "The exact representative alert anchor was not returned exactly once"
-
-    # An intentionally contradictory query proves that the endpoint applied
-    # the supplied filters rather than replaying or substituting the positive
-    # control response.
-    negative_body = {
-        "size": 1,
-        "track_total_hits": True,
-        "timeout": "30s",
-        "_source": ["@timestamp", "event.dataset"],
-        "query": {
-            "bool": {
-                "filter": [{"ids": {"values": [anchor["id"]]}}],
-                "must_not": [{"ids": {"values": [anchor["id"]]}}],
-            },
-        },
-    }
-    negative = execute_search(negative_body, ALERT_INDEX_SCOPE)
-    negative["passed"] = (
-        negative.get("status") == "ok"
-        and negative.get("total_hits_relation") == "eq"
-        and negative.get("total_hits") == 0
-        and negative.get("returned_hits") == 0
-    )
-    if negative.get("status") == "ok" and not negative["passed"]:
-        negative["error"] = "The contradictory negative control unexpectedly returned hits"
-    return {
-        "anchor": anchor,
-        "positive_anchor": positive,
-        "negative_filter": negative,
-    }
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_projection.execute_controls(_evidence_runtime, anchor)
 
 
 def semantic_validity(results: list[dict], osquery_results: list[dict], controls: dict) -> dict:
-    query_execution_valid = all(
-        result.get("status") == "ok" and result.get("semantic_valid") is True
-        for result in results
-    )
-    osquery_valid = all(result.get("status") == "ok" for result in osquery_results)
-    controls_valid = all(
-        (controls.get(name) or {}).get("passed") is True
-        for name in ("positive_anchor", "negative_filter")
-    )
-    coverage_valid = query_execution_valid and osquery_valid
-    semantic_valid = controls_valid and coverage_valid
-    reasons = []
-    if not controls_valid:
-        reasons.append("representative alert controls did not both pass")
-    if not query_execution_valid:
-        reasons.append("one or more Elasticsearch packs failed semantic validation")
-    if not osquery_valid:
-        reasons.append("one or more fixed local OSquery packs failed")
-    return {
-        "transport_valid": True,
-        "controls_valid": controls_valid,
-        "query_execution_valid": query_execution_valid,
-        "coverage_valid": coverage_valid,
-        "semantic_valid": semantic_valid,
-        "reasons": reasons,
-    }
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_projection.semantic_validity(_evidence_runtime, results, osquery_results, controls)
 
 
 def pivot_semantic_validity(results: list[dict], controls: dict) -> dict:
-    query_execution_valid = all(
-        result.get("status") == "ok" and result.get("semantic_valid") is True
-        for result in results
-    )
-    controls_valid = all(
-        (controls.get(name) or {}).get("passed") is True
-        for name in ("positive_anchor", "negative_filter")
-    )
-    semantic_valid = controls_valid and query_execution_valid
-    reasons = []
-    if not controls_valid:
-        reasons.append("representative alert controls did not both pass")
-    if not query_execution_valid:
-        reasons.append("one or more investigation pivots failed semantic validation")
-    return {
-        "transport_valid": True,
-        "controls_valid": controls_valid,
-        "query_execution_valid": query_execution_valid,
-        "coverage_valid": query_execution_valid,
-        "semantic_valid": semantic_valid,
-        "reasons": reasons,
-    }
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_projection.pivot_semantic_validity(_evidence_runtime, results, controls)
 
 
 def osquery_binary() -> Path | None:
-    """Return the managed Elastic Agent osqueryd without accepting a caller path."""
-    candidates = sorted(
-        glob.glob("/opt/Elastic/Agent/data/elastic-agent-*/components/osqueryd"),
-        reverse=True,
-    )
-    for candidate in candidates:
-        path = Path(candidate)
-        if path.is_file():
-            return path
-    return None
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_dispatch.osquery_binary(_evidence_runtime)
 
 
 def execute_osquery_pack(binary: Path, pack_name: str) -> dict:
-    """Run one reviewed query as ephemeral osqueryi and preserve its exact audit."""
-    AUDIT_CONTEXT["osquery_query_count"] = int(
-        AUDIT_CONTEXT.get("osquery_query_count", 0)
-    ) + 1
-    query = OSQUERY_PACKS[pack_name]
-    digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
-    started = time.monotonic()
-    base = {
-        "pack": pack_name,
-        "target": "security-onion-local-host",
-        "query": query,
-        "query_digest": digest,
-    }
-    try:
-        proc = subprocess.run(
-            ["osqueryi", "--disable_database", "--json", query],
-            executable=str(binary),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=OSQUERY_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return {
-            **base,
-            "status": "timeout",
-            "total_rows": 0,
-            "returned_rows": 0,
-            "truncated": False,
-            "duration_ms": OSQUERY_TIMEOUT_SECONDS * 1000,
-            "rows": [],
-        }
-    duration_ms = round((time.monotonic() - started) * 1000)
-    if len(proc.stdout) > MAX_OSQUERY_OUTPUT_BYTES:
-        return {
-            **base,
-            "status": "output_limit",
-            "total_rows": 0,
-            "returned_rows": 0,
-            "truncated": False,
-            "duration_ms": duration_ms,
-            "rows": [],
-        }
-    if proc.returncode != 0:
-        return {
-            **base,
-            "status": "error",
-            "total_rows": 0,
-            "returned_rows": 0,
-            "truncated": False,
-            "duration_ms": duration_ms,
-            "rows": [],
-            "error": proc.stderr.decode("utf-8", "replace")[:1000],
-        }
-    try:
-        parsed = json.loads(proc.stdout.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return {
-            **base,
-            "status": "invalid_response",
-            "total_rows": 0,
-            "returned_rows": 0,
-            "truncated": False,
-            "duration_ms": duration_ms,
-            "rows": [],
-            "error": str(exc),
-        }
-    if not isinstance(parsed, list) or any(not isinstance(row, dict) for row in parsed):
-        return {
-            **base,
-            "status": "invalid_response",
-            "total_rows": 0,
-            "returned_rows": 0,
-            "truncated": False,
-            "duration_ms": duration_ms,
-            "rows": [],
-            "error": "osquery result root must be an array of objects",
-        }
-    rows = parsed[:MAX_OSQUERY_ROWS]
-    return {
-        **base,
-        "status": "ok",
-        "total_rows": len(parsed),
-        "returned_rows": len(rows),
-        "truncated": len(parsed) > len(rows),
-        "duration_ms": duration_ms,
-        "rows": rows,
-    }
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_dispatch.execute_osquery_pack(_evidence_runtime, binary, pack_name)
 
 
 def execute_pivot_batch(data: dict) -> int:
-    request = validated_pivot_request(data)
-    results = [
-        execute_pivot_query(query)
-        for query in request["queries"]
-    ]
-    controls = execute_controls(request["authorization"]["anchor"])
-    validity = pivot_semantic_validity(results, controls)
-    complete = validity["semantic_valid"]
-    response = {
-        "ok": True,
-        "complete": complete,
-        "partial": not complete,
-        "read_only": True,
-        "query_contract": INVESTIGATION_QUERY_CONTRACT,
-        "batch_id": request["batch_id"],
-        "request_digest": canonical_digest(request),
-        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(
-            timespec="seconds"
-        ).replace("+00:00", "Z"),
-        "results": results,
-        "controls": controls,
-        "semantic_validity": validity,
-    }
-    return emit_response(
-        response,
-        output_error="bounded investigation pivot response exceeded the output contract",
-    )
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_dispatch.execute_pivot_batch(_evidence_runtime, data)
 
 
 def execute_dhcp_discovery(data: dict) -> int:
-    """Route the fixed DHCP contract inside the existing read-only SSH lane."""
-    helper_path = Path(__file__).resolve().with_name("export-dhcp-observations")
-    if not helper_path.is_file():
-        fail("DHCP discovery helper is unavailable", 3)
-    loader = importlib.machinery.SourceFileLoader(
-        "_onion_sentinel_dhcp_discovery",
-        str(helper_path),
-    )
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    if spec is None:
-        fail("DHCP discovery helper could not be loaded", 3)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    try:
-        response = module.execute_request(data)
-    except ValueError as exc:
-        fail(f"invalid DHCP discovery request: {exc}")
-    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-        fail(f"DHCP discovery query failed: {exc}", 3)
-    AUDIT_CONTEXT["helper_invocation_count"] = 1
-    return emit_response(
-        response,
-        maximum_bytes=4 * 1024 * 1024,
-        output_error="bounded DHCP discovery response exceeded the output contract",
-    )
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_dispatch.execute_dhcp_discovery(_evidence_runtime, data)
 
 
 def execute_software_inventory(data: dict) -> int:
-    """Route the fixed software contract inside the read-only evidence lane."""
-    helper_path = Path(__file__).resolve().with_name(
-        "export-software-observations"
-    )
-    if not helper_path.is_file():
-        fail("software inventory helper is unavailable", 3)
-    loader = importlib.machinery.SourceFileLoader(
-        "_onion_sentinel_software_inventory",
-        str(helper_path),
-    )
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    if spec is None:
-        fail("software inventory helper could not be loaded", 3)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    try:
-        response = module.execute_request(data)
-    except ValueError as exc:
-        fail(f"invalid software inventory request: {exc}")
-    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-        fail(f"software inventory query failed: {exc}", 3)
-    AUDIT_CONTEXT["helper_invocation_count"] = 1
-    return emit_response(
-        response,
-        maximum_bytes=4 * 1024 * 1024,
-        output_error="bounded software inventory response exceeded the output contract",
-    )
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_dispatch.execute_software_inventory(_evidence_runtime, data)
 
 
 def main() -> int:
-    if not SO_QUERY.is_file():
-        fail("Security Onion query CLI is unavailable", 3)
-    request_data = read_request()
-    if (
-        request_data.get("contract") == DHCP_DISCOVERY_CONTRACT
-        or request_data.get("operation") == DHCP_DISCOVERY_OPERATION
-    ):
-        return execute_dhcp_discovery(request_data)
-    if (
-        request_data.get("contract") == SOFTWARE_INVENTORY_CONTRACT
-        or request_data.get("operation") == SOFTWARE_INVENTORY_OPERATION
-    ):
-        return execute_software_inventory(request_data)
-    if (
-        request_data.get("query_contract") == INVESTIGATION_QUERY_CONTRACT
-        or request_data.get("operation") == INVESTIGATION_QUERY_OPERATION
-    ):
-        return execute_pivot_batch(request_data)
-    binary = osquery_binary()
-    if binary is None:
-        fail("managed Elastic Agent osqueryd is unavailable", 3)
-    packs, osquery_packs, windows, observables, size, anchor = validated_request(request_data)
-    results = []
-    for window_index, window in enumerate(windows):
-        for pack_name in packs:
-            result = execute_pack(pack_name, window, observables, size)
-            result.update({
-                "window_index": window_index,
-                "window": window,
-                "kql_equivalent": kql_equivalent(
-                    window,
-                    pack_name,
-                    observables,
-                ),
-            })
-            results.append(result)
-    osquery_results = [
-        execute_osquery_pack(binary, pack_name)
-        for pack_name in osquery_packs
-    ]
-    controls = execute_controls(anchor)
-    validity = semantic_validity(results, osquery_results, controls)
-    complete = validity["semantic_valid"]
-    response = {
-        # A failed evidence pack is an explicit investigative gap, not a
-        # transport failure. Returning a successful protocol response lets the
-        # incident worker preserve all other pack results and report the gap.
-        "ok": True,
-        "complete": complete,
-        "partial": not complete,
-        "read_only": True,
-        "query_contract": QUERY_CONTRACT,
-        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-        "observables": observables,
-        "results": results,
-        "osquery_results": osquery_results,
-        "controls": controls,
-        "semantic_validity": validity,
-    }
-    return emit_response(response)
+    """Delegate through the stable evidence runtime boundary."""
+    return so_evidence_dispatch.main(_evidence_runtime)
 
 
 if __name__ == "__main__":

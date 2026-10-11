@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import copy
 import hashlib
 import importlib.util
@@ -94,7 +96,7 @@ class AcHunterCollectionArchitectureTests(unittest.TestCase):
         for module in modules[1:]:
             self.assertLessEqual(len(module.read_text().splitlines()), 600)
             self.assertNotIn("from ac_hunter_collection import", module.read_text())
-        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         for module in modules:
             self.assertIn(f'{module.name}" "$DASHBOARD_RUNTIME_DIR/', installer)
 

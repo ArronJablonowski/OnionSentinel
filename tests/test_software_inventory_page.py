@@ -2,6 +2,8 @@
 """Frontend contracts for truth-preserving software inventory evidence."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib.util
 import sys
 import unittest
@@ -42,7 +44,7 @@ class SoftwareInventoryPageTests(unittest.TestCase):
             for path in sorted(BUILDER_PATH.parent.glob("dashboard_builder_*.py"))
         )
         cls.software_page_source = SOFTWARE_PAGE_PATH.read_text(encoding="utf-8")
-        cls.installer_source = INSTALLER_PATH.read_text(encoding="utf-8")
+        cls.installer_source = read_installer_source(INSTALLER_PATH)
 
     def test_renderer_is_owned_by_a_deployed_page_module(self) -> None:
         self.assertIn(

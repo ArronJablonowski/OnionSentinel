@@ -1,6 +1,8 @@
 """Characterization for recovery restore-drill orchestration."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import argparse
 from contextlib import redirect_stdout
 import datetime as dt
@@ -88,7 +90,7 @@ class FixedDateTime(dt.datetime):
 
 class RecoveryRestoreWorkflowCharacterization(unittest.TestCase):
     def test_installer_deploys_recovery_credential_boundary_modules(self) -> None:
-        installer = INSTALLER.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER)
         for module in ("recovery_encryption.py", "recovery_bundle.py"):
             self.assertIn(
                 f'cp "$REPO_DIR/n8n/bin/{module}" '

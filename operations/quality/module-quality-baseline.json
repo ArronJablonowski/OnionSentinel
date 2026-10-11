@@ -1,6 +1,15 @@
 {
   "files": {},
-  "functions": {},
+  "functions": {
+    "security-onion/bin/so_evidence_projection.py::execute_pivot_query": {"max_complexity": 17},
+    "security-onion/bin/so_evidence_projection.py::valid_pivot_hit_source": {"max_complexity": 25},
+    "security-onion/bin/so_evidence_query_execution.py::execute_search": {"max_complexity": 41, "max_lines": 208},
+    "security-onion/bin/so_evidence_query_execution.py::parse_shards": {"max_complexity": 22},
+    "security-onion/bin/so_evidence_transport.py::run_bounded_command": {"max_complexity": 18},
+    "security-onion/bin/so_evidence_transport.py::validated_request": {"max_complexity": 39},
+    "security-onion/bin/so_evidence_validation.py::validated_event_tuple": {"max_complexity": 20},
+    "security-onion/bin/so_evidence_validation.py::validated_pivot_request": {"max_complexity": 94, "max_lines": 318}
+  },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "b6b6f815414e0b7cc0d830b2dcc66c0c3ec0edd0"
+  "source_release": "076bc23c94ceb58c013c18a84c70c8e76cb9a828"
 }

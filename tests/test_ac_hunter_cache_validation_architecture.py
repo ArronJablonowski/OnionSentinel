@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import copy
 import hashlib
 import importlib.util
@@ -83,7 +85,7 @@ class AcHunterCacheValidationArchitectureTests(unittest.TestCase):
             "from ac_hunter_service import",
             CACHE_VALIDATION_PATH.read_text(),
         )
-        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         service_copy = (
             'ac_hunter_service.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_service.py"'
         )

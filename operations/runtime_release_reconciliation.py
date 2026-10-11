@@ -136,6 +136,23 @@ def _logical_lines(source: str) -> tuple[str, ...]:
     return tuple(re.sub(r"\\\n\s*", " ", source).splitlines())
 
 
+def _installer_at_revision(repo_root: Path, revision: str) -> str:
+    """Expand fixed source-only owners from the same exact Git revision."""
+    source = git_file(repo_root, revision, INSTALLER_PATH).decode("utf-8")
+    pattern = re.compile(
+        r'^source "\$REPO_DIR/(n8n/install/macstudio/[a-z_]+\.zsh)" "\$@"$',
+        re.MULTILINE,
+    )
+    owners = [match.group(1) for match in pattern.finditer(source)]
+    if len(owners) != len(set(owners)):
+        raise ReconciliationError("installer owner is duplicated")
+    for owner in owners:
+        text = git_file(repo_root, revision, owner).decode("utf-8")
+        directive = f'source "$REPO_DIR/{owner}" "$@"'
+        source = source.replace(directive + "\n", text)
+    return source
+
+
 def _excluded(runtime: str) -> bool:
     return any(
         runtime == prefix or runtime.startswith(prefix)
@@ -240,7 +257,7 @@ def _direct_mappings(installer: str) -> Iterable[Mapping]:
 
 
 def build_mappings(repo_root: Path, revision: str) -> tuple[Mapping, ...]:
-    installer = git_file(repo_root, revision, INSTALLER_PATH).decode("utf-8")
+    installer = _installer_at_revision(repo_root, revision)
     validate_installer_coverage(installer)
     mappings = set(_direct_mappings(installer))
     tree_mappings = list(TREE_MAPPINGS)

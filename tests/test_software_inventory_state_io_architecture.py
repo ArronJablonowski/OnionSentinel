@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import hashlib
 import inspect
 import json
@@ -70,7 +72,7 @@ class SoftwareInventoryStateIoArchitectureTests(unittest.TestCase):
         self.assertNotIn(
             "from software_inventory_state import", io_path.read_text()
         )
-        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         self.assertIn(
             'software_inventory_state_io.py" "$DASHBOARD_RUNTIME_DIR/',
             installer,

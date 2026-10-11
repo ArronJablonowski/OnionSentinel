@@ -34,6 +34,7 @@ ENRICHMENT_QUERY_SQL = """
       WHERE {group_expr} IN ({placeholders})
         AND enrichment_json IS NOT NULL
         AND TRIM(enrichment_json) != ''
+        AND json_valid(enrichment_json)
     )
     SELECT resolved_group_key, enrichment_json
     FROM ranked_enrichment

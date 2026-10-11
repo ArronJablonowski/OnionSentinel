@@ -2,6 +2,8 @@
 """Modular ownership and deployment contracts for Settings page assets."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib.util
 import sys
 import unittest
@@ -43,7 +45,7 @@ class DashboardSettingsModuleTests(unittest.TestCase):
         cls.agent_card = load(AGENT_CARD_PATH, "dashboard_settings_agent_card")
         cls.settings_page = load(SETTINGS_PAGE_PATH, "dashboard_settings_page")
         cls.builder = load(BUILDER_PATH, "dashboard_settings_builder_test")
-        cls.installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        cls.installer = read_installer_source(INSTALLER_PATH)
 
     def test_builder_reexports_the_assembled_assets(self) -> None:
         self.assertIs(self.builder.SETTINGS_PAGE_CSS, self.assets.SETTINGS_PAGE_CSS)

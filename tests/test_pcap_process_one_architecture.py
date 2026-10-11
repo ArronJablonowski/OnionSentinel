@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import argparse
 import ast
 import copy
@@ -138,7 +140,7 @@ class PcapProcessOneArchitectureTests(unittest.TestCase):
             self.assertLessEqual(lines, 50)
             self.assertLessEqual(complexity, 10)
         self.assertLessEqual(len(PHASES.read_text().splitlines()), 600)
-        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         phases_copy = (
             'cp "$REPO_DIR/n8n/bin/pcap_processor_workflow_phases.py" '
             '"$STACK_DIR/bin/pcap_processor_workflow_phases.py"'

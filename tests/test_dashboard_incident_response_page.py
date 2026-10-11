@@ -2,6 +2,8 @@
 """Characterization and deployment tests for the Incident Responder page."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib.util
 import sys
 import unittest
@@ -71,7 +73,7 @@ class DashboardIncidentResponsePageTests(unittest.TestCase):
 
     def test_module_is_bounded_and_installed_once(self) -> None:
         self.assertLessEqual(len(MODULE_PATH.read_text(encoding="utf-8").splitlines()), 600)
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
         command = (
             'cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_incident_response_page.py" '
             '"$DASHBOARD_RUNTIME_DIR/scripts/dashboard_incident_response_page.py"'

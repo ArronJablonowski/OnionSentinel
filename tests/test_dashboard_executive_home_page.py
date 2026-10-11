@@ -2,6 +2,8 @@
 """Executive Home view-model, renderer, and deployment contracts."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib.util
 import sys
 import unittest
@@ -82,7 +84,7 @@ class DashboardExecutiveHomePageTests(unittest.TestCase):
             self.assertNotIn(forbidden, source)
 
     def test_installer_copies_executive_page_once(self) -> None:
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
         command = (
             'cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_executive_home_page.py" '
             '"$DASHBOARD_RUNTIME_DIR/scripts/dashboard_executive_home_page.py"'

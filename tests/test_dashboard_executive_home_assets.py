@@ -2,6 +2,8 @@
 """Executive Home asset, compatibility, and deployment contracts."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib.util
 import sys
 import unittest
@@ -54,7 +56,7 @@ class DashboardExecutiveHomeAssetsTests(unittest.TestCase):
         self.assertLessEqual(len(MODULE_PATH.read_text(encoding="utf-8").splitlines()), 600)
 
     def test_installer_copies_executive_assets_once(self) -> None:
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
         command = (
             'cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_executive_home_assets.py" '
             '"$DASHBOARD_RUNTIME_DIR/scripts/dashboard_executive_home_assets.py"'

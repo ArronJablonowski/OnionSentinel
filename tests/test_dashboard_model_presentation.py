@@ -2,6 +2,8 @@
 """Contracts for model assignment and execution-provenance presentation."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib.util
 import json
 import os
@@ -162,7 +164,7 @@ class DashboardModelPresentationTests(unittest.TestCase):
         self.assertLessEqual(len(source.splitlines()), 320)
         for forbidden in ("subprocess", "sqlite3", "urllib", "read_text(", "write_text("):
             self.assertNotIn(forbidden, source)
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
         self.assertEqual(installer.count("dashboard_model_presentation.py"), 2)
         self.assertLess(
             installer.index("dashboard_model_routing.py"),

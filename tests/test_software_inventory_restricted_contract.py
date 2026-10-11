@@ -414,8 +414,10 @@ class SoftwareInventorySecurityOnionTests(unittest.TestCase):
             'SOFTWARE_INVENTORY_CONTRACT = "onion-sentinel-software-inventory-v1"',
             source,
         )
+        self.assertIn("so_evidence_dispatch.execute_software_inventory", source)
+        source = (DISPATCHER.parent / "so_evidence_dispatch.py").read_text()
         self.assertIn('"export-software-observations"', source)
-        self.assertIn("return execute_software_inventory(request_data)", source)
+        self.assertIn("return r.execute_software_inventory(request_data)", source)
         self.assertIn(
             "bounded software inventory response exceeded the output contract",
             source,

@@ -2,6 +2,8 @@
 """Contracts for canonical alert-detail layout and legacy normalization."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib.util
 import sys
 import unittest
@@ -154,7 +156,7 @@ class AlertDetailLayoutTests(unittest.TestCase):
         self.assertLessEqual(len(source.splitlines()), 250)
         for forbidden in ("import sqlite3", "import subprocess", "from pathlib", "Path.home", "open("):
             self.assertNotIn(forbidden, source)
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
         self.assertEqual(installer.count("dashboard_alert_detail_layout.py"), 2)
 
 

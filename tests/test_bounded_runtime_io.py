@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import io
 import json
 import os
@@ -725,7 +727,7 @@ class JsonlLogIndexTests(unittest.TestCase):
 
 class InstallerDependencyTests(unittest.TestCase):
     def test_installer_copies_refactored_runtime_dependencies(self) -> None:
-        installer = (ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh").read_text(encoding="utf-8")
+        installer = read_installer_source(ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh")
         for filename in (
             "bounded_http.py",
             "bounded_process.py",
@@ -821,7 +823,7 @@ class InstallerDependencyTests(unittest.TestCase):
 
     def test_installer_validation_only_checks_system_python_before_shutdown(self) -> None:
         installer = BIN_DIR / "install-macstudio-stack.zsh"
-        source = installer.read_text(encoding="utf-8")
+        source = read_installer_source(installer)
         validation_call = "prepare_alert_store_stage\nvalidate_production_python_sources"
         self.assertIn(validation_call, source)
         self.assertLess(
@@ -878,7 +880,7 @@ class InstallerDependencyTests(unittest.TestCase):
 
     def test_installer_explicit_validation_option_is_preflight_only(self) -> None:
         installer = BIN_DIR / "install-macstudio-stack.zsh"
-        source = installer.read_text(encoding="utf-8")
+        source = read_installer_source(installer)
         argument_parser = 'parse_installer_arguments "$@"'
         release_validation = (
             '/usr/bin/python3 "$REPO_DIR/n8n/bin/set-runtime-release-id.py"'

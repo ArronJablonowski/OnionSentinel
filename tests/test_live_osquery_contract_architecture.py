@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import ast
 import hashlib
 import importlib.util
@@ -293,7 +295,7 @@ class LiveOsqueryContractArchitectureTests(unittest.TestCase):
 
     def test_all_three_installers_copy_the_complete_contract_unit(self):
         installers = {
-            "mac": MAC_INSTALLER.read_text(encoding="utf-8"),
+            "mac": read_installer_source(MAC_INSTALLER),
             "relay": RELAY_INSTALLER.read_text(encoding="utf-8"),
             "security_onion": SECURITY_ONION_INSTALLER.read_text(encoding="utf-8"),
         }

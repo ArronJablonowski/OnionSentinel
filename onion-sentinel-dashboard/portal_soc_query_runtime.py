@@ -26,27 +26,39 @@ def soc_alert_enriched_page_rows(r: Any, page_rows: list[Any]) -> list[Any]:
         return []
     try:
         with r.soc_alert_db_connect() as conn:
-            if all("alert_id" in row.keys() and row["alert_id"] for row in page_rows):
-                # Table rows describe their representative alert. Resolve its
-                # enrichment by primary key, not a historical-group JSON sort.
-                ids = list(dict.fromkeys(str(row["alert_id"]) for row in page_rows))
-                placeholders = ",".join("?" for _ in ids)
-                found = conn.execute(
-                    "SELECT alert_id, enrichment_json FROM alerts WHERE alert_id IN (" + placeholders + ")",
-                    ids,
-                ).fetchall()
-                by_id = {str(row["alert_id"]): row["enrichment_json"] or "" for row in found}
-                enrichment_by_group = {
-                    str(row["group_key"]): by_id.get(str(row["alert_id"]), "")
-                    for row in page_rows
-                }
-            else:
-                enrichment_by_group = r.soc_alert_group_enrichment_json_map(
-                    conn, r.page_group_keys(page_rows)
-                )
+            enrichment_by_group = _page_enrichment(r, conn, page_rows)
     except Exception:
         return [dict(row) for row in page_rows]
     return r.merge_page_enrichment(page_rows, enrichment_by_group)
+
+
+def _page_enrichment(r: Any, conn: Any, rows: list[Any]) -> dict:
+    if not all("alert_id" in row.keys() and row["alert_id"] for row in rows):
+        return r.soc_alert_group_enrichment_json_map(conn, r.page_group_keys(rows))
+    ids = list(dict.fromkeys(str(row["alert_id"]) for row in rows))
+    found = conn.execute(
+        "SELECT alert_id, enrichment_json FROM alerts WHERE alert_id IN ("
+        + ",".join("?" for _ in ids) + ")", ids,
+    ).fetchall()
+    by_id = {str(row["alert_id"]): row["enrichment_json"] or "" for row in found}
+    result = {str(row["group_key"]): by_id.get(str(row["alert_id"]), "") for row in rows}
+    missing = [key for key, value in result.items() if _needs_group_enrichment(r, value)]
+    # Preserve the primary-key fast path, but don't discard better evidence
+    # from earlier members when the newest member has none or only errors.
+    if missing:
+        result.update(r.soc_alert_group_enrichment_json_map(conn, missing))
+    return result
+
+
+def _needs_group_enrichment(r: Any, value: str) -> bool:
+    if not value or value.strip() == "{}":
+        return True
+    try:
+        record = r.json.loads(value)
+    except (ValueError, TypeError):
+        return True
+    intel = record.get("external_intel", {}) if isinstance(record, dict) else {}
+    return bool(isinstance(intel, dict) and intel.get("errors") and not intel.get("records"))
 
 
 def soc_alert_group_query_snapshot(

@@ -1,3 +1,5 @@
+
+from installer_source_fixture import read_installer_source
 from pathlib import Path
 import unittest
 
@@ -23,9 +25,7 @@ class PostgresShadowReconcilerTest(unittest.TestCase):
         monitor = (
             ROOT / "n8n/bin/monitor-n8n-stack.zsh"
         ).read_text(encoding="utf-8")
-        installer = (
-            ROOT / "n8n/bin/install-macstudio-stack.zsh"
-        ).read_text(encoding="utf-8")
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         self.assertIn("check_postgres_shadow_reconciliation", monitor)
         self.assertIn("--sqlite", monitor)
         self.assertIn("postgres-shadow-reconciliation.json", monitor)

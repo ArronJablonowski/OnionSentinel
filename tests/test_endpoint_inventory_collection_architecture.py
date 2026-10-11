@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import ast
 import copy
 import datetime as dt
@@ -132,7 +134,7 @@ class EndpointInventoryCollectionArchitectureTests(unittest.TestCase):
             self.assertLessEqual(lines, 50)
             self.assertLessEqual(complexity, 10)
         self.assertLessEqual(len(PREFLIGHT.read_text().splitlines()), 150)
-        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         self.assertIn(
             'cp "$REPO_DIR/n8n/bin/endpoint_inventory_collection.py" '
             '"$STACK_DIR/bin/endpoint_inventory_collection.py"',

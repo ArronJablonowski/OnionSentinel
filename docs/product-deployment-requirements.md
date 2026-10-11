@@ -44,8 +44,9 @@ SOC Alerts table requirements:
 - Count appears left of Severity and is centered.
 - Log Source appears right of AI and has enough width to avoid ugly wrapping.
 - Project timestamps use ISO 8601 style with `T` replaced by two spaces.
-- Mobile SOC Alerts defaults to a collapsed top navigation drawer and renders
-  active alerts as full-width expandable pills.
+- Navigation remains pinned to the left viewport edge on all window sizes,
+  with independent menu scrolling so every option stays reachable. Narrow
+  windows use the collapsed rail; active alerts remain expandable pills.
 
 Analyst workflow requirements:
 

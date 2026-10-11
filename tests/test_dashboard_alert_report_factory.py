@@ -2,6 +2,8 @@
 """Contracts for the extracted SOC alert report factory."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib.util
 import sys
 import tempfile
@@ -414,7 +416,7 @@ class DashboardAlertReportFactoryTests(unittest.TestCase):
         self.assertLessEqual(len(source.splitlines()), 320)
         for forbidden in ("sqlite3", "subprocess", "urllib", "read_text(", "write_text(", "open("):
             self.assertNotIn(forbidden, source)
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
         self.assertEqual(installer.count("dashboard_alert_report_factory.py"), 2)
 
 

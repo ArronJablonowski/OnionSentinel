@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import base64
 import ast
 import importlib
@@ -300,7 +302,7 @@ class DetectionValidationFeaturesArchitectureTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_mac_installer_copies_the_complete_feature_dependency_unit(self):
-        installer = (BIN / "install-macstudio-stack.zsh").read_text(encoding="utf-8")
+        installer = read_installer_source(BIN / "install-macstudio-stack.zsh")
         for name in OWNER_FILES:
             with self.subTest(name=name):
                 self.assertIn(f"n8n/bin/{name}", installer)

@@ -2,6 +2,8 @@
 """Contracts for the dashboard adapter over canonical provider routing."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib.util
 import sys
 import unittest
@@ -90,7 +92,7 @@ class DashboardModelRoutingTests(unittest.TestCase):
         self.assertLessEqual(len(source.splitlines()), 180)
         for forbidden in ("subprocess", "json", "write_text(", "open("):
             self.assertNotIn(forbidden, source)
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
         self.assertEqual(installer.count("dashboard_model_routing.py"), 2)
         package_install = installer.index('install-ai-runtime-package.py" \\\n  --source')
         adapter_install = installer.index("dashboard_model_routing.py")

@@ -13,6 +13,27 @@ from typing import NamedTuple, Sequence
 
 SCHEMA = "onion-sentinel-macstudio-phase-contract-v1"
 PHASE_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
+INSTALLER_OWNERS = (
+    "staging_validation", "investigation_guard", "service_quiescence",
+    "runtime_payload", "dashboard_payload",
+)
+
+
+def read_installer_source(path: Path) -> str:
+    """Read the exact ordered installer program without executing any phase."""
+    source = path.read_text(encoding="utf-8")
+    if path.name != "install-macstudio-stack.zsh":
+        return source
+    directory = path.parent.parent / "install" / "macstudio"
+    for owner in INSTALLER_OWNERS:
+        directive = f'source "$REPO_DIR/n8n/install/macstudio/{owner}.zsh" "$@"'
+        if source.count(directive) != 1:
+            raise PhaseContractError(f"installer owner must occur exactly once: {owner}")
+        module = directory / f"{owner}.zsh"
+        if module.is_symlink() or not module.is_file():
+            raise PhaseContractError(f"installer owner must be a regular file: {owner}")
+        source = source.replace(directive + "\n", module.read_text(encoding="utf-8"))
+    return source
 
 
 class PhaseContractError(RuntimeError):
@@ -129,7 +150,7 @@ def validate_phase_contract(value: object, installer: str) -> tuple[Phase, ...]:
 def load_and_validate(contract_path: Path, installer_path: Path) -> tuple[Phase, ...]:
     try:
         value = json.loads(contract_path.read_text(encoding="utf-8"))
-        installer = installer_path.read_text(encoding="utf-8")
+        installer = read_installer_source(installer_path)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise PhaseContractError("phase contract inputs are unavailable") from exc
     return validate_phase_contract(value, installer)

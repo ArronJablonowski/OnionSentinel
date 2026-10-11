@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 from contextlib import closing
 import gc
 import os
@@ -310,9 +312,7 @@ class AlertStoreSqliteMaintenancePermissionsTests(unittest.TestCase):
         )
 
     def test_installer_copies_snapshot_dependency_before_maintenance(self) -> None:
-        installer = (
-            ROOT / "n8n/bin/install-macstudio-stack.zsh"
-        ).read_text(encoding="utf-8")
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         dependency = installer.index(
             'cp "$REPO_DIR/n8n/bin/recovery_snapshot.py" '
             '"$STACK_DIR/bin/recovery_snapshot.py"'

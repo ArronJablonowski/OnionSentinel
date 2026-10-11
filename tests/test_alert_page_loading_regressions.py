@@ -1,5 +1,6 @@
 """Regression coverage for live ingestion starving or blocking alert pages."""
 import sqlite3
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -20,6 +21,7 @@ class AlertPageLoadingTests(unittest.TestCase):
         trace = []
         db.set_trace_callback(trace.append)
         runtime = SimpleNamespace(
+            json=json,
             soc_alert_db_connect=lambda: db,
             merge_page_enrichment=lambda rows, enrichments: enrichments,
             soc_alert_group_enrichment_json_map=lambda *_: self.fail('historical group scan'),

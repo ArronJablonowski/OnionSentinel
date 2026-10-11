@@ -2,6 +2,8 @@
 """ARR-30 contracts for complete, bounded application-log operations."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib.util
 import dataclasses
 import datetime as dt
@@ -101,9 +103,7 @@ class ApplicationLogProductizationTests(unittest.TestCase):
         entrypoint = BIN_DIR / "maintain-application-logs.py"
         owner = BIN_DIR / "application_log_maintenance.py"
         launchagent = LAUNCHD_DIR / "com.arron.onion-sentinel.application-log-maintenance.plist"
-        installer = (BIN_DIR / "install-macstudio-stack.zsh").read_text(
-            encoding="utf-8"
-        )
+        installer = read_installer_source(BIN_DIR / "install-macstudio-stack.zsh")
 
         self.assertTrue(entrypoint.is_file())
         self.assertTrue(owner.is_file())

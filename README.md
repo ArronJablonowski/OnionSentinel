@@ -209,6 +209,7 @@ Before pushing:
 
 ```bash
 python3 operations/check-module-quality.py
+python3 operations/check-code-size.py
 operations/secret-scan.zsh
 git status --short
 git diff --cached --stat
@@ -226,6 +227,7 @@ open docs/disaster-recovery-runbook.md
 
 # Run local secret scan before first push or commit.
 python3 operations/check-module-quality.py
+python3 operations/check-code-size.py
 operations/secret-scan.zsh
 ```
 

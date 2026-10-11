@@ -44,6 +44,7 @@ class SocGroupEnrichmentTests(unittest.TestCase):
                 ("g1", '{"external_intel":{"errors":[{}]}}', "30", "30", "30", "new-error"),
                 ("g1", '{"external_intel":{"records":[{}]}}', "10", "10", "10", "old-record"),
                 ("g2", '{"external_intel":{"skipped":[{}]}}', "20", "20", "20", "skip"),
+                ("g1", '{malformed', "40", "40", "40", "broken-json"),
             ],
         )
         plan = group_enrichment_query_plan(["g1", "g2"], "group_key")

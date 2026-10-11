@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib.util
 import sys
 import unittest
@@ -157,7 +159,7 @@ class CyberThreatIntelPageTests(unittest.TestCase):
         self.assertIn('&lt;script&gt;alert(&quot;unsafe&quot;)&lt;/script&gt;', rendered)
 
     def test_installer_copies_cti_module_once(self):
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
         command = (
             'cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_cyber_threat_intel_page.py" '
             '"$DASHBOARD_RUNTIME_DIR/scripts/dashboard_cyber_threat_intel_page.py"'

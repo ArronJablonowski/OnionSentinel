@@ -178,7 +178,8 @@ class RuntimeReleaseReconciliationTests(unittest.TestCase):
             reconciliation.validate_installer_coverage(changed)
 
     def test_current_tracked_installer_has_complete_coverage(self) -> None:
-        installer = (ROOT / reconciliation.INSTALLER_PATH).read_text(encoding="utf-8")
+        from installer_source_fixture import read_installer_source
+        installer = read_installer_source(ROOT / reconciliation.INSTALLER_PATH)
         reconciliation.validate_installer_coverage(installer)
 
     def test_credential_governance_preflight_is_exactly_classified(self) -> None:

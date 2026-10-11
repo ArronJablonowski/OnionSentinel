@@ -2,6 +2,8 @@
 """Contracts for dashboard investigation-skill loading and rendering."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib.util
 import sys
 import tempfile
@@ -399,7 +401,7 @@ class DashboardInvestigationSkillsTests(unittest.TestCase):
         self.assertLessEqual(len(source.splitlines()), 240)
         for forbidden in ("subprocess", "sqlite3", "urllib", "write_text("):
             self.assertNotIn(forbidden, source)
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
         self.assertEqual(installer.count("dashboard_investigation_skills.py"), 2)
         self.assertLess(
             installer.index('investigation_skills.py" "$STACK_DIR/bin'),

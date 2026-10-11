@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import datetime as dt
 import importlib.util
 import json
@@ -238,9 +240,7 @@ class EvaluationArtifactRetentionTests(unittest.TestCase):
         )
 
     def test_installer_and_launchagent_own_the_runtime_policy(self) -> None:
-        installer = (BIN / "install-macstudio-stack.zsh").read_text(
-            encoding="utf-8"
-        )
+        installer = read_installer_source(BIN / "install-macstudio-stack.zsh")
         for name in (
             "maintain-evaluation-artifacts.py",
             "seal-evaluation-artifacts.py",
@@ -267,7 +267,7 @@ class EvaluationArtifactRetentionTests(unittest.TestCase):
             "--output",
             str(run / "result.json"),
             "--completed-at",
-            "2026-08-13T12:00:00Z",
+            (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=2)).isoformat(),
         ]
         sealed = subprocess.run(
             seal_command, text=True, capture_output=True, check=False
@@ -289,7 +289,16 @@ class EvaluationArtifactRetentionTests(unittest.TestCase):
             capture_output=True,
             check=False,
         )
-        self.assertEqual(maintained.returncode, 0, maintained.stderr)
+        receipt = json.loads(maintained.stdout)
+        self.assertIn(maintained.returncode, (0, 1), maintained.stderr or maintained.stdout)
+        self.assertIn(receipt["status"], ("ok", "warning"))
+        # A subprocess observes the host's real disk utilisation. Capacity
+        # warnings are legitimate and must not make isolated fixture cleanup
+        # depend on the developer's disk occupancy.
+        self.assertTrue(all(
+            alert["code"] == "local_evaluation_storage_capacity"
+            for alert in receipt["alerts"]
+        ))
         self.assertEqual(report.stat().st_mode & 0o777, 0o600)
         rendered = report.read_text(encoding="utf-8")
         self.assertNotIn("case-name-must-not-leak", rendered)

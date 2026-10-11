@@ -27,16 +27,40 @@ EXPECTED_SEAMS = {
 
 
 def declared_test_symbols(path: Path) -> set[tuple[str, str]]:
-    """Return class/test pairs declared in one unittest source file."""
+    """Resolve declared and inherited cases without importing or executing tests."""
+    def classes(source: Path, seen: set[Path]) -> dict[str, set[str]]:
+        if source in seen:
+            return {}
+        seen = seen | {source}
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        available: dict[str, set[str]] = {}
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module:
+                dependency = source.parent / (node.module + ".py")
+                if dependency.is_file() and dependency.parent == source.parent:
+                    inherited = classes(dependency, seen)
+                    for alias in node.names:
+                        if alias.name in inherited:
+                            available[alias.asname or alias.name] = inherited[alias.name]
+            elif isinstance(node, ast.ClassDef):
+                methods = {
+                    child.name for child in node.body
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and child.name.startswith("test_")
+                }
+                for base in node.bases:
+                    if isinstance(base, ast.Name):
+                        methods.update(available.get(base.id, set()))
+                available[node.name] = methods
+        return available
+
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     symbols: set[tuple[str, str]] = set()
+    resolved = classes(path, set())
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
             continue
-        for child in node.body:
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                if child.name.startswith("test_"):
-                    symbols.add((node.name, child.name))
+        symbols.update((node.name, name) for name in resolved[node.name])
     return symbols
 
 

@@ -1,3 +1,5 @@
+
+from installer_source_fixture import read_installer_source
 import importlib.util
 import json
 import os
@@ -41,7 +43,7 @@ class RuntimeReleaseIdTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.module = load_module()
-        cls.installer_source = INSTALLER.read_text(encoding="utf-8")
+        cls.installer_source = read_installer_source(INSTALLER)
 
     def test_validates_release_ids_without_an_env_file(self) -> None:
         self.assertEqual(

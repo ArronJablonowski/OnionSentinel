@@ -1,0 +1,10 @@
+{
+  "schema": "onion-sentinel-code-size-v1",
+  "maximum_lines": 1000,
+  "frozen_exceptions": {
+    "n8n/compat/investigation-pivots-v1/investigation_query_contract.py": {
+      "sha256": "29864594edb87030f30d7220ad63c97f477522544958b0fda5b1ba84d6ae6aa7",
+      "reason": "Byte-stable v1 wire compatibility bundle. Removal or replacement requires an explicitly versioned, coordinated migration across every enforcement point; this is not maintained current-protocol source."
+    }
+  }
+}

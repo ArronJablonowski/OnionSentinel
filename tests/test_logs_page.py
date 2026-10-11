@@ -2,6 +2,8 @@
 """Frontend and deployment contracts for the Onion Sentinel Logs page."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib.util
 import sys
 import unittest
@@ -50,7 +52,7 @@ class LogsPageTests(unittest.TestCase):
         cls.server_route_source = (
             DASHBOARD_DIR / "onion_sentinel_request_routes.py"
         ).read_text(encoding="utf-8")
-        cls.installer_source = INSTALLER_PATH.read_text(encoding="utf-8")
+        cls.installer_source = read_installer_source(INSTALLER_PATH)
 
     def test_navigation_and_page_identity_are_generated(self) -> None:
         keys = [definition[0] for definition in self.builder.PAGE_DEFS]

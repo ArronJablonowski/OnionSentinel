@@ -2,6 +2,8 @@
 """Contracts for authoritative asset identity APIs and dashboard rendering."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import datetime as dt
 import io
 import importlib.util
@@ -388,7 +390,7 @@ class AssetInventoryPageTests(unittest.TestCase):
             for path in sorted(BUILDER_PATH.parent.glob("dashboard_builder_*.py"))
         )
         asset_page_source = ASSET_PAGE_PATH.read_text(encoding="utf-8")
-        installer_source = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer_source = read_installer_source(INSTALLER_PATH)
         self.assertIn(
             "from dashboard_asset_inventory_page import asset_inventory_page_section",
             builder_source,
@@ -576,7 +578,7 @@ class AssetInventoryPageTests(unittest.TestCase):
         promote.assert_not_called()
 
     def test_installer_deploys_shared_inventory_validator(self) -> None:
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
         launch_agent = (
             ROOT
             / "n8n"

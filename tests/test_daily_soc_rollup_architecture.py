@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import contextlib
 import datetime as dt
 import hashlib
@@ -350,9 +352,7 @@ class DailySocRollupArchitectureTests(unittest.TestCase):
         self.assertNotIn("write_daily_soc_rollup", data_owner.read_text())
         self.assertNotIn("write_daily_soc_rollup", markdown_owner.read_text())
         self.assertNotIn("daily_soc_rollup_data", markdown_owner.read_text())
-        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text(
-            encoding="utf-8"
-        )
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         for filename in (
             "write-daily-soc-rollup.py",
             "daily_soc_rollup_data.py",

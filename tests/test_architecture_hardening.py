@@ -1,3 +1,5 @@
+
+from installer_source_fixture import read_installer_source
 from pathlib import Path
 import unittest
 
@@ -7,9 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class ArchitectureHardeningTest(unittest.TestCase):
     def test_installer_signals_dashboard_only_after_new_builder_is_installed(self) -> None:
-        installer = (
-            ROOT / "n8n/bin/install-macstudio-stack.zsh"
-        ).read_text(encoding="utf-8")
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         builder_copy = installer.index(
             'cp "$REPO_DIR/onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py"'
         )
@@ -28,9 +28,7 @@ class ArchitectureHardeningTest(unittest.TestCase):
         )
 
     def test_dashboard_builder_module_tree_is_fully_installed(self) -> None:
-        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text(
-            encoding="utf-8"
-        )
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         scripts = ROOT / "onion-sentinel-dashboard/scripts"
         for path in sorted(scripts.glob("dashboard_builder_*.py")):
             with self.subTest(path=path.name):
@@ -93,9 +91,7 @@ class ArchitectureHardeningTest(unittest.TestCase):
         self.assertIn("<string>1048576</string>", plist)
 
     def test_installer_runs_locked_alert_store_install_from_package_directory(self):
-        installer = (
-            ROOT / "n8n/bin/install-macstudio-stack.zsh"
-        ).read_text(encoding="utf-8")
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         self.assertIn('cd "$STACK_DIR/alert_store"', installer)
         self.assertIn(
             '/opt/homebrew/bin/npm ci --omit=dev',
@@ -115,9 +111,7 @@ class ArchitectureHardeningTest(unittest.TestCase):
         )
 
     def test_installer_stops_runner_owned_orphan_codex_subprocesses(self):
-        installer = (
-            ROOT / "n8n/bin/install-macstudio-stack.zsh"
-        ).read_text(encoding="utf-8")
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
 
         self.assertIn('local runtime_codex_pids', installer)
         self.assertGreaterEqual(
@@ -146,9 +140,7 @@ class ArchitectureHardeningTest(unittest.TestCase):
         )
 
     def test_installer_holds_both_ai_worker_locks_across_deployment(self):
-        installer = (
-            ROOT / "n8n/bin/install-macstudio-stack.zsh"
-        ).read_text(encoding="utf-8")
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
 
         self.assertIn("start_ai_deployment_guard", installer)
         self.assertIn("release_ai_deployment_guard", installer)
@@ -221,7 +213,7 @@ class ArchitectureHardeningTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         refresher = (ROOT / "n8n/bin/refresh-soc-dashboard.py").read_text(encoding="utf-8")
         plist = (ROOT / "n8n/launchd/com.arron.soc.dashboard-refresh.plist").read_text(encoding="utf-8")
-        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text(encoding="utf-8")
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         self.assertIn("signal_dashboard_refresh", scheduler_runtime)
         self.assertNotIn("def refresh_portal", scheduler + scheduler_runtime)
         self.assertNotIn(
@@ -238,9 +230,7 @@ class ArchitectureHardeningTest(unittest.TestCase):
         self.assertIn("com.arron.soc.dashboard-refresh.plist", installer)
 
     def test_harness_trace_retention_is_installed_and_hourly_bounded(self):
-        installer = (
-            ROOT / "n8n/bin/install-macstudio-stack.zsh"
-        ).read_text(encoding="utf-8")
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         plist = (
             ROOT
             / "n8n/launchd/com.arron.onion-sentinel.harness-maintenance.plist"
@@ -278,9 +268,7 @@ class ArchitectureHardeningTest(unittest.TestCase):
         self.assertIn("<string>--max-live-bytes</string>", plist)
 
     def test_harness_maintenance_load_waits_for_bounded_database_preflight(self):
-        installer = (
-            ROOT / "n8n/bin/install-macstudio-stack.zsh"
-        ).read_text(encoding="utf-8")
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         preflight_call = (
             'wait_for_harness_maintenance_readiness\n'
             'launchctl load "$LAUNCHD_DIR/'
@@ -298,9 +286,7 @@ class ArchitectureHardeningTest(unittest.TestCase):
         self.assertIn(preflight_call, installer)
 
     def test_pcap_query_module_tree_is_installed_before_compatibility_module(self):
-        installer = (
-            ROOT / "n8n/bin/install-macstudio-stack.zsh"
-        ).read_text(encoding="utf-8")
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         facade_copy = 'cp "$REPO_DIR/n8n/bin/pcap_evidence_query.py"'
         for module in (
             "pcap_evidence_query_policy.py",
@@ -318,7 +304,7 @@ class ArchitectureHardeningTest(unittest.TestCase):
             )
 
     def test_repair_install_preserves_live_scoring_policy(self):
-        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text(encoding="utf-8")
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         destination = '$STACK_DIR/alert_store/config/scoring_rules.json'
         guard = f'if [[ ! -f "{destination}" ]]'
         copy = (

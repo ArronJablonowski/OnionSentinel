@@ -14,8 +14,8 @@ if str(ROOT) not in sys.path:
 
 def main() -> int:
     """Execute the checked-in cross-boundary adversarial contract."""
-    suite = unittest.defaultTestLoader.loadTestsFromName(
-        "tests.test_untrusted_telemetry_adversarial_gate"
+    suite = unittest.defaultTestLoader.discover(
+        str(ROOT / "tests"), pattern="test_untrusted_telemetry_adversarial_gate.py"
     )
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     return 0 if result.wasSuccessful() else 2

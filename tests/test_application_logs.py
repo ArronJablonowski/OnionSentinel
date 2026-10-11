@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib
 import importlib.util
 import hashlib
@@ -871,9 +873,7 @@ class ApplicationLogPageContractTests(unittest.TestCase):
         self.assertIn("cache:'no-store',credentials:'same-origin'", self.section)
 
     def test_deployment_copies_log_module_into_dedicated_dashboard_runtime(self) -> None:
-        installer = (
-            ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
-        ).read_text(encoding="utf-8")
+        installer = read_installer_source(ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh")
         for name in (
             "application_log_contract.py",
             "application_log_filesystem.py",

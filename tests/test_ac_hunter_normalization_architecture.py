@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import copy
 import hashlib
 import importlib.util
@@ -91,7 +93,7 @@ class AcHunterNormalizationArchitectureTests(unittest.TestCase):
             "from ac_hunter_normalization import",
             FINDING_NORMALIZATION_PATH.read_text(),
         )
-        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text()
+        installer = read_installer_source(ROOT / "n8n/bin/install-macstudio-stack.zsh")
         facade_copy = (
             'ac_hunter_normalization.py" '
             '"$DASHBOARD_RUNTIME_DIR/ac_hunter_normalization.py"'

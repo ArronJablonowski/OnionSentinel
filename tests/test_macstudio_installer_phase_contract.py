@@ -1,3 +1,5 @@
+
+from installer_source_fixture import read_installer_source
 import importlib.util
 import json
 from pathlib import Path
@@ -32,7 +34,7 @@ class MacstudioInstallerPhaseContractTests(unittest.TestCase):
     def validate(self, value, installer=None):
         return self.contract.validate_phase_contract(
             value,
-            INSTALLER_PATH.read_text(encoding="utf-8")
+            read_installer_source(INSTALLER_PATH)
             if installer is None
             else installer,
         )
@@ -66,7 +68,7 @@ class MacstudioInstallerPhaseContractTests(unittest.TestCase):
     def test_missing_or_duplicated_installer_marker_fails_closed(self):
         value = self.load_current()
         marker = value["phases"][0]["marker"]
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
         with self.assertRaisesRegex(self.contract.PhaseContractError, "exactly once"):
             self.validate(value, installer.replace(marker, "", 1))
         with self.assertRaisesRegex(self.contract.PhaseContractError, "exactly once"):
@@ -76,7 +78,7 @@ class MacstudioInstallerPhaseContractTests(unittest.TestCase):
         value = self.load_current()
         first = value["phases"][0]["marker"]
         second = value["phases"][1]["marker"]
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
         installer = installer.replace(first, "__FIRST__", 1)
         installer = installer.replace(second, first, 1)
         installer = installer.replace("__FIRST__", second, 1)

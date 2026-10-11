@@ -2,6 +2,8 @@
 """Contracts for visibility-aware live updates on every dashboard table page."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import importlib.util
 import sys
 import unittest
@@ -136,7 +138,7 @@ class ReactiveTablePageTests(unittest.TestCase):
         self.assertIn("row.setAttribute('aria-expanded', 'true')", hunt_page)
 
     def test_installer_copies_the_reactive_runtime(self) -> None:
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
         self.assertIn(
             'cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_reactive_tables.py" '
             '"$DASHBOARD_RUNTIME_DIR/scripts/dashboard_reactive_tables.py"',

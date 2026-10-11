@@ -2,6 +2,8 @@
 """Contracts for shared dashboard timestamp parsing and display formatting."""
 from __future__ import annotations
 
+from installer_source_fixture import read_installer_source
+
 import datetime as dt
 import importlib.util
 import sys
@@ -79,7 +81,7 @@ class DashboardTimeFormatTests(unittest.TestCase):
         self.assertLessEqual(len(source.splitlines()), 100)
         for forbidden in ("import sqlite3", "import subprocess", "from pathlib", "Path.home", "open("):
             self.assertNotIn(forbidden, source)
-        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        installer = read_installer_source(INSTALLER_PATH)
         self.assertEqual(installer.count("dashboard_time_format.py"), 2)
 
 
