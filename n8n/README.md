@@ -428,7 +428,7 @@ fulfillment is enabled. Create an n8n variable named `PCAP_BROKER_TOKEN` and
 set it to the same value as the Pi relay `pcap_broker.token`. The broker
 workflow reads `$vars.PCAP_BROKER_TOKEN`, which keeps live packet-evidence
 broker secrets out of workflow JSON, workflow history, and execution snapshots.
-The relay should point `pcap_broker.url` at `http://10.77.7.225:5678/webhook`,
+The relay should point `pcap_broker.url` at `http://10.77.7.201:5678/webhook`,
 use `requests_method: "POST"`, and map:
 
 ```json

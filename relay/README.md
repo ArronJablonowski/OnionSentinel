@@ -182,7 +182,7 @@ and host pin are verified:
 "alert_ingest": {
   "enabled": true,
   "mode": "ssh_batch",
-  "host": "10.77.7.225",
+  "host": "10.77.7.201",
   "user": "__MAC_STUDIO_SSH_USER__",
   "ssh_key": "/opt/so-alert-relay/keys/macstudio-alert-ingest_ed25519",
   "known_hosts": "/opt/so-alert-relay/keys/macstudio_known_hosts",
@@ -240,7 +240,7 @@ PCAP fulfillment is disabled by default in `config/config.example.json`:
 ```json
 "pcap_broker": {
   "enabled": false,
-  "url": "http://10.77.7.225:5678/webhook",
+  "url": "http://10.77.7.201:5678/webhook",
   "requests_method": "POST",
   "upload_artifact": true,
   "artifact_upload_mode": "streamed_chunks",
@@ -262,7 +262,7 @@ PCAP fulfillment is disabled by default in `config/config.example.json`:
   "capture_loss_freshness_seconds": 900,
   "stream_chunk_idle_timeout_seconds": 300,
   "mac_transfer": {
-    "host": "10.77.7.225",
+    "host": "10.77.7.201",
     "user": "__MAC_STUDIO_SSH_USER__",
     "ssh_key": "/opt/so-alert-relay/keys/macstudio-pcap-transfer_ed25519",
     "known_hosts": "/opt/so-alert-relay/keys/macstudio_known_hosts",
@@ -594,12 +594,35 @@ This provides host context from Security Onion itself and bounded historical
 osquery/endpoint evidence without granting the model an interactive shell or
 general endpoint-query channel.
 
+## Mac Studio address migration
+
+The current Mac Studio address is `10.77.7.201` (formerly `10.77.7.225`).
+An address change requires coordinated updates to the live relay config
+(`alert_ingest.host`, `pcap_broker.mac_transfer.host`, `pcap_broker.url`, and
+legacy `webhook.url`), `RELAY_WEBHOOK_URL`, Mac host-key pins, and the Mac-source
+restrictions on the relay administrator's managed broker keys. Verify the host
+key through an already trusted Mac session before changing its address binding.
+Update the Mac's live OSQuery target IP binding when it identifies that host.
+
+On pfSense, update the existing SOC_RELAY destination rules for TCP ports 22
+and 5678, then apply the filter configuration. Preserve each rule's other
+constraints. A successful admin SSH connection from another VLAN does not prove
+that the Relay can reach the new Mac address. Test both ports from the Relay,
+then check actual alert-poll and PCAP service results.
+
+A reachable Mac can still leave both workers failed when the Relay's root disk
+admission guard is active. Preserve the durable database and queued alerts.
+If evidence must be relocated to the dedicated SSD, stop the worker timers and
+services, verify the SSD mount and free capacity, copy and hash-verify every
+file, retain a restoration manifest, and restart both timers after recovery.
+Do not raise the admission thresholds to mask disk pressure.
+
 ## Firewall Needs
 
 From relay `10.88.8.8`:
 
 - to Security Onion `192.168.1.7:22/tcp`
-- to Mac Studio `10.77.7.225:22/tcp` for durable alert intake and artifact transport
-- to Mac Studio `10.77.7.225:5678/tcp` for PCAP control metadata and emergency rollback
+- to Mac Studio `10.77.7.201:22/tcp` for durable alert intake and artifact transport
+- to Mac Studio `10.77.7.201:5678/tcp` for PCAP control metadata and emergency rollback
 - to DNS `53/tcp,udp`
 - to `api.telegram.org:443/tcp` if relay health notifications are enabled

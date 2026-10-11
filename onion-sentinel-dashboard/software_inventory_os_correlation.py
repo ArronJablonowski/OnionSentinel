@@ -74,7 +74,7 @@ def _endpoint_os_identity(item: object) -> tuple[str, str, str] | None:
     os_version = _normalized_item_field(item, "operating_system_version")
     if (
         not asset_label
-        or item.get("source") != "osquery_apps"
+        or item.get("source") not in {"osquery_apps", "osquery_deb", "osquery_rpm"}
         or item.get("operating_system_source") not in ENDPOINT_OS_SOURCES
         or item.get("operating_system_confidence") != "high"
         or not os_type

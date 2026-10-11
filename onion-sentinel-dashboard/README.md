@@ -232,7 +232,7 @@ clients share the coalesced snapshot rather than duplicating backend scans.
 ## Manual Rebuild
 
 ```bash
-ssh <mac_user>@10.77.7.225 'python3 "$HOME/n8n-local/bin/refresh-soc-dashboard.py"'
+ssh <mac_user>@10.77.7.201 'python3 "$HOME/n8n-local/bin/refresh-soc-dashboard.py"'
 ```
 
 The refresh worker writes the completed build directly to `$HOME/SOC Alerts Web`.
@@ -242,7 +242,7 @@ LaunchAgent serves that directory directly.
 
 ## Dedicated Runtime
 
-Onion Sentinel runs at `http://10.77.7.225:8766/` under
+Onion Sentinel runs at `http://10.77.7.201:8766/` under
 `com.arron.onion-sentinel.web`. Admin state and sessions live under
 `$HOME/n8n-local`, are runtime-only, and are ignored by Git. The Hermes LAN
 Portal at port `8765` is separately owned and may contain only an ordinary link

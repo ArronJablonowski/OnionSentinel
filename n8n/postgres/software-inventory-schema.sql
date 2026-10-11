@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS onion_sentinel_software.inventory_records (
     ON DELETE CASCADE,
   evidence_id TEXT NOT NULL CHECK (evidence_id ~ '^[0-9a-f]{24}$'),
   source TEXT NOT NULL
-    CHECK (source IN ('osquery_apps', 'zeek_software', 'http_user_agent')),
+    CHECK (source IN ('osquery_apps', 'osquery_deb', 'osquery_rpm', 'zeek_software', 'http_user_agent')),
   source_dataset TEXT NOT NULL CHECK (length(source_dataset) BETWEEN 1 AND 160),
   tier TEXT NOT NULL CHECK (tier IN ('installed', 'observed', 'inferred')),
   confidence TEXT NOT NULL CHECK (confidence IN ('low', 'medium', 'high')),
@@ -78,6 +78,13 @@ CREATE TABLE IF NOT EXISTS onion_sentinel_software.inventory_records (
   PRIMARY KEY (snapshot_id, evidence_id),
   CHECK (last_seen >= first_seen)
 );
+
+-- Additive migration: existing snapshots remain readable by legacy consumers.
+ALTER TABLE onion_sentinel_software.inventory_records ADD COLUMN IF NOT EXISTS package_manager TEXT NOT NULL DEFAULT '' CHECK (package_manager IN ('', 'deb', 'rpm'));
+ALTER TABLE onion_sentinel_software.inventory_records ADD COLUMN IF NOT EXISTS architecture TEXT NOT NULL DEFAULT '' CHECK (length(architecture) <= 160);
+ALTER TABLE onion_sentinel_software.inventory_records ADD COLUMN IF NOT EXISTS package_release TEXT NOT NULL DEFAULT '' CHECK (length(package_release) <= 1024);
+ALTER TABLE onion_sentinel_software.inventory_records DROP CONSTRAINT IF EXISTS inventory_records_source_check;
+ALTER TABLE onion_sentinel_software.inventory_records ADD CONSTRAINT inventory_records_source_check CHECK (source IN ('osquery_apps', 'osquery_deb', 'osquery_rpm', 'zeek_software', 'http_user_agent'));
 
 CREATE INDEX IF NOT EXISTS idx_ossi_records_last_seen
   ON onion_sentinel_software.inventory_records

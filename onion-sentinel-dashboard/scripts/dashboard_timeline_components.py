@@ -342,7 +342,7 @@ def _timeline_seen_window(
 ) -> tuple[str, str, str, int]:
     candidates = []
     for event in normalized:
-        for key in ('first_seen', 'timestamp', 'last_seen'):
+        for key in ('first_seen', 'last_seen'):
             display_value = str(event.get(key) or '')
             parsed_ts = timeline_timestamp(display_value)
             if parsed_ts is not None:
@@ -387,8 +387,8 @@ def _timeline_html(
   <summary>Duplicate Alert Timeline <span>{len(normalized)} alert row(s), {total_seen} observation(s)</span></summary>
   <div class="alert-timeline-body">
     <dl class="alert-timeline-summary">
-      <div><dt>First Seen:</dt><dd>{html.escape(first_seen)}</dd></div>
-      <div><dt>Last Seen:</dt><dd>{html.escape(last_seen)}</dd></div>
+      <div><dt>First Received:</dt><dd>{html.escape(first_seen)}</dd></div>
+      <div><dt>Last Received:</dt><dd>{html.escape(last_seen)}</dd></div>
       <div><dt>Duration:</dt><dd>{html.escape(duration)}</dd></div>
     </dl>
     <div class="alert-timeline-rail" aria-hidden="true">{''.join(burst_bands)}{''.join(markers)}</div>

@@ -5,9 +5,9 @@ set -euo pipefail
 # change during a rebuild.
 : "${PI_HOST:?Set PI_HOST to the relay SSH target, for example relay_user@10.88.8.8}"
 : "${SO_HOST:?Set SO_HOST to the Security Onion SSH target, for example so-ai-relay@192.168.1.7}"
-: "${MAC_HOST:?Set MAC_HOST to the Mac Studio SSH target, for example mac_user@10.77.7.225}"
-N8N_URL="${N8N_URL:-http://10.77.7.225:5678/healthz}"
-ONION_SENTINEL_URL="${ONION_SENTINEL_URL:-http://10.77.7.225:8766}"
+: "${MAC_HOST:?Set MAC_HOST to the Mac Studio SSH target, for example mac_user@10.77.7.201}"
+N8N_URL="${N8N_URL:-http://10.77.7.201:5678/healthz}"
+ONION_SENTINEL_URL="${ONION_SENTINEL_URL:-http://10.77.7.201:8766}"
 PCAP_TIMER_EXPECTED_STATE="${PCAP_TIMER_EXPECTED_STATE:-active}"
 
 if [[ "$PCAP_TIMER_EXPECTED_STATE" != "active" && "$PCAP_TIMER_EXPECTED_STATE" != "safety-hold" ]]; then
@@ -30,7 +30,7 @@ fi
 echo
 echo "== Pi firewall paths =="
 # These match the minimum pfSense rules for the relay VLAN.
-ssh "$PI_HOST" 'nc -vz -w 3 192.168.1.7 22; nc -vz -w 3 10.77.7.225 22; nc -vz -w 3 10.77.7.225 5678; getent hosts api.telegram.org | head -n 1; nc -vz -w 3 api.telegram.org 443'
+ssh "$PI_HOST" 'nc -vz -w 3 192.168.1.7 22; nc -vz -w 3 10.77.7.201 22; nc -vz -w 3 10.77.7.201 5678; getent hosts api.telegram.org | head -n 1; nc -vz -w 3 api.telegram.org 443'
 
 echo
 echo "== Security Onion wrapper =="

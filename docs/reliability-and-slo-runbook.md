@@ -201,7 +201,7 @@ service exposes only Onion Sentinel static files and an explicit SOC API
 allowlist; its admin session and password state live under `$HOME/n8n-local`.
 
 The Hermes LAN Portal is outside Onion Sentinel's ownership boundary. Hermes
-may link to `http://10.77.7.225:8766/` but must exclude Onion Sentinel from all
+may link to `http://10.77.7.201:8766/` but must exclude Onion Sentinel from all
 builder, copy, stale-cleanup, iframe, reverse-proxy, and authentication jobs.
 CI guards active Onion Sentinel scripts against `$HOME/.hermes` and
 `$HOME/report_portal` paths. Hermes/OpenClaw failures therefore cannot block or

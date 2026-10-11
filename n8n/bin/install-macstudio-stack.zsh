@@ -863,6 +863,7 @@ do
     cp "$REPO_DIR/n8n/agent-memory/$memory_file" "$STACK_DIR/soc-alerts/agent-memory/$memory_file"
   fi
 done
+cp "$REPO_DIR/n8n/bin/sqlite_online_backup.py" "$STACK_DIR/bin/sqlite_online_backup.py"
 cp "$REPO_DIR/n8n/bin/sqlite_backup_recovery_gate.py" "$STACK_DIR/bin/sqlite_backup_recovery_gate.py"
 cp "$REPO_DIR/n8n/bin/ensure-n8n-stack.zsh" "$STACK_DIR/bin/ensure-n8n-stack.zsh"
 cp "$REPO_DIR/n8n/bin/monitor-n8n-stack.zsh" "$STACK_DIR/bin/monitor-n8n-stack.zsh"

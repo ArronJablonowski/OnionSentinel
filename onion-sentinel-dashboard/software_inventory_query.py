@@ -153,7 +153,7 @@ def _apply_endpoint_os_projection(
     public: dict[str, object],
 ) -> None:
     if (
-        record["source"] == "osquery_apps"
+        record["source"] in {"osquery_apps", "osquery_deb", "osquery_rpm"}
         and record["operating_system_source"] in ENDPOINT_OS_SOURCES
         and (
             record["operating_system_type"]

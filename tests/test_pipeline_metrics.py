@@ -62,6 +62,18 @@ class PipelineMetricsTests(unittest.TestCase):
         self.assertEqual(snapshot["drain_eta_seconds"], 900)
         self.assertEqual(snapshot["byte_drain_eta_seconds"], 900)
 
+    def test_preaggregated_windows_preserve_counts_and_do_not_cross_windows(self) -> None:
+        rollups = run_node("""metrics.windowRollups([
+          {event_type:'enqueued',window_label:'15m',event_count:200,size_bytes:0},
+          {event_type:'completed',window_label:'15m',event_count:100,size_bytes:4096},
+          {event_type:'completed',window_label:'24h',event_count:1000000,size_bytes:8192}
+        ], 1800000000000)""")
+        self.assertEqual(rollups['15m']['enqueued'], 200)
+        self.assertEqual(rollups['15m']['completed'], 100)
+        self.assertEqual(rollups['15m']['completed_bytes'], 4096)
+        self.assertEqual(rollups['24h']['completed'], 1000000)
+        self.assertEqual(rollups['1h']['completed'], 0)
+
     def test_disk_projection_uses_net_growth_and_known_backlog(self) -> None:
         now = 1_800_000_000_000
         expression = f"""metrics.diskProjection({{

@@ -1,5 +1,6 @@
 {
   "enabled": false,
+  "linux_packages_enabled": false,
   "host": "10.88.8.8",
   "ssh_user": "aj",
   "ssh_key": "__HOME__/.ssh/onion-sentinel-incident-evidence_ed25519",

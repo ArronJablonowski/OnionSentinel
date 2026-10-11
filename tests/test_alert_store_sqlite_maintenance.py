@@ -55,6 +55,7 @@ class AlertStoreSqliteMaintenancePermissionsTests(unittest.TestCase):
         self.log_dir = self.stack / "logs"
         tool_dir = self.stack / "bin"
         tool_dir.mkdir()
+        shutil.copy2(ROOT / "n8n/bin/sqlite_online_backup.py", tool_dir / "sqlite_online_backup.py")
         snapshot_tool = tool_dir / "recovery_snapshot.py"
         snapshot_tool.write_text(
             "#!/bin/zsh\n"
@@ -250,8 +251,8 @@ class AlertStoreSqliteMaintenancePermissionsTests(unittest.TestCase):
     def test_temporary_and_auto_recovery_artifacts_are_secured_in_order(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         temporary_create = source.index(
-            'sqlite3 -cmd ".timeout $SQLITE_BUSY_TIMEOUT_MS" "$DB_PATH" '
-            '".backup \'$backup_tmp\'"'
+            '/usr/bin/python3 "$STACK_DIR/bin/sqlite_online_backup.py" '
+            '--source "$DB_PATH" --destination "$backup_tmp"'
         )
         temporary_secure = source.index(
             'secure_regular_file "$backup_tmp"', temporary_create

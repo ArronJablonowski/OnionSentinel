@@ -148,6 +148,20 @@ SOURCE_SPECS = {
     },
 }
 
+LINUX_SOURCES = {"osquery_deb": "deb", "osquery_rpm": "rpm"}
+PACKAGE_KEYS = {"package_manager", "architecture", "package_release"}
+for _source, _manager in LINUX_SOURCES.items():
+    SOURCE_SPECS[_source] = {
+        **SOURCE_SPECS["osquery_apps"],
+        "version_field": "osquery.version",
+        "required_fields": ["host.name", "osquery.name", "osquery.version", "osquery.arch"],
+        "detail_fields": [],
+        "platform_default": "linux",
+        "category_default": "package",
+        "category_field": "",
+        "action_id": "pack_onionsentinel-software-inventory_linux_" + _manager,
+    }
+
 
 class BoundedCommandError(RuntimeError):
     pass
@@ -208,7 +222,7 @@ def normalized_host_name(value: str) -> str:
 def validate_cursor(value: object, source_name: str | None = None) -> dict | None:
     if value is None:
         return None
-    if not isinstance(value, dict) or set(value) != CURSOR_KEYS:
+    if not isinstance(value, dict) or set(value) != (CURSOR_KEYS | ({"architecture", "release"} if source_name in LINUX_SOURCES else set())):
         raise ValueError("after must be null or contain only asset, product, and version")
     cursor = {
         "asset": _bounded_text(
@@ -230,7 +244,10 @@ def validate_cursor(value: object, source_name: str | None = None) -> dict | Non
             field="after.version",
             allow_empty=True,
         )
-    if source_name == "osquery_apps":
+    if source_name in LINUX_SOURCES:
+        for field in ("architecture", "release"):
+            cursor[field] = None if field == "release" and value[field] is None else _bounded_text(value[field], 160 if field == "architecture" else 1024, field=f"after.{field}", allow_empty=field == "release")
+    if source_name == "osquery_apps" or source_name in LINUX_SOURCES:
         if UUID_RE.fullmatch(cursor["asset"]):
             raise ValueError("OSQuery cursor hostname must not be UUID-shaped")
     return cursor
@@ -504,7 +521,12 @@ def normalize_bucket(source_name: str, bucket: object) -> tuple[dict, dict]:
         "last_seen": _metric_timestamp(bucket, "last_seen"),
         "observation_count": count,
     }
-    if set(record) != RECORD_KEYS:
+    if source_name in LINUX_SOURCES:
+        record.update(package_manager=LINUX_SOURCES[source_name],
+                      architecture=cursor["architecture"], package_release=cursor["release"] or "")
+        identity += "\0" + cursor["architecture"] + "\0" + (cursor["release"] or "")
+        record["evidence_id"] = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+    if set(record) != (RECORD_KEYS | (PACKAGE_KEYS if source_name in LINUX_SOURCES else set())):
         raise RuntimeError("internal normalized software record contract mismatch")
     return record, cursor
 
@@ -532,6 +554,9 @@ def build_query(
             for field in spec["required_fields"]
         ],
     ]
+    if spec.get("action_id"):
+        filters.append({"term": {"action_id": spec["action_id"]}})
+        filters.append({"term": {"host.os.type": "linux"}})
     if spec["lan_only"]:
         filters.append({
             "bool": {
@@ -570,6 +595,10 @@ def build_query(
                 }
             }
         })
+    if source_name in LINUX_SOURCES:
+        for name, field in (("architecture", "osquery.arch"), ("release", "osquery.release")):
+            composite_sources.append({name: {"terms": {"field": field, "missing_bucket": name == "release",
+                                                       **({"missing_order": "first"} if name == "release" else {})}}})
     composite = {
         # One look-ahead bucket gives unambiguous terminal pagination while
         # the public page remains capped at MAX_PAGE_SIZE.

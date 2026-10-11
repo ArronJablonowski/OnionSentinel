@@ -188,8 +188,18 @@ def _authorized_operations(request: Mapping[str, Any]) -> tuple[bool, list[str]]
     return write_authorized, list(operations)
 
 
+def _path_text(value: Any, label: str) -> str:
+    """Scan credentials within path components, not across directory boundaries."""
+    if not isinstance(value, str) or not value.strip() or len(value) > 240:
+        raise HandoffError(f"{label} must be non-empty and at most 240 characters")
+    for component in value.split("/"):
+        if component:
+            _text(component, label, maximum=240)
+    return value
+
+
 def _relative_source(value: Any, target: str) -> str:
-    source = _text(value, "artifact source", maximum=240)
+    source = _path_text(value, "artifact source")
     path = PurePosixPath(source)
     if path.is_absolute() or not path.parts or ".." in path.parts or str(path) != source:
         raise HandoffError("artifact source path is unsafe")
@@ -201,7 +211,7 @@ def _relative_source(value: Any, target: str) -> str:
 
 
 def _destination(value: Any, target: str) -> str:
-    destination = _text(value, "artifact destination", maximum=240)
+    destination = _path_text(value, "artifact destination")
     path = PurePosixPath(destination)
     if not path.parts or ".." in path.parts or str(path) != destination:
         raise HandoffError("artifact destination path is unsafe")

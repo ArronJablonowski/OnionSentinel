@@ -21,7 +21,7 @@ def _normalize_cursor(
 ) -> Optional[Dict[str, Any]]:
     if value is None and allow_none:
         return None
-    if not isinstance(value, dict) or set(value) != CURSOR_KEYS:
+    if not isinstance(value, dict) or set(value) != (CURSOR_KEYS | ({"architecture", "release"} if expected_source in LINUX_SOURCES else set())):
         raise ValueError("software inventory cursor is invalid")
     asset = _bounded_text(
         value.get("asset"),
@@ -44,26 +44,32 @@ def _normalize_cursor(
             field="software inventory cursor version",
             maximum=1024,
         )
-    if expected_source == "osquery_apps" and _UUID.fullmatch(asset):
+    if (expected_source == "osquery_apps" or expected_source in LINUX_SOURCES) and _UUID.fullmatch(asset):
         raise ValueError("software inventory cursor host must not be UUID-shaped")
-    return {"asset": asset, "product": product, "version": version}
+    result = {"asset": asset, "product": product, "version": version}
+    if expected_source in LINUX_SOURCES:
+        result.update(architecture=_bounded_text(value.get("architecture"), field="cursor architecture", maximum=160, required=True),
+                      release=None if value["release"] is None else _bounded_text(value["release"], field="cursor release", maximum=1024))
+    return result
 
 
-def _cursor_order(value: Dict[str, Any]) -> Tuple[str, str, Tuple[int, str]]:
+def _cursor_order(value: Dict[str, Any]) -> Tuple[Any, ...]:
     version = value.get("version")
     return (
         str(value["asset"]),
         str(value["product"]),
         (0, "") if version in (None, "") else (1, str(version)),
+        str(value.get("architecture") or ""),
+        (0, "") if not value.get("release") else (1, str(value["release"])),
     )
 
 
 def _cursor_public_identity(
     source: str,
     cursor: Dict[str, Any],
-) -> Tuple[str, str, str]:
+) -> Tuple[Any, ...]:
     raw_asset = str(cursor["asset"])
-    if source == "osquery_apps":
+    if source == "osquery_apps" or source in LINUX_SOURCES:
         normalized_host = raw_asset.strip().rstrip(".").lower()
         public_asset = hashlib.sha256(
             ("host\0" + normalized_host).encode("utf-8")
@@ -74,4 +80,4 @@ def _cursor_public_identity(
         public_asset,
         str(cursor["product"]),
         str(cursor["version"] or ""),
-    )
+    ) + ((str(cursor["architecture"]), str(cursor["release"] or "")) if source in LINUX_SOURCES else ())

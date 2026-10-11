@@ -150,8 +150,8 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
         self.assertNotIn("data-codex-cli-model-remove", rendered)
         self.assertIn("data-codex-cli-model-effort", rendered)
         self.assertIn("data-codex-cli-model-enabled", rendered)
-        self.assertEqual(rendered.count("data-codex-cli-model-row"), 4)
-        self.assertEqual(rendered.count("data-codex-cli-model-enabled"), 4)
+        self.assertEqual(rendered.count("data-codex-cli-model-row"), len(self.builder.CODEX_CLI_MODEL_CATALOG))
+        self.assertEqual(rendered.count("data-codex-cli-model-enabled"), len(self.builder.CODEX_CLI_MODEL_CATALOG))
         catalog_positions = [
             rendered.index(f'data-codex-cli-model="{model}"')
             for model in self.builder.CODEX_CLI_MODEL_CATALOG
@@ -170,7 +170,7 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
         self.assertNotIn('<details class="settings-provider-details" id="gpt-cli-provider-settings" open', rendered)
         script = self.builder.SETTINGS_PAGE_JS
         self.assertIn(
-            "const codexCliCatalog = ['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];",
+            "const codexCliCatalog = ['gpt-5.5', 'gpt-5.6-sol', 'gpt-6-astra', 'gpt-6.1-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];",
             script,
         )
         self.assertIn("model: String(row.dataset.codexCliModel || '').trim()", script)

@@ -32,7 +32,7 @@ authoritative service inventory and SLOs.
 | --- | ---: | --- | --- | --- |
 | Security Onion / LAN | Native/LAN | `192.168.1.0/24` | Security Onion management and restricted alert export | `192.168.1.7` Security Onion |
 | SOC Relay | `888` | `10.88.8.0/24` | Isolated Raspberry Pi relay network | `10.88.8.1` pfSense gateway, `10.88.8.8` Raspberry Pi |
-| AI Lab | `777` | `10.77.7.0/24` | n8n and future AI workflow hosts | `10.77.7.225` Mac Studio |
+| AI Lab | `777` | `10.77.7.0/24` | n8n and future AI workflow hosts | `10.77.7.201` Mac Studio |
 | Network Management | `100` | `192.168.100.0/24` | Network/admin devices | Admin workstation/subnet, network gear |
 
 ## Host Inventory
@@ -41,7 +41,7 @@ authoritative service inventory and SLOs.
 | --- | --- | --- | --- |
 | Security Onion | `192.168.1.7` | Alert source | Restricted SSH wrapper `/usr/local/sbin/export-recent-alerts` |
 | Raspberry Pi relay | `10.88.8.8` | Poller, forwarder, PCAP broker, and relay health monitor | `so-alert-poll.timer`, `so-pcap-broker.timer`, durable outbox, `relay_health_wrapper.py` |
-| Mac Studio | `10.77.7.225` | Workflow engine, storage, and stack health monitor | Docker Desktop, n8n, alert-store, SQLite, Telegram notification logic, `com.arron.n8n.monitor-stack` |
+| Mac Studio | `10.77.7.201` | Workflow engine, storage, and stack health monitor | Docker Desktop, n8n, alert-store, SQLite, Telegram notification logic, `com.arron.n8n.monitor-stack` |
 | This Mac | varies | Admin/development workstation | Obsidian vault, project source copies, manual report generation only |
 | pfSense | `10.88.8.1` on VLAN 888 | Router/firewall | VLAN 888 gateway and access rules |
 | OpenWrt tap/mirror bridge | inline | Packet visibility path | VLAN trunk pass-through and LAN2 mirror output to Security Onion |
@@ -386,16 +386,16 @@ This Mac was tested after the source restriction and is denied by Security Onion
 
 | Item | Value |
 | --- | --- |
-| SSH | `<mac_user>@10.77.7.225` |
+| SSH | `<mac_user>@10.77.7.201` |
 | Compose directory | `$HOME/n8n-local` |
-| n8n URL | `http://10.77.7.225:5678` |
+| n8n URL | `http://10.77.7.201:5678` |
 | n8n container | `n8n` |
 | alert-store host service | `com.arron.soc.alert-store` |
 | alert-store Docker proxy | `alert-store` |
 | SQLite DB | `$HOME/n8n-local/alert_store_data/alerts.sqlite3` |
 | SOC Markdown reports | `$HOME/Documents/SOC Alerts` |
 | Docker-mounted report directory | `$HOME/n8n-local/soc-alerts` |
-| Onion Sentinel dashboard | `http://10.77.7.225:8766/` |
+| Onion Sentinel dashboard | `http://10.77.7.201:8766/` |
 | Scoring config | `$HOME/n8n-local/alert_store/config/scoring_rules.json` |
 | Review CLI | `$HOME/n8n-local/alert_store/review_alerts.js` |
 | Investigation CLI | `$HOME/n8n-local/alert_store/investigation_notes.js` |
@@ -519,7 +519,7 @@ writes the independently served dashboard tree:
 Source: $HOME/Documents/SOC Alerts
 Builder: $HOME/n8n-local/onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py
 Refresh: $HOME/n8n-local/bin/refresh-soc-dashboard.py
-Dashboard: http://10.77.7.225:8766/
+Dashboard: http://10.77.7.201:8766/
 ```
 
 Scaling note: the current SOC Alerts UI is generated from Markdown and is good
@@ -530,7 +530,7 @@ local AI/reference corpus. See `soc-alert-storage-ui-scaling-architecture.md`.
 Dashboard implementation:
 
 ```text
-Dashboard URL: http://10.77.7.225:8766/
+Dashboard URL: http://10.77.7.201:8766/
 Primary UI source: $HOME/n8n-local/alert_store_data/alerts.sqlite3
 LLM/report corpus: $HOME/Documents/SOC Alerts
 ```
@@ -700,7 +700,7 @@ SIEM Engineer prompt: $HOME/n8n-local/config/siem_engineer_system_prompt.md
 Cyber Threat Intel: $HOME/n8n-local/config/cyber_threat_intel_system_prompt.md
 Threat Hunter prompt: $HOME/n8n-local/config/threat_hunter_system_prompt.md
 Model routing: $HOME/n8n-local/config/ai_model_settings.json
-Settings UI:  http://10.77.7.225:8766/settings.html
+Settings UI:  http://10.77.7.201:8766/settings.html
 Analyst Prompt API: /api/soc-settings/analyst-prompt
 Incident Response:  /api/soc-settings/incident-responder-prompt
 Engineer Prompt API: /api/soc-settings/siem-engineer-prompt
@@ -863,11 +863,11 @@ Current initial suppression examples:
 Operational commands:
 
 ```bash
-ssh <mac_user>@10.77.7.225 'cd $HOME/n8n-local && /usr/local/bin/docker compose ps'
-ssh <mac_user>@10.77.7.225 '/usr/local/bin/docker inspect -f "{{.Name}} restart={{.HostConfig.RestartPolicy.Name}} status={{.State.Status}}" n8n alert-store'
-curl http://10.77.7.225:5678/healthz
-ssh <mac_user>@10.77.7.225 'find -L "$HOME/Documents/SOC Alerts" -maxdepth 1 -type f -name "*.md" | tail'
-ssh <mac_user>@10.77.7.225 'launchctl print gui/502/com.arron.n8n.monitor-stack | grep -E "runs =|last exit code|run interval"'
+ssh <mac_user>@10.77.7.201 'cd $HOME/n8n-local && /usr/local/bin/docker compose ps'
+ssh <mac_user>@10.77.7.201 '/usr/local/bin/docker inspect -f "{{.Name}} restart={{.HostConfig.RestartPolicy.Name}} status={{.State.Status}}" n8n alert-store'
+curl http://10.77.7.201:5678/healthz
+ssh <mac_user>@10.77.7.201 'find -L "$HOME/Documents/SOC Alerts" -maxdepth 1 -type f -name "*.md" | tail'
+ssh <mac_user>@10.77.7.201 'launchctl print gui/502/com.arron.n8n.monitor-stack | grep -E "runs =|last exit code|run interval"'
 ```
 
 ## Failure Notifications
@@ -968,8 +968,8 @@ Recommended live rules:
 | Block | any IPv6 | any | any | No IPv6 on relay VLAN |
 | Pass | admin Mac or admin network | `10.88.8.8` | TCP/22 | Pi SSH administration |
 | Pass | `10.88.8.8` | `192.168.1.7` | TCP/22 | Restricted SSH alert polling |
-| Pass | `10.88.8.8` | `10.77.7.225` | TCP/22 | Forced-command durable alert intake and PCAP artifact transport |
-| Pass | `10.88.8.8` | `10.77.7.225` | TCP/5678 | n8n heartbeat, PCAP control metadata, and rollback alert webhook |
+| Pass | `10.88.8.8` | `10.77.7.201` | TCP/22 | Forced-command durable alert intake and PCAP artifact transport |
+| Pass | `10.88.8.8` | `10.77.7.201` | TCP/5678 | n8n heartbeat, PCAP control metadata, and rollback alert webhook |
 | Pass | `10.88.8.8` | DNS server / firewall | TCP/UDP 53 | DNS |
 | Pass | `10.88.8.8` | NTP server / firewall | UDP/123 | Time sync |
 | Temporary pass | `10.88.8.8` | Internet NTP | UDP/123 | Time sync until VLAN-local NTP is ready |
@@ -1012,10 +1012,10 @@ Verified allowed on 2026-07-01:
 ```text
 admin Mac -> 10.88.8.8:22 succeeded
 10.88.8.8 -> 192.168.1.7:22 succeeded
-10.88.8.8 -> 10.77.7.225:5678 succeeded
+10.88.8.8 -> 10.77.7.201:5678 succeeded
 10.88.8.8 -> DNS for api.telegram.org succeeded
 10.88.8.8 -> api.telegram.org:443 succeeded
-10.77.7.225:5678 /healthz returned {"status":"ok"}
+10.77.7.201:5678 /healthz returned {"status":"ok"}
 ```
 
 ## Pi Update Procedure
@@ -1078,7 +1078,7 @@ Current report file:
 Generate a current report manually:
 
 ```bash
-ssh <mac_user>@10.77.7.225 \
+ssh <mac_user>@10.77.7.201 \
   '/usr/local/bin/docker exec alert-store node /app/review_alerts.js --hours 24 --limit 20' \
   > "<obsidian_vault>/Security Onion/reports/security-onion-alert-review-$(date -u +%Y-%m-%d).md"
 ```
@@ -1115,8 +1115,8 @@ ssh <relay_user>@10.88.8.8 'sudo journalctl -u so-alert-poll.service -u so-pcap-
 Mac Studio stack:
 
 ```bash
-ssh <mac_user>@10.77.7.225 'cd $HOME/n8n-local && /usr/local/bin/docker compose ps'
-curl http://10.77.7.225:5678/healthz
+ssh <mac_user>@10.77.7.201 'cd $HOME/n8n-local && /usr/local/bin/docker compose ps'
+curl http://10.77.7.201:5678/healthz
 ```
 
 Security Onion wrapper:
@@ -1128,7 +1128,7 @@ ssh aj@192.168.1.7 'sudo grep -n "LOOKBACK\\|from=\\\"10.88.8.8\\\"" /usr/local/
 Alert review:
 
 ```bash
-ssh <mac_user>@10.77.7.225 \
+ssh <mac_user>@10.77.7.201 \
   '/usr/local/bin/docker exec alert-store node /app/review_alerts.js --hours 1 --limit 15'
 ```
 
@@ -1447,7 +1447,7 @@ validated separately through `/healthz` and the Mac stack monitor.
 ```text
 Container path: /data/n8n-beacon.json
 Served path:    $HOME/SOC Alerts Web/n8n-beacon.json
-URL:            http://10.77.7.225:8766/n8n-beacon.json
+URL:            http://10.77.7.201:8766/n8n-beacon.json
 ```
 
 The alert-store also keeps a rolling beacon history beside each configured

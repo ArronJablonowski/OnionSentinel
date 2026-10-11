@@ -27,11 +27,15 @@ ASSET_LABEL_MAX_PAGES = 10
 ASSET_LABEL_MAX_RECORDS = ASSET_LABEL_PAGE_SIZE * ASSET_LABEL_MAX_PAGES
 SOURCES = {
     "osquery_apps": ("installed", "high"),
+    "osquery_deb": ("installed", "high"),
+    "osquery_rpm": ("installed", "high"),
     "zeek_software": ("observed", "medium"),
     "http_user_agent": ("inferred", "low"),
 }
 SOURCE_DATASETS = {
     "osquery_apps": {"osquery_manager.result", "osquery.live.software_inventory"},
+    "osquery_deb": {"osquery_manager.result"},
+    "osquery_rpm": {"osquery_manager.result"},
     "zeek_software": {"zeek.software"},
     "http_user_agent": {"zeek.http"},
 }
@@ -344,7 +348,7 @@ def _record_asset_reference(
         maximum=8,
         required=True,
     ).lower()
-    expected_ref_type = "host" if source == "osquery_apps" else "ip"
+    expected_ref_type = "host" if source.startswith("osquery_") else "ip"
     if asset_ref_type != expected_ref_type:
         raise InventoryStateError("asset_ref_type does not match its source")
     asset_ref = _safe_text(
@@ -352,7 +356,7 @@ def _record_asset_reference(
     )
     if not SAFE_ASSET_REF_RE.fullmatch(asset_ref):
         raise InventoryStateError("asset_ref is invalid")
-    if source == "osquery_apps":
+    if source.startswith("osquery_"):
         if not EVIDENCE_ID_RE.fullmatch(asset_ref.lower()):
             raise InventoryStateError(
                 "OSQuery asset references must be pseudonymous identifiers"
@@ -449,7 +453,7 @@ def _record_operating_system(
         raise InventoryStateError(
             "operating_system_confidence is unsupported"
         )
-    if source == "osquery_apps":
+    if source.startswith("osquery_"):
         _validate_endpoint_operating_system(
             os_present,
             operating_system_source,
@@ -485,7 +489,18 @@ def _sanitize_record(raw: object) -> dict[str, object]:
         operating_system_source,
         operating_system_confidence,
     ) = _record_operating_system(raw, source)
+    package_fields = {}
+    if source in {"osquery_deb", "osquery_rpm"}:
+        manager = "deb" if source == "osquery_deb" else "rpm"
+        if raw.get("package_manager") != manager or raw.get("platform") != "linux":
+            raise InventoryStateError("Linux package metadata conflicts with source")
+        architecture = _safe_text(raw.get("architecture"), "architecture", maximum=160, required=True)
+        release = _safe_text(raw.get("package_release"), "package_release", maximum=1024)
+        if manager == "deb" and release:
+            raise InventoryStateError("DEB package cannot assert RPM release")
+        package_fields = {"package_manager": manager, "architecture": architecture, "package_release": release}
     return {
+        **package_fields,
         "evidence_id": evidence_id,
         "source": source,
         "source_dataset": source_dataset,

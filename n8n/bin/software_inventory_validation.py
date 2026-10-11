@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from software_inventory_contract import (
     AUDIT_RECEIPT_KEYS,
     CONTRACT,
+    LINUX_SOURCES,
     MAX_TOTAL_RECORDS,
     QUERY_AUDIT_KEYS,
     RESPONSE_KEY_SETS,
@@ -284,7 +285,7 @@ def _validate_cursor_binding(
         normalized_records[-1]["asset_ref"],
         normalized_records[-1]["product"],
         normalized_records[-1]["version"],
-    ):
+    ) + ((normalized_records[-1]["architecture"], normalized_records[-1]["package_release"]) if expected_source in LINUX_SOURCES else ()):
         raise ValueError(
             "software inventory cursor does not identify the last public record"
         )

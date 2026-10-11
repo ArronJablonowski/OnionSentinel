@@ -506,7 +506,7 @@ def main() -> int:
     parser.add_argument("--stack-dir", type=Path, default=Path.home() / "n8n-local")
     parser.add_argument("--backup-root", type=Path)
     parser.add_argument("--docker", default="/usr/local/bin/docker")
-    parser.add_argument("--keep", type=int, default=7)
+    parser.add_argument("--keep", type=int, default=2)
     parser.add_argument(
         "--keychain-service",
         default="com.arron.onion-sentinel.runtime-backup.v1",

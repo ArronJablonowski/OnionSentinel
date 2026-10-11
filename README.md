@@ -9,7 +9,7 @@ This repository is designed to be safe for a private GitHub repo. It contains so
 ```mermaid
 flowchart LR
   SO["Security Onion\n192.168.1.7"] -->|restricted SSH export| PI["Raspberry Pi Relay\n10.88.8.8"]
-  PI -->|bounded forced SSH batch| INTAKE["Restricted alert intake\nMac Studio 10.77.7.225"]
+  PI -->|bounded forced SSH batch| INTAKE["Restricted alert intake\nMac Studio 10.77.7.201"]
   INTAKE --> STORE["alert-store commit boundary"]
   STORE --> DB["SQLite alert store"]
   STORE --> ENRICH["Durable public enrichment jobs\nL1 memory + L2 SQLite cache"]
@@ -236,9 +236,9 @@ operations/secret-scan.zsh
 | Security Onion | `192.168.1.7` |
 | Relay VLAN | `10.88.8.0/24` |
 | Relay host | `10.88.8.8` |
-| Mac Studio | `10.77.7.225` |
-| n8n webhook | `http://10.77.7.225:5678/webhook/security-onion-alert` |
-| Dashboard | `http://10.77.7.225:8766/` |
+| Mac Studio | `10.77.7.201` |
+| n8n webhook | `http://10.77.7.201:5678/webhook/security-onion-alert` |
+| Dashboard | `http://10.77.7.201:8766/` |
 | Alert DB | `$HOME/n8n-local/alert_store_data/alerts.sqlite3` |
 | Reports | `$HOME/n8n-local/soc-alerts` and `~/Documents/SOC Alerts` symlink |
 

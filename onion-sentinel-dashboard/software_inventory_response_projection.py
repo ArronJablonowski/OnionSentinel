@@ -10,23 +10,25 @@ from software_inventory_state import API_SCHEMA, TIERS, _utc_iso
 VERSION_CONFLICT = "simultaneous-version-disagreement"
 
 
-def _conflict_key(record: dict[str, object]) -> tuple[str, str, str, str]:
+def _conflict_key(record: dict[str, object]) -> tuple[str, ...]:
     return (
         str(record.get("asset_ref_type") or ""),
         str(record.get("asset_ref") or ""),
         str(record.get("product") or "").casefold(),
         str(record.get("last_seen") or ""),
+        str(record.get("package_manager") or ""),
+        str(record.get("architecture") or ""),
     )
 
 
 def _version_groups(
     records: list[dict[str, object]],
-) -> dict[tuple[str, str, str, str], set[str]]:
-    groups: dict[tuple[str, str, str, str], set[str]] = {}
+) -> dict[tuple[str, ...], set[str]]:
+    groups: dict[tuple[str, ...], set[str]] = {}
     for record in records:
         version = str(record.get("version") or "").strip().casefold()
         if version:
-            groups.setdefault(_conflict_key(record), set()).add(version)
+            groups.setdefault(_conflict_key(record), set()).add(version + "\0" + str(record.get("package_release") or ""))
     return groups
 
 

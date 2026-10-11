@@ -56,6 +56,16 @@ def raw_alert_object(row: object) -> dict:
         return {}
 
 
+def original_event_timestamp(row: object) -> str:
+    """Keep original event time separate from local receipt timestamps."""
+    raw = raw_alert_object(row)
+    original = nested_value(raw, "security_onion", "raw_event", "@timestamp")
+    value = original if original is not None else row_item(row, "timestamp")
+    if not isinstance(value, str) or parse_iso_timestamp(value) is None:
+        return ""
+    return value
+
+
 def alert_group_key(row: object) -> str:
     """Return the stable grouped-detection key, excluding rotating source ports."""
     suppression_key = row_item(row, "suppression_key")
@@ -110,7 +120,7 @@ def timeline_member(member: object) -> tuple[dict[str, object], int]:
     raw = raw_alert_object(member)
     timeline = {
         "alert_id": row_item(member, "alert_id"),
-        "timestamp": row_item(member, "timestamp") or last_seen or first_seen,
+        "timestamp": original_event_timestamp(member),
         "first_seen": first_seen,
         "last_seen": last_seen,
         "seen_count": seen_count,

@@ -34,6 +34,19 @@ function record(overrides = {}) {
   };
 }
 
+test('Linux packages retain manager, architecture and RPM release without Darwin labeling', () => {
+  const linux = record({source: 'osquery_rpm', platform: 'linux', operating_system_type: 'Red Hat',
+    package_manager: 'rpm', architecture: 'x86_64', package_release: '2.el9'});
+  const normalized = normalizeRecord(linux);
+  assert.equal(normalized.package_release, '2.el9');
+  assert.equal(normalized.architecture, 'x86_64');
+  assert.equal(normalized.tier, 'installed');
+  assert.throws(() => normalizeRecord({...linux, architecture: ''}));
+  assert.throws(() => normalizeRecord({...linux, platform: 'darwin'}));
+  assert.throws(() => normalizeRecord({...linux, source: 'osquery_deb', package_manager: 'deb'}));
+  assert.match(conflictSql(), /peer.architecture = record.architecture/);
+});
+
 test('normalizes the complete bounded provenance record', () => {
   const result = normalizeRecord(record());
   assert.equal(result.product, 'Firefox');

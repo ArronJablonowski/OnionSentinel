@@ -29,6 +29,10 @@ def _record_source(
         expected_source is not None and source != expected_source
     ):
         raise ValueError("software inventory record source is invalid")
+    if source in LINUX_SOURCES and set(value) != RECORD_KEYS | PACKAGE_KEYS:
+        raise ValueError("Linux package metadata is required")
+    if source not in LINUX_SOURCES and set(value) == RECORD_KEYS | PACKAGE_KEYS:
+        raise ValueError("Package metadata conflicts with source")
     return value, source, SOURCE_POLICY[source]
 
 
@@ -98,7 +102,7 @@ def _record_asset(
         if not any(address in network for network in _LAN_NETWORKS):
             raise ValueError("software inventory IP reference is not a LAN address")
     elif asset_ref_type == "host":
-        if source != "osquery_apps" or not _HEX_24.fullmatch(asset_ref):
+        if policy["asset_ref_type"] != "host" or not _HEX_24.fullmatch(asset_ref):
             raise ValueError("software inventory host reference is invalid")
     else:
         raise ValueError("software inventory asset reference type is invalid")
@@ -170,7 +174,7 @@ def _record_operating_system(
     fields = _operating_system_fields(value)
     os_type, os_version, os_source, os_confidence = fields
     os_present = bool(os_type or os_version)
-    if source == "osquery_apps":
+    if source == "osquery_apps" or source in LINUX_SOURCES:
         if os_present and (
             os_source not in policy.get("operating_system_sources", set())
             or os_confidence != "high"
@@ -231,7 +235,18 @@ def normalize_record(
     first_seen, last_seen, observation_count = _record_observation(
         record, expected_window
     )
+    package_fields = {}
+    if source in LINUX_SOURCES:
+        manager = "deb" if source == "osquery_deb" else "rpm"
+        if record["package_manager"] != manager:
+            raise ValueError("Linux package manager conflicts with source")
+        architecture = _bounded_text(record["architecture"], field="architecture", maximum=160, required=True)
+        release = _bounded_text(record["package_release"], field="package_release", maximum=1024)
+        if manager == "deb" and release:
+            raise ValueError("DEB packages must not claim RPM release")
+        package_fields = {"package_manager": manager, "architecture": architecture, "package_release": release}
     return {
+        **package_fields,
         "evidence_id": evidence_id,
         "source": source,
         "source_dataset": dataset,

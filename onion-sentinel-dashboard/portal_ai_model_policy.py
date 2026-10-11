@@ -38,6 +38,8 @@ OPENCLAW_SUPPORTED_OLLAMA_URLS = frozenset(
 CODEX_CLI_MODEL_CATALOG = (
     "gpt-5.5",
     "gpt-5.6-sol",
+    "gpt-6-astra",
+    "gpt-6.1-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
 )

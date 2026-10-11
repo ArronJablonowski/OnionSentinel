@@ -12,6 +12,9 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from urllib import request
 from urllib.error import HTTPError, URLError
 
@@ -23,6 +26,29 @@ MAX_BATCH_ITEMS = max(1, min(1000, int(os.environ.get("ONION_SENTINEL_ALERT_BATC
 REQUEST_TIMEOUT_SECONDS = max(5, min(120, int(os.environ.get("ONION_SENTINEL_ALERT_REQUEST_TIMEOUT_SECONDS", "35"))))
 BATCH_DEADLINE_SECONDS = max(30, min(300, int(os.environ.get("ONION_SENTINEL_ALERT_BATCH_DEADLINE_SECONDS", "120"))))
 RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504, 507}
+PAUSE_FILE = Path(__file__).resolve().parents[1] / "run/alert-intake-maintenance-pause"
+POLICY_FILE = Path(__file__).resolve().parents[1] / "config/alert_ingestion_policy.json"
+
+
+def event_admission(payload: dict) -> str | None:
+    """Apply operator policy to original event time, never receipt time."""
+    try:
+        policy = json.loads(POLICY_FILE.read_text())
+    except FileNotFoundError:
+        return None
+    if not policy.get("enabled"):
+        return None
+    zone = ZoneInfo(policy["time_zone"])
+    raw = payload.get("security_onion", {}).get("raw_event", {})
+    value = raw.get("@timestamp") or payload.get("@timestamp") or payload.get("timestamp")
+    try:
+        event = datetime.fromisoformat(" ".join(str(value).split()).replace("Z", "+00:00"))
+        if event.tzinfo is None:
+            return "missing_or_invalid_original_event_time"
+    except (ValueError, TypeError):
+        return "missing_or_invalid_original_event_time"
+    cutoff = max(policy["min_event_date"], datetime.now(zone).date().isoformat())
+    return "event_before_today" if event.astimezone(zone).date().isoformat() < cutoff else None
 
 
 def reject(reason: str) -> None:
@@ -53,6 +79,29 @@ def response_detail(body: object, fallback: str) -> str:
 
 
 def post_message(delivery_id: str, payload: dict) -> dict:
+    try:
+        PAUSE_FILE.lstat()
+        paused = True
+    except FileNotFoundError:
+        paused = False
+    except OSError:
+        paused = True
+    if paused:
+        return {
+            "delivery_id": delivery_id,
+            "ok": False,
+            "retryable": True,
+            "status": "maintenance_paused",
+            "reason": "operator-requested alert intake pause",
+        }
+    try:
+        reason = event_admission(payload)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {"delivery_id": delivery_id, "ok": False, "retryable": True,
+                "status": "admission_policy_error", "reason": "intake policy unavailable"}
+    if reason:
+        return {"delivery_id": delivery_id, "ok": True, "retryable": False,
+                "status": "dropped", "reason": reason}
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     req = request.Request(
         ALERT_STORE_URL,

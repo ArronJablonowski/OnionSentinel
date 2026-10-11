@@ -123,7 +123,7 @@ CONTROLLED_SELECTED_JOB_FAILURE_EXIT_CODE = 1
 MAX_AI_SETTINGS_BYTES = 256 * 1024
 CODEX_CLI_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
 CODEX_CLI_MODEL_CATALOG = frozenset(
-    {"gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
+    {"gpt-5.5", "gpt-5.6-sol", "gpt-6-astra", "gpt-6.1-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
 )
 AGENT_ROLES = (
     "soc-analyst",

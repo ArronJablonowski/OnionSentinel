@@ -35,6 +35,11 @@ SOFTWARE_INVENTORY_SOURCES = {
         "platform": "",
     },
 }
+LINUX_SOURCES = {"osquery_deb": "deb", "osquery_rpm": "rpm"}
+PACKAGE_KEYS = {"package_manager", "architecture", "package_release"}
+for _source in LINUX_SOURCES:
+    SOFTWARE_INVENTORY_SOURCES[_source] = {
+        **SOFTWARE_INVENTORY_SOURCES["osquery_apps"], "platform": "linux"}
 SOFTWARE_CURSOR_KEYS = {"asset", "product", "version"}
 SOFTWARE_RESPONSE_KEYS = {
     "ok",
@@ -74,6 +79,7 @@ SOFTWARE_OS_RECORD_KEYS = SOFTWARE_RECORD_KEYS | {
 SOFTWARE_RECORD_KEY_SETS = {
     frozenset(SOFTWARE_RECORD_KEYS),
     frozenset(SOFTWARE_OS_RECORD_KEYS),
+    frozenset(SOFTWARE_OS_RECORD_KEYS | PACKAGE_KEYS),
 }
 SOFTWARE_TEXT_LIMITS = {
     "asset": 512,
@@ -81,6 +87,8 @@ SOFTWARE_TEXT_LIMITS = {
     "version": 1024,
     "platform": 160,
     "category": 256,
+    "architecture": 160,
+    "release": 1024,
     "operating_system_type": 160,
     "operating_system_version": 512,
     "operating_system_source": 128,
@@ -156,7 +164,7 @@ def validate_software_cursor(
 ) -> dict | None:
     if value is None:
         return None
-    if not isinstance(value, dict) or set(value) != SOFTWARE_CURSOR_KEYS:
+    if not isinstance(value, dict) or set(value) != (SOFTWARE_CURSOR_KEYS | ({"architecture", "release"} if source in LINUX_SOURCES else set())):
         raise ValueError(
             "software cursor must be null or contain asset, product, and version"
         )
@@ -180,7 +188,10 @@ def validate_software_cursor(
             field="after.version",
             allow_empty=True,
         )
-    if source == "osquery_apps" and UUID_RE.fullmatch(cursor["asset"]):
+    if source in LINUX_SOURCES:
+        for field in ("architecture", "release"):
+            cursor[field] = None if field == "release" and value[field] is None else _software_text(value[field], SOFTWARE_TEXT_LIMITS[field], field=f"after.{field}", allow_empty=field == "release")
+    if (source == "osquery_apps" or source in LINUX_SOURCES) and UUID_RE.fullmatch(cursor["asset"]):
         raise ValueError("software cursor host must not be UUID-shaped")
     return cursor
 
@@ -348,10 +359,10 @@ def _validate_passive_operating_system(record: dict) -> None:
 
 
 def _validate_operating_system(record: dict, source: str) -> None:
-    if set(record) != SOFTWARE_OS_RECORD_KEYS:
+    if not SOFTWARE_OS_RECORD_KEYS.issubset(record):
         return
     _validate_operating_system_fields(record)
-    if source == "osquery_apps":
+    if source == "osquery_apps" or source in LINUX_SOURCES:
         _validate_endpoint_operating_system(record)
     else:
         _validate_passive_operating_system(record)
@@ -390,6 +401,15 @@ def _validate_software_record(
             "software inventory record fields failed validation"
         )
     expected = SOFTWARE_INVENTORY_SOURCES[source]
+    if source in LINUX_SOURCES:
+        if set(record) != SOFTWARE_OS_RECORD_KEYS | PACKAGE_KEYS or record["package_manager"] != LINUX_SOURCES[source]:
+            raise ValueError("Linux package metadata conflicts with source")
+        _software_text(record["architecture"], 160, field="record.architecture")
+        _software_text(record["package_release"], 1024, field="record.package_release", allow_empty=True)
+        if source == "osquery_deb" and record["package_release"]:
+            raise ValueError("DEB package cannot assert RPM release")
+    elif set(record) == SOFTWARE_OS_RECORD_KEYS | PACKAGE_KEYS:
+        raise ValueError("Package metadata conflicts with source")
     _validate_record_identity(record, source, expected)
     _validate_asset_reference(record, expected)
     _validate_record_text(record)

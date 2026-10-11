@@ -81,7 +81,11 @@ def _evaluate_worker_queue(
     completion_age: int | None,
     failures: list[str],
 ) -> None:
-    if processing_count and (processing_age is None or processing_age > 15 * 60):
+    # Counts and age rows can straddle a job transition. Missing age evidence
+    # must fail closed, but cannot establish the duration of a worker stall.
+    if processing_count and processing_age is None:
+        failures.append(f"{label} processing-age telemetry is unavailable")
+    elif processing_count and processing_age > 15 * 60:
         failures.append(
             f"{label} has been processing without state progress for 15 minutes"
         )

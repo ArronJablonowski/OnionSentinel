@@ -300,6 +300,17 @@ class CrossHostHandoffContractTests(unittest.TestCase):
         with self.assertRaisesRegex(handoff.HandoffError, "private key"):
             handoff.build_handoff_plan(self.repo, document)
 
+    def test_long_managed_paths_are_not_opaque_credentials(self) -> None:
+        source = "onion-sentinel-dashboard/scripts/dashboard_alert_report_factory.py"
+        destination = "dashboard/scripts/dashboard_alert_report_factory.py"
+        self.assertEqual(handoff._relative_source(source, "mac_studio"), source)
+        self.assertEqual(handoff._destination(destination, "mac_studio"), destination)
+
+    def test_path_components_still_reject_opaque_credentials(self) -> None:
+        for value in ("dashboard/" + "A" * 60 + ".py", "dashboard/BOT_TOKEN=unsafe"):
+            with self.subTest(value=value), self.assertRaisesRegex(handoff.HandoffError, "sensitive"):
+                handoff._destination(value, "mac_studio")
+
     def test_unknown_fields_and_unsafe_paths_fail_closed(self) -> None:
         document = copy.deepcopy(self.document)
         document["request"]["unexpected"] = True

@@ -14,7 +14,7 @@ STACK_DIR="${STACK_DIR:-$HOME/n8n-local}"
 DB_PATH="${ALERT_STORE_DB_PATH:-$STACK_DIR/alert_store_data/alerts.sqlite3}"
 BACKUP_DIR="${ALERT_STORE_BACKUP_DIR:-$STACK_DIR/alert_store_backups}"
 LOG_DIR="${ALERT_STORE_MAINTENANCE_LOG_DIR:-$STACK_DIR/logs}"
-DEFAULT_KEEP_BACKUPS=10
+DEFAULT_KEEP_BACKUPS=2
 KEEP_BACKUPS="${ALERT_STORE_BACKUP_KEEP:-$DEFAULT_KEEP_BACKUPS}"
 AUTO_RECOVER="${ALERT_STORE_AUTO_RECOVER:-0}"
 SQLITE_BUSY_TIMEOUT_MS="${ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS:-60000}"
@@ -195,7 +195,7 @@ verified_backup() {
   rm -f "$backup_tmp"
   BACKUP_PLAINTEXT="$backup_tmp"
   while (( attempt <= BACKUP_ATTEMPTS )); do
-    if backup_error="$(sqlite3 -cmd ".timeout $SQLITE_BUSY_TIMEOUT_MS" "$DB_PATH" ".backup '$backup_tmp'" 2>&1)"; then
+    if backup_error="$(/usr/bin/python3 "$STACK_DIR/bin/sqlite_online_backup.py" --source "$DB_PATH" --destination "$backup_tmp" --timeout-seconds "$(( (SQLITE_BUSY_TIMEOUT_MS + 999) / 1000 ))" 2>&1)"; then
       secure_regular_file "$backup_tmp"
       break
     fi

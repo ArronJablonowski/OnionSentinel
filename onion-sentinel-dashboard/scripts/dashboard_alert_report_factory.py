@@ -1,7 +1,6 @@
 """Transform normalized alert rows into dashboard report view models."""
 from __future__ import annotations
 
-import datetime as dt
 import hashlib
 import re
 from dataclasses import dataclass
@@ -20,7 +19,9 @@ from dashboard_alert_pcap_workflow import (
     pcap_status_for_row,
 )
 from dashboard_alert_report_model import AlertReport, CRITICALITY_ORDER
-from dashboard_alert_repository import alert_group_key, raw_alert_object, row_item, safe_int
+from dashboard_alert_repository import (
+    alert_group_key, original_event_timestamp, raw_alert_object, row_item, safe_int,
+)
 from dashboard_pcap_components import render_pcap_evidence_markdown
 from dashboard_time_format import normalize_iso_display_text, parse_iso_timestamp
 from dashboard_timeline_components import alert_seen_timeline_html
@@ -198,12 +199,8 @@ def network_identity(row: object, raw: dict) -> ReportNetworkIdentity:
 
 
 def report_timestamp(row: object) -> float:
-    """Use the newest stored event timestamp or an explicit build-time fallback."""
-    for value in (row_item(row, "last_seen"), row_item(row, "timestamp")):
-        parsed = parse_iso_timestamp(value)  # type: ignore[arg-type]
-        if parsed is not None:
-            return parsed
-    return dt.datetime.now(dt.timezone.utc).timestamp()
+    """Return original event time; zero sorts unknown events without inventing time."""
+    return parse_iso_timestamp(original_event_timestamp(row)) or 0.0
 
 
 def report_group_key(row: object) -> object:
@@ -224,6 +221,7 @@ def report_detail_html(
     """Compose canonical Markdown and validated detail HTML."""
     layout_row = dict(row)  # type: ignore[arg-type]
     layout_row.update({
+        "event_timestamp": original_event_timestamp(row) or "unavailable",
         "first_seen": row_item(row, "first_seen") or "n/a",
         "last_seen": row_item(row, "last_seen") or "n/a",
         "seen_count": repeat_count,

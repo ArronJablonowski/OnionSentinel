@@ -16,6 +16,19 @@ import report_portal as portal  # noqa: E402
 
 
 class AiModelPolicyTests(unittest.TestCase):
+    def test_sol_61_medium_roster_and_primary_assignment(self) -> None:
+        valid, roster = policy._normalize_codex_cli_models(
+            [{"model": "gpt-6.1-sol", "reasoning_effort": "medium", "enabled": True}],
+            legacy_model="gpt-5.5", legacy_effort="medium", legacy_enabled=False,
+        )
+        self.assertTrue(valid)
+        self.assertEqual([entry for entry in roster if entry["enabled"]], [
+            {"model": "gpt-6.1-sol", "reasoning_effort": "medium", "enabled": True}
+        ])
+        routes = policy._enabled_agent_model_routes([], roster)
+        assignments = {role: "codex-cli:gpt-6.1-sol:medium" for role in policy.CYBER_SECURITY_AGENT_ROLES}
+        self.assertEqual(policy._normalize_agent_models(assignments, routes), assignments)
+
     def test_portal_reexports_shared_policy_symbols(self) -> None:
         for name in (
             "default_soc_ai_settings",

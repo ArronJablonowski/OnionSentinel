@@ -45,11 +45,15 @@ function windowRollups(events, nowMs, windows = DEFAULT_WINDOWS) {
   const rollups = {};
   for (const [label, seconds] of Object.entries(windows)) {
     const cutoff = nowMs - seconds * 1000;
-    const current = events.filter((event) => (timestampMs(event.occurred_at) || 0) >= cutoff);
-    const enqueued = current.filter((event) => event.event_type === 'enqueued').length;
+    const current = events.filter((event) => event.window_label
+      ? event.window_label === label
+      : (timestampMs(event.occurred_at) || 0) >= cutoff);
+    const countRows = (rows) => rows.reduce((total, event) => total
+      + (event.event_count == null ? 1 : Math.max(0, numeric(event.event_count))), 0);
+    const enqueued = countRows(current.filter((event) => event.event_type === 'enqueued'));
     const completedRows = current.filter((event) => event.event_type === 'completed');
-    const failed = current.filter((event) => event.event_type === 'failed').length;
-    const completed = completedRows.length;
+    const failed = countRows(current.filter((event) => event.event_type === 'failed'));
+    const completed = countRows(completedRows);
     const completedBytes = completedRows.reduce((total, event) => total + Math.max(0, numeric(event.size_bytes)), 0);
     const arrivalRate = ratePerSecond(enqueued, seconds);
     const completionRate = ratePerSecond(completed, seconds);
@@ -157,6 +161,7 @@ function createPipelineMetrics({run, all, now, diskSnapshot, retentionHours = 16
     `);
     await run('CREATE INDEX IF NOT EXISTS idx_pipeline_stage_events_time ON pipeline_stage_events(occurred_at)');
     await run('CREATE INDEX IF NOT EXISTS idx_pipeline_stage_events_stage_time ON pipeline_stage_events(stage, event_type, occurred_at)');
+    await run("CREATE INDEX IF NOT EXISTS idx_pipeline_stage_events_epoch_cover ON pipeline_stage_events(julianday(replace(occurred_at, '  ', 'T')), stage, event_type, size_bytes)");
     await run(`
       CREATE TABLE IF NOT EXISTS pipeline_metric_samples (
         captured_at TEXT PRIMARY KEY,
@@ -238,9 +243,19 @@ function createPipelineMetrics({run, all, now, diskSnapshot, retentionHours = 16
   async function snapshot() {
     const nowText = now();
     const nowMs = timestampMs(nowText) || Date.now();
-    const cutoff = new Date(nowMs - 24 * 60 * 60 * 1000).toISOString();
+    const windows = Object.entries(DEFAULT_WINDOWS);
+    const cutoffs = windows.flatMap(([label, seconds]) => [
+      label, new Date(nowMs - seconds * 1000).toISOString(),
+    ]);
     const [events, durableRows, pcapRows, samples] = await Promise.all([
-      all("SELECT stage, event_type, size_bytes, occurred_at FROM pipeline_stage_events WHERE datetime(replace(occurred_at, '  ', 'T')) >= datetime(?)", [cutoff]),
+      // Aggregate in SQLite: transferring a million event rows into Node and
+      // filtering them repeatedly blocks every HTTP handler, including leases.
+      all(`WITH windows(window_label, cutoff) AS (VALUES ${windows.map(() => '(?, ?)').join(',')})
+        SELECT e.stage, e.event_type, w.window_label, COUNT(*) AS event_count,
+               COALESCE(SUM(MAX(0, e.size_bytes)), 0) AS size_bytes
+        FROM pipeline_stage_events e JOIN windows w
+          ON julianday(replace(e.occurred_at, '  ', 'T')) >= julianday(w.cutoff)
+        GROUP BY e.stage, e.event_type, w.window_label`, cutoffs),
       all(`SELECT job_type AS stage,
           SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
           SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS processing,

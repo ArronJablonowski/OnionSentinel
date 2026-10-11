@@ -53,6 +53,14 @@ function owner(overrides = {}) {
   return {events, service};
 }
 
+test('terminal retention drop performs no writes, scoring, notifications or queue work', async () => {
+  const {events, service} = owner({admissionReason: () => 'event_before_today',
+    scoreAlert: () => { throw new Error('must not score dropped event'); }});
+  assert.deepEqual(await service.store({timestamp: '2026-08-26T00:00:00Z'}),
+    {ok: true, status: 'dropped', stored: false, reason: 'event_before_today'});
+  assert.deepEqual(events, []);
+});
+
 test('keeps notification, durable jobs, and metrics inside the ingest transaction', async () => {
   const {events, service} = owner();
   await service.store({alert_id: 'alert-1'});

@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 
-const SOURCES = new Set(['osquery_apps', 'zeek_software', 'http_user_agent']);
+const SOURCES = new Set(['osquery_apps', 'osquery_deb', 'osquery_rpm', 'zeek_software', 'http_user_agent']);
 const TIERS = new Set(['installed', 'observed', 'inferred']);
 const CONFIDENCES = new Set(['low', 'medium', 'high']);
 const FRESHNESS = new Set(['current', 'recent', 'historical', 'expired']);
@@ -33,7 +33,7 @@ const RECORD_FIELDS = Object.freeze([
   'asset_ref_type', 'asset_ref', 'platform', 'operating_system_type',
   'operating_system_version', 'operating_system_source',
   'operating_system_confidence', 'product', 'version', 'category',
-  'first_seen', 'last_seen', 'observation_count',
+  'first_seen', 'last_seen', 'observation_count', 'package_manager', 'architecture', 'package_release',
 ]);
 
 function text(value, maximum, field, {required = false} = {}) {
@@ -86,6 +86,13 @@ function normalizeRecord(value) {
     throw new Error('software inventory provenance is invalid');
   }
   if (!['host', 'ip'].includes(assetRefType)) throw new Error('asset_ref_type is invalid');
+  const manager = source === 'osquery_deb' ? 'deb' : source === 'osquery_rpm' ? 'rpm' : '';
+  if (manager && (value.package_manager !== manager || !text(value.architecture, 160, 'architecture')
+    || tier !== 'installed' || confidence !== 'high' || assetRefType !== 'host' || value.platform !== 'linux'
+    || (manager === 'deb' && value.package_release))) throw new Error('Linux package metadata is invalid');
+  if (!manager && (value.package_manager || value.architecture || value.package_release)) {
+    throw new Error('Package metadata conflicts with source');
+  }
   const firstSeen = timestamp(value.first_seen, 'first_seen');
   const lastSeen = timestamp(value.last_seen, 'last_seen');
   if (Date.parse(lastSeen) < Date.parse(firstSeen)) throw new Error('last_seen precedes first_seen');
@@ -96,6 +103,9 @@ function normalizeRecord(value) {
     throw new Error('operating_system_confidence is invalid');
   }
   return {
+    package_manager: text(value.package_manager, 16, 'package_manager'),
+    architecture: text(value.architecture, 160, 'architecture'),
+    package_release: text(value.package_release, 1024, 'package_release'),
     evidence_id: evidenceId,
     source,
     source_dataset: text(value.source_dataset, 160, 'source_dataset', {required: true}),
@@ -159,10 +169,12 @@ function conflictSql(alias = 'record') {
       AND peer.asset_ref = ${alias}.asset_ref
       AND md5(lower(peer.product)) = md5(lower(${alias}.product))
       AND lower(peer.product) = lower(${alias}.product)
+      AND peer.architecture = ${alias}.architecture
+      AND peer.package_manager = ${alias}.package_manager
       AND peer.last_seen = ${alias}.last_seen
       AND peer.version <> ''
       AND ${alias}.version <> ''
-      AND lower(peer.version) <> lower(${alias}.version)
+      AND (lower(peer.version) <> lower(${alias}.version) OR peer.package_release <> ${alias}.package_release)
   )`;
 }
 
@@ -178,7 +190,7 @@ function publicRow(row) {
   result.evidence_conflict = row.evidence_conflict ? VERSION_CONFLICT : '';
   result.asset_label = '';
   result.operating_system_observed_at = (
-    result.source === 'osquery_apps'
+    ['osquery_apps', 'osquery_deb', 'osquery_rpm'].includes(result.source)
     && ['osquery_manager.result:host.os', 'osquery.live:os_version']
       .includes(result.operating_system_source)
     && (result.operating_system_type || result.operating_system_version)
@@ -274,7 +286,7 @@ function createPostgresSoftwareStore({pool, schemaPath, logger = console}) {
            asset_ref_type, asset_ref, platform, operating_system_type,
            operating_system_version, operating_system_source,
            operating_system_confidence, product, version, category,
-           first_seen, last_seen, observation_count
+           first_seen, last_seen, observation_count, package_manager, architecture, package_release
          )
          SELECT $1, item.evidence_id, item.source, item.source_dataset,
            item.tier, item.confidence, item.asset_ref_type, item.asset_ref,
@@ -282,14 +294,14 @@ function createPostgresSoftwareStore({pool, schemaPath, logger = console}) {
            item.operating_system_version, item.operating_system_source,
            item.operating_system_confidence, item.product, item.version,
            item.category, item.first_seen::timestamptz,
-           item.last_seen::timestamptz, item.observation_count
+           item.last_seen::timestamptz, item.observation_count, item.package_manager, item.architecture, item.package_release
          FROM jsonb_to_recordset($2::jsonb) AS item(
            evidence_id text, source text, source_dataset text, tier text,
            confidence text, asset_ref_type text, asset_ref text, platform text,
            operating_system_type text, operating_system_version text,
            operating_system_source text, operating_system_confidence text,
            product text, version text, category text, first_seen text,
-           last_seen text, observation_count bigint
+           last_seen text, observation_count bigint, package_manager text, architecture text, package_release text
          )
          ON CONFLICT (snapshot_id, evidence_id) DO UPDATE SET
            source = EXCLUDED.source, source_dataset = EXCLUDED.source_dataset,
@@ -301,6 +313,8 @@ function createPostgresSoftwareStore({pool, schemaPath, logger = console}) {
            operating_system_source = EXCLUDED.operating_system_source,
            operating_system_confidence = EXCLUDED.operating_system_confidence,
            product = EXCLUDED.product, version = EXCLUDED.version,
+           package_manager = EXCLUDED.package_manager, architecture = EXCLUDED.architecture,
+           package_release = EXCLUDED.package_release,
            category = EXCLUDED.category, first_seen = EXCLUDED.first_seen,
            last_seen = EXCLUDED.last_seen,
            observation_count = EXCLUDED.observation_count`,

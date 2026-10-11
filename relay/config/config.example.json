@@ -39,7 +39,7 @@
     "_comment": "Dedicated forced-command SSH key. No shell, forwarding, arbitrary command, or direct SQLite access is permitted.",
     "enabled": false,
     "mode": "ssh_batch",
-    "host": "10.77.7.225",
+    "host": "10.77.7.201",
     "user": "__MAC_STUDIO_SSH_USER__",
     "ssh_key": "/opt/so-alert-relay/keys/macstudio-alert-ingest_ed25519",
     "known_hosts": "/opt/so-alert-relay/keys/macstudio_known_hosts",
@@ -52,7 +52,7 @@
   "pcap_broker": {
     "_comment": "Disabled until the n8n PCAP broker proxy workflow is imported, tokenized, active, and reachable from the relay VLAN.",
     "enabled": false,
-    "url": "http://10.77.7.225:5678/webhook",
+    "url": "http://10.77.7.201:5678/webhook",
     "token": "",
     "requests_method": "POST",
     "upload_artifact": true,
@@ -73,7 +73,7 @@
     "capture_loss_freshness_seconds": 900,
     "stream_chunk_idle_timeout_seconds": 300,
     "mac_transfer": {
-      "host": "10.77.7.225",
+      "host": "10.77.7.201",
       "user": "__MAC_STUDIO_SSH_USER__",
       "ssh_key": "/opt/so-alert-relay/keys/macstudio-pcap-transfer_ed25519",
       "known_hosts": "/opt/so-alert-relay/keys/macstudio_known_hosts",

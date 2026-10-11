@@ -1,6 +1,8 @@
 'use strict';
+const {configuredAdmissionReason} = require('../lib/alert_event_admission');
 
 function createAlertIngestOrchestrator({
+  admissionReason = configuredAdmissionReason,
   scoreAlert,
   withWriteGate,
   withTransaction,
@@ -89,6 +91,8 @@ function createAlertIngestOrchestrator({
   }
 
   async function store(rawAlert) {
+    const reason = admissionReason(rawAlert);
+    if (reason) return {ok: true, status: 'dropped', stored: false, reason};
     const alert = {...rawAlert, triage: scoreAlert(rawAlert)};
     let wakeAiAfterCommit = false;
     const result = await withWriteGate(() => withTransaction(async () => {

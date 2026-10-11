@@ -300,13 +300,14 @@ def collect_snapshot(
     del previous_state  # A complete collection is a replacement, not a merge.
     window = collection_window(now)
     deadline = time.monotonic() + config["max_collection_seconds"]
+    sources = SOURCES + (LINUX_SOURCES if config.get("linux_packages_enabled", False) else ())
     statuses = {
         source: _empty_source_status()
-        for source in SOURCES
+        for source in sources
     }
     records: List[Dict[str, Any]] = []
     evidence_ids: Set[str] = set()
-    for source in SOURCES:
+    for source in sources:
         source_records, source_status = _collect_snapshot_source(
             config,
             source,
@@ -342,12 +343,13 @@ def _has_complete_snapshot(previous: Dict[str, Any]) -> bool:
 def _failed_source_statuses(
     source_statuses: Optional[Dict[str, Dict[str, Any]]],
 ) -> Dict[str, Dict[str, Any]]:
+    roster = SOURCES + (LINUX_SOURCES if source_statuses and any(source in source_statuses for source in LINUX_SOURCES) else ())
     statuses = {
         source: _empty_source_status()
-        for source in SOURCES
+        for source in roster
     }
     if source_statuses:
-        for source in SOURCES:
+        for source in roster:
             if source in source_statuses:
                 statuses[source] = source_statuses[source]
     return statuses
@@ -425,7 +427,7 @@ def disabled_state(
                 ),
                 "source_statuses": {
                     source: _empty_source_status("disabled")
-                    for source in SOURCES
+                    for source in previous["collection"]["source_statuses"]
                 },
                 "complete": False,
             },

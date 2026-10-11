@@ -92,12 +92,28 @@ def soc_ai_group_members(r: Any, group_keys: list[str]) -> list[tuple[str, str]]
 
 
 def soc_alert_page_ai_artifact_context(r: Any, rows: list[Any]) -> dict[str, object]:
+    # Index only files for the visible representatives. A table request must
+    # not parse the entire historical prompt/analysis corpus.
+    tokens = {
+        str(row["alert_id"]).rsplit(":", 1)[-1]
+        for row in rows if "alert_id" in row.keys() and row["alert_id"]
+    }
+    tokens = {token for token in tokens if r.re.fullmatch(r"[A-Za-z0-9_.=-]{1,512}", token)}
+    base = r._soc_ai_artifact_sources()
+    def visible(paths):
+        return (path for path in paths if any(token in path.name for token in tokens))
+    sources = r.AiArtifactSources(
+        prompt_paths=lambda: visible(base.prompt_paths()),
+        analysis_paths=lambda: visible(base.analysis_paths()),
+        read_record=base.read_record,
+        modified_time=base.modified_time,
+    )
     dependencies = r.AiArtifactContextDependencies(
         dashboard_group_id=r.soc_alert_group_id,
         group_members=r._soc_ai_group_members,
     )
     return r.compose_page_ai_artifact_context(
-        rows, r.soc_alert_ai_artifact_index(), dependencies
+        rows, r.build_ai_artifact_index(sources, include_prompts=True), dependencies
     )
 
 

@@ -1,5 +1,6 @@
 """Core SOC status-write, SQLite connection, and query-policy runtime wiring."""
 from __future__ import annotations
+import time
 
 from contextlib import contextmanager
 from typing import Any
@@ -49,10 +50,12 @@ def soc_alert_db_connect(r: Any):
         raise FileNotFoundError(f"SOC alert store DB not found: {r.SOC_ALERT_STORE_DB}")
     conn = r.sqlite3.connect(
         f"file:{r.SOC_ALERT_STORE_DB}?mode=ro", uri=True,
-        timeout=r.SOC_ALERT_DB_BUSY_TIMEOUT_SECONDS,
+        timeout=min(r.SOC_ALERT_DB_BUSY_TIMEOUT_SECONDS, 0.5),
     )
     conn.row_factory = r.sqlite3.Row
-    conn.execute(f"PRAGMA busy_timeout = {r.SOC_ALERT_DB_BUSY_TIMEOUT_MS}")
+    conn.execute(f"PRAGMA busy_timeout = {min(r.SOC_ALERT_DB_BUSY_TIMEOUT_MS, 500)}")
+    deadline = time.monotonic() + 3.0
+    conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
     try:
         yield conn
     finally:

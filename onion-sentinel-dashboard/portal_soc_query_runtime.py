@@ -26,9 +26,24 @@ def soc_alert_enriched_page_rows(r: Any, page_rows: list[Any]) -> list[Any]:
         return []
     try:
         with r.soc_alert_db_connect() as conn:
-            enrichment_by_group = r.soc_alert_group_enrichment_json_map(
-                conn, r.page_group_keys(page_rows)
-            )
+            if all("alert_id" in row.keys() and row["alert_id"] for row in page_rows):
+                # Table rows describe their representative alert. Resolve its
+                # enrichment by primary key, not a historical-group JSON sort.
+                ids = list(dict.fromkeys(str(row["alert_id"]) for row in page_rows))
+                placeholders = ",".join("?" for _ in ids)
+                found = conn.execute(
+                    "SELECT alert_id, enrichment_json FROM alerts WHERE alert_id IN (" + placeholders + ")",
+                    ids,
+                ).fetchall()
+                by_id = {str(row["alert_id"]): row["enrichment_json"] or "" for row in found}
+                enrichment_by_group = {
+                    str(row["group_key"]): by_id.get(str(row["alert_id"]), "")
+                    for row in page_rows
+                }
+            else:
+                enrichment_by_group = r.soc_alert_group_enrichment_json_map(
+                    conn, r.page_group_keys(page_rows)
+                )
     except Exception:
         return [dict(row) for row in page_rows]
     return r.merge_page_enrichment(page_rows, enrichment_by_group)

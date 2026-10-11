@@ -3,8 +3,6 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const sqlite3 = require('sqlite3');
-const {Pool} = require('pg');
 
 function parseArgs(argv) {
   const result = {};
@@ -31,9 +29,9 @@ function readEnv(file) {
   return values;
 }
 
-function sqliteAll(database, sql) {
+function sqliteAll(database, sql, parameters = []) {
   return new Promise((resolve, reject) => {
-    database.all(sql, [], (error, rows) => (error ? reject(error) : resolve(rows)));
+    database.all(sql, parameters, (error, rows) => (error ? reject(error) : resolve(rows)));
   });
 }
 
@@ -65,7 +63,53 @@ function signature(row, postgres = false) {
   });
 }
 
+async function reconcilePages({sqlitePage, postgresPage, maximumId, pageSize = 500}) {
+  if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 1000) {
+    throw new Error('reconciliation page size must be between 1 and 1000');
+  }
+  const result = {generated_at: new Date().toISOString(), ok: true,
+    sqlite_rows: 0, postgres_rows: 0, pending_projection_count: 0,
+    pending_projection_age_seconds: 0, pending_projection_stale: false,
+    missing_count: 0, extra_count: 0, mismatch_count: 0,
+    missing_sample: [], extra_sample: [], mismatch_sample: []};
+  let oldestDirtyMs = Infinity;
+  const record = (kind, id) => {
+    result[`${kind}_count`] += 1;
+    if (result[`${kind}_sample`].length < 10) result[`${kind}_sample`].push(id);
+  };
+  // Match the same bounded identity range in both stores. No payload or complete
+  // table remains resident across pages, including differences and samples.
+  for (let lower = 0; lower < maximumId; lower += pageSize) {
+    const upper = lower + pageSize;
+    const rows = await sqlitePage(lower, upper);
+    const projected = await postgresPage(lower, upper);
+    result.sqlite_rows += rows.length;
+    result.postgres_rows += projected.length;
+    const local = new Map(rows.map(row => [Number(row.id), row]));
+    const remote = new Map(projected.map(row => [Number(row.sqlite_id), row]));
+    for (const [id, row] of local) {
+      if (Number(row.projected_revision) < Number(row.revision)) {
+        result.pending_projection_count += 1;
+        const parsed = Date.parse(String(row.projection_updated_at || '').replace('  ', 'T'));
+        if (Number.isFinite(parsed)) oldestDirtyMs = Math.min(oldestDirtyMs, parsed);
+        continue;
+      }
+      if (!remote.has(id)) record('missing', id);
+      else if (signature(row) !== signature(remote.get(id), true)) record('mismatch', id);
+    }
+    for (const id of remote.keys()) if (!local.has(id)) record('extra', id);
+  }
+  result.pending_projection_age_seconds = Number.isFinite(oldestDirtyMs)
+    ? Math.max(0, Math.floor((Date.now() - oldestDirtyMs) / 1000)) : 0;
+  result.pending_projection_stale = result.pending_projection_age_seconds > 300;
+  result.ok = result.missing_count === 0 && result.extra_count === 0
+    && result.mismatch_count === 0 && !result.pending_projection_stale;
+  return result;
+}
+
 async function main() {
+  const sqlite3 = require('sqlite3');
+  const {Pool} = require('pg');
   const args = parseArgs(process.argv);
   const env = readEnv(path.resolve(args.env));
   const required = [
@@ -82,6 +126,7 @@ async function main() {
     `file:${path.resolve(args.sqlite)}?mode=ro`,
     sqlite3.OPEN_READONLY | sqlite3.OPEN_URI,
   );
+  database.configure('busyTimeout', 5000);
   const pool = new Pool({
     host: env.ALERT_STORE_POSTGRES_HOST,
     port: Number(env.ALERT_STORE_POSTGRES_PORT),
@@ -95,74 +140,24 @@ async function main() {
     application_name: 'onion-sentinel-shadow-reconciler',
   });
   try {
-    const sqliteRows = await sqliteAll(
-      database,
-      `SELECT job.*, outbox.revision, outbox.projected_revision,
-              outbox.updated_at AS projection_updated_at
-       FROM durable_jobs AS job
-       JOIN postgres_shadow_outbox AS outbox
-         ON outbox.entity_type = 'durable_job'
-        AND outbox.entity_key = CAST(job.id AS TEXT)
-       ORDER BY job.id`,
-    );
-    const postgresResult = await pool.query(
-      `SELECT * FROM onion_sentinel_queue.shadow_durable_jobs
-       ORDER BY sqlite_id`,
-    );
-    const sqliteMap = new Map(
-      sqliteRows.map((row) => [Number(row.id), signature(row)]),
-    );
-    const postgresMap = new Map(
-      postgresResult.rows.map((row) => [Number(row.sqlite_id), signature(row, true)]),
-    );
-    // Queue mutations and projection are intentionally separate transactions.
-    // Exclude only currently dirty identities from an exact comparison, then
-    // fail if any such projection has remained dirty beyond the bounded grace.
-    const dirtyRows = sqliteRows.filter(
-      (row) => Number(row.projected_revision) < Number(row.revision),
-    );
-    const dirtyIds = new Set(dirtyRows.map((row) => Number(row.id)));
-    const oldestDirtyMs = dirtyRows.reduce((oldest, row) => {
-      const parsed = Date.parse(String(row.projection_updated_at || '').replace('  ', 'T'));
-      return Number.isFinite(parsed) ? Math.min(oldest, parsed) : oldest;
-    }, Number.POSITIVE_INFINITY);
-    const pendingProjectionAgeSeconds = Number.isFinite(oldestDirtyMs)
-      ? Math.max(0, Math.floor((Date.now() - oldestDirtyMs) / 1000))
-      : 0;
-    const missingIds = [...sqliteMap.keys()].filter(
-      (id) => !dirtyIds.has(id) && !postgresMap.has(id),
-    );
-    const extraIds = [...postgresMap.keys()].filter(
-      (id) => !dirtyIds.has(id) && !sqliteMap.has(id),
-    );
-    const mismatchedIds = [...sqliteMap.keys()].filter(
-      (id) => (
-        !dirtyIds.has(id)
-        && postgresMap.has(id)
-        && sqliteMap.get(id) !== postgresMap.get(id)
+    const result = await reconcilePages({
+      sqlitePage: (lower, upper) => sqliteAll(database,
+        `SELECT job.*, outbox.revision, outbox.projected_revision,
+                outbox.updated_at AS projection_updated_at
+         FROM durable_jobs AS job JOIN postgres_shadow_outbox AS outbox
+           ON outbox.entity_type = 'durable_job'
+          AND outbox.entity_key = CAST(job.id AS TEXT)
+         WHERE job.id > ? AND job.id <= ? ORDER BY job.id`, [lower, upper]),
+      postgresPage: async (lower, upper) => (await pool.query(
+        `SELECT * FROM onion_sentinel_queue.shadow_durable_jobs
+         WHERE sqlite_id > $1 AND sqlite_id <= $2 ORDER BY sqlite_id`,
+        [lower, upper],
+      )).rows,
+      maximumId: Math.max(
+        Number((await sqliteAll(database, 'SELECT COALESCE(MAX(id), 0) AS maximum FROM durable_jobs'))[0].maximum),
+        Number((await pool.query('SELECT COALESCE(MAX(sqlite_id), 0) AS maximum FROM onion_sentinel_queue.shadow_durable_jobs')).rows[0].maximum),
       ),
-    );
-    const pendingProjectionStale = pendingProjectionAgeSeconds > 300;
-    const result = {
-      generated_at: new Date().toISOString(),
-      ok: (
-        missingIds.length === 0
-        && extraIds.length === 0
-        && mismatchedIds.length === 0
-        && !pendingProjectionStale
-      ),
-      sqlite_rows: sqliteMap.size,
-      postgres_rows: postgresMap.size,
-      pending_projection_count: dirtyIds.size,
-      pending_projection_age_seconds: pendingProjectionAgeSeconds,
-      pending_projection_stale: pendingProjectionStale,
-      missing_count: missingIds.length,
-      extra_count: extraIds.length,
-      mismatch_count: mismatchedIds.length,
-      missing_sample: missingIds.slice(0, 10),
-      extra_sample: extraIds.slice(0, 10),
-      mismatch_sample: mismatchedIds.slice(0, 10),
-    };
+    });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     if (!result.ok) process.exitCode = 1;
   } finally {
@@ -171,7 +166,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+module.exports = {reconcilePages, signature};
+
+if (require.main === module) main().catch((error) => {
   process.stderr.write(`shadow reconciliation failed: ${error.message}\n`);
   process.exitCode = 1;
 });

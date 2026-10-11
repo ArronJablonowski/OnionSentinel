@@ -13,7 +13,7 @@ activity.
 The only supported network path is:
 
 ```text
-Onion Sentinel 10.77.7.225
+Onion Sentinel 10.77.7.201
   -> forced SSH request to Relay 10.88.8.8
   -> pinned HTTPS request to AC Hunter 192.168.1.12:443
 ```
@@ -127,7 +127,7 @@ chmod 0600 "$HOME/.ssh/onion-sentinel-ac-hunter_ed25519"
 Starting from `relay/config/authorized_keys.ac-hunter.example`, replace only
 the public-key placeholder and install the resulting single line in the Relay
 administrator's `authorized_keys`. Preserve its source restriction to
-`10.77.7.225`, forced command, and all forwarding, PTY, X11, agent, and user-rc
+`10.77.7.201`, forced command, and all forwarding, PTY, X11, agent, and user-rc
 denials. Confirm that the selected SSH user matches `relay_user` in the Mac
 config and the administrator used to render the Relay sudoers rule.
 

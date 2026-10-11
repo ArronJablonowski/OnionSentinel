@@ -7,7 +7,7 @@ Use this when the Pi SD card fails, the Mac Studio n8n stack breaks, or the Secu
 ```text
 Security Onion: aj@192.168.1.7
 Pi relay: <relay_user>@10.88.8.8
-Mac Studio: <mac_user>@10.77.7.225
+Mac Studio: <mac_user>@10.77.7.201
 Pi relay VLAN: 888 / 10.88.8.0/24
 Pi relay IP: 10.88.8.8
 ```
@@ -33,8 +33,8 @@ pfSense VLAN 888 should allow:
 ```text
 admin Mac or admin network -> 10.88.8.8 TCP/22
 10.88.8.8 -> 192.168.1.7 TCP/22
-10.88.8.8 -> 10.77.7.225 TCP/22 for forced alert intake and artifact transport
-10.88.8.8 -> 10.77.7.225 TCP/5678 for PCAP control metadata and emergency rollback
+10.88.8.8 -> 10.77.7.201 TCP/22 for forced alert intake and artifact transport
+10.88.8.8 -> 10.77.7.201 TCP/5678 for PCAP control metadata and emergency rollback
 10.88.8.8 -> DNS TCP/UDP 53
 10.88.8.8 -> NTP UDP/123, preferably to the VLAN-local firewall/NTP service
 temporary: 10.88.8.8 -> Internet UDP/123 until VLAN-local NTP is ready
@@ -313,13 +313,13 @@ normal encrypted Mac Studio backups because Git contains templates only.
 The prompts and model routing can be edited from:
 
 ```text
-http://10.77.7.225:8766/settings.html
+http://10.77.7.201:8766/settings.html
 ```
 
 Open n8n:
 
 ```text
-http://10.77.7.225:5678
+http://10.77.7.201:5678
 ```
 
 Import:
@@ -587,7 +587,7 @@ Hermes and OpenClaw availability cannot affect this dashboard runtime.
 Dashboard URL:
 
 ```text
-http://10.77.7.225:8766/
+http://10.77.7.201:8766/
 ```
 
 After alert-store starts, its additive schema migration creates the Incident
@@ -633,7 +633,7 @@ sudo -u soalert ssh \
   -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
   -o UserKnownHostsFile=/opt/so-alert-relay/keys/macstudio_known_hosts \
   -o GlobalKnownHostsFile=/dev/null -T \
-  <mac_user>@10.77.7.225 onion-sentinel-alert-intake batch \
+  <mac_user>@10.77.7.201 onion-sentinel-alert-intake batch \
   < /tmp/onion-sentinel-intake-test.json
 ```
 
@@ -646,8 +646,8 @@ operation, new alerts and quiet-cycle relay heartbeats both update that file.
 If the tile is red, check the newest beacon timestamp and the Pi timer logs:
 
 ```bash
-ssh aj_lobster@10.77.7.225 'cat "$HOME/n8n-local/alert_store_data/n8n-beacon.json"'
-ssh aj_lobster@10.77.7.225 'curl -fsS "http://127.0.0.1:8766/api/system-health/beacons?hours=24"'
+ssh aj_lobster@10.77.7.201 'cat "$HOME/n8n-local/alert_store_data/n8n-beacon.json"'
+ssh aj_lobster@10.77.7.201 'curl -fsS "http://127.0.0.1:8766/api/system-health/beacons?hours=24"'
 ssh aj@10.88.8.8 'systemctl list-timers --all so-alert-poll.timer so-pcap-broker.timer --no-pager; sudo journalctl -u so-alert-poll.service -u so-pcap-broker.service -n 40 --no-pager'
 ```
 
@@ -661,17 +661,17 @@ If n8n logs show SQLite I/O errors, validate both SQLite stores before
 troubleshooting the relay:
 
 ```bash
-ssh aj_lobster@10.77.7.225 'sqlite3 "$HOME/n8n-local/n8n_data/database.sqlite" "PRAGMA quick_check;"'
-ssh aj_lobster@10.77.7.225 'sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "PRAGMA quick_check;"'
+ssh aj_lobster@10.77.7.201 'sqlite3 "$HOME/n8n-local/n8n_data/database.sqlite" "PRAGMA quick_check;"'
+ssh aj_lobster@10.77.7.201 'sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "PRAGMA quick_check;"'
 ```
 
 Alert-store SQLite maintenance:
 
 ```bash
-ssh aj_lobster@10.77.7.225 'launchctl print gui/$(id -u)/com.arron.soc.alert-store-maintenance | grep -E "state =|last exit code|run interval|path ="'
-ssh aj_lobster@10.77.7.225 '$HOME/n8n-local/bin/maintain-alert-store-sqlite.zsh'
-ssh aj_lobster@10.77.7.225 'tail -80 "$HOME/n8n-local/logs/alert-store-sqlite-maintenance.log"'
-ssh aj_lobster@10.77.7.225 'ls -lh "$HOME/n8n-local/alert_store_backups" | tail'
+ssh aj_lobster@10.77.7.201 'launchctl print gui/$(id -u)/com.arron.soc.alert-store-maintenance | grep -E "state =|last exit code|run interval|path ="'
+ssh aj_lobster@10.77.7.201 '$HOME/n8n-local/bin/maintain-alert-store-sqlite.zsh'
+ssh aj_lobster@10.77.7.201 'tail -80 "$HOME/n8n-local/logs/alert-store-sqlite-maintenance.log"'
+ssh aj_lobster@10.77.7.201 'ls -lh "$HOME/n8n-local/alert_store_backups" | tail'
 ```
 
 The maintenance job creates verified SQLite backups and recovered candidates
@@ -937,16 +937,16 @@ alert-store maintenance window. Keep all backups in the Mac Studio runtime
 tree and never copy them into Git:
 
 ```bash
-ssh aj_lobster@10.77.7.225 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose stop alert-store'
-ssh aj_lobster@10.77.7.225 'launchctl bootout gui/$(id -u)/com.arron.soc.alert-store 2>/dev/null || true'
-ssh aj_lobster@10.77.7.225 'launchctl bootout gui/$(id -u)/com.arron.onion-sentinel.web 2>/dev/null || true'
-ssh aj_lobster@10.77.7.225 'ts=$(date +%Y%m%dT%H%M%S%z); cp -p "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "$HOME/n8n-local/alert_store_backups/alerts.sqlite3.pre-index-repair-$ts.bak"'
-ssh aj_lobster@10.77.7.225 'sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "REINDEX;"'
-ssh aj_lobster@10.77.7.225 'ts=$(date +%Y%m%dT%H%M%S%z); out="$HOME/n8n-local/alert_store_data/alerts.repaired-$ts.sqlite3"; rm -f "$out"; sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "VACUUM INTO '\''$out'\'';"; sqlite3 "$out" "PRAGMA integrity_check;"; mv "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "$HOME/n8n-local/alert_store_data/alerts.sqlite3.pre-vacuum-replace-$ts.bak"; mv "$out" "$HOME/n8n-local/alert_store_data/alerts.sqlite3"; chmod 0644 "$HOME/n8n-local/alert_store_data/alerts.sqlite3"'
-ssh aj_lobster@10.77.7.225 'launchctl bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.arron.soc.alert-store.plist" 2>/dev/null || launchctl kickstart -k gui/$(id -u)/com.arron.soc.alert-store'
-ssh aj_lobster@10.77.7.225 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose up -d alert-store'
-ssh aj_lobster@10.77.7.225 'launchctl bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.arron.onion-sentinel.web.plist" 2>/dev/null || launchctl kickstart -k gui/$(id -u)/com.arron.onion-sentinel.web'
-ssh aj_lobster@10.77.7.225 'sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "PRAGMA quick_check;"'
+ssh aj_lobster@10.77.7.201 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose stop alert-store'
+ssh aj_lobster@10.77.7.201 'launchctl bootout gui/$(id -u)/com.arron.soc.alert-store 2>/dev/null || true'
+ssh aj_lobster@10.77.7.201 'launchctl bootout gui/$(id -u)/com.arron.onion-sentinel.web 2>/dev/null || true'
+ssh aj_lobster@10.77.7.201 'ts=$(date +%Y%m%dT%H%M%S%z); cp -p "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "$HOME/n8n-local/alert_store_backups/alerts.sqlite3.pre-index-repair-$ts.bak"'
+ssh aj_lobster@10.77.7.201 'sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "REINDEX;"'
+ssh aj_lobster@10.77.7.201 'ts=$(date +%Y%m%dT%H%M%S%z); out="$HOME/n8n-local/alert_store_data/alerts.repaired-$ts.sqlite3"; rm -f "$out"; sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "VACUUM INTO '\''$out'\'';"; sqlite3 "$out" "PRAGMA integrity_check;"; mv "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "$HOME/n8n-local/alert_store_data/alerts.sqlite3.pre-vacuum-replace-$ts.bak"; mv "$out" "$HOME/n8n-local/alert_store_data/alerts.sqlite3"; chmod 0644 "$HOME/n8n-local/alert_store_data/alerts.sqlite3"'
+ssh aj_lobster@10.77.7.201 'launchctl bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.arron.soc.alert-store.plist" 2>/dev/null || launchctl kickstart -k gui/$(id -u)/com.arron.soc.alert-store'
+ssh aj_lobster@10.77.7.201 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose up -d alert-store'
+ssh aj_lobster@10.77.7.201 'launchctl bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.arron.onion-sentinel.web.plist" 2>/dev/null || launchctl kickstart -k gui/$(id -u)/com.arron.onion-sentinel.web'
+ssh aj_lobster@10.77.7.201 'sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "PRAGMA quick_check;"'
 ```
 
 After the container is healthy, run one relay service cycle and confirm the
@@ -971,11 +971,11 @@ database.
 SQLite-to-PostgreSQL migration outline:
 
 ```bash
-ssh aj_lobster@10.77.7.225 'cd "$HOME/n8n-local" && ts=$(date +%Y%m%dT%H%M%S%z) && mkdir -p "n8n_data/migration-exports/$ts/entities" && /usr/local/bin/docker compose stop n8n && /usr/local/bin/docker compose run --rm --entrypoint n8n n8n export:entities --outputDir="/home/node/.n8n/migration-exports/$ts/entities" && printf "%s\n" "$ts" > n8n_data/migration-exports/latest-postgres-migration.txt'
-ssh aj_lobster@10.77.7.225 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose stop n8n'
-ssh aj_lobster@10.77.7.225 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose up -d postgres'
-ssh aj_lobster@10.77.7.225 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose run --rm --entrypoint n8n n8n import:entities --inputDir="/home/node/.n8n/migration-exports/<timestamp>/entities" --truncateTables'
-ssh aj_lobster@10.77.7.225 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose up -d n8n'
+ssh aj_lobster@10.77.7.201 'cd "$HOME/n8n-local" && ts=$(date +%Y%m%dT%H%M%S%z) && mkdir -p "n8n_data/migration-exports/$ts/entities" && /usr/local/bin/docker compose stop n8n && /usr/local/bin/docker compose run --rm --entrypoint n8n n8n export:entities --outputDir="/home/node/.n8n/migration-exports/$ts/entities" && printf "%s\n" "$ts" > n8n_data/migration-exports/latest-postgres-migration.txt'
+ssh aj_lobster@10.77.7.201 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose stop n8n'
+ssh aj_lobster@10.77.7.201 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose up -d postgres'
+ssh aj_lobster@10.77.7.201 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose run --rm --entrypoint n8n n8n import:entities --inputDir="/home/node/.n8n/migration-exports/<timestamp>/entities" --truncateTables'
+ssh aj_lobster@10.77.7.201 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose up -d n8n'
 ```
 
 Use a runtime-only `N8N_POSTGRES_PASSWORD` in `$HOME/n8n-local/.env`. Do not
@@ -1288,7 +1288,7 @@ The default n8n proxy configuration is:
 ```json
 "pcap_broker": {
   "enabled": true,
-  "url": "http://10.77.7.225:5678/webhook",
+  "url": "http://10.77.7.201:5678/webhook",
   "token": "REPLACE_WITH_PCAP_BROKER_TOKEN",
   "requests_method": "POST",
   "paths": {
@@ -1314,7 +1314,7 @@ The default n8n proxy configuration is:
   "capture_loss_freshness_seconds": 900,
   "stream_chunk_idle_timeout_seconds": 300,
   "mac_transfer": {
-    "host": "10.77.7.225",
+    "host": "10.77.7.201",
     "user": "__MAC_STUDIO_SSH_USER__",
     "ssh_key": "/opt/so-alert-relay/keys/macstudio-pcap-transfer_ed25519",
     "known_hosts": "/opt/so-alert-relay/keys/macstudio_known_hosts",
@@ -1412,7 +1412,7 @@ Preferred alert delivery settings live in
 "alert_ingest": {
   "enabled": true,
   "mode": "ssh_batch",
-  "host": "10.77.7.225",
+  "host": "10.77.7.201",
   "user": "__MAC_STUDIO_SSH_USER__",
   "ssh_key": "/opt/so-alert-relay/keys/macstudio-alert-ingest_ed25519",
   "known_hosts": "/opt/so-alert-relay/keys/macstudio_known_hosts",
@@ -1538,7 +1538,7 @@ From this repo on the admin Mac:
 ```bash
 PI_HOST=<relay_user>@10.88.8.8 \
 SO_HOST=<security_onion_user>@192.168.1.7 \
-MAC_HOST=<mac_user>@10.77.7.225 \
+MAC_HOST=<mac_user>@10.77.7.201 \
 ./operations/verify-stack.zsh
 ```
 
@@ -1549,7 +1549,7 @@ SQLite's online backup API, validates the copy independently, and deletes the
 temporary drill artifact. It does not stop services or modify production data.
 
 ```bash
-ssh <mac_user>@10.77.7.225 'bash -s' <<'REMOTE'
+ssh <mac_user>@10.77.7.201 'bash -s' <<'REMOTE'
 set -euo pipefail
 db="$HOME/n8n-local/alert_store_data/alerts.sqlite3"
 tmp="$(mktemp /tmp/onion-sentinel-dr-XXXXXX.sqlite3)"

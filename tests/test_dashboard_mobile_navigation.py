@@ -6,6 +6,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_BUILDER = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "build_soc_alerts_dashboard.py"
 DASHBOARD_BUILDER_RUNTIME = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_builder_runtime.py"
 SHELL_PAGE = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_shell_page.py"
+NAV_STYLE = REPO_ROOT / "onion-sentinel-dashboard" / "assets" / "dashboard-navigation.css"
 
 
 def dashboard_contract_source() -> str:
@@ -14,39 +15,25 @@ def dashboard_contract_source() -> str:
 
 
 class DashboardMobileNavigationTest(unittest.TestCase):
-    def test_mobile_navigation_is_top_collapsed_drawer(self):
+    def test_mobile_navigation_is_always_a_pinned_left_rail(self):
         source = dashboard_contract_source()
-
-        self.assertIn("@media(max-width:1180px)", source)
-        self.assertIn(".sidebar{{position:fixed;left:0;right:0;top:0;bottom:auto", source)
-        self.assertIn(".sidebar .nav{{display:none", source)
-        self.assertIn(".app-shell.mobile-nav-open .sidebar .nav{{display:grid", source)
-        self.assertIn("Open navigation menu", source)
-
-        self.assertNotIn(".sidebar{{position:fixed;left:0;right:0;bottom:0;top:auto", source)
-        self.assertNotIn(".content{{padding:14px 10px 92px}}", source)
+        css = NAV_STYLE.read_text()
+        self.assertIn('assets/dashboard-navigation.css?v=20261011-pinned', source)
+        self.assertIn('position: fixed !important', css)
+        self.assertIn('inset: 0 auto 0 0 !important', css)
+        self.assertIn('grid-column: 2', css)
+        self.assertIn('height: 100dvh !important', css)
 
     def test_open_mobile_navigation_owns_vertical_scrolling(self):
-        source = dashboard_contract_source()
-
-        self.assertIn(
-            ".app-shell.mobile-nav-open .sidebar{{height:100vh;height:100dvh;"
-            "max-height:100vh;max-height:100dvh;overflow:hidden",
-            source,
-        )
-        self.assertIn(
-            ".app-shell.mobile-nav-open .sidebar .nav{{display:grid;"
-            "grid-auto-rows:max-content;align-content:start;flex:1 1 auto;"
-            "min-height:0;width:100%;overflow-x:hidden;overflow-y:auto",
-            source,
-        )
-        self.assertIn("touch-action:pan-y", source)
-        self.assertIn("calc(20px + env(safe-area-inset-bottom))", source)
-        self.assertIn(
-            ".app-shell.mobile-nav-open .sidebar .nav-item{{width:100%;"
-            "height:auto;min-height:48px",
-            source,
-        )
+        css = NAV_STYLE.read_text()
+        self.assertIn('flex: 1 1 auto', css)
+        self.assertIn('min-height: 0', css)
+        self.assertIn('overflow-y: auto', css)
+        self.assertIn('overscroll-behavior-y: contain', css)
+        self.assertIn('touch-action: pan-y', css)
+        self.assertIn('env(safe-area-inset-bottom)', css)
+        self.assertIn('min-height: 48px', css)
+        self.assertIn('.nav-item:focus-visible', css)
 
     def test_mobile_expansion_survives_api_refresh_without_persisting(self):
         source = dashboard_contract_source()

@@ -65,6 +65,12 @@ SOURCE_POLICY = {
         "asset_ref_type": "ip",
     },
 }
+LINUX_SOURCES = ("osquery_deb", "osquery_rpm")
+PACKAGE_KEYS = {"package_manager", "architecture", "package_release"}
+for _source in LINUX_SOURCES:
+    SOURCE_POLICY[_source] = {**SOURCE_POLICY["osquery_apps"], "platform": "linux",
+                              "additional_datasets": set(),
+                              "operating_system_sources": {"osquery_manager.result:host.os"}}
 RESPONSE_KEYS = {
     "ok",
     "contract",
@@ -122,6 +128,7 @@ LEGACY_RECORD_KEYS = RECORD_KEYS - {
 RECORD_KEY_SETS = {
     frozenset(RECORD_KEYS),
     frozenset(LEGACY_RECORD_KEYS),
+    frozenset(RECORD_KEYS | PACKAGE_KEYS),
 }
 CURSOR_KEYS = {"asset", "product", "version"}
 QUERY_AUDIT_KEYS = {"index", "dataset", "query_digest"}
@@ -180,6 +187,7 @@ _LAN_NETWORKS = tuple(
 )
 CONFIG_KEYS = {
     "enabled",
+    "linux_packages_enabled",
     "host",
     "ssh_user",
     "ssh_key",
@@ -317,10 +325,12 @@ def _read_json_file(
 
 
 def _config_document(value: object) -> Dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != CONFIG_KEYS:
+    if not isinstance(value, dict) or set(value) not in (CONFIG_KEYS, CONFIG_KEYS - {"linux_packages_enabled"}):
         raise ValueError("software inventory config contains unsupported or missing fields")
     if not isinstance(value.get("enabled"), bool):
         raise ValueError("software inventory config enabled must be boolean")
+    if "linux_packages_enabled" in value and not isinstance(value["linux_packages_enabled"], bool):
+        raise ValueError("linux_packages_enabled must be boolean")
     return value
 
 
@@ -400,6 +410,8 @@ def load_config(path: Path) -> Dict[str, Any]:
         "host": host,
         "ssh_user": user,
     }
+    if "linux_packages_enabled" in value:
+        normalized["linux_packages_enabled"] = value["linux_packages_enabled"]
     normalized.update(_config_numeric_values(value))
     normalized.update(_config_paths(value))
     _verify_config_files(normalized)

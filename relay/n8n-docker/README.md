@@ -11,8 +11,8 @@ rollback. During restore, deploy `n8n/` and the host-native alert-store before
 enabling the relay timers. Then confirm both narrow paths from the Pi:
 
 ```bash
-nc -vz -w 3 10.77.7.225 22
-nc -vz -w 3 10.77.7.225 5678
+nc -vz -w 3 10.77.7.201 22
+nc -vz -w 3 10.77.7.201 5678
 sudo systemctl start so-alert-poll.service
 sudo systemctl start so-pcap-broker.service
 ```

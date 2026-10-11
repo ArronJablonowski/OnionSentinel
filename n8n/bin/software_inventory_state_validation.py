@@ -198,7 +198,7 @@ def _collection_header(
     if not isinstance(collection.get("complete"), bool):
         raise ValueError("software inventory collection completeness is invalid")
     statuses = collection.get("source_statuses")
-    if not isinstance(statuses, dict) or set(statuses) != set(SOURCES):
+    if not isinstance(statuses, dict) or set(statuses) not in (set(SOURCES), set(SOURCES) | set(LINUX_SOURCES)):
         raise ValueError("software inventory source status roster is invalid")
     return collection, status, timestamps, error, window
 
@@ -210,7 +210,7 @@ def _collection_statuses(
     statuses = collection["source_statuses"]
     normalized = {
         source: normalize_source_status(statuses[source], source)
-        for source in SOURCES
+        for source in collection["source_statuses"]
     }
     if status == "ok" and (
         collection["complete"] is not True

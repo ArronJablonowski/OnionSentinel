@@ -33,7 +33,25 @@ def soc_alert_group_key_sql(r: Any) -> str:
     return """
       COALESCE(
         NULLIF(suppression_key, ''),
-        COALESCE(triage_level, 'unknown-level') || '|' ||
+        (
+          CASE lower(COALESCE(triage_level, ''))
+            WHEN 'critical' THEN 'critical'
+            WHEN 'high' THEN 'high'
+            WHEN 'medium' THEN 'medium'
+            WHEN 'low' THEN 'low'
+            WHEN 'informational' THEN 'informational'
+            WHEN 'info' THEN 'informational'
+            ELSE CASE lower(COALESCE(severity_label, ''))
+              WHEN 'critical' THEN 'critical'
+              WHEN 'high' THEN 'high'
+              WHEN 'medium' THEN 'medium'
+              WHEN 'low' THEN 'low'
+              WHEN 'informational' THEN 'informational'
+              WHEN 'info' THEN 'informational'
+              ELSE 'unknown'
+            END
+          END
+        ) || '|' ||
         COALESCE(rule_name, 'unknown-rule') || '|' ||
         COALESCE(source_ip, 'unknown-source') || '|' ||
         COALESCE(destination_ip, 'unknown-destination') || '|' ||

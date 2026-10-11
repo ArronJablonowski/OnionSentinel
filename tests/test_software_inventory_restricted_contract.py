@@ -481,6 +481,7 @@ class SoftwareInventoryRelayTests(unittest.TestCase):
     def record(self, source: str) -> dict:
         spec = self.broker.SOFTWARE_INVENTORY_SOURCES[source]
         return {
+            **({"package_manager": "deb" if source == "osquery_deb" else "rpm", "architecture": "amd64", "package_release": ""} if source in {"osquery_deb", "osquery_rpm"} else {}),
             "evidence_id": "b" * 24,
             "source": source,
             "source_dataset": spec["dataset"],
@@ -492,7 +493,7 @@ class SoftwareInventoryRelayTests(unittest.TestCase):
                 if spec["asset_ref_type"] == "host"
                 else "10.66.6.10"
             ),
-            "platform": "darwin" if source == "osquery_apps" else "",
+            "platform": spec["platform"],
             "operating_system_type": (
                 "macOS" if source == "osquery_apps" else ""
             ),
