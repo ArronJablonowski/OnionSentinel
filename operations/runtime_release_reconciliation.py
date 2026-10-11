@@ -79,6 +79,13 @@ CREDENTIAL_GOVERNANCE_PREFLIGHT_RE = re.compile(
     r'"\$REPO_DIR/operations/validate-credential-governance\.py"\s+--catalog\s+'
     r'"\$REPO_DIR/operations/security/credential-governance\.json"\s+>/dev/null\s*$'
 )
+DEPLOYED_CREDENTIAL_PREFLIGHT_RE = re.compile(
+    r'^if \[\[ "\$\{ONION_SENTINEL_VALIDATE_ONLY:-0\}" != "1" \]\] && ! '
+    r'/usr/bin/env -i PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1\s+'
+    r'/usr/bin/python3 "\$REPO_DIR/operations/validate-credential-governance\.py"\s+'
+    r'--deployed-runtime\s+--catalog "\$REPO_DIR/operations/security/credential-governance\.json"\s+'
+    r'--inventory "\$STACK_DIR/config/service-identity-inventory\.json" >/dev/null$'
+)
 
 
 class ReconciliationError(RuntimeError):
@@ -198,6 +205,7 @@ def _known_non_copy_operation(line: str) -> bool:
     )
     return (
         any(fragment in line for fragment in ALLOWED_DYNAMIC_COPY_FRAGMENTS)
+        or DEPLOYED_CREDENTIAL_PREFLIGHT_RE.fullmatch(line) is not None
         or any(source in line for source in excluded_sources)
         or "install-ai-runtime-package.py" in line
         or "install-investigation-query-runtime.py" in line

@@ -76,6 +76,19 @@ fi
   --release-id "$RUNTIME_RELEASE_ID" \
   --validate-only
 
+# Source-only qualification is not proof that the host has approved credential
+# lifecycle records. Check the deployed inventory before stopping services or
+# replacing any runtime code; startup must never be the first discovery point.
+if [[ "${ONION_SENTINEL_VALIDATE_ONLY:-0}" != "1" ]] && ! /usr/bin/env -i PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 \
+  /usr/bin/python3 "$REPO_DIR/operations/validate-credential-governance.py" \
+  --deployed-runtime \
+  --catalog "$REPO_DIR/operations/security/credential-governance.json" \
+  --inventory "$STACK_DIR/config/service-identity-inventory.json" >/dev/null
+then
+  echo "Refusing install before service changes: credential lifecycle inventory is missing or invalid." >&2
+  exit 78
+fi
+
 source "$REPO_DIR/n8n/install/macstudio/staging_validation.zsh" "$@"
 trap cleanup_alert_store_stage EXIT
 prepare_alert_store_stage

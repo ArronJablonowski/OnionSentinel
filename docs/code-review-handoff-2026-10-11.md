@@ -26,6 +26,12 @@ been eliminated.
   are unchanged.
 - The standalone untrusted-telemetry gate uses explicit unittest discovery so
   extracted test helpers are importable without ambient `PYTHONPATH` setup.
+- Production installation checks the operator-controlled credential lifecycle
+  inventory before staging runtime files, acquiring worker guards, or changing
+  services. A missing inventory previously failed only at alert-store startup,
+  after production had been stopped and replaced. The new regression asserts
+  exit 78 and no runtime-directory mutation; reconciliation classifies this
+  exact read-only preflight and rejects command/path substitutions.
 - The pending modularization preserves public test identities, installer shell
   behavior, and exporter entry points. Maintained source files are capped at
   1,000 physical lines, including comments; the frozen v1 contract is the
@@ -41,8 +47,12 @@ been eliminated.
 - Endpoint response governance, credential governance, database governance,
   untrusted telemetry, source-size/module-quality and secret scanning gates.
 - Installer validate-only preflight passed before production mutation.
-- Full unittest discovery: **5,120 tests passed**, 119.056 seconds. The
-  malformed-JSON enrichment regression also passed after that run.
+- Complete predeployment unittest discovery: **5,120 tests passed**,
+  114.133 seconds, including the malformed-JSON regression.
+- Final complete suite after the installer-preflight repair: **5,122 tests
+  passed**, 111.471 seconds. Source quality, secrets, shell syntax and source-only
+  installer validation were rerun successfully.
+- Node suite: **564 tests passed**, including both covering-index query plans.
 - Maintained code-size gate passed; largest maintained file: 989 physical lines.
 - Module-quality gate passed with 37 non-growing ratchet warnings.
 - The predeployment SLO probe timed out fetching metrics; the soak reporter
@@ -50,6 +60,42 @@ been eliminated.
   Neither result is concealed or treated as release qualification.
 
 ## Unresolved items / next agent
+
+### Deployment blocked — operator credential inventory required
+
+The attempted deployment of `58fac8c58d39a7c00db9edd4269d963c86d1db6c`
+failed because the private runtime file
+`/Users/aj_lobster/n8n-local/config/service-identity-inventory.json` is missing.
+The source-only credential catalog check cannot prove deployed credential
+lifecycle compliance. Do not remove the startup gate, use an empty enablement
+manifest, or invent activation/approval/rotation records to make it pass.
+
+An authorized operator must maintain the actual owner-only (0600) inventory
+described in `security/service-identity-lifecycle.md`, using the example schema
+and truthful lifecycle records for every enabled identity. Validate without
+printing its contents:
+
+```sh
+python3 operations/validate-credential-governance.py --deployed-runtime \
+  --catalog operations/security/credential-governance.json \
+  --inventory /Users/aj_lobster/n8n-local/config/service-identity-inventory.json
+```
+
+Once it passes, rerun the exact new Git revision's qualification, create fresh
+bounded digest handoffs, drain investigations using their normal guard, deploy,
+and reconcile every managed artifact. The previous handoffs are evidence of
+the failed attempt, not reusable admission or successful application receipts.
+
+### Covering-index fix is not yet deployed
+
+Rollback restored the prior durable-job module, so the new metrics covering
+indexes are not installed. Post-recovery bounded probes at 11:50 Denver time
+returned HTTP 200, but alert-store health took 5.543 seconds, metrics 8.462
+seconds and the alert API 5.094 seconds. Production is online, not latency/SLO
+qualified. After approved deployment, verify index creation and `EXPLAIN QUERY
+PLAN`, repeated health/metrics/UI requests under concurrent investigation load,
+queue throughput and SQLite writer contention. Only then start a fresh soak;
+no previous automated healthy clock is acceptable evidence.
 
 ### PCAP broker operational failure — remote access required
 
@@ -100,6 +146,46 @@ refactor is not deployed to Security Onion as part of this Mac release.
 
 ## Deployment status
 
-Pending the final complete-suite result, verified recovery backup, exact Git
-revision handoff, and the installer investigation-idle guard. Do not interpret
-this pending section as deployment evidence.
+**Not deployed successfully.** Code commits through `58fac8c5` were pushed to
+GitHub branch `modularize-macstudio-installer`; the additional early credential
+preflight repair and this handoff are committed with the final QA follow-up.
+There was no main-branch merge or Security Onion/Relay deployment.
+
+A verified rolling recovery bundle was created at
+`/Users/aj_lobster/n8n-local/recovery_backups/20261011T110318-0600` before the
+attempt. No database restore was performed. Recovery restored all 886 managed
+artifacts to their independently recorded predeployment digests, then restored
+the two changed investigation-skill policies by their exact predeployment
+digests. Non-release environment settings are unchanged. The live release marker
+is back to `a940f6fade0c49732e16373b344b5c9ca15133d9`, which already had scoped
+patches; this is not a claim of single-commit full-tree reconciliation.
+
+Two scripts had pre-existing local retention-only patches absent from Git:
+`bin/backup-onion-sentinel-runtime.py` and
+`bin/maintain-alert-store-sqlite.zsh`. They were initially retained on replacement
+code; a read-only import check exposed a missing rolled-back dependency and the
+first maintenance invocation failed before creating its snapshot. The local
+"keep two" patches were then reconstructed against historical source and proved
+byte-exact using both independent predeployment SHA-256 values. Those exact
+prior versions were restored, and normal maintenance was triggered again.
+`retention-rollback.json` records this final recovery; there are no retained
+replacement exceptions. Newly added
+runtime code was moved into recoverable owner-only quarantine. The web and
+alert-store services, scheduled maintenance and AI lanes were reloaded; the
+temporary investigation drain marker was removed. The previously disabled
+nightly full-backup service was not enabled.
+
+Owner-only evidence (0700 directory, 0600 reports) is in
+`/Users/aj_lobster/n8n-local/logs/qualification/code-qa-20261011-58fac8c5`:
+deployment logs, predeployment digest handoffs, backup/QA reports,
+`rollback-receipt.json`, `rollback-verification.json`,
+`configuration-rollback.json`, and `environment-after.json`. Initial recovery
+verification reported two changed skill policies; the subsequent configuration
+rollback report records their exact restoration. `recovery-final-verification.json`
+then confirmed zero changed configuration paths, no temporary investigation
+pause, and HTTP 200 from web health, alert-store health, metrics and the alert
+API. The later `recovery-exact-verification.json` also checks both restored
+retention-patched scripts. Metrics recorded 388 completed incident-response jobs (previously 387)
+and the post-commit backlog down to 5,254; this proves resumed progress, not
+that the remaining backlog or latency is resolved. Do not treat the release
+marker or a passing health request as deployment acceptance evidence.

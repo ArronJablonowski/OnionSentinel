@@ -86,3 +86,13 @@ host modification is included in this pass.
   largest maintained file is `tests/test_software_inventory_api.py` (989 lines).
 - Module-quality gate and secret scan passed. Shell syntax checks passed for
   the installer and all sourced owners. `git diff --check` passed.
+
+### Subsequent repository QA
+
+The results above describe the initial source-only extraction. The later QA
+pass fixed the three reproduced baseline failures and added enrichment,
+artifact-selection, covering-index and deployment-preflight regressions. It
+also normalized extracted module EOF whitespace, so expanded installer byte
+parity is historical characterization, not a current byte-identity claim.
+See `../code-review-handoff-2026-10-11.md` for current passing-suite results,
+the failed production deployment, recovery evidence and operator prerequisites.

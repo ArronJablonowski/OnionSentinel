@@ -187,6 +187,26 @@ class RuntimeReleaseReconciliationTests(unittest.TestCase):
             INSTALLER + CREDENTIAL_GOVERNANCE_PREFLIGHT + "\n"
         )
 
+    def test_deployed_credential_preflight_is_exactly_classified(self) -> None:
+        command = (
+            'if [[ "${ONION_SENTINEL_VALIDATE_ONLY:-0}" != "1" ]] && ! '
+            '/usr/bin/env -i PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 '
+            '/usr/bin/python3 "$REPO_DIR/operations/validate-credential-governance.py" '
+            '--deployed-runtime --catalog "$REPO_DIR/operations/security/credential-governance.json" '
+            '--inventory "$STACK_DIR/config/service-identity-inventory.json" >/dev/null'
+        )
+        reconciliation.validate_installer_coverage(INSTALLER + command + "\n")
+        for original, replacement in (
+            ("--deployed-runtime", "--verbose"),
+            ("service-identity-inventory.json", "other.json"),
+            ("validate-credential-governance.py", "other-validator.py"),
+        ):
+            with self.subTest(replacement=replacement):
+                with self.assertRaisesRegex(reconciliation.ReconciliationError, "unclassified"):
+                    reconciliation.validate_installer_coverage(
+                        INSTALLER + command.replace(original, replacement) + "\n"
+                    )
+
     def test_credential_governance_preflight_rejects_extra_repository_reference(self) -> None:
         changed = (
             INSTALLER
